@@ -1,13 +1,13 @@
 [package]
 name = "translator-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.104"
+anyhow = { workspace = true }
 chrono = { version = "0.4.45", features = ["serde"] }
-parking_lot = "0.12.5"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-thiserror = "2.0.19"
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 toml = "1.1.4"

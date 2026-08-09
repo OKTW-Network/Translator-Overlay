@@ -1,14 +1,14 @@
 [package]
 name = "translator-capture"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.104"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
-thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-tracing = "0.1.44"
-translator-core = { version = "0.1.0", path = "../translator-core" }
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
+anyhow = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+translator-core = { path = "../translator-core" }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 windows-capture = "2.0.0"
