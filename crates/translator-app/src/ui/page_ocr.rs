@@ -27,6 +27,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     let s_tier = Arc::clone(shared);
     let s_conf = Arc::clone(shared);
     let s_stable = Arc::clone(shared);
+    let s_max_unstable = Arc::clone(shared);
     let s_interval = Arc::clone(shared);
     let s_filter = Arc::clone(shared);
     let s_persist = Arc::clone(shared);
@@ -47,6 +48,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     let bump_a = bump.clone();
     let bump_b = bump.clone();
     let bump_c = bump.clone();
+    let bump_c2 = bump.clone();
     let bump_d = bump.clone();
     let bump_e = bump.clone();
     let bump_f = bump.clone();
@@ -409,6 +411,26 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                     mark_dirty(&mut ui);
                 }
                 bump_c.call(|n| n.wrapping_add(1));
+            },
+        ),
+        card_slider_number(
+            SliderNumberParams {
+                key: "ocr-max-unstable-ms",
+                header: "Force translate (ms)".into(),
+                description: Some(
+                    "If OCR keeps changing, translate anyway after this long. 0 = off.".into(),
+                ),
+                value: snap.max_unstable_ms,
+                min: 0.0,
+                max: 15_000.0,
+                step: 100.0,
+            },
+            move |v| {
+                if let Ok(mut ui) = s_max_unstable.lock() {
+                    ui.draft.ocr.max_unstable_ms = v.max(0.0) as u64;
+                    mark_dirty(&mut ui);
+                }
+                bump_c2.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(

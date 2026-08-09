@@ -41,10 +41,17 @@ fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
 ///
 /// Once a track is confirmed, it keeps being emitted for `max_miss` even if
 /// OCR misses it for a frame or two (common when the background animates).
+///
+/// If the reading at a spot keeps flipping, force-confirm after `max_unstable`
+/// from first sighting so thrash still reaches translation. Unconfirmed tracks
+/// are retained at least that long (not only `max_miss`) so the force timer
+/// can actually fire.
 #[derive(Debug)]
 pub struct BlockPersistenceFilter {
     persist: Duration,
     max_miss: Duration,
+    /// Force-confirm thrashing tracks after this long. Zero = disabled.
+    max_unstable: Duration,
     tracks: Vec<Track>,
     /// Spatial quantize step in pixels (center matching).
     quant: i32,
@@ -54,26 +61,43 @@ pub struct BlockPersistenceFilter {
 struct Track {
     text: String,
     bbox: Rect,
+    /// Wall clock from first sighting at this spot (not reset on text thrash).
+    first_seen: Instant,
     first_stable_since: Instant,
     last_seen: Instant,
     /// True once the text has lingered long enough at this spot.
     confirmed: bool,
     /// Last good sample (used for hysteresis when a frame misses the region).
     last_block: OcrBlock,
+    /// While confirmed, OCR text that differs from the frozen emit (pending adopt).
+    pending_text: Option<String>,
+    /// When `pending_text` first appeared (or last changed).
+    pending_since: Option<Instant>,
+    /// When confirmed text first diverged from OCR (continuous thrash clock).
+    thrash_since: Option<Instant>,
 }
 
 impl BlockPersistenceFilter {
     pub fn new(persist_ms: u64, max_miss_ms: u64) -> Self {
+        Self::with_max_unstable(persist_ms, max_miss_ms, 2_000)
+    }
+
+    pub fn with_max_unstable(persist_ms: u64, max_miss_ms: u64, max_unstable_ms: u64) -> Self {
         Self {
             persist: Duration::from_millis(persist_ms),
             max_miss: Duration::from_millis(max_miss_ms.max(persist_ms.saturating_add(100))),
+            max_unstable: Duration::from_millis(max_unstable_ms),
             tracks: Vec::new(),
             quant: 16,
         }
     }
 
     pub fn from_config(config: &OcrConfig) -> Self {
-        Self::new(config.block_persist_ms, config.block_max_miss_ms)
+        Self::with_max_unstable(
+            config.block_persist_ms,
+            config.block_max_miss_ms,
+            config.max_unstable_ms,
+        )
     }
 
     pub fn reset(&mut self) {
@@ -82,6 +106,18 @@ impl BlockPersistenceFilter {
 
     pub fn is_enabled(&self) -> bool {
         !self.persist.is_zero()
+    }
+
+    /// How long to keep a track that is not currently confirmed.
+    ///
+    /// Must be ≥ `max_unstable` so thrashing regions live long enough to force
+    /// confirm. Confirmed tracks still expire on the shorter `max_miss` grace.
+    fn track_retain(&self, confirmed: bool) -> Duration {
+        if confirmed || self.max_unstable.is_zero() {
+            self.max_miss
+        } else {
+            self.max_miss.max(self.max_unstable)
+        }
     }
 
     /// Update tracks from this frame and return only persistent blocks.
@@ -93,6 +129,8 @@ impl BlockPersistenceFilter {
         }
 
         let now = Instant::now();
+        let persist = self.persist;
+        let max_unstable = self.max_unstable;
 
         for block in blocks {
             let text_key = normalize_text(&block.text);
@@ -105,6 +143,9 @@ impl BlockPersistenceFilter {
                 if normalize_text(&track.text) == text_key {
                     // Same region + same text → accumulate persistence.
                     track.last_seen = now;
+                    track.pending_text = None;
+                    track.pending_since = None;
+                    track.thrash_since = None;
                     // Once confirmed, freeze the box against detector jitter so
                     // overlay captions do not shake when the background animates.
                     // Unconfirmed tracks still track the latest sample so the
@@ -114,42 +155,100 @@ impl BlockPersistenceFilter {
                         track.bbox = bbox;
                         track.last_block.bbox = bbox;
                         track.last_block.confidence = block.confidence;
-                        // Prefer the longer/newer recognition string only when it
-                        // normalizes equal (already true here); keep stored text.
                     } else {
                         track.bbox = block.bbox;
                         track.last_block = block;
                     }
-                    if now.saturating_duration_since(track.first_stable_since) >= self.persist {
+                    if now.saturating_duration_since(track.first_stable_since) >= persist {
                         track.confirmed = true;
                     }
+                } else if track.confirmed {
+                    // Confirmed region, OCR string thrashing: keep emitted text
+                    // frozen so the page fingerprint does not churn every frame.
+                    // Adopt a new reading after it lingers, or after max_unstable
+                    // of continuous thrash (use latest sample).
+                    track.last_seen = now;
+                    if track.thrash_since.is_none() {
+                        track.thrash_since = Some(now);
+                    }
+                    let bbox = track.bbox.stabilize_against(block.bbox);
+                    track.bbox = bbox;
+                    track.last_block.bbox = bbox;
+                    track.last_block.confidence = block.confidence;
+
+                    let pending_key = track
+                        .pending_text
+                        .as_deref()
+                        .map(normalize_text)
+                        .unwrap_or_default();
+                    if pending_key == text_key {
+                        let since = track.pending_since.unwrap_or(now);
+                        if now.saturating_duration_since(since) >= persist {
+                            track.text = block.text.clone();
+                            track.last_block.text = block.text.clone();
+                            track.pending_text = None;
+                            track.pending_since = None;
+                            track.thrash_since = None;
+                            track.first_stable_since = now;
+                        }
+                    } else {
+                        track.pending_text = Some(block.text.clone());
+                        track.pending_since = Some(now);
+                    }
+
+                    let thrash_force = !max_unstable.is_zero()
+                        && track
+                            .thrash_since
+                            .map(|t| now.saturating_duration_since(t) >= max_unstable)
+                            .unwrap_or(false);
+                    if thrash_force && normalize_text(&track.text) != text_key {
+                        track.text = block.text.clone();
+                        track.last_block.text = block.text.clone();
+                        track.pending_text = None;
+                        track.pending_since = None;
+                        track.thrash_since = None;
+                        track.first_stable_since = now;
+                    }
                 } else {
-                    // Position match but text flipped (animation / OCR thrash): restart.
+                    // Unconfirmed text flip: restart same-text timer, keep first_seen.
                     track.text = block.text.clone();
                     track.bbox = block.bbox;
                     track.first_stable_since = now;
                     track.last_seen = now;
-                    track.confirmed = false;
                     track.last_block = block;
+                    track.pending_text = None;
+                    track.pending_since = None;
+                    track.thrash_since = None;
+                }
+                if !track.confirmed
+                    && !max_unstable.is_zero()
+                    && now.saturating_duration_since(track.first_seen) >= max_unstable
+                {
+                    track.confirmed = true;
                 }
             } else {
                 self.tracks.push(Track {
                     text: block.text.clone(),
                     bbox: block.bbox,
+                    first_seen: now,
                     first_stable_since: now,
                     last_seen: now,
                     confirmed: false,
                     last_block: block,
+                    pending_text: None,
+                    pending_since: None,
+                    thrash_since: None,
                 });
             }
         }
 
         // Emit every confirmed track still within the miss grace window.
         // Hysteresis: keep showing text even if this frame's OCR missed the box.
+        let max_miss = self.max_miss;
         let mut out: Vec<OcrBlock> = self
             .tracks
             .iter()
-            .filter(|t| t.confirmed && now.saturating_duration_since(t.last_seen) <= self.max_miss)
+            .filter(|t| t.confirmed && now.saturating_duration_since(t.last_seen) <= max_miss)
             .map(|t| t.last_block.clone())
             .collect();
 
@@ -159,15 +258,22 @@ impl BlockPersistenceFilter {
                 .then_with(|| (a.bbox.x as i32).cmp(&(b.bbox.x as i32)))
         });
 
-        // Drop tracks that vanished past the grace window.
-        self.tracks
-            .retain(|t| now.saturating_duration_since(t.last_seen) <= self.max_miss);
+        // Drop tracks that vanished past their retain window. Unconfirmed thrash
+        // tracks use max(max_miss, max_unstable) so force-confirm can fire.
+        let retain_confirmed = self.track_retain(true);
+        let retain_unconfirmed = self.track_retain(false);
+        self.tracks.retain(|t| {
+            let limit = if t.confirmed {
+                retain_confirmed
+            } else {
+                retain_unconfirmed
+            };
+            now.saturating_duration_since(t.last_seen) <= limit
+        });
 
         reindex(out)
     }
-}
 
-impl BlockPersistenceFilter {
     fn find_track(&self, block: &OcrBlock, text_key: &str) -> Option<usize> {
         let cx = block.bbox.x + block.bbox.width * 0.5;
         let cy = block.bbox.y + block.bbox.height * 0.5;
@@ -179,22 +285,34 @@ impl BlockPersistenceFilter {
             let tcy = track.bbox.y + track.bbox.height * 0.5;
             let dx = (cx - tcx).abs();
             let dy = (cy - tcy).abs();
-            // Match by center proximity (tolerant of OCR box jitter).
-            let max_dx = (block.bbox.width.max(track.bbox.width) * 0.55).max(q as f32 * 2.0);
-            let max_dy = (block.bbox.height.max(track.bbox.height) * 0.75).max(q as f32 * 2.0);
+            // Match by center proximity (tolerant of OCR box jitter and width
+            // swings when trailing glyphs appear/disappear).
+            let max_dx = (block.bbox.width.max(track.bbox.width) * 0.65)
+                .max(q as f32 * 3.0)
+                .max(24.0);
+            let max_dy = (block.bbox.height.max(track.bbox.height) * 0.90)
+                .max(q as f32 * 2.5)
+                .max(16.0);
             if dx > max_dx || dy > max_dy {
                 continue;
             }
 
             let same_text = normalize_text(&track.text) == text_key;
-            // Prefer exact text match; allow position-only when IoU is high
-            // so we can detect text thrashing at the same spot.
             let iou = rect_iou(block.bbox, track.bbox);
-            if !same_text && iou < 0.2 {
+            // Different text at nearly the same center still matches (OCR thrash
+            // often changes box size enough to tank IoU below 0.2).
+            if !same_text && iou < 0.05 && (dx > max_dx * 0.45 || dy > max_dy * 0.45) {
                 continue;
             }
 
-            let score = if same_text { iou + 1.0 } else { iou };
+            // Prefer same text; otherwise prefer closer centers.
+            let center_score = 1.0 - (dx / max_dx).max(0.0).min(1.0) * 0.5
+                - (dy / max_dy).max(0.0).min(1.0) * 0.5;
+            let score = if same_text {
+                iou + 1.0 + center_score
+            } else {
+                iou * 0.5 + center_score
+            };
             if best.map(|(_, s)| score > s).unwrap_or(true) {
                 best = Some((i, score));
             }
@@ -221,6 +339,16 @@ mod tests {
             text: text.to_string(),
             confidence: 0.9,
             bbox: Rect::new(x, y, 80.0, 20.0),
+            source_lines: 1,
+        }
+    }
+
+    fn block_wh(text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrBlock {
+        OcrBlock {
+            id: 0,
+            text: text.to_string(),
+            confidence: 0.9,
+            bbox: Rect::new(x, y, w, h),
             source_lines: 1,
         }
     }
@@ -324,9 +452,54 @@ mod tests {
 
     #[test]
     fn persistence_disabled_passthrough() {
-        let mut f = BlockPersistenceFilter::new(0, 0);
+        let mut f = BlockPersistenceFilter::with_max_unstable(0, 0, 0);
         let blocks = vec![block("now", 0.0, 0.0)];
         let out = f.filter(blocks.clone());
         assert_eq!(out, blocks);
+    }
+
+    #[test]
+    fn thrashing_text_force_confirms_after_max_unstable() {
+        // Persist never settles (same-text window huge); text flips every frame.
+        let mut f = BlockPersistenceFilter::with_max_unstable(10_000, 500, 80);
+        let _ = f.filter(vec![block("hello!", 10.0, 10.0)]);
+        assert!(f.filter(vec![block("hello", 11.0, 10.0)]).is_empty());
+
+        std::thread::sleep(Duration::from_millis(90));
+        let out = f.filter(vec![block("hello?", 10.0, 11.0)]);
+        assert_eq!(out.len(), 1, "thrash should force-confirm after max_unstable");
+        assert_eq!(out[0].text, "hello?");
+    }
+
+    #[test]
+    fn thrashing_with_bbox_width_swing_still_force_confirms() {
+        // Trailing glyph flicker often changes box width / center a lot.
+        let mut f = BlockPersistenceFilter::with_max_unstable(10_000, 400, 80);
+        let _ = f.filter(vec![block_wh("セリフ", 100.0, 200.0, 80.0, 22.0)]);
+        let _ = f.filter(vec![block_wh("セリフ。", 98.0, 199.0, 160.0, 24.0)]);
+        let _ = f.filter(vec![block_wh("セリフ", 102.0, 201.0, 84.0, 20.0)]);
+        std::thread::sleep(Duration::from_millis(90));
+        let out = f.filter(vec![block_wh("セリフ…", 96.0, 198.0, 170.0, 26.0)]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].text.starts_with("セリフ"));
+    }
+
+    #[test]
+    fn unconfirmed_track_survives_longer_than_max_miss_for_force() {
+        // max_miss is short; max_unstable is longer — track must live to force.
+        let mut f = BlockPersistenceFilter::with_max_unstable(10_000, 50, 120);
+        let _ = f.filter(vec![block("a!", 10.0, 10.0)]);
+        std::thread::sleep(Duration::from_millis(70)); // past max_miss, under max_unstable
+        // Still matched: last_seen updates. Simulate gap then return:
+        let mid = f.filter(vec![]);
+        assert!(mid.is_empty());
+        std::thread::sleep(Duration::from_millis(30));
+        // Track retained because unconfirmed retain = max_unstable (120).
+        let out = f.filter(vec![block("a", 11.0, 10.0)]);
+        // first_seen ~100ms ago; may not force yet. But track should exist (no emit).
+        assert!(out.is_empty() || out.len() == 1);
+        std::thread::sleep(Duration::from_millis(40));
+        let forced = f.filter(vec![block("a?", 10.0, 11.0)]);
+        assert_eq!(forced.len(), 1, "should force after total first_seen >= 120ms");
     }
 }

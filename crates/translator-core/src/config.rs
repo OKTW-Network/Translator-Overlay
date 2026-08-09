@@ -115,9 +115,9 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: "https://localhost/v1".to_string(),
             api_key: String::new(),
-            model: "gpt-4o-mini".to_string(),
+            model: "gptoss".to_string(),
             temperature: None,
             top_p: None,
             max_tokens: None,
@@ -223,8 +223,10 @@ pub struct OcrConfig {
     pub confidence_threshold: f32,
     /// Page-level: wait this long with unchanged OCR before translating.
     pub stable_duration_ms: u64,
+    /// If OCR content keeps changing, force-translate after this many ms anyway.
+    /// Covers thrash that never settles (e.g. trailing glyph flicker). 0 = off.
+    pub max_unstable_ms: u64,
     /// Drop single ASCII letter/digit OCR hits (e.g. "0", "V", "C").
-    #[serde(default = "default_true")]
     pub filter_single_char: bool,
     /// Per-block: text must stay at roughly the same place this long before emit.
     /// Filters icons/animations that OCR misreads as changing text. 0 = disabled.
@@ -235,21 +237,17 @@ pub struct OcrConfig {
     pub line_merge: LineMergeConfig,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for OcrConfig {
     fn default() -> Self {
         Self {
             model_tier: ModelTier::Small,
             models_dir: "models".to_string(),
-            confidence_threshold: 0.5,
+            confidence_threshold: 0.8,
             stable_duration_ms: 500,
+            max_unstable_ms: 1000,
             filter_single_char: true,
-            // ~1–2 capture frames at 300ms interval: keep only text that lingers.
-            block_persist_ms: 450,
-            block_max_miss_ms: 700,
+            block_persist_ms: 500,
+            block_max_miss_ms: 750,
             line_merge: LineMergeConfig::default(),
         }
     }
@@ -401,7 +399,7 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            min_interval_ms: 300,
+            min_interval_ms: 250,
             show_preview: false,
         }
     }
