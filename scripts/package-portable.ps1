@@ -11,17 +11,12 @@
     - DirectML.dll          (ONNX Runtime GPU EP; PE import — required next to exe)
     - resources.pri
 
-  Optionally includes a sanitized config.toml.
-
   Target machines must have a matching Windows App Runtime installed.
   See: https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
   Visual C++ Redistributable may also be needed for MSVC CRT DLLs.
 
 .PARAMETER SkipBuild
   Skip `cargo build --release` (use existing target/release artifacts).
-
-.PARAMETER IncludeConfig
-  Ship a config.toml template with api_key cleared. Default: true.
 
 .PARAMETER OutDir
   Staging / output root. Default: <repo>/dist
@@ -38,7 +33,6 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [bool]$IncludeConfig = $true,
     [string]$OutDir = "",
     [string]$ZipName = ""
 )
@@ -58,22 +52,6 @@ function Get-AppVersion {
         return $Matches[1]
     }
     return "0.0.0"
-}
-
-function Write-SanitizedConfig {
-    param(
-        [string]$SourcePath,
-        [string]$DestPath
-    )
-    $lines = Get-Content -LiteralPath $SourcePath
-    $out = foreach ($line in $lines) {
-        if ($line -match '^\s*api_key\s*=') {
-            'api_key = ""'
-        } else {
-            $line
-        }
-    }
-    $out | Set-Content -LiteralPath $DestPath -Encoding utf8
 }
 
 $Root = Get-RepoRoot
@@ -150,19 +128,6 @@ if (Test-Path -LiteralPath $ResourcesPri) {
     Copy-Item -LiteralPath $ResourcesPri -Destination (Join-Path $StageDir "resources.pri")
 }
 
-if ($IncludeConfig) {
-    $cfgSrc = Join-Path $Root "config.toml"
-    if (-not (Test-Path -LiteralPath $cfgSrc)) {
-        $cfgSrc = Join-Path $ReleaseDir "config.toml"
-    }
-    if (Test-Path -LiteralPath $cfgSrc) {
-        Write-Host "==> Writing sanitized config.toml (api_key cleared)..."
-        Write-SanitizedConfig -SourcePath $cfgSrc -DestPath (Join-Path $StageDir "config.toml")
-    } else {
-        Write-Warning "No config.toml found; app will create one on first run."
-    }
-}
-
 # README stub inside package
 $packReadme = @"
 # Translator Overlay $Version (portable)
@@ -177,9 +142,9 @@ $packReadme = @"
 ## Run
 1. Extract this folder anywhere.
 2. Double-click translator-app.exe
-3. Configure API key in the UI (or edit config.toml) and Save.
+3. Configure API key in the UI and Save.
 
-config.toml and models/ are stored next to the executable.
+config.toml and models/ are created next to the executable on first run.
 "@
 Set-Content -LiteralPath (Join-Path $StageDir "README.txt") -Value $packReadme -Encoding utf8
 
