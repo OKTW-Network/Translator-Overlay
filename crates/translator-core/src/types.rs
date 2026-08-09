@@ -84,6 +84,10 @@ impl Rect {
     }
 }
 
+fn default_source_lines() -> u32 {
+    1
+}
+
 /// One OCR text region.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrBlock {
@@ -91,6 +95,9 @@ pub struct OcrBlock {
     pub text: String,
     pub confidence: f32,
     pub bbox: Rect,
+    /// Detector lines merged into this block (`1` = single line).
+    #[serde(default = "default_source_lines")]
+    pub source_lines: u32,
 }
 
 /// OCR block after translation.
@@ -101,6 +108,9 @@ pub struct TranslatedBlock {
     pub translation: String,
     pub confidence: f32,
     pub bbox: Rect,
+    /// Detector lines in the source (`1` = single line; overlay may widen/shrink).
+    #[serde(default = "default_source_lines")]
+    pub source_lines: u32,
 }
 
 /// PP-OCRv6 model size tier.

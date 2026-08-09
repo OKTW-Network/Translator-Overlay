@@ -726,6 +726,7 @@ fn remap_translations_to_ocr(
                 translation: tb.translation.clone(),
                 confidence: ob.confidence,
                 bbox,
+                source_lines: ob.source_lines.max(1),
             });
         }
     }

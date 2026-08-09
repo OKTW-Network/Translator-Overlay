@@ -126,12 +126,19 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
         // Overlay expands height from measured translation text, not OCR union.
         let line_h = median_f32(heights);
         let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
+        // Sum source_lines so re-merge / multi-member groups keep the true count.
+        let source_lines = members
+            .iter()
+            .map(|&idx| blocks[idx].source_lines.max(1))
+            .sum::<u32>()
+            .max(1);
 
         merged.push(OcrBlock {
             id: 0,
             text,
             confidence: conf,
             bbox,
+            source_lines,
         });
     }
 
@@ -518,6 +525,7 @@ mod tests {
             text: text.to_string(),
             confidence: 0.9,
             bbox: Rect::new(x, y, w, h),
+            source_lines: 1,
         }
     }
 
@@ -532,6 +540,7 @@ mod tests {
         assert_eq!(merged[0].text, "Hello world");
         // One-line-tall anchor for overlay.
         assert!(merged[0].bbox.height <= 22.0, "h={}", merged[0].bbox.height);
+        assert_eq!(merged[0].source_lines, 2, "merged block tracks line count");
     }
 
     #[test]

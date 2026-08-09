@@ -11,9 +11,11 @@ use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
     CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT, DT_EDITCONTROL,
-    DT_LEFT, DT_NOPREFIX, DT_TOP, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FF_DONTCARE,
-    FW_SEMIBOLD, GetDC, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, ReleaseDC,
-    SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TRANSPARENT,
+    DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
+    FF_DONTCARE,
+    FW_NORMAL, GetDC, GetTextMetricsW, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
+    ReleaseDC, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TEXTMETRICW,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -416,11 +418,10 @@ impl OverlayHost {
         let fg = draw::text_rgba(&self.config);
         let surface = draw::SurfaceSize::new(w, h);
 
-        // Collect expanded label rects first so longer translations are not clipped
-        // to the short OCR source bbox.
+        // Layout labels first so paint order is stable.
         let content_w = self.content_w;
         let content_h = self.content_h;
-        let pending: Vec<(SurfaceRect, String)> = self
+        let pending: Vec<(SurfaceRect, String, u32)> = self
             .blocks
             .iter()
             .filter_map(|block| {
@@ -429,16 +430,16 @@ impl OverlayHost {
                     return None;
                 }
                 let base = draw::map_rect_to_surface(block.bbox, content_w, content_h, w, h)?;
-                Some((base, text.to_string()))
+                Some((base, text.to_string(), block.source_lines.max(1)))
             })
             .collect();
 
-        // (rect, text, font_px) — font is derived from the OCR source box, not the
-        // expanded background (which would make multi-line text tiny).
+        // (rect, text, font_px) — single-line sources may shrink/widen; merged
+        // paragraphs keep the OCR column width.
         let mut labels: Vec<(SurfaceRect, String, i32)> = Vec::with_capacity(pending.len());
-        for (base, text) in pending {
-            let font_px = draw::font_height_for(base);
-            let expanded = self.expand_label_rect(base, &text, font_px, surface)?;
+        for (base, text, source_lines) in pending {
+            let (expanded, font_px) =
+                self.layout_label(base, &text, source_lines, surface)?;
             labels.push((expanded, text, font_px));
         }
 
@@ -460,66 +461,154 @@ impl OverlayHost {
         Ok(())
     }
 
-    /// Grow the OCR-mapped box so the full translation can wrap without ellipsis.
-    fn expand_label_rect(
+    /// Pick CreateFont height so the GDI cell fits inside the OCR glyph box.
+    ///
+    /// Fixed ratios still overshoot (Segoe UI cell > requested height; vertical
+    /// OCR width is padded). Shrink until ascent+descent ≤ ~90% of short side.
+    fn fit_font_to_source_box(&mut self, base: SurfaceRect) -> Result<i32, OverlayError> {
+        let target = draw::char_box_px(base);
+        // Leave a little air so ClearType stems don't look larger than source ink.
+        let max_cell = ((target as f32) * 0.90).round().max(8.0) as i32;
+        let mut px = draw::font_height_for(base);
+
+        for _ in 0..6 {
+            self.ensure_font(px)?;
+            let cell = unsafe {
+                let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
+                let mut tm = TEXTMETRICW::default();
+                if GetTextMetricsW(self.hdc_mem, &mut tm).as_bool() {
+                    (tm.tmAscent + tm.tmDescent).max(1)
+                } else {
+                    px
+                }
+            };
+            if cell <= max_cell {
+                break;
+            }
+            let next = ((px as f32) * (max_cell as f32) / (cell as f32))
+                .floor()
+                .max(8.0) as i32;
+            if next >= px {
+                px = (px - 1).max(8);
+            } else {
+                px = next;
+            }
+        }
+        Ok(px)
+    }
+
+    /// Layout one overlay label.
+    ///
+    /// - Merged paragraph (`source_lines > 1`): lock width to OCR column; wrap.
+    /// - Single line: shrink font (down to ~70%) to fit source width, then allow
+    ///   width growth up to 1.75x if the translation is still longer.
+    fn layout_label(
         &mut self,
         base: SurfaceRect,
         text: &str,
-        font_px: i32,
+        source_lines: u32,
         surface: draw::SurfaceSize,
-    ) -> Result<SurfaceRect, OverlayError> {
-        self.ensure_font(font_px)?;
+    ) -> Result<(SurfaceRect, i32), OverlayError> {
+        let max_w = (surface.width - base.x).max(1);
+        let source_w = base.w.clamp(1, max_w);
+        let mut font_px = self.fit_font_to_source_box(base)?;
 
+        if source_lines <= 1 {
+            // 1) Shrink font so the translation can stay one line inside source_w.
+            let min_font = ((font_px as f32) * 0.70).round().max(8.0) as i32;
+            loop {
+                let pad = label_pad(font_px);
+                let natural = self.measure_single_line(text, font_px)?;
+                let need_w = natural.0 + pad * 2;
+                if need_w <= source_w || font_px <= min_font {
+                    break;
+                }
+                font_px = (font_px - 1).max(min_font);
+            }
+
+            // 2) If still wider than source at min font, grow width (cap 1.75×).
+            let pad = label_pad(font_px);
+            let natural = self.measure_single_line(text, font_px)?;
+            let need_w = (natural.0 + pad * 2).max(1);
+            let expand_cap = ((source_w as f32) * 1.75).round() as i32;
+            let box_w = if need_w <= source_w {
+                source_w
+            } else {
+                need_w.min(expand_cap).min(max_w).max(source_w)
+            };
+
+            // Height: one line if it fits; otherwise wrap within the chosen width.
+            let text_h = if need_w <= box_w {
+                natural.1
+            } else {
+                self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?
+                    .1
+            };
+            let box_h = (text_h + pad * 2).max(font_px + pad * 2);
+            return Ok((place_label(base, box_w, box_h, surface), font_px));
+        }
+
+        // Multi-line source: keep OCR column width; wrap height only.
+        let pad = label_pad(font_px);
+        let box_w = source_w;
+        let text_h = self
+            .measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?
+            .1;
+        let box_h = (text_h + pad * 2).max(font_px + pad * 2);
+        Ok((place_label(base, box_w, box_h, surface), font_px))
+    }
+
+    /// Unwrapped single-line extent (width, height) in pixels.
+    fn measure_single_line(&mut self, text: &str, font_px: i32) -> Result<(i32, i32), OverlayError> {
+        self.ensure_font(font_px)?;
         unsafe {
             let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
-
-            let pad = 6i32;
-            // Prefer at least the source width; allow growing for longer translations.
-            let min_w = base.w.max(64);
-            let max_w = (surface.width - base.x).max(min_w);
-            let prefer_w = min_w
-                .max((base.w as f32 * 1.5).round() as i32)
-                .max(font_px * 8)
-                .min(max_w);
-
             let mut calc = RECT {
                 left: 0,
                 top: 0,
-                right: (prefer_w - pad * 2).max(8),
+                right: 0,
+                bottom: 0,
+            };
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            let flags = DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT;
+            let measured_h = DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags);
+            let w = (calc.right - calc.left).max(1);
+            let h = if measured_h > 0 {
+                measured_h
+            } else {
+                font_px + 2
+            };
+            Ok((w, h))
+        }
+    }
+
+    /// Word-wrapped extent for a fixed text area width.
+    fn measure_wrapped(
+        &mut self,
+        text: &str,
+        font_px: i32,
+        text_area_w: i32,
+    ) -> Result<(i32, i32), OverlayError> {
+        self.ensure_font(font_px)?;
+        unsafe {
+            let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
+            let mut calc = RECT {
+                left: 0,
+                top: 0,
+                right: text_area_w.max(8),
                 bottom: 0,
             };
             let mut wide: Vec<u16> = text.encode_utf16().collect();
             let flags =
                 DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT;
             let measured_h = DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags);
-            let text_h = if measured_h > 0 {
+            let w = (calc.right - calc.left).max(1);
+            let h = if measured_h > 0 {
                 measured_h
             } else {
-                font_px + 4
+                font_px + 2
             };
-            let text_w = (calc.right - calc.left).max(1);
-
-            let box_w = (text_w + pad * 2).max(base.w).min(max_w);
-            // Height follows measured translation only — do not stretch to the
-            // (possibly multi-line) OCR source box, which made labels too tall.
-            let box_h = (text_h + pad * 2).max(font_px + pad * 2);
-
-            // Grow downward / right first; if past edge, shift up / left.
-            let mut x = base.x;
-            let mut y = base.y;
-            if x + box_w > surface.width {
-                x = (surface.width - box_w).max(0);
-            }
-            if y + box_h > surface.height {
-                y = (surface.height - box_h).max(0);
-            }
-
-            Ok(SurfaceRect {
-                x,
-                y,
-                w: box_w.min(surface.width),
-                h: box_h.min(surface.height),
-            })
+            Ok((w, h))
         }
     }
 
@@ -550,7 +639,7 @@ impl OverlayHost {
             let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
             let _ = SetBkMode(self.hdc_mem, TRANSPARENT);
 
-            let pad = 6i32;
+            let pad = label_pad(style.font_px);
             let mut text_rect = RECT {
                 left: rect.x + pad,
                 top: rect.y + pad,
@@ -843,15 +932,47 @@ fn client_screen_rect(target: HWND) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// Label padding scales with font size so small UI text is not over-padded.
+fn label_pad(font_px: i32) -> i32 {
+    (font_px / 6).clamp(2, 6)
+}
+
+/// Place a label at the OCR origin; shift up only if it would go past the bottom.
+fn place_label(
+    base: SurfaceRect,
+    box_w: i32,
+    box_h: i32,
+    surface: draw::SurfaceSize,
+) -> SurfaceRect {
+    let box_w = box_w.clamp(1, surface.width.max(1));
+    let box_h = box_h.min(surface.height.max(1)).max(1);
+    let mut x = base.x;
+    let mut y = base.y;
+    if x + box_w > surface.width {
+        x = (surface.width - box_w).max(0);
+    }
+    if y + box_h > surface.height {
+        y = (surface.height - box_h).max(0);
+    }
+    SurfaceRect {
+        x,
+        y,
+        w: box_w,
+        h: box_h,
+    }
+}
+
 fn create_font(px: i32) -> Result<HFONT, OverlayError> {
     unsafe {
         let pitch = (DEFAULT_PITCH.0 as u32) | (FF_DONTCARE.0 as u32);
+        // Regular weight matches typical game/UI source text better than semibold
+        // (which looks larger/heavier than the OCR ink).
         let font = CreateFontW(
             -px,
             0,
             0,
             0,
-            FW_SEMIBOLD.0 as i32,
+            FW_NORMAL.0 as i32,
             0,
             0,
             0,

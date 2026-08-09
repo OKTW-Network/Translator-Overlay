@@ -221,6 +221,7 @@ mod tests {
             text: text.to_string(),
             confidence: 0.9,
             bbox: Rect::new(x, y, 80.0, 20.0),
+            source_lines: 1,
         }
     }
 

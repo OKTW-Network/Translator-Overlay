@@ -132,6 +132,7 @@ impl OcrEngine {
                 text,
                 confidence,
                 bbox,
+                source_lines: 1,
             });
         }
 

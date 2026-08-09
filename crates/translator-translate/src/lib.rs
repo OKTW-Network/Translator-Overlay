@@ -215,6 +215,7 @@ pub fn merge_translations(
             translation,
             confidence: src.confidence,
             bbox: src.bbox,
+            source_lines: src.source_lines.max(1),
         });
     }
     Ok(out)
@@ -687,6 +688,7 @@ mod tests {
             text: "Hello".into(),
             confidence: 0.9,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
         }];
         let json = r#"{"blocks":[{"id":1,"translation":"T1"}]}"#;
         let out = merge_translations(&source, json).unwrap();
@@ -711,6 +713,7 @@ mod tests {
             text: "Hi".into(),
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
         }];
         let json = "```json\n{\"blocks\":[{\"id\":0,\"translation\":\"T2\"}]}\n```";
         let out = merge_translations(&source, json).unwrap();
@@ -724,6 +727,7 @@ mod tests {
             text: "Hi".into(),
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
         }];
         let json = r#"Here you go:
 {
@@ -746,6 +750,7 @@ Hope that helps!"#;
             text: "Bye".into(),
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
         }];
         let json = r#"{"blocks":[{"id":"2","text":"T4"}]}"#;
         let out = merge_translations(&source, json).unwrap();
@@ -759,6 +764,7 @@ Hope that helps!"#;
             text: "A".into(),
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
         }];
         let json = r#"[{"id":1,"translation":"T5"}]"#;
         let out = merge_translations(&source, json).unwrap();

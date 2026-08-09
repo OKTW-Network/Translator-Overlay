@@ -198,13 +198,25 @@ pub fn commit_optional_fields(ui: &mut UiShared) {
     ui.draft = effective_draft(ui);
 }
 
+/// True when the form (draft + free-text fields) differs from `live`.
+///
+/// Prefer this when the caller already holds `state.read()` — nested
+/// `is_settings_dirty` → `state.read()` deadlocks under parking_lot's fair
+/// policy once a writer (pipeline) is waiting.
+pub fn draft_differs_from(ui: &UiShared, live: &AppConfig) -> bool {
+    effective_draft(ui) != *live
+}
+
 /// True only when the form actually differs from the running config.
 ///
 /// Do not trust a sticky dirty flag: Slider/NumberBox/TextBox often fire
 /// change events when re-bound on the 250ms UI tick, which would mark dirty
 /// even when nothing changed.
+///
+/// Acquires `state` once; safe to call without an existing state lock.
 pub fn is_settings_dirty(ui: &UiShared) -> bool {
-    effective_draft(ui) != ui.state.read().config
+    let live = ui.state.read().config.clone();
+    draft_differs_from(ui, &live)
 }
 
 /// Call after a real user edit. Clears the success banner so it does not stack.
@@ -449,7 +461,8 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         settings_message: s.settings_message.clone().unwrap_or_default(),
         // Compare draft↔live config (not a sticky flag) so re-bind events
         // from Slider/NumberBox do not show false "Unsaved changes".
-        settings_dirty: is_settings_dirty(&ui),
+        // Use already-held `s.config` — do not call is_settings_dirty (nested read).
+        settings_dirty: draft_differs_from(&ui, &s.config),
         form_error: ui.form_error.clone().unwrap_or_default(),
         confirm: ui.confirm,
         optional_tip_seen: ui.optional_tip_seen,
