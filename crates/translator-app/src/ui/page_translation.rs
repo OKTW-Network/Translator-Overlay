@@ -1,7 +1,8 @@
 //! Translation / context settings.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use windows_reactor::*;
 
 use crate::ui::{

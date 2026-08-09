@@ -1,7 +1,8 @@
 //! API settings page: connection, optional sampling, reliability.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use windows_reactor::*;
 
 use crate::ui::{

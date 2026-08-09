@@ -1,7 +1,8 @@
 //! OCR / capture settings.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use translator_core::ModelTier;
 use windows_reactor::*;
 

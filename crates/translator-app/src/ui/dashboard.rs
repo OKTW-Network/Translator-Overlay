@@ -1,7 +1,8 @@
 //! Dashboard: capture control, window picker, live OCR / translation preview.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use translator_capture::list_windows;
 use windows_reactor::*;
 
@@ -99,7 +100,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 let cx = cx.clone();
                 move || {
                     {
-                        let ui = cx.shared.lock().unwrap();
+                        let ui = cx.shared.lock();
                         if ui.state.read().auto_running {
                             let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
                         } else if let Some(w) = ui.windows.get(ui.selected_idx).cloned() {
@@ -128,7 +129,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .on_click({
                     let cx = cx.clone();
                     move || {
-                        let ui = cx.shared.lock().unwrap();
+                        let ui = cx.shared.lock();
                         let next = !ui.state.read().config.capture.show_preview;
                         let _ = ui.cmd_tx.send(PipelineCommand::SetShowPreview(next));
                         drop(ui);

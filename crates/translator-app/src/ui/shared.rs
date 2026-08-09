@@ -1,7 +1,8 @@
 //! Shared UI state, snapshot, and config draft helpers.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{AppConfig, ModelTier};
 use windows_reactor::Updater;
@@ -30,15 +31,13 @@ impl UiCx {
 
     /// Mutate shared UI state, then refresh.
     pub fn with_mut(&self, f: impl FnOnce(&mut UiShared)) {
-        if let Ok(mut ui) = self.shared.lock() {
-            f(&mut ui);
-        }
+        f(&mut self.shared.lock());
         self.refresh();
     }
 
     /// Send a pipeline command and refresh.
     pub fn send_cmd(&self, cmd: PipelineCommand) {
-        let _ = self.shared.lock().unwrap().cmd_tx.send(cmd);
+        let _ = self.shared.lock().cmd_tx.send(cmd);
         self.refresh();
     }
 }
@@ -392,7 +391,7 @@ pub struct Snapshot {
 }
 
 pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
-    let ui = shared.lock().unwrap();
+    let ui = shared.lock();
     let s = ui.state.read();
     let history_preview = s
         .history

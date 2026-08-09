@@ -1,7 +1,8 @@
 //! Settings page chrome: headers, cards, InfoBar, command footer.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use windows_reactor::*;
 
 use crate::{
@@ -243,7 +244,8 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     let save = save.on_click({
         let cx = cx.clone();
         move || {
-            if let Ok(mut ui) = cx.shared.lock() {
+            {
+                let mut ui = cx.shared.lock();
                 if let Some(err) = form_validation_error(&ui) {
                     ui.form_error = Some(err);
                     drop(ui);
