@@ -9,8 +9,8 @@ use oar_ocr::prelude::OAROCRBuilder;
 use oar_ocr::processors::BoundingBox;
 use tracing::info;
 use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, Rect};
-use translator_models::ModelPaths;
 
+use crate::models::ModelPaths;
 use crate::OcrError;
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).

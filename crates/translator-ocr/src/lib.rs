@@ -3,11 +3,13 @@
 mod engine;
 mod filter;
 mod merge;
+mod models;
 mod stability;
 
 pub use engine::*;
 pub use filter::*;
 pub use merge::*;
+pub use models::*;
 pub use stability::*;
 
 use thiserror::Error;

@@ -10,4 +10,3 @@ oar-ocr = { version = "0.9", features = ["auto-download", "directml"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 translator-core = { path = "../translator-core" }
-translator-models = { path = "../translator-models" }

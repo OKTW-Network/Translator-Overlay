@@ -1,7 +1,0 @@
-[package]
-name = "translator-models"
-version.workspace = true
-edition = "2024"
-
-[dependencies]
-translator-core = { path = "../translator-core" }

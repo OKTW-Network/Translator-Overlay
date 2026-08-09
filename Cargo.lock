@@ -3322,13 +3322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "translator-models"
-version = "0.1.0"
-dependencies = [
- "translator-core",
-]
-
-[[package]]
 name = "translator-ocr"
 version = "0.1.0"
 dependencies = [
@@ -3338,7 +3331,6 @@ dependencies = [
  "thiserror",
  "tracing",
  "translator-core",
- "translator-models",
 ]
 
 [[package]]

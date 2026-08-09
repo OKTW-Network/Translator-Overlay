@@ -150,8 +150,7 @@ crates/
   translator-app/         # 主程式、UI、pipeline 協調
   translator-capture/     # Windows Graphics Capture 視窗擷取
   translator-core/        # config / state / 共用型別
-  translator-models/      # PP-OCRv6 模型目錄與路徑
-  translator-ocr/         # OCR 引擎、穩定門檻、行合併
+  translator-ocr/         # OCR 引擎、模型目錄、穩定門檻、行合併
   translator-overlay/     # 透明點穿覆蓋視窗
   translator-translate/   # OpenAI 相容翻譯客戶端
 scripts/
