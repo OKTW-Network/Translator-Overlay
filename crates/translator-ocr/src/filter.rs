@@ -19,12 +19,7 @@ pub fn is_single_latin_or_digit(text: &str) -> bool {
 
 /// Drop blocks that are only one English letter or digit.
 pub fn filter_single_char_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    reindex(
-        blocks
-            .into_iter()
-            .filter(|b| !is_single_latin_or_digit(&b.text))
-            .collect(),
-    )
+    reindex(blocks.into_iter().filter(|b| !is_single_latin_or_digit(&b.text)).collect())
 }
 
 fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
@@ -93,11 +88,7 @@ impl BlockPersistenceFilter {
     }
 
     pub fn from_config(config: &OcrConfig) -> Self {
-        Self::with_max_unstable(
-            config.block_persist_ms,
-            config.block_max_miss_ms,
-            config.max_unstable_ms,
-        )
+        Self::with_max_unstable(config.block_persist_ms, config.block_max_miss_ms, config.max_unstable_ms)
     }
 
     pub fn reset(&mut self) {
@@ -176,11 +167,7 @@ impl BlockPersistenceFilter {
                     track.last_block.bbox = bbox;
                     track.last_block.confidence = block.confidence;
 
-                    let pending_key = track
-                        .pending_text
-                        .as_deref()
-                        .map(normalize_text)
-                        .unwrap_or_default();
+                    let pending_key = track.pending_text.as_deref().map(normalize_text).unwrap_or_default();
                     if pending_key == text_key {
                         let since = track.pending_since.unwrap_or(now);
                         if now.saturating_duration_since(since) >= persist {
@@ -220,10 +207,7 @@ impl BlockPersistenceFilter {
                     track.pending_since = None;
                     track.thrash_since = None;
                 }
-                if !track.confirmed
-                    && !max_unstable.is_zero()
-                    && now.saturating_duration_since(track.first_seen) >= max_unstable
-                {
+                if !track.confirmed && !max_unstable.is_zero() && now.saturating_duration_since(track.first_seen) >= max_unstable {
                     track.confirmed = true;
                 }
             } else {
@@ -263,11 +247,7 @@ impl BlockPersistenceFilter {
         let retain_confirmed = self.track_retain(true);
         let retain_unconfirmed = self.track_retain(false);
         self.tracks.retain(|t| {
-            let limit = if t.confirmed {
-                retain_confirmed
-            } else {
-                retain_unconfirmed
-            };
+            let limit = if t.confirmed { retain_confirmed } else { retain_unconfirmed };
             now.saturating_duration_since(t.last_seen) <= limit
         });
 
@@ -287,12 +267,8 @@ impl BlockPersistenceFilter {
             let dy = (cy - tcy).abs();
             // Match by center proximity (tolerant of OCR box jitter and width
             // swings when trailing glyphs appear/disappear).
-            let max_dx = (block.bbox.width.max(track.bbox.width) * 0.65)
-                .max(q as f32 * 3.0)
-                .max(24.0);
-            let max_dy = (block.bbox.height.max(track.bbox.height) * 0.90)
-                .max(q as f32 * 2.5)
-                .max(16.0);
+            let max_dx = (block.bbox.width.max(track.bbox.width) * 0.65).max(q as f32 * 3.0).max(24.0);
+            let max_dy = (block.bbox.height.max(track.bbox.height) * 0.90).max(q as f32 * 2.5).max(16.0);
             if dx > max_dx || dy > max_dy {
                 continue;
             }
@@ -306,8 +282,7 @@ impl BlockPersistenceFilter {
             }
 
             // Prefer same text; otherwise prefer closer centers.
-            let center_score = 1.0 - (dx / max_dx).clamp(0.0, 1.0) * 0.5
-                - (dy / max_dy).clamp(0.0, 1.0) * 0.5;
+            let center_score = 1.0 - (dx / max_dx).clamp(0.0, 1.0) * 0.5 - (dy / max_dy).clamp(0.0, 1.0) * 0.5;
             let score = if same_text {
                 iou + 1.0 + center_score
             } else {
@@ -430,10 +405,7 @@ mod tests {
         jittered.bbox.height = 22.0;
         let out = f.filter(vec![jittered]);
         assert_eq!(out.len(), 1);
-        assert_eq!(
-            out[0].bbox, frozen,
-            "confirmed track should keep stable bbox"
-        );
+        assert_eq!(out[0].bbox, frozen, "confirmed track should keep stable bbox");
     }
 
     #[test]

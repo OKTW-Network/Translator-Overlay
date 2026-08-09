@@ -2,8 +2,10 @@
 
 use windows_reactor::*;
 
-use super::chrome::{settings_card, settings_card_stack, settings_row};
-use super::shared::{argb_u32_to_parts, parse_hex_u32};
+use crate::ui::{
+    chrome::{settings_card, settings_card_stack, settings_row},
+    shared::{argb_u32_to_parts, parse_hex_u32},
+};
 
 /// Compact right-edge ToggleSwitch (Windows Settings style).
 ///
@@ -30,9 +32,7 @@ pub fn card_text(
     placeholder: impl Into<String>,
     on_changed: impl Fn(String) + 'static,
 ) -> Element {
-    let mut tb = text_box(value)
-        .placeholder_text(placeholder)
-        .on_text_changed(on_changed);
+    let mut tb = text_box(value).placeholder_text(placeholder).on_text_changed(on_changed);
     tb.modifiers.min_width = Some(200.0);
     tb.modifiers.width = Some(280.0);
     tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
@@ -128,10 +128,7 @@ pub fn quantize_to_step(v: f64, min: f64, max: f64, step: f64) -> f64 {
     (min + steps * step).clamp(min, max)
 }
 
-fn slider_number_controls(
-    p: &SliderNumberParams,
-    on_changed: impl Fn(f64) + Clone + 'static,
-) -> Element {
+fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Element {
     let min = p.min;
     let max = p.max;
     let step = p.step;
@@ -143,18 +140,13 @@ fn slider_number_controls(
     };
     let on_box = move |v: f64| on_changed(quantize_to_step(v, min, max, step));
 
-    let mut slider = Slider::new(value)
-        .range(min, max)
-        .step(step)
-        .on_value_changed(on_slider);
+    let mut slider = Slider::new(value).range(min, max).step(step).on_value_changed(on_slider);
     // Fixed width so the control column stays Auto-sized and right-aligned.
     slider.modifiers.width = Some(180.0);
     slider.modifiers.min_width = Some(140.0);
     slider.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
 
-    let mut nb = NumberBox::new(value)
-        .range(min, max)
-        .on_value_changed(on_box);
+    let mut nb = NumberBox::new(value).range(min, max).on_value_changed(on_box);
     nb.modifiers.width = Some(100.0);
     nb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
 
@@ -162,19 +154,13 @@ fn slider_number_controls(
 }
 
 /// Slider + NumberBox on one row (labels left, controls flush-right) — standalone card.
-pub fn card_slider_number(
-    p: SliderNumberParams,
-    on_changed: impl Fn(f64) + Clone + 'static,
-) -> Element {
+pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Element {
     let controls = slider_number_controls(&p, on_changed);
     settings_card(p.key, p.header, p.description.as_deref(), controls)
 }
 
 /// Slider + NumberBox as a flat expander item (no nested card chrome).
-pub fn row_slider_number(
-    p: SliderNumberParams,
-    on_changed: impl Fn(f64) + Clone + 'static,
-) -> Element {
+pub fn row_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Element {
     let controls = slider_number_controls(&p, on_changed);
     settings_row(p.key, p.header, p.description.as_deref(), controls)
 }
@@ -217,10 +203,7 @@ pub fn optional_slider_row(
 
     let labels = vstack((
         text_block(p.header).semibold().font_size(14.0),
-        text_block(p.description)
-            .font_size(12.0)
-            .foreground(ThemeRef::SecondaryText)
-            .wrap(),
+        text_block(p.description).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap(),
     ))
     .spacing(2.0)
     .horizontal_alignment(HorizontalAlignment::Stretch)
@@ -235,10 +218,7 @@ pub fn optional_slider_row(
     slider.modifiers.min_width = Some(120.0);
     slider.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
 
-    let mut nb = NumberBox::new(value)
-        .range(min, max)
-        .enabled(enabled)
-        .on_value_changed(on_box);
+    let mut nb = NumberBox::new(value).range(min, max).enabled(enabled).on_value_changed(on_box);
     nb.modifiers.width = Some(88.0);
     nb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
 
@@ -291,11 +271,7 @@ pub struct OptionalNumberParams {
 }
 
 /// Optional integer/float with master toggle (e.g. max_tokens).
-pub fn optional_number_row(
-    p: OptionalNumberParams,
-    on_value: impl Fn(f64) + 'static,
-    on_enabled: impl Fn(bool) + 'static,
-) -> Element {
+pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'static, on_enabled: impl Fn(bool) + 'static) -> Element {
     let min = p.min;
     let max = p.max;
     let step = p.step;
@@ -304,20 +280,12 @@ pub fn optional_number_row(
 
     let header_el = text_block(p.header).semibold().font_size(14.0);
     let labels: Element = match p.description.as_deref() {
-        Some(d) if !d.is_empty() => vstack((
-            header_el,
-            text_block(d)
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
-        ))
-        .spacing(2.0)
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .vertical_alignment(VerticalAlignment::Center)
-        .into(),
-        _ => header_el
+        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
+            .spacing(2.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
+        _ => header_el.vertical_alignment(VerticalAlignment::Center).into(),
     };
 
     let mut nb = NumberBox::new(value)
@@ -374,29 +342,17 @@ pub struct OptionalTextParams {
 }
 
 /// Optional string field with master toggle (e.g. reasoning_effort).
-pub fn optional_text_row(
-    p: OptionalTextParams,
-    on_text: impl Fn(String) + 'static,
-    on_enabled: impl Fn(bool) + 'static,
-) -> Element {
+pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'static, on_enabled: impl Fn(bool) + 'static) -> Element {
     let toggle = compact_toggle(p.enabled, on_enabled);
 
     let header_el = text_block(p.header).semibold().font_size(14.0);
     let labels: Element = match p.description.as_deref() {
-        Some(d) if !d.is_empty() => vstack((
-            header_el,
-            text_block(d)
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
-        ))
-        .spacing(2.0)
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .vertical_alignment(VerticalAlignment::Center)
-        .into(),
-        _ => header_el
+        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
+            .spacing(2.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
+        _ => header_el.vertical_alignment(VerticalAlignment::Center).into(),
     };
 
     let mut tb = text_box(p.text)
@@ -479,22 +435,14 @@ pub fn card_color_popup(
         .min_height(32.0)
         .padding(Thickness::uniform(0.0))
         .vertical_alignment(VerticalAlignment::Center)
-        .tooltip(if p.open {
-            "Close color picker"
-        } else {
-            "Open color picker"
-        })
+        .tooltip(if p.open { "Close color picker" } else { "Open color picker" })
         .on_click(on_toggle_open);
 
-    let mut hex_tb = text_box(p.hex)
-        .placeholder_text(p.placeholder)
-        .on_text_changed(on_hex_changed);
+    let mut hex_tb = text_box(p.hex).placeholder_text(p.placeholder).on_text_changed(on_hex_changed);
     hex_tb.modifiers.width = Some(120.0);
     hex_tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
 
-    let row = hstack((swatch, hex_tb))
-        .spacing(8.0)
-        .vertical_alignment(VerticalAlignment::Center);
+    let row = hstack((swatch, hex_tb)).spacing(8.0).vertical_alignment(VerticalAlignment::Center);
 
     if p.open {
         // Spectrum + alpha only — hex is on the row; channel boxes clutter the popup.

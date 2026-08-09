@@ -1,37 +1,40 @@
 //! Win32 layered-window host thread.
 
-use std::mem::size_of;
-use std::sync::mpsc::Receiver;
-use std::time::{Duration, Instant};
+use std::{
+    mem::size_of,
+    sync::mpsc::Receiver,
+    time::{Duration, Instant},
+};
 
 use tracing::{debug, warn};
 use translator_core::{OverlayConfig, TranslatedBlock};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
-    CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT, DT_EDITCONTROL,
-    DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
-    FF_DONTCARE,
-    FW_NORMAL, GetDC, GetTextMetricsW, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
-    ReleaseDC, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TEXTMETRICW,
-    TRANSPARENT,
+use windows::{
+    Win32::{
+        Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
+        Graphics::Gdi::{
+            AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+            ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT,
+            DT_EDITCONTROL, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, FF_DONTCARE,
+            FW_NORMAL, GetDC, GetTextMetricsW, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject,
+            SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, TEXTMETRICW, TRANSPARENT,
+        },
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::{
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT, GetAncestor,
+            GetClientRect, GetForegroundWindow, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, IsChild, IsIconic, IsWindow,
+            IsWindowVisible, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE,
+            SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
+            UnregisterClassW, UpdateLayeredWindow, WM_DESTROY, WM_NCHITTEST, WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+        },
+    },
+    core::{PCWSTR, w},
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GA_ROOT, GetAncestor, GetClientRect, GetForegroundWindow, HTTRANSPARENT,
-    HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, IsChild, IsIconic, IsWindow, IsWindowVisible,
-    LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UnregisterClassW, UpdateLayeredWindow,
-    WM_DESTROY, WM_NCHITTEST, WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
-};
-use windows::core::{PCWSTR, w};
 
-use crate::OverlayError;
-use crate::draw::{self, Rgba, SurfaceRect};
+use crate::{
+    OverlayError,
+    draw::{self, Rgba, SurfaceRect},
+};
 
 /// Font size + text colour for one overlay label.
 struct LabelStyle {
@@ -87,16 +90,14 @@ pub struct OverlayHost {
 impl OverlayHost {
     pub fn create(config: OverlayConfig) -> Result<Self, OverlayError> {
         unsafe {
-            let hinstance = GetModuleHandleW(None)
-                .map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
+            let hinstance = GetModuleHandleW(None).map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
 
             let wc = WNDCLASSEXW {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(wnd_proc),
                 hInstance: hinstance.into(),
-                hCursor: LoadCursorW(None, IDC_ARROW)
-                    .map_err(|e| OverlayError::Other(format!("LoadCursorW: {e}")))?,
+                hCursor: LoadCursorW(None, IDC_ARROW).map_err(|e| OverlayError::Other(format!("LoadCursorW: {e}")))?,
                 lpszClassName: CLASS_NAME,
                 ..Default::default()
             };
@@ -145,9 +146,7 @@ impl OverlayHost {
                 let _ = DeleteDC(hdc_mem);
                 ReleaseDC(Some(hwnd), hdc_screen);
                 let _ = DestroyWindow(hwnd);
-                return Err(OverlayError::Other(
-                    "CreateCompatibleDC(present) failed".into(),
-                ));
+                return Err(OverlayError::Other("CreateCompatibleDC(present) failed".into()));
             }
 
             let mut host = Self {
@@ -242,8 +241,7 @@ impl OverlayHost {
                 content_width,
                 content_height,
             } => {
-                let size_changed =
-                    self.content_w != content_width || self.content_h != content_height;
+                let size_changed = self.content_w != content_width || self.content_h != content_height;
                 self.blocks = blocks;
                 self.content_w = content_width;
                 self.content_h = content_height;
@@ -325,15 +323,7 @@ impl OverlayHost {
             }
 
             // TOPMOST only while target is focused — otherwise other apps get covered.
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                client_w,
-                client_h,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
 
             if let Err(e) = self.present(x, y, client_w, client_h) {
@@ -345,15 +335,7 @@ impl OverlayHost {
     fn hide(&mut self) {
         unsafe {
             // Drop topmost so we never stay above unrelated apps after hide.
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_NOTOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW,
-            );
+            let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
     }
@@ -388,9 +370,8 @@ impl OverlayHost {
             };
 
             let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbmp =
-                CreateDIBSection(Some(self.hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-                    .map_err(|e| OverlayError::Other(format!("CreateDIBSection: {e}")))?;
+            let hbmp = CreateDIBSection(Some(self.hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+                .map_err(|e| OverlayError::Other(format!("CreateDIBSection: {e}")))?;
 
             if hbmp.is_invalid() || bits.is_null() {
                 return Err(OverlayError::Other("CreateDIBSection returned null".into()));
@@ -438,8 +419,7 @@ impl OverlayHost {
         // paragraphs keep the OCR column width.
         let mut labels: Vec<(SurfaceRect, String, i32)> = Vec::with_capacity(pending.len());
         for (base, text, source_lines) in pending {
-            let (expanded, font_px) =
-                self.layout_label(base, &text, source_lines, surface)?;
+            let (expanded, font_px) = self.layout_label(base, &text, source_lines, surface)?;
             labels.push((expanded, text, font_px));
         }
 
@@ -447,16 +427,10 @@ impl OverlayHost {
             draw::fill_rect(buf, surface, *rect, bg);
         }
         for (rect, text, font_px) in &labels {
-            self.draw_text_label(
-                buf,
-                surface,
-                *rect,
-                text,
-                LabelStyle {
-                    font_px: *font_px,
-                    color: fg,
-                },
-            )?;
+            self.draw_text_label(buf, surface, *rect, text, LabelStyle {
+                font_px: *font_px,
+                color: fg,
+            })?;
         }
         Ok(())
     }
@@ -485,9 +459,7 @@ impl OverlayHost {
             if cell <= max_cell {
                 break;
             }
-            let next = ((px as f32) * (max_cell as f32) / (cell as f32))
-                .floor()
-                .max(8.0) as i32;
+            let next = ((px as f32) * (max_cell as f32) / (cell as f32)).floor().max(8.0) as i32;
             if next >= px {
                 px = (px - 1).max(8);
             } else {
@@ -541,8 +513,7 @@ impl OverlayHost {
             let text_h = if need_w <= box_w {
                 natural.1
             } else {
-                self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?
-                    .1
+                self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1
             };
             let box_h = (text_h + pad * 2).max(font_px + pad * 2);
             return Ok((place_label(base, box_w, box_h, surface), font_px));
@@ -551,9 +522,7 @@ impl OverlayHost {
         // Multi-line source: keep OCR column width; wrap height only.
         let pad = label_pad(font_px);
         let box_w = source_w;
-        let text_h = self
-            .measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?
-            .1;
+        let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
         let box_h = (text_h + pad * 2).max(font_px + pad * 2);
         Ok((place_label(base, box_w, box_h, surface), font_px))
     }
@@ -573,22 +542,13 @@ impl OverlayHost {
             let flags = DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT;
             let measured_h = DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags);
             let w = (calc.right - calc.left).max(1);
-            let h = if measured_h > 0 {
-                measured_h
-            } else {
-                font_px + 2
-            };
+            let h = if measured_h > 0 { measured_h } else { font_px + 2 };
             Ok((w, h))
         }
     }
 
     /// Word-wrapped extent for a fixed text area width.
-    fn measure_wrapped(
-        &mut self,
-        text: &str,
-        font_px: i32,
-        text_area_w: i32,
-    ) -> Result<(i32, i32), OverlayError> {
+    fn measure_wrapped(&mut self, text: &str, font_px: i32, text_area_w: i32) -> Result<(i32, i32), OverlayError> {
         self.ensure_font(font_px)?;
         unsafe {
             let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
@@ -599,15 +559,10 @@ impl OverlayHost {
                 bottom: 0,
             };
             let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let flags =
-                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT;
+            let flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT;
             let measured_h = DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags);
             let w = (calc.right - calc.left).max(1);
-            let h = if measured_h > 0 {
-                measured_h
-            } else {
-                font_px + 2
-            };
+            let h = if measured_h > 0 { measured_h } else { font_px + 2 };
             Ok((w, h))
         }
     }
@@ -704,13 +659,7 @@ impl OverlayHost {
         Ok(())
     }
 
-    fn present(
-        &mut self,
-        x: i32,
-        y: i32,
-        client_w: i32,
-        client_h: i32,
-    ) -> Result<(), OverlayError> {
+    fn present(&mut self, x: i32, y: i32, client_w: i32, client_h: i32) -> Result<(), OverlayError> {
         if self.bits.is_null() || self.bmp_w <= 0 || self.bmp_h <= 0 {
             return Err(OverlayError::Other("paint bitmap missing".into()));
         }
@@ -814,20 +763,11 @@ impl OverlayHost {
             };
 
             let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbmp = CreateDIBSection(
-                Some(self.hdc_present),
-                &bmi,
-                DIB_RGB_COLORS,
-                &mut bits,
-                None,
-                0,
-            )
-            .map_err(|e| OverlayError::Other(format!("CreateDIBSection(present): {e}")))?;
+            let hbmp = CreateDIBSection(Some(self.hdc_present), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+                .map_err(|e| OverlayError::Other(format!("CreateDIBSection(present): {e}")))?;
 
             if hbmp.is_invalid() || bits.is_null() {
-                return Err(OverlayError::Other(
-                    "CreateDIBSection(present) returned null".into(),
-                ));
+                return Err(OverlayError::Other("CreateDIBSection(present) returned null".into()));
             }
 
             let _ = SelectObject(self.hdc_present, HGDIOBJ(hbmp.0));
@@ -922,8 +862,7 @@ fn client_screen_rect(target: HWND) -> Option<(i32, i32, i32, i32)> {
             x: client.right,
             y: client.bottom,
         };
-        if !ClientToScreen(target, &mut tl).as_bool() || !ClientToScreen(target, &mut br).as_bool()
-        {
+        if !ClientToScreen(target, &mut tl).as_bool() || !ClientToScreen(target, &mut br).as_bool() {
             return None;
         }
         let w = (br.x - tl.x).max(1);
@@ -938,12 +877,7 @@ fn label_pad(font_px: i32) -> i32 {
 }
 
 /// Place a label at the OCR origin; shift up only if it would go past the bottom.
-fn place_label(
-    base: SurfaceRect,
-    box_w: i32,
-    box_h: i32,
-    surface: draw::SurfaceSize,
-) -> SurfaceRect {
+fn place_label(base: SurfaceRect, box_w: i32, box_h: i32, surface: draw::SurfaceSize) -> SurfaceRect {
     let box_w = box_w.clamp(1, surface.width.max(1));
     let box_h = box_h.min(surface.height.max(1)).max(1);
     let mut x = base.x;
@@ -954,12 +888,7 @@ fn place_label(
     if y + box_h > surface.height {
         y = (surface.height - box_h).max(0);
     }
-    SurfaceRect {
-        x,
-        y,
-        w: box_w,
-        h: box_h,
-    }
+    SurfaceRect { x, y, w: box_w, h: box_h }
 }
 
 fn create_font(px: i32) -> Result<HFONT, OverlayError> {
@@ -1017,12 +946,7 @@ fn blend_premul(buf: &mut [u8], idx: usize, r: u8, g: u8, b: u8, a: u8) {
     buf[idx + 3] = (src_a + (dst_a * inv) / 255).min(255) as u8;
 }
 
-unsafe extern "system" fn wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),

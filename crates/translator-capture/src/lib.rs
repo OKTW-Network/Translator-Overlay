@@ -3,10 +3,9 @@
 mod client_area;
 mod session;
 
-pub use client_area::*;
-pub use session::*;
-
 use thiserror::Error;
+
+pub use crate::{client_area::*, session::*};
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
@@ -74,12 +73,7 @@ impl CapturedFrame {
         let mut buf = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut buf);
         encoder
-            .write_image(
-                &self.rgba,
-                self.width,
-                self.height,
-                image::ExtendedColorType::Rgba8,
-            )
+            .write_image(&self.rgba, self.width, self.height, image::ExtendedColorType::Rgba8)
             .map_err(|e| CaptureError::Frame(e.to_string()))?;
         Ok(buf)
     }

@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use windows_reactor::*;
 
-use super::chrome::{section_header, settings_page_shell};
-use super::controls::{
-    OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams,
-    card_password, card_slider_number, card_text, optional_number_row, optional_slider_row,
-    optional_text_row,
+use crate::ui::{
+    chrome::{section_header, settings_page_shell},
+    controls::{
+        OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_password, card_slider_number, card_text,
+        optional_number_row, optional_slider_row, optional_text_row,
+    },
+    shared::{Snapshot, UiShared, mark_dirty},
 };
-use super::shared::{Snapshot, UiShared, mark_dirty};
 
 pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
     let s_url = Arc::clone(shared);
@@ -81,20 +82,13 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 }
             },
         ),
-        card_text(
-            "api-model",
-            "Model",
-            Some("Model name, e.g. gpt-4o-mini."),
-            snap.draft_model.clone(),
-            "gpt-4o-mini",
-            move |v| {
-                if let Ok(mut ui) = s_model.lock() {
-                    ui.draft.api.model = v;
-                    mark_dirty(&mut ui);
-                }
-                bump_m.call(|n| n.wrapping_add(1));
-            },
-        ),
+        card_text("api-model", "Model", Some("Model name, e.g. gpt-4o-mini."), snap.draft_model.clone(), "gpt-4o-mini", move |v| {
+            if let Ok(mut ui) = s_model.lock() {
+                ui.draft.api.model = v;
+                mark_dirty(&mut ui);
+            }
+            bump_m.call(|n| n.wrapping_add(1));
+        }),
     ))
     .spacing(4.0);
 
@@ -105,9 +99,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         let s = Arc::clone(shared);
         let bump_tip = bump.clone();
         TeachingTip::new("Optional parameters")
-            .subtitle(
-                "Turn Off to leave a field out of the API request. Controls stay disabled while Off.",
-            )
+            .subtitle("Turn Off to leave a field out of the API request. Controls stay disabled while Off.")
             .is_open(!snap.optional_tip_seen)
             .light_dismiss()
             .on_closed(move || {
@@ -314,12 +306,5 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     ))
     .spacing(4.0);
 
-    settings_page_shell(
-        shared,
-        snap,
-        bump,
-        vstack((connection, sampling, reliability))
-            .spacing(8.0)
-            .into(),
-    )
+    settings_page_shell(shared, snap, bump, vstack((connection, sampling, reliability)).spacing(8.0).into())
 }

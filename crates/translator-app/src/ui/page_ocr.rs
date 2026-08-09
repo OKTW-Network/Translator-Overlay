@@ -5,18 +5,14 @@ use std::sync::{Arc, Mutex};
 use translator_core::ModelTier;
 use windows_reactor::*;
 
-use super::chrome::{section_header, settings_card, settings_expander, settings_page_shell};
-use super::controls::{
-    SliderNumberParams, card_slider_number, card_toggle, row_slider_number, row_toggle,
+use crate::ui::{
+    chrome::{section_header, settings_card, settings_expander, settings_page_shell},
+    controls::{SliderNumberParams, card_slider_number, card_toggle, row_slider_number, row_toggle},
+    shared::{Snapshot, UiShared, mark_dirty},
 };
-use super::shared::{Snapshot, UiShared, mark_dirty};
 
 /// Bind a line-merge f32 field from a slider/number value.
-fn set_merge_f32(
-    shared: &Arc<Mutex<UiShared>>,
-    set: impl FnOnce(&mut translator_core::LineMergeConfig, f32),
-    v: f64,
-) {
+fn set_merge_f32(shared: &Arc<Mutex<UiShared>>, set: impl FnOnce(&mut translator_core::LineMergeConfig, f32), v: f64) {
     if let Ok(mut ui) = shared.lock() {
         set(&mut ui.draft.ocr.line_merge, v as f32);
         mark_dirty(&mut ui);
@@ -72,48 +68,39 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         // Compact but readable: default RadioButton MinWidth (~120) spreads
         // short labels too far; zero padding/min-width crushes circle+text.
         // Cap width near content size and space items with hstack only.
-        settings_card(
-            "ocr-tier",
-            "Model size",
-            Some("Smaller is faster; larger is more accurate. Reloads on Save."),
-            {
-                let idx = snap.model_tier_idx;
-                let pick = move |choice: i32| {
-                    let s = Arc::clone(&s_tier);
-                    let bump = bump_a.clone();
-                    move || {
-                        if let Ok(mut ui) = s.lock() {
-                            ui.draft.ocr.model_tier = match choice {
-                                0 => ModelTier::Tiny,
-                                2 => ModelTier::Medium,
-                                _ => ModelTier::Small,
-                            };
-                            mark_dirty(&mut ui);
-                        }
-                        bump.call(|n| n.wrapping_add(1));
+        settings_card("ocr-tier", "Model size", Some("Smaller is faster; larger is more accurate. Reloads on Save."), {
+            let idx = snap.model_tier_idx;
+            let pick = move |choice: i32| {
+                let s = Arc::clone(&s_tier);
+                let bump = bump_a.clone();
+                move || {
+                    if let Ok(mut ui) = s.lock() {
+                        ui.draft.ocr.model_tier = match choice {
+                            0 => ModelTier::Tiny,
+                            2 => ModelTier::Medium,
+                            _ => ModelTier::Small,
+                        };
+                        mark_dirty(&mut ui);
                     }
-                };
-                // Width ≈ glyph + label; leave template padding for circle↔text.
-                let radio =
-                    |label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>| {
-                        let mut rb = RadioButton::new(label)
-                            .group("ocr-model-tier")
-                            .checked(checked)
-                            .on_checked(on);
-                        rb.modifiers.min_width = Some(width);
-                        rb.modifiers.width = Some(width);
-                        rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-                        rb
-                    };
-                hstack((
-                    radio("tiny", 64.0, idx == 0, Box::new(pick(0))),
-                    radio("small", 72.0, idx == 1, Box::new(pick(1))),
-                    radio("medium", 84.0, idx == 2, Box::new(pick(2))),
-                ))
-                .spacing(12.0)
-                .vertical_alignment(VerticalAlignment::Center)
-            },
-        ),
+                    bump.call(|n| n.wrapping_add(1));
+                }
+            };
+            // Width ≈ glyph + label; leave template padding for circle↔text.
+            let radio = |label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>| {
+                let mut rb = RadioButton::new(label).group("ocr-model-tier").checked(checked).on_checked(on);
+                rb.modifiers.min_width = Some(width);
+                rb.modifiers.width = Some(width);
+                rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+                rb
+            };
+            hstack((
+                radio("tiny", 64.0, idx == 0, Box::new(pick(0))),
+                radio("small", 72.0, idx == 1, Box::new(pick(1))),
+                radio("medium", 84.0, idx == 2, Box::new(pick(2))),
+            ))
+            .spacing(12.0)
+            .vertical_alignment(VerticalAlignment::Center)
+        }),
     ))
     .spacing(4.0);
 
@@ -222,9 +209,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             SliderNumberParams {
                 key: "merge-list-gap-min",
                 header: "List gap min (× h)".into(),
-                description: Some(
-                    "Gaps larger than this may be UI list spacing (not wraps).".into(),
-                ),
+                description: Some("Gaps larger than this may be UI list spacing (not wraps).".into()),
                 value: snap.merge_list_gap_min,
                 min: 0.05,
                 max: 0.80,
@@ -239,9 +224,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             SliderNumberParams {
                 key: "merge-wrap-width",
                 header: "Wrap width ratio".into(),
-                description: Some(
-                    "Wide line above shorter line (≥ this factor) counts as wrap.".into(),
-                ),
+                description: Some("Wide line above shorter line (≥ this factor) counts as wrap.".into()),
                 value: snap.merge_wrap_width,
                 min: 1.1,
                 max: 3.0,
@@ -417,9 +400,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             SliderNumberParams {
                 key: "ocr-max-unstable-ms",
                 header: "Force translate (ms)".into(),
-                description: Some(
-                    "If OCR keeps changing, translate anyway after this long. 0 = off.".into(),
-                ),
+                description: Some("If OCR keeps changing, translate anyway after this long. 0 = off.".into()),
                 value: snap.max_unstable_ms,
                 min: 0.0,
                 max: 15_000.0,

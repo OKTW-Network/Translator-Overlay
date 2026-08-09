@@ -4,15 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use windows_reactor::*;
 
-use super::chrome::{section_header, settings_card_stack, settings_page_shell};
-use super::controls::{SliderNumberParams, card_slider_number, card_text};
-use super::shared::{Snapshot, UiShared, mark_dirty};
+use crate::ui::{
+    chrome::{section_header, settings_card_stack, settings_page_shell},
+    controls::{SliderNumberParams, card_slider_number, card_text},
+    shared::{Snapshot, UiShared, mark_dirty},
+};
 
-pub fn translation_page(
-    shared: &Arc<Mutex<UiShared>>,
-    snap: &Snapshot,
-    bump: &Updater<u32>,
-) -> Element {
+pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
     let s_src = Arc::clone(shared);
     let s_dst = Arc::clone(shared);
     let s_hist = Arc::clone(shared);
@@ -111,8 +109,7 @@ pub fn translation_page(
                 .on_text_changed(move |v: String| {
                     if let Ok(mut ui) = s_sys.lock() {
                         let t = v.trim().to_string();
-                        ui.draft.translation.system_prompt =
-                            if t.is_empty() { None } else { Some(t) };
+                        ui.draft.translation.system_prompt = if t.is_empty() { None } else { Some(t) };
                         mark_dirty(&mut ui);
                     }
                     bump_e.call(|n| n.wrapping_add(1));
@@ -121,10 +118,5 @@ pub fn translation_page(
     ))
     .spacing(4.0);
 
-    settings_page_shell(
-        shared,
-        snap,
-        bump,
-        vstack((languages, context, prompt)).spacing(8.0).into(),
-    )
+    settings_page_shell(shared, snap, bump, vstack((languages, context, prompt)).spacing(8.0).into())
 }

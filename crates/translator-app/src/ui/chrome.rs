@@ -4,25 +4,21 @@ use std::sync::{Arc, Mutex};
 
 use windows_reactor::*;
 
-use super::shared::{
-    ConfirmAction, Snapshot, UiShared, commit_optional_fields, do_discard, do_reload_from_disk,
-    form_validation_error, is_settings_dirty,
+use crate::{
+    pipeline::PipelineCommand,
+    ui::shared::{
+        ConfirmAction, Snapshot, UiShared, commit_optional_fields, do_discard, do_reload_from_disk, form_validation_error,
+        is_settings_dirty,
+    },
 };
-use crate::pipeline::PipelineCommand;
 
 /// Windows Settings–style page title + optional description.
 pub fn page_header(title: impl Into<String>, description: Option<&str>) -> Element {
     let title = text_block(title).font_size(28.0).bold();
     match description {
-        Some(d) if !d.is_empty() => vstack((
-            title,
-            text_block(d)
-                .font_size(13.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
-        ))
-        .spacing(4.0)
-        .into(),
+        Some(d) if !d.is_empty() => vstack((title, text_block(d).font_size(13.0).foreground(ThemeRef::SecondaryText).wrap()))
+            .spacing(4.0)
+            .into(),
         _ => title.into(),
     }
 }
@@ -57,9 +53,7 @@ pub fn settings_expander(
 ) -> Element {
     // Content is a list of flat rows; no extra margin that would look like a
     // nested card inset.
-    let body = child
-        .into()
-        .horizontal_alignment(HorizontalAlignment::Stretch);
+    let body = child.into().horizontal_alignment(HorizontalAlignment::Stretch);
 
     Expander::new(body)
         .header(header)
@@ -77,27 +71,15 @@ pub fn settings_expander(
 }
 
 /// Shared label + control layout for settings rows (card or flat).
-fn settings_row_body(
-    header: impl Into<String>,
-    description: Option<&str>,
-    control: impl Into<Element>,
-) -> Element {
+fn settings_row_body(header: impl Into<String>, description: Option<&str>, control: impl Into<Element>) -> Element {
     let header_el = text_block(header).semibold().font_size(14.0);
     let left: Element = match description {
-        Some(d) if !d.is_empty() => vstack((
-            header_el,
-            text_block(d)
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
-        ))
-        .spacing(2.0)
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .vertical_alignment(VerticalAlignment::Center)
-        .into(),
-        _ => header_el
+        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
+            .spacing(2.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
+        _ => header_el.vertical_alignment(VerticalAlignment::Center).into(),
     };
 
     // Grid must Stretch: otherwise Star collapses to content and controls pack left.
@@ -131,12 +113,7 @@ fn settings_row_body(
 /// same header/control layout as a card, but no `CardBackground` / corner radius
 /// (those belong to the outer expander only). A hairline bottom border separates
 /// items like the toolkit item style.
-pub fn settings_row(
-    key: &str,
-    header: impl Into<String>,
-    description: Option<&str>,
-    control: impl Into<Element>,
-) -> Element {
+pub fn settings_row(key: &str, header: impl Into<String>, description: Option<&str>, control: impl Into<Element>) -> Element {
     let body = settings_row_body(header, description, control);
     border(body)
         .border_thickness(Thickness {
@@ -163,12 +140,7 @@ pub fn settings_row(
 /// of label/description length (HStack would pack after the text width).
 ///
 /// Do **not** nest these inside an Expander — use [`settings_row`] instead.
-pub fn settings_card(
-    key: &str,
-    header: impl Into<String>,
-    description: Option<&str>,
-    control: impl Into<Element>,
-) -> Element {
+pub fn settings_card(key: &str, header: impl Into<String>, description: Option<&str>, control: impl Into<Element>) -> Element {
     border(settings_row_body(header, description, control))
         .background(ThemeRef::CardBackground)
         .corner_radius(8.0)
@@ -179,23 +151,12 @@ pub fn settings_card(
 }
 
 /// Card with header/description on top and full-width content below (sliders, multiline).
-pub fn settings_card_stack(
-    key: &str,
-    header: impl Into<String>,
-    description: Option<&str>,
-    content: impl Into<Element>,
-) -> Element {
+pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Option<&str>, content: impl Into<Element>) -> Element {
     let header_el = text_block(header).semibold().font_size(14.0);
     let head: Element = match description {
-        Some(d) if !d.is_empty() => vstack((
-            header_el,
-            text_block(d)
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
-        ))
-        .spacing(2.0)
-        .into(),
+        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
+            .spacing(2.0)
+            .into(),
         _ => header_el.into(),
     };
 
@@ -235,10 +196,7 @@ pub fn status_infobar(snap: &Snapshot) -> Element {
 
 /// Compact app status strip (not full runtime dump).
 pub fn app_status_strip(snap: &Snapshot) -> Element {
-    let ocr_time = snap
-        .last_ocr_ms
-        .map(|ms| format!("{ms} ms"))
-        .unwrap_or_else(|| "—".into());
+    let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
     text_block(format!(
         "{}  ·  {}  ·  OCR {ocr_time}  ·  API key {}",
         snap.status,
@@ -256,11 +214,7 @@ pub fn app_status_strip(snap: &Snapshot) -> Element {
 ///
 /// `Button::accent()` cannot be cleared via Prop Unset (reactor no-op), so we
 /// remount with a different key when dirty toggles to force a fresh Default style.
-pub fn settings_actions(
-    shared: &Arc<Mutex<UiShared>>,
-    snap: &Snapshot,
-    bump: &Updater<u32>,
-) -> Element {
+pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
     let s_save = Arc::clone(shared);
     let s_reload = Arc::clone(shared);
     let bump_save = bump.clone();
@@ -327,10 +281,7 @@ pub fn settings_actions(
             .with_key("settings-save-msg")
             .into()
     } else {
-        text_block("")
-            .font_size(12.0)
-            .with_key("settings-status-empty")
-            .into()
+        text_block("").font_size(12.0).with_key("settings-status-empty").into()
     };
 
     hstack((
@@ -382,19 +333,11 @@ pub fn settings_sticky_chrome(
 ) -> Element {
     let title_el = text_block(title).font_size(28.0).bold();
     let head: Element = match description {
-        Some(d) if !d.is_empty() => vstack((
-            title_el,
-            text_block(d)
-                .font_size(13.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
-        ))
-        .spacing(4.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .into(),
-        _ => title_el
+        Some(d) if !d.is_empty() => vstack((title_el, text_block(d).font_size(13.0).foreground(ThemeRef::SecondaryText).wrap()))
+            .spacing(4.0)
             .vertical_alignment(VerticalAlignment::Center)
             .into(),
+        _ => title_el.vertical_alignment(VerticalAlignment::Center).into(),
     };
 
     let actions = settings_actions(shared, snap, bump)
@@ -433,16 +376,10 @@ pub fn settings_sticky_chrome(
 fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
     let open = snap.confirm != ConfirmAction::None;
     let (title, body, primary) = match snap.confirm {
-        ConfirmAction::Reload => (
-            "Reload from disk?",
-            "Unsaved edits will be lost. The file on disk will replace the current draft.",
-            "Reload",
-        ),
-        ConfirmAction::Discard => (
-            "Discard changes?",
-            "Unsaved edits will be lost. Running settings will be restored.",
-            "Discard",
-        ),
+        ConfirmAction::Reload => {
+            ("Reload from disk?", "Unsaved edits will be lost. The file on disk will replace the current draft.", "Reload")
+        }
+        ConfirmAction::Discard => ("Discard changes?", "Unsaved edits will be lost. Running settings will be restored.", "Discard"),
         ConfirmAction::None => ("", "", "OK"),
     };
 
@@ -474,18 +411,10 @@ fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater
 /// Standard settings page body (cards only).
 ///
 /// Title + Save live in [`settings_sticky_chrome`] (fixed above the scroll area).
-pub fn settings_page_shell(
-    shared: &Arc<Mutex<UiShared>>,
-    snap: &Snapshot,
-    bump: &Updater<u32>,
-    body: Element,
-) -> Element {
-    vstack((
-        body.horizontal_alignment(HorizontalAlignment::Stretch),
-        confirm_dialog(shared, snap, bump),
-    ))
-    .spacing(12.0)
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .with_key("settings-page-shell")
-    .into()
+pub fn settings_page_shell(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>, body: Element) -> Element {
+    vstack((body.horizontal_alignment(HorizontalAlignment::Stretch), confirm_dialog(shared, snap, bump)))
+        .spacing(12.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .with_key("settings-page-shell")
+        .into()
 }

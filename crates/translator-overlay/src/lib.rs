@@ -7,14 +7,16 @@
 mod draw;
 mod host;
 
-use std::sync::mpsc::{self, Sender};
-use std::thread::JoinHandle;
+use std::{
+    sync::mpsc::{self, Sender},
+    thread::JoinHandle,
+};
 
 use thiserror::Error;
 use tracing::{error, info};
 use translator_core::{OverlayConfig, TranslatedBlock};
 
-use host::{OverlayCommand, OverlayHost};
+use crate::host::{OverlayCommand, OverlayHost};
 
 #[derive(Debug, Error)]
 pub enum OverlayError {
@@ -54,10 +56,7 @@ impl OverlayController {
         match ready_rx.recv() {
             Ok(Ok(())) => {
                 info!("overlay host ready");
-                Ok(Self {
-                    tx,
-                    join: Some(join),
-                })
+                Ok(Self { tx, join: Some(join) })
             }
             Ok(Err(e)) => {
                 let _ = join.join();
@@ -65,9 +64,7 @@ impl OverlayController {
             }
             Err(_) => {
                 let _ = join.join();
-                Err(OverlayError::Spawn(
-                    "overlay thread exited before ready".into(),
-                ))
+                Err(OverlayError::Spawn("overlay thread exited before ready".into()))
             }
         }
     }
@@ -86,12 +83,7 @@ impl OverlayController {
     ///
     /// `content_width` / `content_height` are the capture-image dimensions the
     /// block bboxes are expressed in.
-    pub fn set_blocks(
-        &self,
-        blocks: Vec<TranslatedBlock>,
-        content_width: u32,
-        content_height: u32,
-    ) -> Result<(), OverlayError> {
+    pub fn set_blocks(&self, blocks: Vec<TranslatedBlock>, content_width: u32, content_height: u32) -> Result<(), OverlayError> {
         self.send(OverlayCommand::SetBlocks {
             blocks,
             content_width,
@@ -130,4 +122,4 @@ impl Drop for OverlayController {
 }
 
 // Re-export pure helpers for tests / callers.
-pub use draw::{Rgba, SurfaceRect, SurfaceSize, argb_channels, map_rect_to_surface};
+pub use crate::draw::{Rgba, SurfaceRect, SurfaceSize, argb_channels, map_rect_to_surface};

@@ -83,12 +83,7 @@ impl Conversation {
         let system = self.messages.iter().find(|m| m.role == "system").cloned();
 
         // Collect trailing non-system messages (user/assistant pairs).
-        let non_system: Vec<_> = self
-            .messages
-            .iter()
-            .filter(|m| m.role != "system")
-            .cloned()
-            .collect();
+        let non_system: Vec<_> = self.messages.iter().filter(|m| m.role != "system").cloned().collect();
 
         let keep_msgs = history_max_items.saturating_mul(2);
         let start = non_system.len().saturating_sub(keep_msgs);
@@ -99,11 +94,7 @@ impl Conversation {
             self.messages.push(sys);
         }
         self.messages.extend(kept);
-        self.turn_count = self
-            .messages
-            .iter()
-            .filter(|m| m.role == "assistant")
-            .count();
+        self.turn_count = self.messages.iter().filter(|m| m.role == "assistant").count();
     }
 }
 
@@ -136,13 +127,7 @@ pub fn user_payload_from_blocks(blocks: &[OcrBlock]) -> String {
         text: &'a str,
     }
     let payload = Payload {
-        blocks: blocks
-            .iter()
-            .map(|b| BlockIn {
-                id: b.id,
-                text: &b.text,
-            })
-            .collect(),
+        blocks: blocks.iter().map(|b| BlockIn { id: b.id, text: &b.text }).collect(),
     };
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
@@ -166,8 +151,9 @@ fn deserialize_block_id<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::{self, Visitor};
     use std::fmt;
+
+    use serde::de::{self, Visitor};
 
     struct IdVisitor;
     impl<'de> Visitor<'de> for IdVisitor {
@@ -186,9 +172,7 @@ where
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
-            v.trim()
-                .parse()
-                .map_err(|_| E::custom(format!("invalid block id: {v}")))
+            v.trim().parse().map_err(|_| E::custom(format!("invalid block id: {v}")))
         }
     }
 
@@ -196,10 +180,7 @@ where
 }
 
 /// Merge LLM JSON output with original OCR blocks.
-pub fn merge_translations(
-    source: &[OcrBlock],
-    response_json: &str,
-) -> Result<Vec<TranslatedBlock>, TranslateError> {
+pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<Vec<TranslatedBlock>, TranslateError> {
     let blocks = parse_translation_blocks(response_json)?;
 
     let mut out = Vec::with_capacity(source.len());
@@ -221,9 +202,7 @@ pub fn merge_translations(
     Ok(out)
 }
 
-fn parse_translation_blocks(
-    response_json: &str,
-) -> Result<Vec<TranslationBlockOut>, TranslateError> {
+fn parse_translation_blocks(response_json: &str) -> Result<Vec<TranslationBlockOut>, TranslateError> {
     let candidates = json_parse_candidates(response_json);
     let mut last_err = String::new();
 
@@ -235,9 +214,7 @@ fn parse_translation_blocks(
     }
 
     let snippet = truncate_for_error(response_json.trim(), 240);
-    Err(TranslateError::Parse(format!(
-        "{last_err}; content snippet: {snippet:?}"
-    )))
+    Err(TranslateError::Parse(format!("{last_err}; content snippet: {snippet:?}")))
 }
 
 fn try_parse_blocks(json: &str) -> Result<Vec<TranslationBlockOut>, String> {
@@ -438,12 +415,8 @@ impl TranslateClient {
         &self.api
     }
 
-    pub async fn chat_completions(
-        &self,
-        messages: &[ChatMessage],
-    ) -> Result<String, TranslateError> {
-        self.chat_completions_cancellable(messages, &CancellationToken::new())
-            .await
+    pub async fn chat_completions(&self, messages: &[ChatMessage]) -> Result<String, TranslateError> {
+        self.chat_completions_cancellable(messages, &CancellationToken::new()).await
     }
 
     pub async fn chat_completions_cancellable(
@@ -458,18 +431,10 @@ impl TranslateClient {
             return Err(TranslateError::Cancelled);
         }
 
-        let url = format!(
-            "{}/chat/completions",
-            self.api.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/chat/completions", self.api.base_url.trim_end_matches('/'));
         let body = self.api.request_body(messages);
 
-        let send = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.api.api_key)
-            .json(&body)
-            .send();
+        let send = self.http.post(&url).bearer_auth(&self.api.api_key).json(&body).send();
 
         let response = tokio::select! {
             biased;
@@ -552,8 +517,7 @@ fn extract_assistant_content(response_json: &str) -> Result<String, TranslateErr
         content: Option<String>,
     }
 
-    let root: Root =
-        serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
+    let root: Root = serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
     root.choices
         .into_iter()
         .next()
@@ -563,11 +527,7 @@ fn extract_assistant_content(response_json: &str) -> Result<String, TranslateErr
 
 /// Join translated block texts for UI / history.
 pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
-    blocks
-        .iter()
-        .map(|b| b.translation.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+    blocks.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>().join("\n")
 }
 
 /// High-level translate step with conversation reuse + compression.
@@ -577,14 +537,7 @@ pub async fn translate_blocks(
     translation_cfg: &TranslationConfig,
     blocks: &[OcrBlock],
 ) -> Result<Vec<TranslatedBlock>, TranslateError> {
-    translate_blocks_cancellable(
-        client,
-        conversation,
-        translation_cfg,
-        blocks,
-        &CancellationToken::new(),
-    )
-    .await
+    translate_blocks_cancellable(client, conversation, translation_cfg, blocks, &CancellationToken::new()).await
 }
 
 /// Same as [`translate_blocks`], but aborts when `cancel` is triggered.
@@ -603,28 +556,17 @@ pub async fn translate_blocks_cancellable(
     }
 
     // Compress *before* adding the new turn so the request stays within budget.
-    conversation.compress_if_needed(
-        translation_cfg.conversation_max_turns,
-        translation_cfg.history_max_items,
-    );
+    conversation.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
     conversation.ensure_system(default_system_prompt(translation_cfg));
 
     let user = user_payload_from_blocks(blocks);
     conversation.push_user(user);
 
-    let content = match client
-        .chat_completions_with_retry(&conversation.messages, cancel)
-        .await
-    {
+    let content = match client.chat_completions_with_retry(&conversation.messages, cancel).await {
         Ok(c) => c,
         Err(e) => {
             // Roll back the unsent user turn so Retry can re-push cleanly.
-            if conversation
-                .messages
-                .last()
-                .map(|m| m.role == "user")
-                .unwrap_or(false)
-            {
+            if conversation.messages.last().map(|m| m.role == "user").unwrap_or(false) {
                 conversation.messages.pop();
             }
             return Err(e);
@@ -637,12 +579,7 @@ pub async fn translate_blocks_cancellable(
             Ok(translated)
         }
         Err(e) => {
-            if conversation
-                .messages
-                .last()
-                .map(|m| m.role == "user")
-                .unwrap_or(false)
-            {
+            if conversation.messages.last().map(|m| m.role == "user").unwrap_or(false) {
                 conversation.messages.pop();
             }
             Err(e)
@@ -652,8 +589,9 @@ pub async fn translate_blocks_cancellable(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use translator_core::{ApiConfig, Rect};
+
+    use super::*;
 
     #[test]
     fn request_omits_unset_params() {

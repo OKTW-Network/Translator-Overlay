@@ -1,8 +1,10 @@
 //! Background pipeline: capture → OCR → stability gate → LLM translate → overlay.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use parking_lot::RwLock;
 use tokio::sync::oneshot;
@@ -10,14 +12,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppConfig, AppState, OcrBlock, PipelineStatus, TranslatedBlock};
-use translator_ocr::{
-    BlockPersistenceFilter, OcrEngine, OcrFingerprint, StabilityGate, StabilityOutcome,
-    prepare_engine,
-};
+use translator_ocr::{BlockPersistenceFilter, OcrEngine, OcrFingerprint, StabilityGate, StabilityOutcome, prepare_engine};
 use translator_overlay::OverlayController;
-use translator_translate::{
-    Conversation, TranslateClient, TranslateError, blocks_to_translated_text, merge_translations,
-};
+use translator_translate::{Conversation, TranslateClient, TranslateError, blocks_to_translated_text, merge_translations};
 
 /// Commands the UI sends to the pipeline worker.
 #[derive(Debug)]
@@ -432,14 +429,7 @@ fn pipeline_loop(state: SharedState, rx: CmdRx) {
             match job.rx.try_recv() {
                 Ok(job_result) => {
                     let finished = inflight.take().expect("inflight present");
-                    finish_translate(
-                        &state,
-                        &mut conversation,
-                        overlay.as_ref(),
-                        finished,
-                        job_result,
-                        &mut last_translated_fp,
-                    );
+                    finish_translate(&state, &mut conversation, overlay.as_ref(), finished, job_result, &mut last_translated_fp);
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {}
                 Err(oneshot::error::TryRecvError::Closed) => {
@@ -546,11 +536,7 @@ fn pipeline_loop(state: SharedState, rx: CmdRx) {
     }
 }
 
-fn apply_config(
-    state: &SharedState,
-    targets: ConfigApplyTargets<'_>,
-    cfg: AppConfig,
-) {
+fn apply_config(state: &SharedState, targets: ConfigApplyTargets<'_>, cfg: AppConfig) {
     // Model tier change requires a full engine reload (new ONNX weights).
     let engine_reload = *targets.ocr_tier != cfg.ocr.model_tier;
     *targets.show_preview = cfg.capture.show_preview;
@@ -608,10 +594,7 @@ fn apply_config(
     }
 }
 
-fn load_engine(
-    state: &SharedState,
-    cfg: &translator_core::OcrConfig,
-) -> Result<OcrEngine, translator_ocr::OcrError> {
+fn load_engine(state: &SharedState, cfg: &translator_core::OcrConfig) -> Result<OcrEngine, translator_ocr::OcrError> {
     state.write().status = PipelineStatus::LoadingModels;
     // May block while oar-ocr fetches missing registry files / loads ORT.
     prepare_engine(cfg)
@@ -635,12 +618,7 @@ fn update_preview(state: &SharedState, frame: &CapturedFrame, show_preview: bool
 /// Drop stale captions so they do not stick on the overlay, and forget
 /// fingerprints / persistence tracks so the same page can re-translate if it
 /// reappears.
-fn clear_stale_overlay(
-    ctx: &mut TranslateCtx<'_>,
-    gate: &mut StabilityGate,
-    persist: &mut BlockPersistenceFilter,
-    reason: &str,
-) {
+fn clear_stale_overlay(ctx: &mut TranslateCtx<'_>, gate: &mut StabilityGate, persist: &mut BlockPersistenceFilter, reason: &str) {
     let mut s = ctx.state.write();
     let had_content = !s.latest_translated_blocks.is_empty()
         || !s.latest_ocr_blocks.is_empty()
@@ -700,12 +678,7 @@ fn maybe_expire_raw_empty(
         return;
     }
     *raw_empty_since = None;
-    clear_stale_overlay(
-        ctx,
-        gate,
-        persist,
-        "raw OCR empty grace elapsed (no new frames)",
-    );
+    clear_stale_overlay(ctx, gate, persist, "raw OCR empty grace elapsed (no new frames)");
 }
 
 /// Rebuild displayed translations from current OCR.
@@ -724,11 +697,7 @@ fn maybe_expire_raw_empty(
 ///
 /// When `content_resized` is true, adopt OCR boxes fully so coordinates match
 /// the new frame.
-fn remap_translations_to_ocr(
-    translated: &[TranslatedBlock],
-    ocr: &[OcrBlock],
-    content_resized: bool,
-) -> Vec<TranslatedBlock> {
+fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock], content_resized: bool) -> Vec<TranslatedBlock> {
     let mut used = vec![false; translated.len()];
     let mut out = Vec::new();
 
@@ -742,11 +711,7 @@ fn remap_translations_to_ocr(
             if used[ti] {
                 return None;
             }
-            if normalize_match_text(&t.source) == key {
-                Some(ti)
-            } else {
-                None
-            }
+            if normalize_match_text(&t.source) == key { Some(ti) } else { None }
         });
 
         let spatial_hit = text_hit.or_else(|| best_spatial_translation(translated, &used, ob.bbox));
@@ -757,11 +722,7 @@ fn remap_translations_to_ocr(
         used[ti] = true;
         let tb = &translated[ti];
         // Sticky: never follow OCR geometry. Resize path is the only exception.
-        let bbox = if content_resized {
-            ob.bbox
-        } else {
-            tb.bbox
-        };
+        let bbox = if content_resized { ob.bbox } else { tb.bbox };
         out.push(TranslatedBlock {
             id: i as u32,
             // Keep the last translated source/translation; OCR string may thrash.
@@ -776,11 +737,7 @@ fn remap_translations_to_ocr(
 }
 
 /// Prefer a prior translation whose box still overlaps this OCR hit.
-fn best_spatial_translation(
-    translated: &[TranslatedBlock],
-    used: &[bool],
-    bbox: translator_core::Rect,
-) -> Option<usize> {
+fn best_spatial_translation(translated: &[TranslatedBlock], used: &[bool], bbox: translator_core::Rect) -> Option<usize> {
     let (cx, cy) = bbox.center();
     let mut best: Option<(usize, f32)> = None;
     for (ti, t) in translated.iter().enumerate() {
@@ -800,9 +757,7 @@ fn best_spatial_translation(
         if iou < 0.20 {
             continue;
         }
-        let score = iou * 3.0
-            + (1.0 - (dx / max_dx).clamp(0.0, 1.0))
-            + (1.0 - (dy / max_dy).clamp(0.0, 1.0));
+        let score = iou * 3.0 + (1.0 - (dx / max_dx).clamp(0.0, 1.0)) + (1.0 - (dy / max_dy).clamp(0.0, 1.0));
         if best.map(|(_, s)| score > s).unwrap_or(true) {
             best = Some((ti, score));
         }
@@ -824,9 +779,10 @@ fn translated_geometry_changed(previous: &[TranslatedBlock], remapped: &[Transla
     }
     for b in remapped {
         let key = normalize_match_text(&b.source);
-        let Some(a) = previous.iter().find(|p| {
-            normalize_match_text(&p.source) == key && p.translation == b.translation
-        }) else {
+        let Some(a) = previous
+            .iter()
+            .find(|p| normalize_match_text(&p.source) == key && p.translation == b.translation)
+        else {
             return true;
         };
         if a.bbox != b.bbox {
@@ -850,10 +806,7 @@ fn run_ocr_auto(
         }
         // OCR can take hundreds of ms; avoid clobbering "waiting / overlay" so the
         // UI does not look stuck on "Running OCR" while text is already stable.
-        if !matches!(
-            s.status,
-            PipelineStatus::WaitingForStable { .. } | PipelineStatus::OverlayActive
-        ) {
+        if !matches!(s.status, PipelineStatus::WaitingForStable { .. } | PipelineStatus::OverlayActive) {
             s.status = PipelineStatus::RunningOcr;
         }
     }
@@ -873,12 +826,7 @@ fn run_ocr_auto(
         s.last_ocr_ms = Some(ocr_ms);
         s.last_ocr_block_count = raw.len() as u32;
     }
-    info!(
-        ocr_ms,
-        blocks = raw.len(),
-        frame = frame.sequence,
-        "OCR frame complete"
-    );
+    info!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
 
     // Persistence keeps vanished text for a short grace (icons/jitter). That is
     // useful for the stability gate, but must NOT keep ghost text "alive" for the
@@ -904,8 +852,7 @@ fn run_ocr_auto(
     let content_since = *timers.raw_content_since.get_or_insert_with(Instant::now);
     let max_unstable_ms = ctx.state.read().config.ocr.max_unstable_ms;
     let content_elapsed = content_since.elapsed();
-    let force_unstable = max_unstable_ms > 0
-        && content_elapsed >= Duration::from_millis(max_unstable_ms);
+    let force_unstable = max_unstable_ms > 0 && content_elapsed >= Duration::from_millis(max_unstable_ms);
 
     // Prefer durable (linger-filtered) blocks. If OCR never settles long enough
     // for persistence, after max_unstable force the latest raw reading through
@@ -913,11 +860,7 @@ fn run_ocr_auto(
     let (blocks, forced_raw) = if !durable.is_empty() {
         (durable, false)
     } else if force_unstable {
-        info!(
-            elapsed_ms = content_elapsed.as_millis() as u64,
-            raw = raw.len(),
-            "OCR thrash — forcing raw blocks past persistence"
-        );
+        info!(elapsed_ms = content_elapsed.as_millis() as u64, raw = raw.len(), "OCR thrash — forcing raw blocks past persistence");
         (raw.clone(), true)
     } else {
         // Still waiting for linger / force. Keep OCR preview, do not wipe an
@@ -939,53 +882,20 @@ fn run_ocr_auto(
         StabilityOutcome::Changed => {
             // Keep previous captions while the new page settles. Immediate clear
             // made every OCR blip look like the overlay vanished.
-            apply_sticky_overlay(
-                ctx,
-                &mut filters,
-                timers.remap_miss_since,
-                &blocks,
-                &text,
-                frame.width,
-                frame.height,
-            );
+            apply_sticky_overlay(ctx, &mut filters, timers.remap_miss_since, &blocks, &text, frame.width, frame.height);
             let mut s = ctx.state.write();
             s.can_retry_translate = false;
             s.status = PipelineStatus::WaitingForStable { elapsed_ms: 0 };
         }
         StabilityOutcome::Waiting { elapsed_ms } => {
-            apply_sticky_overlay(
-                ctx,
-                &mut filters,
-                timers.remap_miss_since,
-                &blocks,
-                &text,
-                frame.width,
-                frame.height,
-            );
+            apply_sticky_overlay(ctx, &mut filters, timers.remap_miss_since, &blocks, &text, frame.width, frame.height);
             let mut s = ctx.state.write();
             s.status = PipelineStatus::WaitingForStable { elapsed_ms };
         }
-        StabilityOutcome::Ready {
-            elapsed_ms,
-            fingerprint,
-        } => {
-            info!(
-                blocks = blocks.len(),
-                elapsed_ms,
-                forced_raw,
-                ?fingerprint,
-                "OCR stable — translating"
-            );
+        StabilityOutcome::Ready { elapsed_ms, fingerprint } => {
+            info!(blocks = blocks.len(), elapsed_ms, forced_raw, ?fingerprint, "OCR stable — translating");
             // Stick old translations (frozen size) until HTTP returns.
-            apply_sticky_overlay(
-                ctx,
-                &mut filters,
-                timers.remap_miss_since,
-                &blocks,
-                &text,
-                frame.width,
-                frame.height,
-            );
+            apply_sticky_overlay(ctx, &mut filters, timers.remap_miss_since, &blocks, &text, frame.width, frame.height);
             // Fresh content session for force-raw after this emit settles.
             *timers.raw_content_since = Some(Instant::now());
             let page = PendingPage {
@@ -1003,15 +913,7 @@ fn run_ocr_auto(
             start_translate(ctx, page, false);
         }
         StabilityOutcome::AlreadyEmitted { .. } => {
-            apply_sticky_overlay(
-                ctx,
-                &mut filters,
-                timers.remap_miss_since,
-                &blocks,
-                &text,
-                frame.width,
-                frame.height,
-            );
+            apply_sticky_overlay(ctx, &mut filters, timers.remap_miss_since, &blocks, &text, frame.width, frame.height);
             if ctx.state.read().auto_running {
                 let mut s = ctx.state.write();
                 if !s.latest_translated_blocks.is_empty() {
@@ -1041,10 +943,8 @@ fn apply_sticky_overlay(
     let (had_translated, remapped, geometry_changed) = {
         let s = ctx.state.read();
         let had = !s.latest_translated_blocks.is_empty();
-        let remapped =
-            remap_translations_to_ocr(&s.latest_translated_blocks, blocks, content_resized);
-        let geometry_changed =
-            translated_geometry_changed(&s.latest_translated_blocks, &remapped);
+        let remapped = remap_translations_to_ocr(&s.latest_translated_blocks, blocks, content_resized);
+        let geometry_changed = translated_geometry_changed(&s.latest_translated_blocks, &remapped);
         (had, remapped, geometry_changed)
     };
 
@@ -1060,12 +960,7 @@ fn apply_sticky_overlay(
             let grace = raw_empty_grace(ctx.state);
             if since.elapsed() >= grace {
                 *remap_miss_since = None;
-                clear_stale_overlay(
-                    ctx,
-                    filters.gate,
-                    filters.persist,
-                    "sticky remap empty past grace (layout gone)",
-                );
+                clear_stale_overlay(ctx, filters.gate, filters.persist, "sticky remap empty past grace (layout gone)");
             }
         }
         // Keep last captions as-is during short thrash / partial miss.
@@ -1097,12 +992,7 @@ fn apply_sticky_overlay(
     s.latest_translated_text = translated_text;
 }
 
-fn run_ocr_manual(
-    ctx: &mut TranslateCtx<'_>,
-    engine: &mut OcrEngine,
-    gate: &mut StabilityGate,
-    frame: &CapturedFrame,
-) {
+fn run_ocr_manual(ctx: &mut TranslateCtx<'_>, engine: &mut OcrEngine, gate: &mut StabilityGate, frame: &CapturedFrame) {
     {
         let mut s = ctx.state.write();
         s.status = PipelineStatus::RunningOcr;
@@ -1128,11 +1018,7 @@ fn run_ocr_manual(
     let fp = OcrFingerprint::from_blocks(&blocks);
     let _ = gate.force_emit(fp);
 
-    info!(
-        ocr_ms,
-        blocks = blocks.len(),
-        "manual OCR complete — translating"
-    );
+    info!(ocr_ms, blocks = blocks.len(), "manual OCR complete — translating");
     let page = PendingPage {
         blocks: blocks.clone(),
         source_text: text.clone(),
@@ -1207,8 +1093,7 @@ fn start_translate(ctx: &mut TranslateCtx<'_>, page: PendingPage, force: bool) {
     // Prepare conversation on the pipeline thread (shared mutable state).
     ctx.conversation
         .compress_if_needed(tcfg.conversation_max_turns, tcfg.history_max_items);
-    ctx.conversation
-        .ensure_system(translator_translate::default_system_prompt(&tcfg));
+    ctx.conversation.ensure_system(translator_translate::default_system_prompt(&tcfg));
     let user = translator_translate::user_payload_from_blocks(&page.blocks);
     ctx.conversation.push_user(user);
     let messages_len_after_user = ctx.conversation.messages.len();
@@ -1228,9 +1113,7 @@ fn start_translate(ctx: &mut TranslateCtx<'_>, page: PendingPage, force: bool) {
     }
 
     ctx.rt.spawn(async move {
-        let result = client_clone
-            .chat_completions_with_retry(&messages, &cancel_job)
-            .await;
+        let result = client_clone.chat_completions_with_retry(&messages, &cancel_job).await;
         let _ = tx.send(TranslateJobResult {
             result,
             messages_len_after_user,
@@ -1259,11 +1142,7 @@ fn finish_translate(
     // Roll back user turn on failure so Retry can re-push cleanly.
     let rollback_user = |conversation: &mut Conversation| {
         if conversation.messages.len() == job_result.messages_len_after_user
-            && conversation
-                .messages
-                .last()
-                .map(|m| m.role == "user")
-                .unwrap_or(false)
+            && conversation.messages.last().map(|m| m.role == "user").unwrap_or(false)
         {
             conversation.messages.pop();
         }
@@ -1275,21 +1154,9 @@ fn finish_translate(
                 Ok(translated) => {
                     conversation.push_assistant(&content);
                     let translated_text = blocks_to_translated_text(&translated);
-                    info!(
-                        blocks = translated.len(),
-                        turns = conversation.turn_count,
-                        "translation complete"
-                    );
+                    info!(blocks = translated.len(), turns = conversation.turn_count, "translation complete");
                     *last_translated_fp = Some(job.fingerprint);
-                    apply_translated(
-                        state,
-                        overlay,
-                        job.source_text,
-                        translated,
-                        translated_text,
-                        job.content_width,
-                        job.content_height,
-                    );
+                    apply_translated(state, overlay, job.source_text, translated, translated_text, job.content_width, job.content_height);
                 }
                 Err(e) => {
                     error!(error = %e, "failed to merge translation");

@@ -1,9 +1,13 @@
 //! Map window chrome to client-area crop offsets for Graphics Capture frames.
 
-use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+use windows::Win32::{
+    Foundation::{HWND, POINT, RECT},
+    Graphics::{
+        Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
+        Gdi::ClientToScreen,
+    },
+    UI::WindowsAndMessaging::{GetClientRect, GetWindowRect},
+};
 
 use crate::{CaptureError, CapturedFrame};
 
@@ -37,8 +41,7 @@ impl ClientAreaMetrics {
             let window = outer_window_rect(hwnd)?;
 
             let mut client = RECT::default();
-            GetClientRect(hwnd, &mut client)
-                .map_err(|e| CaptureError::Window(format!("GetClientRect: {e}")))?;
+            GetClientRect(hwnd, &mut client).map_err(|e| CaptureError::Window(format!("GetClientRect: {e}")))?;
 
             let mut origin = POINT {
                 x: client.left,
@@ -146,8 +149,7 @@ unsafe fn outer_window_rect(hwnd: HWND) -> Result<RECT, CaptureError> {
         }
 
         let mut window = RECT::default();
-        GetWindowRect(hwnd, &mut window)
-            .map_err(|e| CaptureError::Window(format!("GetWindowRect: {e}")))?;
+        GetWindowRect(hwnd, &mut window).map_err(|e| CaptureError::Window(format!("GetWindowRect: {e}")))?;
         Ok(window)
     }
 }

@@ -13,12 +13,7 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
+        Self { x, y, width, height }
     }
 
     pub fn center(self) -> (f32, f32) {
@@ -76,11 +71,7 @@ impl Rect {
 
     /// Keep `self` when `candidate` is only OCR jitter; otherwise take `candidate`.
     pub fn stabilize_against(self, candidate: Self) -> Self {
-        if self.is_significant_relayout(candidate) {
-            candidate
-        } else {
-            self
-        }
+        if self.is_significant_relayout(candidate) { candidate } else { self }
     }
 }
 

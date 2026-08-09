@@ -96,8 +96,7 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
         members.sort_by(|&a, &b| {
             let ya = blocks[a].bbox.y as i32;
             let yb = blocks[b].bbox.y as i32;
-            ya.cmp(&yb)
-                .then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
+            ya.cmp(&yb).then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
         });
 
         let mut text = String::new();
@@ -109,11 +108,7 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
 
         for (k, &idx) in members.iter().enumerate() {
             let b = &blocks[idx];
-            text = if k == 0 {
-                b.text.clone()
-            } else {
-                join_text(&text, &b.text)
-            };
+            text = if k == 0 { b.text.clone() } else { join_text(&text, &b.text) };
             conf += b.confidence;
             x0 = x0.min(b.bbox.x);
             y0 = y0.min(b.bbox.y);
@@ -127,11 +122,7 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
         let line_h = median_f32(heights);
         let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
         // Sum source_lines so re-merge / multi-member groups keep the true count.
-        let source_lines = members
-            .iter()
-            .map(|&idx| blocks[idx].source_lines.max(1))
-            .sum::<u32>()
-            .max(1);
+        let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
 
         merged.push(OcrBlock {
             id: 0,
@@ -236,13 +227,7 @@ fn can_link_lines(upper: &OcrBlock, lower: &OcrBlock, med_h: f32, cfg: &LineMerg
 /// line wrap. Decision uses **bbox geometry and column gap statistics only**
 /// (no vocabulary / language-specific character lists). Thresholds come from
 /// [`LineMergeConfig`].
-fn is_spaced_list_pair(
-    blocks: &[OcrBlock],
-    i: usize,
-    j: usize,
-    med_h: f32,
-    cfg: &LineMergeConfig,
-) -> bool {
+fn is_spaced_list_pair(blocks: &[OcrBlock], i: usize, j: usize, med_h: f32, cfg: &LineMergeConfig) -> bool {
     let upper = &blocks[i];
     let lower = &blocks[j];
     let Some(gap) = vertical_gap_if_below(upper, lower) else {
@@ -313,10 +298,7 @@ fn is_spaced_list_pair(
     };
 
     // Gap sits on the column’s regular rhythm → list peers.
-    if pitch >= cfg.list_pitch_min_ratio * med_h
-        && gap >= cfg.list_pitch_match_lo * pitch
-        && gap <= cfg.list_pitch_match_hi * pitch
-    {
+    if pitch >= cfg.list_pitch_min_ratio * med_h && gap >= cfg.list_pitch_match_lo * pitch && gap <= cfg.list_pitch_match_hi * pitch {
         return true;
     }
     // Clearly tighter than item pitch → wrap leading, not list.
@@ -341,13 +323,7 @@ fn is_body_line(b: &OcrBlock, cfg: &LineMergeConfig) -> bool {
     b.bbox.width >= cfg.body_aspect_min * h || b.bbox.width >= cfg.body_min_width
 }
 
-fn pair_max_gap(
-    upper: &OcrBlock,
-    lower: &OcrBlock,
-    med_h: f32,
-    page_max: f32,
-    cfg: &LineMergeConfig,
-) -> f32 {
+fn pair_max_gap(upper: &OcrBlock, lower: &OcrBlock, med_h: f32, page_max: f32, cfg: &LineMergeConfig) -> f32 {
     if is_body_line(upper, cfg) || is_body_line(lower, cfg) {
         page_max
     } else {
@@ -361,11 +337,7 @@ fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool 
     ah.min(bh) / ah.max(bh) >= cfg.height_ratio_min
 }
 
-fn is_short_label_above_long_body(
-    upper: &OcrBlock,
-    lower: &OcrBlock,
-    cfg: &LineMergeConfig,
-) -> bool {
+fn is_short_label_above_long_body(upper: &OcrBlock, lower: &OcrBlock, cfg: &LineMergeConfig) -> bool {
     let uw = upper.bbox.width.max(1.0);
     let lw = lower.bbox.width.max(1.0);
     let uh = upper.bbox.height.max(1.0);
@@ -374,12 +346,7 @@ fn is_short_label_above_long_body(
 
 /// Short, narrow plate directly above a wider line (speaker / name tag layout).
 /// Uses bbox aspect and relative widths only — no character vocabulary.
-fn is_nameplate_above_body(
-    upper: &OcrBlock,
-    lower: &OcrBlock,
-    med_h: f32,
-    cfg: &LineMergeConfig,
-) -> bool {
+fn is_nameplate_above_body(upper: &OcrBlock, lower: &OcrBlock, med_h: f32, cfg: &LineMergeConfig) -> bool {
     let uh = upper.bbox.height.max(1.0);
     let uw = upper.bbox.width.max(1.0);
     let lw = lower.bbox.width.max(1.0);
@@ -426,13 +393,7 @@ fn horiz_compatible(a: &OcrBlock, b: &OcrBlock, med_h: f32, cfg: &LineMergeConfi
     false
 }
 
-fn has_intervening_line(
-    blocks: &[OcrBlock],
-    upper: usize,
-    lower: usize,
-    med_h: f32,
-    cfg: &LineMergeConfig,
-) -> bool {
+fn has_intervening_line(blocks: &[OcrBlock], upper: usize, lower: usize, med_h: f32, cfg: &LineMergeConfig) -> bool {
     let u = &blocks[upper];
     let l = &blocks[lower];
     let y0 = u.bbox.y + u.bbox.height;
@@ -531,10 +492,7 @@ mod tests {
 
     #[test]
     fn merges_stacked_english_lines() {
-        let blocks = vec![
-            line(0, "Hello", 10.0, 10.0, 100.0, 18.0),
-            line(1, "world", 12.0, 32.0, 90.0, 18.0),
-        ];
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Hello world");
@@ -549,20 +507,14 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let blocks = vec![
-            line(0, "Hello", 10.0, 10.0, 100.0, 18.0),
-            line(1, "world", 12.0, 32.0, 90.0, 18.0),
-        ];
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
         let merged = merge_line_blocks_with(blocks, &cfg);
         assert_eq!(merged.len(), 2);
     }
 
     #[test]
     fn merges_cjk_without_space() {
-        let blocks = vec![
-            line(0, "甲乙", 10.0, 10.0, 80.0, 20.0),
-            line(1, "丙丁", 10.0, 34.0, 80.0, 20.0),
-        ];
+        let blocks = vec![line(0, "甲乙", 10.0, 10.0, 80.0, 20.0), line(1, "丙丁", 10.0, 34.0, 80.0, 20.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "甲乙丙丁");
@@ -574,40 +526,24 @@ mod tests {
         let blocks = vec![
             line(0, "This is a long", 10.0, 10.0, 200.0, h),
             line(1, "paragraph that wraps", 10.0, 10.0 + h + 5.0, 200.0, h),
-            line(
-                2,
-                "across three lines.",
-                10.0,
-                10.0 + 2.0 * (h + 5.0),
-                180.0,
-                h,
-            ),
+            line(2, "across three lines.", 10.0, 10.0 + 2.0 * (h + 5.0), 180.0, h),
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
-        assert_eq!(
-            merged[0].text,
-            "This is a long paragraph that wraps across three lines."
-        );
+        assert_eq!(merged[0].text, "This is a long paragraph that wraps across three lines.");
         assert!((merged[0].bbox.height - h).abs() < 1.0);
     }
 
     #[test]
     fn does_not_merge_side_by_side() {
-        let blocks = vec![
-            line(0, "Left", 10.0, 10.0, 40.0, 18.0),
-            line(1, "Right", 200.0, 12.0, 40.0, 18.0),
-        ];
+        let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 200.0, 12.0, 40.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2);
     }
 
     #[test]
     fn does_not_merge_far_vertical_gap() {
-        let blocks = vec![
-            line(0, "A", 10.0, 10.0, 40.0, 18.0),
-            line(1, "B", 10.0, 120.0, 40.0, 18.0),
-        ];
+        let blocks = vec![line(0, "A", 10.0, 10.0, 40.0, 18.0), line(1, "B", 10.0, 120.0, 40.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2);
     }
@@ -674,12 +610,7 @@ mod tests {
             line(6, "きききき", x, 224.0 + 6.0 * pitch, 194.0, h),
         ];
         let merged = merge_line_blocks(blocks);
-        assert_eq!(
-            merged.len(),
-            7,
-            "list items must stay separate: {:?}",
-            merged.iter().map(|b| &b.text).collect::<Vec<_>>()
-        );
+        assert_eq!(merged.len(), 7, "list items must stay separate: {:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
     }
 
     #[test]
@@ -694,12 +625,7 @@ mod tests {
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
         assert!(texts.contains(&label), "{texts:?}");
         assert!(texts.contains(&"ON"), "{texts:?}");
-        assert!(
-            !texts
-                .iter()
-                .any(|t| t.contains("そON") || t.contains("そ ON")),
-            "{texts:?}"
-        );
+        assert!(!texts.iter().any(|t| t.contains("そON") || t.contains("そ ON")), "{texts:?}");
     }
 
     #[test]
@@ -707,28 +633,13 @@ mod tests {
         // Speaker nameplate + wrapped dialogue (tight vertical gap).
         let blocks = vec![
             line(0, "spkA", 331.0, 801.0, 104.0, 62.0),
-            line(
-                1,
-                "「あああああああああああああああああああああああああああ",
-                324.0,
-                876.0,
-                1220.0,
-                60.0,
-            ),
+            line(1, "「あああああああああああああああああああああああああああ", 324.0, 876.0, 1220.0, 60.0),
             line(2, "いい？」", 341.0, 937.0, 190.0, 58.0),
         ];
         let merged = merge_line_blocks(blocks);
-        assert_eq!(
-            merged.len(),
-            2,
-            "speaker + one wrapped dialogue block: {:?}",
-            merged.iter().map(|b| &b.text).collect::<Vec<_>>()
-        );
+        assert_eq!(merged.len(), 2, "speaker + one wrapped dialogue block: {:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
         assert_eq!(merged[0].text, "spkA");
-        assert_eq!(
-            merged[1].text,
-            "「あああああああああああああああああああああああああああいい？」"
-        );
+        assert_eq!(merged[1].text, "「あああああああああああああああああああああああああああいい？」");
         // One-line-tall overlay anchor (not the union of both dialogue lines).
         assert!(merged[1].bbox.height <= 62.0);
     }
@@ -764,62 +675,22 @@ mod tests {
         // Unique markers (W1A/W1B …) embedded in CJK filler for join/assert only.
         let blocks = vec![
             line(0, "spkB", 596.0, 86.0, 76.0, 44.0),
-            line(
-                1,
-                "「ええええええええええええええええええええ」",
-                586.0,
-                120.0,
-                688.0,
-                40.0,
-            ),
-            line(
-                2,
-                "あああああああああああああああああああW1A",
-                600.0,
-                306.0,
-                854.0,
-                40.0,
-            ),
+            line(1, "「ええええええええええええええええええええ」", 586.0, 120.0, 688.0, 40.0),
+            line(2, "あああああああああああああああああああW1A", 600.0, 306.0, 854.0, 40.0),
             line(3, "W1B。", 602.0, 338.0, 220.0, 40.0),
-            line(
-                4,
-                "いいいいいいいいいいいいいいいいいいいW2A",
-                602.0,
-                416.0,
-                848.0,
-                40.0,
-            ),
+            line(4, "いいいいいいいいいいいいいいいいいいいW2A", 602.0, 416.0, 848.0, 40.0),
             line(5, "W2B。", 604.0, 448.0, 468.0, 40.0),
-            line(
-                6,
-                "「おおおおおおおおおおおおおおおおW3A",
-                553.0,
-                927.0,
-                834.0,
-                45.0,
-            ),
+            line(6, "「おおおおおおおおおおおおおおおおW3A", 553.0, 927.0, 834.0, 45.0),
             line(7, "W3B", 601.0, 959.0, 190.0, 30.0),
         ];
         let merged = merge_line_blocks(blocks);
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
 
         assert!(texts.contains(&"spkB"), "{texts:?}");
-        assert!(
-            texts.iter().any(|t| t.contains("W1A") && t.contains("W1B")),
-            "{texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("W2A") && t.contains("W2B")),
-            "{texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("W3A") && t.contains("W3B")),
-            "{texts:?}"
-        );
-        let narr_count = texts
-            .iter()
-            .filter(|t| t.contains("W1A") || t.contains("W2A"))
-            .count();
+        assert!(texts.iter().any(|t| t.contains("W1A") && t.contains("W1B")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("W2A") && t.contains("W2B")), "{texts:?}");
+        assert!(texts.iter().any(|t| t.contains("W3A") && t.contains("W3B")), "{texts:?}");
+        let narr_count = texts.iter().filter(|t| t.contains("W1A") || t.contains("W2A")).count();
         assert_eq!(narr_count, 2, "{texts:?}");
     }
 
@@ -832,11 +703,7 @@ mod tests {
             line(3, "「き」", 580.0, 660.0, 110.0, 50.0),
         ];
         let merged = merge_line_blocks(blocks);
-        assert!(
-            merged.len() >= 3,
-            "{:?}",
-            merged.iter().map(|b| &b.text).collect::<Vec<_>>()
-        );
+        assert!(merged.len() >= 3, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
         assert!(merged.iter().any(|b| b.text == "spkB"));
     }
 
@@ -844,46 +711,18 @@ mod tests {
     fn backlog_wraps_and_keeps_entries() {
         // Dense backlog: wrapped paragraphs + nameplates + short lines.
         let blocks = vec![
-            line(
-                0,
-                "あああああああああああああああああああW1A",
-                600.0,
-                148.0,
-                852.0,
-                40.0,
-            ),
+            line(0, "あああああああああああああああああああW1A", 600.0, 148.0, 852.0, 40.0),
             line(1, "W1B。", 599.0, 179.0, 222.0, 44.0),
-            line(
-                2,
-                "いいいいいいいいいいいいいいいいいいいW2A",
-                602.0,
-                258.0,
-                848.0,
-                40.0,
-            ),
+            line(2, "いいいいいいいいいいいいいいいいいいいW2A", 602.0, 258.0, 848.0, 40.0),
             line(3, "W2B。", 602.0, 290.0, 470.0, 40.0),
             line(4, "？？？", 599.0, 363.0, 98.0, 46.0),
             line(5, "「かかか」", 580.0, 396.0, 192.0, 48.0),
             line(6, "spkB", 595.0, 473.0, 78.0, 48.0),
             line(7, "「き」", 577.0, 503.0, 114.0, 52.0),
-            line(
-                8,
-                "くくくくくくくくくくくくくくくくくW4。",
-                602.0,
-                586.0,
-                806.0,
-                40.0,
-            ),
+            line(8, "くくくくくくくくくくくくくくくくくW4。", 602.0, 586.0, 806.0, 40.0),
             line(9, "けけけけけけけけW5？", 600.0, 662.0, 456.0, 40.0),
             line(10, "spkA", 594.0, 734.0, 80.0, 52.0),
-            line(
-                11,
-                "「おおおおおおおおおおおおおおおおW3A",
-                580.0,
-                768.0,
-                806.0,
-                46.0,
-            ),
+            line(11, "「おおおおおおおおおおおおおおおおW3A", 580.0, 768.0, 806.0, 46.0),
             line(12, "W3B」", 600.0, 804.0, 198.0, 40.0),
             line(13, "spkB", 595.0, 877.0, 78.0, 48.0),
             line(14, "「ささささささ」", 582.0, 910.0, 328.0, 46.0),
@@ -891,31 +730,14 @@ mod tests {
         let merged = merge_line_blocks(blocks);
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
 
-        assert!(
-            texts.iter().any(|t| t.contains("W1A") && t.contains("W1B")),
-            "para1 wrap: {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("W2A") && t.contains("W2B")),
-            "para2 wrap: {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("W3A") && t.contains("W3B")),
-            "dialogue wrap: {texts:?}"
-        );
+        assert!(texts.iter().any(|t| t.contains("W1A") && t.contains("W1B")), "para1 wrap: {texts:?}");
+        assert!(texts.iter().any(|t| t.contains("W2A") && t.contains("W2B")), "para2 wrap: {texts:?}");
+        assert!(texts.iter().any(|t| t.contains("W3A") && t.contains("W3B")), "dialogue wrap: {texts:?}");
         assert!(texts.contains(&"spkA"), "{texts:?}");
         assert!(texts.contains(&"spkB"), "{texts:?}");
         // Speaker / short lines stay separate from their dialogue.
-        assert!(
-            !texts
-                .iter()
-                .any(|t| t.contains("spkA「") || t.starts_with("spkA「")),
-            "{texts:?}"
-        );
-        let narr = texts
-            .iter()
-            .filter(|t| t.contains("W1A") || t.contains("W2A"))
-            .count();
+        assert!(!texts.iter().any(|t| t.contains("spkA「") || t.starts_with("spkA「")), "{texts:?}");
+        let narr = texts.iter().filter(|t| t.contains("W1A") || t.contains("W2A")).count();
         assert_eq!(narr, 2, "two narrative paragraphs: {texts:?}");
     }
 
@@ -926,31 +748,15 @@ mod tests {
         let mut blocks = Vec::new();
         // Many list-like peers above (would trip naive peer-count rejection).
         for i in 0..5 {
-            blocks.push(line(
-                i,
-                &format!("row{i}"),
-                600.0,
-                20.0 + i as f32 * 80.0,
-                400.0,
-                h,
-            ));
+            blocks.push(line(i, &format!("row{i}"), 600.0, 20.0 + i as f32 * 80.0, 400.0, h));
         }
         // Long line + short continuation, gap = 14 (> 0.28*h).
-        blocks.push(line(
-            5,
-            "あああああああああああああああああああW1A",
-            600.0,
-            500.0,
-            850.0,
-            h,
-        ));
+        blocks.push(line(5, "あああああああああああああああああああW1A", 600.0, 500.0, 850.0, h));
         blocks.push(line(6, "W1B。", 600.0, 500.0 + h + 14.0, 220.0, h));
 
         let merged = merge_line_blocks(blocks);
         assert!(
-            merged
-                .iter()
-                .any(|b| b.text.contains("W1A") && b.text.contains("W1B")),
+            merged.iter().any(|b| b.text.contains("W1A") && b.text.contains("W1B")),
             "{:?}",
             merged.iter().map(|b| &b.text).collect::<Vec<_>>()
         );

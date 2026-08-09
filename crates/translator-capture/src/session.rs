@@ -1,19 +1,25 @@
 //! Free-threaded capture session that streams frames over a channel.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
+    time::Duration,
+};
 
 use tracing::{info, warn};
-use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
-use windows_capture::frame::Frame;
-use windows_capture::graphics_capture_api::InternalCaptureControl;
-use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+use windows_capture::{
+    capture::{Context, GraphicsCaptureApiHandler},
+    frame::Frame,
+    graphics_capture_api::InternalCaptureControl,
+    settings::{
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings,
+        SecondaryWindowSettings, Settings,
+    },
+    window::Window,
 };
-use windows_capture::window::Window;
 
 use crate::{CaptureError, CapturedFrame};
 
@@ -31,8 +37,8 @@ struct FrameHandler {
 }
 
 impl GraphicsCaptureApiHandler for FrameHandler {
-    type Flags = HandlerFlags;
     type Error = CaptureError;
+    type Flags = HandlerFlags;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -42,20 +48,14 @@ impl GraphicsCaptureApiHandler for FrameHandler {
         })
     }
 
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame<'_>,
-        _capture_control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
+    fn on_frame_arrived(&mut self, frame: &mut Frame<'_>, _capture_control: InternalCaptureControl) -> Result<(), Self::Error> {
         let width = frame.width();
         let height = frame.height();
         if width == 0 || height == 0 {
             return Ok(());
         }
 
-        let buffer = frame
-            .buffer()
-            .map_err(|e| CaptureError::Frame(e.to_string()))?;
+        let buffer = frame.buffer().map_err(|e| CaptureError::Frame(e.to_string()))?;
         let pixels = buffer.as_nopadding_buffer(&mut self.scratch);
         let rgba = pixels.to_vec();
 
@@ -117,12 +117,7 @@ impl CaptureSession {
     }
 
     /// Start capturing a window by HWND.
-    pub fn start_window(
-        &mut self,
-        hwnd: isize,
-        title: impl Into<String>,
-        min_interval_ms: u64,
-    ) -> Result<(), CaptureError> {
+    pub fn start_window(&mut self, hwnd: isize, title: impl Into<String>, min_interval_ms: u64) -> Result<(), CaptureError> {
         if self.is_running() {
             return Err(CaptureError::AlreadyRunning);
         }
@@ -149,8 +144,7 @@ impl CaptureSession {
             },
         );
 
-        let control = FrameHandler::start_free_threaded(settings)
-            .map_err(|e| CaptureError::Capture(e.to_string()))?;
+        let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
 
         self.control = Some(control);
         self.rx = Some(rx);

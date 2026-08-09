@@ -143,11 +143,7 @@ mod tests {
     fn medium_shares_dict_with_small() {
         let small = ModelPaths::from_dir(Path::new("models"), ModelTier::Small);
         let medium = ModelPaths::from_dir(Path::new("models"), ModelTier::Medium);
-        assert_eq!(
-            small.dict.file_name(),
-            medium.dict.file_name(),
-            "small/medium share ppocrv6_dict.txt"
-        );
+        assert_eq!(small.dict.file_name(), medium.dict.file_name(), "small/medium share ppocrv6_dict.txt");
     }
 
     #[test]

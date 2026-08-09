@@ -5,8 +5,10 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::AppConfig;
-use crate::types::{OcrBlock, TranslatedBlock};
+use crate::{
+    config::AppConfig,
+    types::{OcrBlock, TranslatedBlock},
+};
 
 /// High-level pipeline status shown in the control UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -54,13 +56,7 @@ impl PipelineStatus {
     }
 
     pub fn is_busy(&self) -> bool {
-        matches!(
-            self,
-            Self::RunningOcr
-                | Self::Translating
-                | Self::LoadingModels
-                | Self::WaitingForStable { .. }
-        )
+        matches!(self, Self::RunningOcr | Self::Translating | Self::LoadingModels | Self::WaitingForStable { .. })
     }
 }
 
@@ -143,12 +139,7 @@ impl AppState {
         self.status = PipelineStatus::Error { message };
     }
 
-    pub fn push_history(
-        &mut self,
-        source_text: String,
-        translated_text: String,
-        blocks: Vec<TranslatedBlock>,
-    ) {
+    pub fn push_history(&mut self, source_text: String, translated_text: String, blocks: Vec<TranslatedBlock>) {
         let id = self.next_history_id;
         self.next_history_id += 1;
         self.history.push_front(HistoryEntry {

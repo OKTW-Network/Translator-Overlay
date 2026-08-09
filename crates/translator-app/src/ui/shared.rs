@@ -52,10 +52,7 @@ pub struct UiShared {
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
-    let (state, cmd_tx) = crate::APP_HANDLES
-        .get()
-        .expect("APP_HANDLES must be set before UI starts")
-        .clone();
+    let (state, cmd_tx) = crate::APP_HANDLES.get().expect("APP_HANDLES must be set before UI starts").clone();
     let draft = state.read().config.clone();
     let optional = optional_api_state(&draft);
     let (text_argb_str, bg_argb_str) = overlay_color_strings(&draft);
@@ -103,28 +100,17 @@ fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
         temp_enabled: cfg.api.temperature.is_some(),
         top_p_enabled: cfg.api.top_p.is_some(),
         max_tokens_enabled: cfg.api.max_tokens.is_some(),
-        reasoning_enabled: cfg
-            .api
-            .reasoning_effort
-            .as_ref()
-            .is_some_and(|s| !s.trim().is_empty()),
+        reasoning_enabled: cfg.api.reasoning_effort.as_ref().is_some_and(|s| !s.trim().is_empty()),
         // Always keep a valid number (toggle off = omit on save, not empty field).
         temp_val: f64::from(cfg.api.temperature.unwrap_or(0.7)),
         top_p_val: f64::from(cfg.api.top_p.unwrap_or(0.9)),
         max_tokens_val: f64::from(cfg.api.max_tokens.unwrap_or(2048)),
-        reasoning_str: cfg
-            .api
-            .reasoning_effort
-            .clone()
-            .unwrap_or_else(|| "medium".into()),
+        reasoning_str: cfg.api.reasoning_effort.clone().unwrap_or_else(|| "medium".into()),
     }
 }
 
 pub fn overlay_color_strings(cfg: &AppConfig) -> (String, String) {
-    (
-        format!("{:08X}", cfg.overlay.text_color_argb),
-        format!("{:08X}", cfg.overlay.background_color_argb),
-    )
+    (format!("{:08X}", cfg.overlay.text_color_argb), format!("{:08X}", cfg.overlay.background_color_argb))
 }
 
 pub fn reload_draft_from_state(ui: &mut UiShared) {
@@ -176,11 +162,7 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
     };
     cfg.api.reasoning_effort = if ui.reasoning_enabled {
         let r = ui.reasoning_str.trim();
-        if r.is_empty() {
-            None
-        } else {
-            Some(r.to_string())
-        }
+        if r.is_empty() { None } else { Some(r.to_string()) }
     } else {
         None
     };
@@ -252,9 +234,7 @@ pub fn form_validation_error(ui: &UiShared) -> Option<String> {
 pub fn do_reload_from_disk(ui: &mut UiShared) {
     match AppConfig::load_or_create_default() {
         Ok(cfg) => {
-            let _ = ui
-                .cmd_tx
-                .send(crate::pipeline::PipelineCommand::ApplyConfig(Box::new(cfg)));
+            let _ = ui.cmd_tx.send(crate::pipeline::PipelineCommand::ApplyConfig(Box::new(cfg)));
             if let Ok(c) = AppConfig::load_or_create_default() {
                 ui.draft = c;
                 apply_optional_from_config(ui);
@@ -267,9 +247,7 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
             }
         }
         Err(e) => {
-            ui.state
-                .write()
-                .set_error(format!("Could not reload config: {e}"));
+            ui.state.write().set_error(format!("Could not reload config: {e}"));
             ui.confirm = ConfirmAction::None;
         }
     }
@@ -282,12 +260,7 @@ pub fn do_discard(ui: &mut UiShared) {
 }
 
 pub fn argb_u32_to_parts(v: u32) -> (u8, u8, u8, u8) {
-    (
-        ((v >> 24) & 0xFF) as u8,
-        ((v >> 16) & 0xFF) as u8,
-        ((v >> 8) & 0xFF) as u8,
-        (v & 0xFF) as u8,
-    )
+    (((v >> 24) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
 }
 
 pub fn parts_to_argb_u32(a: u8, r: u8, g: u8, b: u8) -> u32 {
@@ -412,18 +385,9 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
 
     Snapshot {
         status: s.status.label(),
-        target: s
-            .target_window_title
-            .clone()
-            .unwrap_or_else(|| "(none)".into()),
+        target: s.target_window_title.clone().unwrap_or_else(|| "(none)".into()),
         preview: if s.config.capture.show_preview {
-            format!(
-                "{}x{} seq={} {}",
-                s.preview.width,
-                s.preview.height,
-                s.preview.sequence,
-                s.preview.path.as_deref().unwrap_or("")
-            )
+            format!("{}x{} seq={} {}", s.preview.width, s.preview.height, s.preview.sequence, s.preview.path.as_deref().unwrap_or(""))
         } else {
             "(preview off)".into()
         },
@@ -492,12 +456,7 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         target_lang_draft: ui.draft.translation.target_lang.clone(),
         history_max: ui.draft.translation.history_max_items as f64,
         conv_max: ui.draft.translation.conversation_max_turns as f64,
-        system_prompt: ui
-            .draft
-            .translation
-            .system_prompt
-            .clone()
-            .unwrap_or_default(),
+        system_prompt: ui.draft.translation.system_prompt.clone().unwrap_or_default(),
         model_tier_idx: tier_idx,
         confidence: ui.draft.ocr.confidence_threshold as f64,
         stable_ms: ui.draft.ocr.stable_duration_ms as f64,

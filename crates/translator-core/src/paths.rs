@@ -24,9 +24,7 @@ pub fn exe_dir() -> Result<PathBuf, PathError> {
     }
 
     let exe = std::env::current_exe()?;
-    exe.parent()
-        .map(Path::to_path_buf)
-        .ok_or(PathError::NoParent)
+    exe.parent().map(Path::to_path_buf).ok_or(PathError::NoParent)
 }
 
 /// Path to `config.toml` next to the executable.

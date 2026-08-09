@@ -1,25 +1,27 @@
 //! Application configuration loaded from `config.toml` next to the executable.
 
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
-use serde::de::{self, Deserializer, Visitor};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    de::{self, Deserializer, Visitor},
+};
 use thiserror::Error;
 
-use crate::paths::{config_path, resolve_under_exe};
-use crate::types::ModelTier;
+use crate::{
+    paths::{config_path, resolve_under_exe},
+    types::ModelTier,
+};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("path error: {0}")]
     Path(#[from] crate::paths::PathError),
     #[error("IO error for {path}: {source}")]
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    Io { path: PathBuf, source: std::io::Error },
     #[error("failed to parse config TOML: {0}")]
     Parse(#[from] toml::de::Error),
     #[error("failed to serialize config TOML: {0}")]
@@ -146,10 +148,7 @@ pub struct ChatCompletionRequestBody<'a> {
 }
 
 impl ApiConfig {
-    pub fn request_body<'a>(
-        &'a self,
-        messages: &'a [ChatMessage],
-    ) -> ChatCompletionRequestBody<'a> {
+    pub fn request_body<'a>(&'a self, messages: &'a [ChatMessage]) -> ChatCompletionRequestBody<'a> {
         ChatCompletionRequestBody {
             model: &self.model,
             messages,
@@ -409,16 +408,10 @@ impl Default for CaptureConfig {
 #[serde(default)]
 pub struct OverlayConfig {
     /// Text colour including alpha (`0xAARRGGBB` in config.toml).
-    #[serde(
-        serialize_with = "serialize_argb_hex",
-        deserialize_with = "deserialize_argb_hex"
-    )]
+    #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
     pub text_color_argb: u32,
     /// Box fill colour including alpha (`0xAARRGGBB` in config.toml).
-    #[serde(
-        serialize_with = "serialize_argb_hex",
-        deserialize_with = "deserialize_argb_hex"
-    )]
+    #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
     pub background_color_argb: u32,
 }
 
@@ -475,8 +468,7 @@ where
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
-            parse_argb_hex(v)
-                .ok_or_else(|| E::custom(format!("invalid ARGB color: {v:?}")))
+            parse_argb_hex(v).ok_or_else(|| E::custom(format!("invalid ARGB color: {v:?}")))
         }
 
         fn visit_string<E: de::Error>(self, v: String) -> Result<u32, E> {
@@ -497,14 +489,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use super::*;
+
     fn temp_config_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("translator_overlay_{name}_{nanos}.toml"))
     }
 
@@ -512,14 +502,8 @@ mod tests {
     fn default_roundtrip_toml() {
         let config = AppConfig::default();
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(
-            text.contains("text_color_argb = \"0xFFFFFFFF\""),
-            "expected hex string in TOML, got:\n{text}"
-        );
-        assert!(
-            text.contains("background_color_argb = \"0xC8000000\""),
-            "expected hex string in TOML, got:\n{text}"
-        );
+        assert!(text.contains("text_color_argb = \"0xFFFFFFFF\""), "expected hex string in TOML, got:\n{text}");
+        assert!(text.contains("background_color_argb = \"0xC8000000\""), "expected hex string in TOML, got:\n{text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(config, parsed);
     }

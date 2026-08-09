@@ -11,15 +11,21 @@ mod shared;
 
 use std::time::Duration;
 
-use windows_reactor::*;
+use windows_reactor::{
+    Backdrop, Color, DispatcherTimer, Element, ElementExt, GridLength, HorizontalAlignment, NavViewItem, NavigationView,
+    NavigationViewPaneDisplayMode, RenderCx, RequestedTheme, Symbol, Thickness, VerticalAlignment, grid, scroll_viewer, set_backdrop,
+    set_requested_theme,
+};
 
-use chrome::settings_sticky_chrome;
-use dashboard::dashboard_page;
-use page_api::api_page;
-use page_ocr::ocr_page;
-use page_overlay::overlay_page;
-use page_translation::translation_page;
-use shared::{make_shared, take_snapshot};
+use crate::ui::{
+    chrome::settings_sticky_chrome,
+    dashboard::dashboard_page,
+    page_api::api_page,
+    page_ocr::ocr_page,
+    page_overlay::overlay_page,
+    page_translation::translation_page,
+    shared::{make_shared, take_snapshot},
+};
 
 /// Entry render function for the control window.
 pub fn app(cx: &mut RenderCx) -> Element {
@@ -52,9 +58,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
     // positionally reuse StackPanel children across tab switches.
     let page = match page_tag.as_str() {
         "api" => api_page(&shared_arc, &snap, &bump_tick).with_key("page-api"),
-        "translation" => {
-            translation_page(&shared_arc, &snap, &bump_tick).with_key("page-translation")
-        }
+        "translation" => translation_page(&shared_arc, &snap, &bump_tick).with_key("page-translation"),
         "ocr" => ocr_page(&shared_arc, &snap, &bump_tick).with_key("page-ocr"),
         "overlay" => overlay_page(&shared_arc, &snap, &bump_tick).with_key("page-overlay"),
         _ => dashboard_page(&shared_arc, &snap, &bump_tick).with_key("page-dashboard"),
@@ -62,10 +66,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
 
     // Settings pages: pin title + Save above the scroll (color = unsaved).
     let settings_meta: Option<(&str, Option<&str>)> = match page_tag.as_str() {
-        "api" => Some((
-            "API",
-            Some("Connect to an OpenAI-compatible translation API."),
-        )),
+        "api" => Some(("API", Some("Connect to an OpenAI-compatible translation API."))),
         "translation" => Some(("Translation", Some("Languages and translation context."))),
         "ocr" => Some(("OCR", Some("Text recognition and capture timing."))),
         "overlay" => Some(("Overlay", Some("How the translation overlay looks."))),
@@ -109,17 +110,11 @@ pub fn app(cx: &mut RenderCx) -> Element {
     };
 
     let nav_items = [
-        NavViewItem::new("Dashboard")
-            .tag("dashboard")
-            .icon(Symbol::Home),
+        NavViewItem::new("Dashboard").tag("dashboard").icon(Symbol::Home),
         NavViewItem::new("API").tag("api").icon(Symbol::Link),
-        NavViewItem::new("Translation")
-            .tag("translation")
-            .icon(Symbol::Globe),
+        NavViewItem::new("Translation").tag("translation").icon(Symbol::Globe),
         NavViewItem::new("OCR").tag("ocr").icon(Symbol::Camera),
-        NavViewItem::new("Overlay")
-            .tag("overlay")
-            .icon(Symbol::ViewAll),
+        NavViewItem::new("Overlay").tag("overlay").icon(Symbol::ViewAll),
     ];
 
     let current_tag = page_tag.clone();

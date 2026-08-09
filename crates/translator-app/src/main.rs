@@ -23,8 +23,7 @@ fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
 
@@ -46,9 +45,7 @@ fn main() {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
     let _pipeline = spawn_pipeline(Arc::clone(&state), cmd_rx);
 
-    APP_HANDLES
-        .set((Arc::clone(&state), cmd_tx.clone()))
-        .expect("APP_HANDLES set once");
+    APP_HANDLES.set((Arc::clone(&state), cmd_tx.clone())).expect("APP_HANDLES set once");
 
     // Framework-dependent: initialize Windows App Runtime via Bootstrap.dll.
     // Requires Windows App Runtime on the machine (install prompt if missing).
@@ -74,9 +71,7 @@ fn main() {
 
 /// Per-monitor DPI v2 so Win32 client rects match capture / overlay pixels.
 fn enable_per_monitor_dpi_v2() {
-    use windows::Win32::UI::HiDpi::{
-        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
-    };
+    use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
     // SAFETY: process-wide, no windows yet; failure is non-fatal (already set).
     let ok = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     if ok.is_err() {

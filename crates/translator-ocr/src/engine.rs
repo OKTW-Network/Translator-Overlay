@@ -1,17 +1,17 @@
 //! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + DirectML on Windows).
 
-use std::path::Path;
-use std::sync::Once;
+use std::{path::Path, sync::Once};
 
 use image::{DynamicImage, RgbaImage};
-use oar_ocr::core::config::{OrtExecutionProvider, OrtSessionConfig};
-use oar_ocr::prelude::OAROCRBuilder;
-use oar_ocr::processors::BoundingBox;
+use oar_ocr::{
+    core::config::{OrtExecutionProvider, OrtSessionConfig},
+    prelude::OAROCRBuilder,
+    processors::BoundingBox,
+};
 use tracing::info;
 use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, Rect};
 
-use crate::models::ModelPaths;
-use crate::OcrError;
+use crate::{OcrError, models::ModelPaths};
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
 pub struct OcrEngine {
@@ -38,9 +38,7 @@ impl std::fmt::Debug for OcrEngine {
 impl OcrEngine {
     /// Point oar-ocr auto-download / cache at our app `models_dir` (portable).
     pub fn configure_model_home(models_dir: &Path) -> Result<(), OcrError> {
-        std::fs::create_dir_all(models_dir).map_err(|e| {
-            OcrError::Other(format!("create models dir {}: {e}", models_dir.display()))
-        })?;
+        std::fs::create_dir_all(models_dir).map_err(|e| OcrError::Other(format!("create models dir {}: {e}", models_dir.display())))?;
         // oar-ocr resolves bare registry names under $OAR_HOME.
         // SAFETY: process-wide env used only for OCR model cache root.
         unsafe {
@@ -101,10 +99,7 @@ impl OcrEngine {
         // oar-ocr predict takes RGB8 ImageBuffer.
         let rgb = image.to_rgb8();
 
-        let results = self
-            .inner
-            .predict(vec![rgb])
-            .map_err(|e| OcrError::Engine(e.to_string()))?;
+        let results = self.inner.predict(vec![rgb]).map_err(|e| OcrError::Engine(e.to_string()))?;
 
         let Some(page) = results.into_iter().next() else {
             return Ok(Vec::new());
@@ -150,46 +145,30 @@ impl OcrEngine {
     }
 
     /// Run OCR on RGBA pixel buffer (e.g. capture frame).
-    pub fn recognize_rgba(
-        &mut self,
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-    ) -> Result<Vec<OcrBlock>, OcrError> {
+    pub fn recognize_rgba(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<Vec<OcrBlock>, OcrError> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| OcrError::Image("frame dimensions overflow".into()))?;
         if rgba.len() < expected {
-            return Err(OcrError::Image(format!(
-                "buffer too small: {} < {}",
-                rgba.len(),
-                expected
-            )));
+            return Err(OcrError::Image(format!("buffer too small: {} < {}", rgba.len(), expected)));
         }
 
-        let rgba_img = RgbaImage::from_raw(width, height, rgba[..expected].to_vec())
-            .ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))?;
+        let rgba_img =
+            RgbaImage::from_raw(width, height, rgba[..expected].to_vec()).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))?;
         let dyn_img = DynamicImage::ImageRgba8(rgba_img);
         self.recognize(&dyn_img)
     }
 
     /// Join block texts for UI display.
     pub fn blocks_to_text(blocks: &[OcrBlock]) -> String {
-        blocks
-            .iter()
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 }
 
 fn default_execution_providers() -> Vec<OrtExecutionProvider> {
     // Prefer DirectML GPU on Windows; always fall back to CPU.
-    vec![
-        OrtExecutionProvider::DirectML { device_id: Some(0) },
-        OrtExecutionProvider::CPU,
-    ]
+    vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]
 }
 
 fn model_source_args(paths: &ModelPaths) -> (String, String, String) {
@@ -249,8 +228,9 @@ fn log_gpu_once() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use oar_ocr::processors::BoundingBox;
+
+    use super::*;
 
     #[test]
     fn aabb_maps_to_rect() {

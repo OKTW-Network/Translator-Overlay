@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex};
 use translator_capture::list_windows;
 use windows_reactor::*;
 
-use super::chrome::{app_status_strip, page_header, status_infobar};
-use super::shared::{Snapshot, UiShared};
-use crate::pipeline::PipelineCommand;
+use crate::{
+    pipeline::PipelineCommand,
+    ui::{
+        chrome::{app_status_strip, page_header, status_infobar},
+        shared::{Snapshot, UiShared},
+    },
+};
 
-pub fn dashboard_page(
-    shared: &Arc<Mutex<UiShared>>,
-    snap: &Snapshot,
-    bump: &Updater<u32>,
-) -> Element {
+pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
     let s1 = Arc::clone(shared);
     let s2 = Arc::clone(shared);
     let s3 = Arc::clone(shared);
@@ -52,17 +52,10 @@ pub fn dashboard_page(
     } else {
         snap.window_labels.clone()
     };
-    let window_selected = if snap.window_count == 0 {
-        -1
-    } else {
-        snap.selected_window_idx
-    };
+    let window_selected = if snap.window_count == 0 { -1 } else { snap.selected_window_idx };
 
     vstack((
-        page_header(
-            "Dashboard",
-            Some("Choose a window, capture text, and watch translations."),
-        ),
+        page_header("Dashboard", Some("Choose a window, capture text, and watch translations.")),
         app_status_strip(snap),
         status_infobar(snap),
         {
@@ -106,25 +99,15 @@ pub fn dashboard_page(
                     bump1.call(|n| n.wrapping_add(1));
                 });
 
-            hstack((
-                text_block("Window")
-                    .semibold()
-                    .vertical_alignment(VerticalAlignment::Center),
-                picker,
-                refresh,
-            ))
-            .spacing(8.0)
-            .with_key("window-picker-row")
+            hstack((text_block("Window").semibold().vertical_alignment(VerticalAlignment::Center), picker, refresh))
+                .spacing(8.0)
+                .with_key("window-picker-row")
         },
         hstack((
             button("Foreground")
                 .tooltip("Capture the window that currently has focus")
                 .on_click(move || {
-                    let _ = s2
-                        .lock()
-                        .unwrap()
-                        .cmd_tx
-                        .send(PipelineCommand::StartForeground);
+                    let _ = s2.lock().unwrap().cmd_tx.send(PipelineCommand::StartForeground);
                     bump2.call(|n| n.wrapping_add(1));
                 }),
             button(start_label).tooltip(start_tip).on_click(move || {
@@ -141,52 +124,36 @@ pub fn dashboard_page(
                 }
                 bump3.call(|n| n.wrapping_add(1));
             }),
-            button("Once")
-                .tooltip("Capture once and translate immediately")
-                .on_click(move || {
-                    let _ = s4
-                        .lock()
-                        .unwrap()
-                        .cmd_tx
-                        .send(PipelineCommand::ManualCapture);
-                    bump4.call(|n| n.wrapping_add(1));
-                }),
+            button("Once").tooltip("Capture once and translate immediately").on_click(move || {
+                let _ = s4.lock().unwrap().cmd_tx.send(PipelineCommand::ManualCapture);
+                bump4.call(|n| n.wrapping_add(1));
+            }),
         ))
         .spacing(8.0),
         hstack((
-            button(if show_preview {
-                "Preview on"
-            } else {
-                "Preview off"
-            })
-            .tooltip(if show_preview {
-                "Turn off preview image"
-            } else {
-                "Turn on preview image"
-            })
-            .on_click(move || {
-                let ui = s5.lock().unwrap();
-                let next = !ui.state.read().config.capture.show_preview;
-                let _ = ui.cmd_tx.send(PipelineCommand::SetShowPreview(next));
-                drop(ui);
-                bump5.call(|n| n.wrapping_add(1));
-            }),
+            button(if show_preview { "Preview on" } else { "Preview off" })
+                .tooltip(if show_preview {
+                    "Turn off preview image"
+                } else {
+                    "Turn on preview image"
+                })
+                .on_click(move || {
+                    let ui = s5.lock().unwrap();
+                    let next = !ui.state.read().config.capture.show_preview;
+                    let _ = ui.cmd_tx.send(PipelineCommand::SetShowPreview(next));
+                    drop(ui);
+                    bump5.call(|n| n.wrapping_add(1));
+                }),
             button("Clear chat")
                 .tooltip("Clear the translation model conversation history")
                 .on_click(move || {
-                    let _ = s7
-                        .lock()
-                        .unwrap()
-                        .cmd_tx
-                        .send(PipelineCommand::ResetConversation);
+                    let _ = s7.lock().unwrap().cmd_tx.send(PipelineCommand::ResetConversation);
                     bump7.call(|n| n.wrapping_add(1));
                 }),
-            button("Stop all")
-                .tooltip("Stop capture immediately")
-                .on_click(move || {
-                    let _ = s8.lock().unwrap().cmd_tx.send(PipelineCommand::StopCapture);
-                    bump8.call(|n| n.wrapping_add(1));
-                }),
+            button("Stop all").tooltip("Stop capture immediately").on_click(move || {
+                let _ = s8.lock().unwrap().cmd_tx.send(PipelineCommand::StopCapture);
+                bump8.call(|n| n.wrapping_add(1));
+            }),
         ))
         .spacing(8.0),
         hstack((
@@ -198,55 +165,33 @@ pub fn dashboard_page(
                 })
                 .enabled(in_flight)
                 .on_click(move || {
-                    let _ = s11
-                        .lock()
-                        .unwrap()
-                        .cmd_tx
-                        .send(PipelineCommand::CancelTranslate);
+                    let _ = s11.lock().unwrap().cmd_tx.send(PipelineCommand::CancelTranslate);
                     bump11.call(|n| n.wrapping_add(1));
                 }),
             button("Retry")
                 .tooltip("Retry the last failed translation")
                 .enabled(can_retry && !in_flight)
                 .on_click(move || {
-                    let _ = s12
-                        .lock()
-                        .unwrap()
-                        .cmd_tx
-                        .send(PipelineCommand::RetryTranslate);
+                    let _ = s12.lock().unwrap().cmd_tx.send(PipelineCommand::RetryTranslate);
                     bump12.call(|n| n.wrapping_add(1));
                 }),
         ))
         .spacing(8.0),
         text_block(format!(
             "Model {}  ·  {} → {}  ·  OCR {}  ·  frames {}  ·  history {}",
-            snap.model,
-            snap.source_lang,
-            snap.target_lang,
-            snap.tier,
-            snap.frame_count,
-            snap.history_len
+            snap.model, snap.source_lang, snap.target_lang, snap.tier, snap.frame_count, snap.history_len
         ))
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText),
         text_block({
-            let ocr_time = snap
-                .last_ocr_ms
-                .map(|ms| format!("{ms} ms"))
-                .unwrap_or_else(|| "—".into());
-            format!(
-                "Last OCR: {ocr_time}  ·  {} blocks  ·  Preview: {}",
-                snap.last_ocr_block_count, snap.preview
-            )
+            let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
+            format!("Last OCR: {ocr_time}  ·  {} blocks  ·  Preview: {}", snap.last_ocr_block_count, snap.preview)
         })
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText),
         vstack((
             text_block({
-                let ocr_time = snap
-                    .last_ocr_ms
-                    .map(|ms| format!("{ms} ms"))
-                    .unwrap_or_else(|| "—".into());
+                let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
                 format!("OCR ({ocr_time})")
             })
             .semibold(),

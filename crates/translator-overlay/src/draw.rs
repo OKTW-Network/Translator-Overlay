@@ -64,13 +64,7 @@ impl Rgba {
 }
 
 /// Map a capture-space OCR rect onto the overlay surface.
-pub fn map_rect_to_surface(
-    bbox: Rect,
-    content_w: u32,
-    content_h: u32,
-    surface_w: i32,
-    surface_h: i32,
-) -> Option<SurfaceRect> {
+pub fn map_rect_to_surface(bbox: Rect, content_w: u32, content_h: u32, surface_w: i32, surface_h: i32) -> Option<SurfaceRect> {
     if content_w == 0 || content_h == 0 || surface_w <= 0 || surface_h <= 0 {
         return None;
     }
@@ -196,8 +190,9 @@ pub fn font_height_for(rect: SurfaceRect) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use translator_core::Rect;
+
+    use super::*;
 
     #[test]
     fn map_rect_scales() {
@@ -218,17 +213,7 @@ mod tests {
     #[test]
     fn fill_rect_sets_alpha() {
         let mut buf = vec![0u8; 4 * 4 * 4];
-        fill_rect(
-            &mut buf,
-            SurfaceSize::new(4, 4),
-            SurfaceRect {
-                x: 1,
-                y: 1,
-                w: 2,
-                h: 2,
-            },
-            Rgba::new(255, 0, 0, 128),
-        );
+        fill_rect(&mut buf, SurfaceSize::new(4, 4), SurfaceRect { x: 1, y: 1, w: 2, h: 2 }, Rgba::new(255, 0, 0, 128));
         // pixel (1,1): row stride 16, 4 bytes per pixel
         let i = 16 + 4;
         assert_eq!(buf[i + 3], 128);
@@ -245,62 +230,30 @@ mod tests {
     #[test]
     fn font_height_tracks_line_box() {
         // Small UI label (~12px OCR) must not jump to a fixed 16px floor.
-        let small = SurfaceRect {
-            x: 0,
-            y: 0,
-            w: 80,
-            h: 12,
-        };
+        let small = SurfaceRect { x: 0, y: 0, w: 80, h: 12 };
         let small_px = font_height_for(small);
-        assert!(
-            (8..=10).contains(&small_px),
-            "small line box → ~8px font, got {small_px}"
-        );
+        assert!((8..=10).contains(&small_px), "small line box → ~8px font, got {small_px}");
 
         // Typical body line — under box height so glyphs don't overflow ink.
-        let body = SurfaceRect {
-            x: 0,
-            y: 0,
-            w: 200,
-            h: 28,
-        };
+        let body = SurfaceRect { x: 0, y: 0, w: 200, h: 28 };
         let body_px = font_height_for(body);
-        assert!(
-            (16..=22).contains(&body_px),
-            "body line → ~19px font, got {body_px}"
-        );
+        assert!((16..=22).contains(&body_px), "body line → ~19px font, got {body_px}");
         assert!(body_px < 28, "font must stay under line box height");
 
         // Large title scales with box (not crushed to 20–28).
-        let title = SurfaceRect {
-            x: 0,
-            y: 0,
-            w: 300,
-            h: 64,
-        };
+        let title = SurfaceRect { x: 0, y: 0, w: 300, h: 64 };
         let title_px = font_height_for(title);
-        assert!(
-            (40..=50).contains(&title_px),
-            "title line → ~43px font, got {title_px}"
-        );
+        assert!((40..=50).contains(&title_px), "title line → ~43px font, got {title_px}");
     }
 
     #[test]
     fn font_height_vertical_uses_width() {
         // Tall thin column (vertical CJK / stacked UI): char size ≈ width, not height.
-        let vertical = SurfaceRect {
-            x: 0,
-            y: 0,
-            w: 24,
-            h: 220,
-        };
+        let vertical = SurfaceRect { x: 0, y: 0, w: 24, h: 220 };
         assert_eq!(char_box_px(vertical), 24);
         let px = font_height_for(vertical);
         // Vertical fill is more conservative (~0.58 of width).
-        assert!(
-            (12..=16).contains(&px),
-            "vertical text should size from width (~14px), got {px}"
-        );
+        assert!((12..=16).contains(&px), "vertical text should size from width (~14px), got {px}");
         // Must not treat full column height as font size.
         assert!(px < 40, "vertical text must not use full height, got {px}");
     }

@@ -6,14 +6,10 @@ mod merge;
 mod models;
 mod stability;
 
-pub use engine::*;
-pub use filter::*;
-pub use merge::*;
-pub use models::*;
-pub use stability::*;
-
 use thiserror::Error;
 use translator_core::OcrConfig;
+
+pub use crate::{engine::*, filter::*, merge::*, models::*, stability::*};
 
 #[derive(Debug, Error)]
 pub enum OcrError {
