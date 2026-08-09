@@ -79,6 +79,13 @@ fn default_source_lines() -> u32 {
     1
 }
 
+/// Collapse runs of whitespace so OCR thrash / layout compare stays stable.
+///
+/// Used by stability fingerprints, block persistence, and sticky remap matching.
+pub fn normalize_ocr_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// One OCR text region.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrBlock {

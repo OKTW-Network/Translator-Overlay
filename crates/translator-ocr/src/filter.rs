@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use translator_core::{OcrBlock, OcrConfig, Rect};
+use translator_core::{OcrBlock, OcrConfig, Rect, normalize_ocr_text};
 
 /// True when `text` is a single ASCII letter or digit (e.g. `"0"`, `"V"`, `"c"`).
 ///
@@ -124,14 +124,14 @@ impl BlockPersistenceFilter {
         let max_unstable = self.max_unstable;
 
         for block in blocks {
-            let text_key = normalize_text(&block.text);
+            let text_key = normalize_ocr_text(&block.text);
             if text_key.is_empty() {
                 continue;
             }
 
             if let Some(idx) = self.find_track(&block, &text_key) {
                 let track = &mut self.tracks[idx];
-                if normalize_text(&track.text) == text_key {
+                if normalize_ocr_text(&track.text) == text_key {
                     // Same region + same text → accumulate persistence.
                     track.last_seen = now;
                     track.pending_text = None;
@@ -167,7 +167,7 @@ impl BlockPersistenceFilter {
                     track.last_block.bbox = bbox;
                     track.last_block.confidence = block.confidence;
 
-                    let pending_key = track.pending_text.as_deref().map(normalize_text).unwrap_or_default();
+                    let pending_key = track.pending_text.as_deref().map(normalize_ocr_text).unwrap_or_default();
                     if pending_key == text_key {
                         let since = track.pending_since.unwrap_or(now);
                         if now.saturating_duration_since(since) >= persist {
@@ -188,7 +188,7 @@ impl BlockPersistenceFilter {
                             .thrash_since
                             .map(|t| now.saturating_duration_since(t) >= max_unstable)
                             .unwrap_or(false);
-                    if thrash_force && normalize_text(&track.text) != text_key {
+                    if thrash_force && normalize_ocr_text(&track.text) != text_key {
                         track.text = block.text.clone();
                         track.last_block.text = block.text.clone();
                         track.pending_text = None;
@@ -273,7 +273,7 @@ impl BlockPersistenceFilter {
                 continue;
             }
 
-            let same_text = normalize_text(&track.text) == text_key;
+            let same_text = normalize_ocr_text(&track.text) == text_key;
             let iou = rect_iou(block.bbox, track.bbox);
             // Different text at nearly the same center still matches (OCR thrash
             // often changes box size enough to tank IoU below 0.2).
@@ -294,10 +294,6 @@ impl BlockPersistenceFilter {
         }
         best.map(|(i, _)| i)
     }
-}
-
-fn normalize_text(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn rect_iou(a: Rect, b: Rect) -> f32 {

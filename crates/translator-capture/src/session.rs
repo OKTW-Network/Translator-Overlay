@@ -163,17 +163,29 @@ impl CaptureSession {
         self.start_window(hwnd, title, min_interval_ms)
     }
 
-    /// Stop capture if running.
+    /// Stop the capture stream but keep `target_hwnd` / `target_title` (overlay tracking).
+    pub fn stop_stream_keep_target(&mut self) {
+        self.stop_stream_inner(true);
+    }
+
+    /// Stop capture if running and clear the target window.
     pub fn stop(&mut self) {
+        self.stop_stream_inner(false);
+    }
+
+    fn stop_stream_inner(&mut self, keep_target: bool) {
         if let Some(control) = self.control.take()
             && let Err(e) = control.stop()
         {
             warn!(error = %e, "error stopping capture");
         }
         self.rx = None;
-        self.target_hwnd = None;
         self.running = false;
-        info!("capture stopped");
+        if !keep_target {
+            self.target_hwnd = None;
+            self.target_title = None;
+        }
+        info!(keep_target, "capture stopped");
     }
 
     /// Drain the channel and return the latest frame, if any.

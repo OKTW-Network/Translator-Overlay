@@ -96,6 +96,25 @@ impl Conversation {
         self.messages.extend(kept);
         self.turn_count = self.messages.iter().filter(|m| m.role == "assistant").count();
     }
+
+    /// Compress + system prompt + user payload for a new translate request.
+    ///
+    /// Returns a clone of `messages` for the HTTP call and the length after the
+    /// user turn (for [`Self::rollback_user_turn`] on failure / cancel).
+    pub fn begin_translate_request(&mut self, translation_cfg: &TranslationConfig, blocks: &[OcrBlock]) -> (Vec<ChatMessage>, usize) {
+        self.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
+        self.ensure_system(default_system_prompt(translation_cfg));
+        self.push_user(user_payload_from_blocks(blocks));
+        let messages_len_after_user = self.messages.len();
+        (self.messages.clone(), messages_len_after_user)
+    }
+
+    /// Pop the pending user turn when its length still matches a failed request.
+    pub fn rollback_user_turn(&mut self, messages_len_after_user: usize) {
+        if self.messages.len() == messages_len_after_user && self.messages.last().map(|m| m.role == "user").unwrap_or(false) {
+            self.messages.pop();
+        }
+    }
 }
 
 /// Build default system prompt for structured block translation.
@@ -555,20 +574,12 @@ pub async fn translate_blocks_cancellable(
         return Ok(Vec::new());
     }
 
-    // Compress *before* adding the new turn so the request stays within budget.
-    conversation.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
-    conversation.ensure_system(default_system_prompt(translation_cfg));
+    let (messages, messages_len_after_user) = conversation.begin_translate_request(translation_cfg, blocks);
 
-    let user = user_payload_from_blocks(blocks);
-    conversation.push_user(user);
-
-    let content = match client.chat_completions_with_retry(&conversation.messages, cancel).await {
+    let content = match client.chat_completions_with_retry(&messages, cancel).await {
         Ok(c) => c,
         Err(e) => {
-            // Roll back the unsent user turn so Retry can re-push cleanly.
-            if conversation.messages.last().map(|m| m.role == "user").unwrap_or(false) {
-                conversation.messages.pop();
-            }
+            conversation.rollback_user_turn(messages_len_after_user);
             return Err(e);
         }
     };
@@ -579,9 +590,7 @@ pub async fn translate_blocks_cancellable(
             Ok(translated)
         }
         Err(e) => {
-            if conversation.messages.last().map(|m| m.role == "user").unwrap_or(false) {
-                conversation.messages.pop();
-            }
+            conversation.rollback_user_turn(messages_len_after_user);
             Err(e)
         }
     }

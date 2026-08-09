@@ -139,6 +139,22 @@ impl AppState {
         self.status = PipelineStatus::Error { message };
     }
 
+    /// Restore a non-error operational status from current flags / overlay content.
+    ///
+    /// Shared by config save, conversation reset, and similar UI-side recoveries
+    /// so status rules stay in one place.
+    pub fn restore_operational_status(&mut self) {
+        if self.translate_in_flight {
+            self.status = PipelineStatus::Translating;
+        } else if self.auto_running {
+            self.status = PipelineStatus::Capturing;
+        } else if !self.latest_translated_blocks.is_empty() {
+            self.status = PipelineStatus::OverlayActive;
+        } else {
+            self.status = PipelineStatus::Idle;
+        }
+    }
+
     pub fn push_history(&mut self, source_text: String, translated_text: String, blocks: Vec<TranslatedBlock>) {
         let id = self.next_history_id;
         self.next_history_id += 1;

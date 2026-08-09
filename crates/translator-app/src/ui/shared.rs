@@ -134,12 +134,9 @@ pub fn apply_optional_from_config(ui: &mut UiShared) {
     ui.reasoning_enabled = o.reasoning_enabled;
 }
 
+/// Parse ARGB hex for settings fields (delegates to core).
 pub fn parse_hex_u32(s: &str) -> Option<u32> {
-    let t = s.trim().trim_start_matches("0x").trim_start_matches("0X");
-    if t.is_empty() {
-        return None;
-    }
-    u32::from_str_radix(t, 16).ok()
+    translator_core::parse_argb_hex(s)
 }
 
 /// Merge optional / overlay free-form fields into a config snapshot (pure).
@@ -260,7 +257,8 @@ pub fn do_discard(ui: &mut UiShared) {
 }
 
 pub fn argb_u32_to_parts(v: u32) -> (u8, u8, u8, u8) {
-    (((v >> 24) & 0xFF) as u8, ((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
+    let (a, r, g, b) = translator_overlay::argb_channels(v);
+    (a, r, g, b)
 }
 
 pub fn parts_to_argb_u32(a: u8, r: u8, g: u8, b: u8) -> u32 {

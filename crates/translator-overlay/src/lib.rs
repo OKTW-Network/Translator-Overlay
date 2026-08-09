@@ -6,6 +6,7 @@
 
 mod draw;
 mod host;
+mod layout;
 
 use std::{
     sync::mpsc::{self, Sender},

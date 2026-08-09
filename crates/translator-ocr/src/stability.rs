@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use translator_core::{OcrBlock, OcrConfig};
+use translator_core::{OcrBlock, OcrConfig, normalize_ocr_text};
 
 /// Fingerprint of an OCR page for stability detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -20,7 +20,7 @@ impl OcrFingerprint {
     pub fn from_blocks(blocks: &[OcrBlock]) -> Self {
         let mut lines: Vec<String> = blocks
             .iter()
-            .map(|b| normalize_fp_text(&b.text))
+            .map(|b| normalize_ocr_text(&b.text))
             .filter(|t| !t.is_empty())
             .collect();
         // Order-independent so merge/detector reordering does not reset the gate.
@@ -35,13 +35,9 @@ impl OcrFingerprint {
 
     pub fn from_text(text: &str) -> Self {
         let mut hasher = DefaultHasher::new();
-        normalize_fp_text(text).hash(&mut hasher);
+        normalize_ocr_text(text).hash(&mut hasher);
         Self(hasher.finish())
     }
-}
-
-fn normalize_fp_text(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Waits until OCR content is stable enough to translate.
