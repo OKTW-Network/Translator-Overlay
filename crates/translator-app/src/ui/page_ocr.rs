@@ -8,60 +8,19 @@ use windows_reactor::*;
 use crate::ui::{
     chrome::{section_header, settings_card, settings_expander, settings_page_shell},
     controls::{SliderNumberParams, card_slider_number, card_toggle, row_slider_number, row_toggle},
-    shared::{Snapshot, UiShared, mark_dirty},
+    shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
 
 /// Bind a line-merge f32 field from a slider/number value.
-fn set_merge_f32(shared: &Arc<Mutex<UiShared>>, set: impl FnOnce(&mut translator_core::LineMergeConfig, f32), v: f64) {
-    if let Ok(mut ui) = shared.lock() {
+fn set_merge_f32(cx: &UiCx, set: impl FnOnce(&mut translator_core::LineMergeConfig, f32), v: f64) {
+    cx.with_mut(|ui| {
         set(&mut ui.draft.ocr.line_merge, v as f32);
-        mark_dirty(&mut ui);
-    }
+        mark_dirty(ui);
+    });
 }
 
 pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
-    let s_tier = Arc::clone(shared);
-    let s_conf = Arc::clone(shared);
-    let s_stable = Arc::clone(shared);
-    let s_max_unstable = Arc::clone(shared);
-    let s_interval = Arc::clone(shared);
-    let s_filter = Arc::clone(shared);
-    let s_persist = Arc::clone(shared);
-    let s_miss = Arc::clone(shared);
-    let s_merge = Arc::clone(shared);
-    let s_m1 = Arc::clone(shared);
-    let s_m2 = Arc::clone(shared);
-    let s_m3 = Arc::clone(shared);
-    let s_m4 = Arc::clone(shared);
-    let s_m5 = Arc::clone(shared);
-    let s_m6 = Arc::clone(shared);
-    let s_m7 = Arc::clone(shared);
-    let s_m8 = Arc::clone(shared);
-    let s_m9 = Arc::clone(shared);
-    let s_m10 = Arc::clone(shared);
-    let s_m11 = Arc::clone(shared);
-    let s_m12 = Arc::clone(shared);
-    let bump_a = bump.clone();
-    let bump_b = bump.clone();
-    let bump_c = bump.clone();
-    let bump_c2 = bump.clone();
-    let bump_d = bump.clone();
-    let bump_e = bump.clone();
-    let bump_f = bump.clone();
-    let bump_g = bump.clone();
-    let bump_i = bump.clone();
-    let bump_j = bump.clone();
-    let bump_k = bump.clone();
-    let bump_l = bump.clone();
-    let bump_m = bump.clone();
-    let bump_n = bump.clone();
-    let bump_o = bump.clone();
-    let bump_p = bump.clone();
-    let bump_q = bump.clone();
-    let bump_r = bump.clone();
-    let bump_s = bump.clone();
-    let bump_t = bump.clone();
-    let bump_u = bump.clone();
+    let cx = UiCx::new(shared, bump);
 
     let model = vstack((
         section_header("Model"),
@@ -70,19 +29,18 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         // Cap width near content size and space items with hstack only.
         settings_card("ocr-tier", "Model size", Some("Smaller is faster; larger is more accurate. Reloads on Save."), {
             let idx = snap.model_tier_idx;
+            let cx_tier = cx.clone();
             let pick = move |choice: i32| {
-                let s = Arc::clone(&s_tier);
-                let bump = bump_a.clone();
+                let cx = cx_tier.clone();
                 move || {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.draft.ocr.model_tier = match choice {
                             0 => ModelTier::Tiny,
                             2 => ModelTier::Medium,
                             _ => ModelTier::Small,
                         };
-                        mark_dirty(&mut ui);
-                    }
-                    bump.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             };
             // Width ≈ glyph + label; leave template padding for circle↔text.
@@ -116,34 +74,27 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 1.0,
                 step: 0.01,
             },
-            move |v| {
-                if let Ok(mut ui) = s_conf.lock() {
-                    ui.draft.ocr.confidence_threshold = v.clamp(0.0, 1.0) as f32;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.confidence_threshold = v.clamp(0.0, 1.0) as f32;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_b.call(|n| n.wrapping_add(1));
             },
         ),
-        card_toggle(
-            "ocr-filter-single",
-            "Ignore single characters",
-            Some("Drop lone single-character detections."),
-            snap.filter_single,
+        card_toggle("ocr-filter-single", "Ignore single characters", Some("Drop lone single-character detections."), snap.filter_single, {
+            let cx = cx.clone();
             move |v| {
-                if let Ok(mut ui) = s_filter.lock() {
+                cx.with_mut(|ui| {
                     ui.draft.ocr.filter_single_char = v;
-                    mark_dirty(&mut ui);
-                }
-                bump_e.call(|n| n.wrapping_add(1));
-            },
-        ),
+                    mark_dirty(ui);
+                });
+            }
+        }),
     ))
     .spacing(4.0);
-
-    let s_exp_merge = Arc::clone(shared);
-    let s_exp_adv = Arc::clone(shared);
-    let bump_exp = bump.clone();
-    let bump_exp2 = bump.clone();
 
     // Flat rows inside Expander (SettingsExpander.Items style) — no nested cards.
     let line_merge_body = vstack((
@@ -152,12 +103,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             "Merge lines into paragraphs",
             Some("Join stacked OCR lines that look like one paragraph (geometry only)."),
             snap.merge_enabled,
-            move |v| {
-                if let Ok(mut ui) = s_merge.lock() {
-                    ui.draft.ocr.line_merge.enabled = v;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.line_merge.enabled = v;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_i.call(|n| n.wrapping_add(1));
             },
         ),
         row_slider_number(
@@ -170,9 +123,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 1.20,
                 step: 0.01,
             },
-            move |v| {
-                set_merge_f32(&s_m1, |m, x| m.max_gap_ratio = x.max(0.05), v);
-                bump_j.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.max_gap_ratio = x.max(0.05), v)
             },
         ),
         row_slider_number(
@@ -185,9 +138,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 0.5,
                 step: 0.01,
             },
-            move |v| {
-                set_merge_f32(&s_m2, |m, x| m.min_gap_ratio = x, v);
-                bump_k.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.min_gap_ratio = x, v)
             },
         ),
         row_slider_number(
@@ -200,9 +153,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 2.5,
                 step: 0.05,
             },
-            move |v| {
-                set_merge_f32(&s_m3, |m, x| m.gap_slack = x.max(0.5), v);
-                bump_l.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.gap_slack = x.max(0.5), v)
             },
         ),
         row_slider_number(
@@ -215,9 +168,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 0.80,
                 step: 0.01,
             },
-            move |v| {
-                set_merge_f32(&s_m4, |m, x| m.list_gap_min_ratio = x.max(0.0), v);
-                bump_m.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.list_gap_min_ratio = x.max(0.0), v)
             },
         ),
         row_slider_number(
@@ -230,9 +183,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 3.0,
                 step: 0.05,
             },
-            move |v| {
-                set_merge_f32(&s_m5, |m, x| m.wrap_width_ratio = x.max(1.0), v);
-                bump_n.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.wrap_width_ratio = x.max(1.0), v)
             },
         ),
         row_slider_number(
@@ -245,9 +198,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 1.0,
                 step: 0.01,
             },
-            move |v| {
-                set_merge_f32(&s_m6, |m, x| m.height_ratio_min = x.clamp(0.1, 1.0), v);
-                bump_o.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.height_ratio_min = x.clamp(0.1, 1.0), v)
             },
         ),
     ))
@@ -265,9 +218,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 1.5,
                 step: 0.05,
             },
-            move |v| {
-                set_merge_f32(&s_m7, |m, x| m.left_align_ratio = x.max(0.05), v);
-                bump_p.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.left_align_ratio = x.max(0.05), v)
             },
         ),
         row_slider_number(
@@ -280,9 +233,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 0.80,
                 step: 0.01,
             },
-            move |v| {
-                set_merge_f32(&s_m8, |m, x| m.short_max_gap_ratio = x.max(0.0), v);
-                bump_q.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.short_max_gap_ratio = x.max(0.0), v)
             },
         ),
         row_slider_number(
@@ -295,12 +248,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 12.0,
                 step: 1.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_m9.lock() {
-                    ui.draft.ocr.line_merge.list_min_peers = v.max(2.0) as u32;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.line_merge.list_min_peers = v.max(2.0) as u32;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_r.call(|n| n.wrapping_add(1));
             },
         ),
         row_slider_number(
@@ -313,9 +268,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 4.0,
                 step: 0.1,
             },
-            move |v| {
-                set_merge_f32(&s_m10, |m, x| m.compact_aspect_max = x.max(0.5), v);
-                bump_s.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.compact_aspect_max = x.max(0.5), v)
             },
         ),
         row_toggle(
@@ -323,12 +278,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             "Keep nameplates separate",
             Some("Short narrow box above a wider line stays its own block."),
             snap.merge_keep_nameplate,
-            move |v| {
-                if let Ok(mut ui) = s_m11.lock() {
-                    ui.draft.ocr.line_merge.keep_speaker_separate = v;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.line_merge.keep_speaker_separate = v;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_t.call(|n| n.wrapping_add(1));
             },
         ),
         row_slider_number(
@@ -341,9 +298,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 3.0,
                 step: 0.05,
             },
-            move |v| {
-                set_merge_f32(&s_m12, |m, x| m.nameplate_body_width_ratio = x.max(1.0), v);
-                bump_u.call(|n| n.wrapping_add(1));
+            {
+                let cx = cx.clone();
+                move |v| set_merge_f32(&cx, |m, x| m.nameplate_body_width_ratio = x.max(1.0), v)
             },
         ),
     ))
@@ -354,11 +311,13 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         "ocr-exp-line-merge",
         "Line merge",
         snap.expand_line_merge,
-        move |open| {
-            if let Ok(mut ui) = s_exp_merge.lock() {
-                ui.expand_line_merge = open;
+        {
+            let cx = cx.clone();
+            move |open| {
+                cx.with_mut(|ui| {
+                    ui.expand_line_merge = open;
+                });
             }
-            bump_exp.call(|n| n.wrapping_add(1));
         },
         line_merge_body,
     );
@@ -367,11 +326,13 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         "ocr-exp-line-merge-adv",
         "Line merge · advanced",
         snap.expand_line_merge_adv,
-        move |open| {
-            if let Ok(mut ui) = s_exp_adv.lock() {
-                ui.expand_line_merge_adv = open;
+        {
+            let cx = cx.clone();
+            move |open| {
+                cx.with_mut(|ui| {
+                    ui.expand_line_merge_adv = open;
+                });
             }
-            bump_exp2.call(|n| n.wrapping_add(1));
         },
         line_merge_adv_body,
     );
@@ -388,12 +349,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 10_000.0,
                 step: 50.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_stable.lock() {
-                    ui.draft.ocr.stable_duration_ms = v.max(0.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.stable_duration_ms = v.max(0.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_c.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -406,12 +369,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 15_000.0,
                 step: 100.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_max_unstable.lock() {
-                    ui.draft.ocr.max_unstable_ms = v.max(0.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.max_unstable_ms = v.max(0.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_c2.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -424,12 +389,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 5_000.0,
                 step: 50.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_interval.lock() {
-                    ui.draft.capture.min_interval_ms = v.max(50.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.capture.min_interval_ms = v.max(50.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_d.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -442,12 +409,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 5_000.0,
                 step: 50.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_persist.lock() {
-                    ui.draft.ocr.block_persist_ms = v.max(0.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.block_persist_ms = v.max(0.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_f.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -460,12 +429,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 10_000.0,
                 step: 50.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_miss.lock() {
-                    ui.draft.ocr.block_max_miss_ms = v.max(0.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.block_max_miss_ms = v.max(0.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_g.call(|n| n.wrapping_add(1));
             },
         ),
     ))

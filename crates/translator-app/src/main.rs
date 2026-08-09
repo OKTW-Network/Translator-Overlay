@@ -43,9 +43,9 @@ fn main() {
 
     let state: SharedState = Arc::new(RwLock::new(AppState::new(config)));
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-    let _pipeline = spawn_pipeline(Arc::clone(&state), cmd_rx);
+    let _pipeline = spawn_pipeline(state.clone(), cmd_rx);
 
-    APP_HANDLES.set((Arc::clone(&state), cmd_tx.clone())).expect("APP_HANDLES set once");
+    APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
 
     // Framework-dependent: initialize Windows App Runtime via Bootstrap.dll.
     // Requires Windows App Runtime on the machine (install prompt if missing).

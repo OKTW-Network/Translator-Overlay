@@ -7,49 +7,37 @@ use windows_reactor::*;
 use crate::ui::{
     chrome::{section_header, settings_card_stack, settings_page_shell},
     controls::{SliderNumberParams, card_slider_number, card_text},
-    shared::{Snapshot, UiShared, mark_dirty},
+    shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
 
 pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
-    let s_src = Arc::clone(shared);
-    let s_dst = Arc::clone(shared);
-    let s_hist = Arc::clone(shared);
-    let s_conv = Arc::clone(shared);
-    let s_sys = Arc::clone(shared);
-    let bump_a = bump.clone();
-    let bump_b = bump.clone();
-    let bump_c = bump.clone();
-    let bump_d = bump.clone();
-    let bump_e = bump.clone();
+    let cx = UiCx::new(shared, bump);
 
     let languages = vstack((
         section_header("Languages"),
-        card_text(
-            "tr-source-lang",
-            "Source language",
-            Some("Language on screen, or auto."),
-            snap.source_lang_draft.clone(),
-            "auto",
+        card_text("tr-source-lang", "Source language", Some("Language on screen, or auto."), snap.source_lang_draft.clone(), "auto", {
+            let cx = cx.clone();
             move |v| {
-                if let Ok(mut ui) = s_src.lock() {
+                cx.with_mut(|ui| {
                     ui.draft.translation.source_lang = v;
-                    mark_dirty(&mut ui);
-                }
-                bump_a.call(|n| n.wrapping_add(1));
-            },
-        ),
+                    mark_dirty(ui);
+                });
+            }
+        }),
         card_text(
             "tr-target-lang",
             "Target language",
             Some("Language for the translation."),
             snap.target_lang_draft.clone(),
             "e.g. zh-TW",
-            move |v| {
-                if let Ok(mut ui) = s_dst.lock() {
-                    ui.draft.translation.target_lang = v;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.translation.target_lang = v;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_b.call(|n| n.wrapping_add(1));
             },
         ),
     ))
@@ -67,12 +55,14 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
                 max: 100.0,
                 step: 1.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_hist.lock() {
-                    ui.draft.translation.history_max_items = v.max(1.0) as usize;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.translation.history_max_items = v.max(1.0) as usize;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_c.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -85,12 +75,14 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
                 max: 200.0,
                 step: 1.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_conv.lock() {
-                    ui.draft.translation.conversation_max_turns = v.max(1.0) as usize;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.translation.conversation_max_turns = v.max(1.0) as usize;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_d.call(|n| n.wrapping_add(1));
             },
         ),
     ))
@@ -106,13 +98,15 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
                 .multiline()
                 .height(120.0)
                 .placeholder_text("Built-in prompt")
-                .on_text_changed(move |v: String| {
-                    if let Ok(mut ui) = s_sys.lock() {
-                        let t = v.trim().to_string();
-                        ui.draft.translation.system_prompt = if t.is_empty() { None } else { Some(t) };
-                        mark_dirty(&mut ui);
+                .on_text_changed({
+                    let cx = cx.clone();
+                    move |v: String| {
+                        cx.with_mut(|ui| {
+                            let t = v.trim().to_string();
+                            ui.draft.translation.system_prompt = if t.is_empty() { None } else { Some(t) };
+                            mark_dirty(ui);
+                        });
                     }
-                    bump_e.call(|n| n.wrapping_add(1));
                 }),
         ),
     ))

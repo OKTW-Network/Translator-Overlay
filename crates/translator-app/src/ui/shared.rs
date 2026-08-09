@@ -4,8 +4,44 @@ use std::sync::{Arc, Mutex};
 
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{AppConfig, ModelTier};
+use windows_reactor::Updater;
 
-use crate::pipeline::{CmdTx, SharedState};
+use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
+
+/// Shared UI handle for event closures. Clone once per handler (cheap Arc bumps).
+#[derive(Clone)]
+pub struct UiCx {
+    pub shared: Arc<Mutex<UiShared>>,
+    pub bump: Updater<u32>,
+}
+
+impl UiCx {
+    pub fn new(shared: &Arc<Mutex<UiShared>>, bump: &Updater<u32>) -> Self {
+        Self {
+            shared: shared.clone(),
+            bump: bump.clone(),
+        }
+    }
+
+    /// Re-render after a UI mutation.
+    pub fn refresh(&self) {
+        self.bump.call(|n| n.wrapping_add(1));
+    }
+
+    /// Mutate shared UI state, then refresh.
+    pub fn with_mut(&self, f: impl FnOnce(&mut UiShared)) {
+        if let Ok(mut ui) = self.shared.lock() {
+            f(&mut ui);
+        }
+        self.refresh();
+    }
+
+    /// Send a pipeline command and refresh.
+    pub fn send_cmd(&self, cmd: PipelineCommand) {
+        let _ = self.shared.lock().unwrap().cmd_tx.send(cmd);
+        self.refresh();
+    }
+}
 
 /// Pending destructive settings action awaiting ContentDialog confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

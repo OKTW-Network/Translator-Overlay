@@ -9,31 +9,12 @@ use crate::{
     pipeline::PipelineCommand,
     ui::{
         chrome::{app_status_strip, page_header, status_infobar},
-        shared::{Snapshot, UiShared},
+        shared::{Snapshot, UiCx, UiShared},
     },
 };
 
 pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
-    let s1 = Arc::clone(shared);
-    let s2 = Arc::clone(shared);
-    let s3 = Arc::clone(shared);
-    let s4 = Arc::clone(shared);
-    let s5 = Arc::clone(shared);
-    let s7 = Arc::clone(shared);
-    let s8 = Arc::clone(shared);
-    let s_win = Arc::clone(shared);
-    let s11 = Arc::clone(shared);
-    let s12 = Arc::clone(shared);
-    let bump1 = bump.clone();
-    let bump2 = bump.clone();
-    let bump3 = bump.clone();
-    let bump4 = bump.clone();
-    let bump5 = bump.clone();
-    let bump7 = bump.clone();
-    let bump8 = bump.clone();
-    let bump_win = bump.clone();
-    let bump11 = bump.clone();
-    let bump12 = bump.clone();
+    let cx = UiCx::new(shared, bump);
 
     let start_label = if snap.auto_running { "Stop" } else { "Start" };
     let start_tip = if snap.auto_running {
@@ -63,17 +44,19 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .selected_index(window_selected)
                 .placeholder_text("Select window…")
                 .enabled(snap.window_count > 0)
-                .on_selection_changed(move |idx: i32| {
-                    if idx < 0 {
-                        return;
-                    }
-                    if let Ok(mut ui) = s_win.lock() {
-                        let i = idx as usize;
-                        if i < ui.windows.len() {
-                            ui.selected_idx = i;
+                .on_selection_changed({
+                    let cx = cx.clone();
+                    move |idx: i32| {
+                        if idx < 0 {
+                            return;
                         }
+                        cx.with_mut(|ui| {
+                            let i = idx as usize;
+                            if i < ui.windows.len() {
+                                ui.selected_idx = i;
+                            }
+                        });
                     }
-                    bump_win.call(|n| n.wrapping_add(1));
                 })
                 .with_key("window-combo");
             picker.modifiers.min_width = Some(280.0);
@@ -89,14 +72,16 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .min_height(36.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .tooltip("Refresh window list")
-                .on_click(move || {
-                    if let Ok(mut ui) = s1.lock() {
-                        ui.windows = list_windows().unwrap_or_default();
-                        if ui.selected_idx >= ui.windows.len() && !ui.windows.is_empty() {
-                            ui.selected_idx = 0;
-                        }
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            ui.windows = list_windows().unwrap_or_default();
+                            if ui.selected_idx >= ui.windows.len() && !ui.windows.is_empty() {
+                                ui.selected_idx = 0;
+                            }
+                        });
                     }
-                    bump1.call(|n| n.wrapping_add(1));
                 });
 
             hstack((text_block("Window").semibold().vertical_alignment(VerticalAlignment::Center), picker, refresh))
@@ -106,27 +91,30 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
         hstack((
             button("Foreground")
                 .tooltip("Capture the window that currently has focus")
-                .on_click(move || {
-                    let _ = s2.lock().unwrap().cmd_tx.send(PipelineCommand::StartForeground);
-                    bump2.call(|n| n.wrapping_add(1));
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::StartForeground)
                 }),
-            button(start_label).tooltip(start_tip).on_click(move || {
-                {
-                    let ui = s3.lock().unwrap();
-                    if ui.state.read().auto_running {
-                        let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
-                    } else if let Some(w) = ui.windows.get(ui.selected_idx).cloned() {
-                        let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
-                            hwnd: w.hwnd,
-                            title: w.title,
-                        });
+            button(start_label).tooltip(start_tip).on_click({
+                let cx = cx.clone();
+                move || {
+                    {
+                        let ui = cx.shared.lock().unwrap();
+                        if ui.state.read().auto_running {
+                            let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+                        } else if let Some(w) = ui.windows.get(ui.selected_idx).cloned() {
+                            let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
+                                hwnd: w.hwnd,
+                                title: w.title,
+                            });
+                        }
                     }
+                    cx.refresh();
                 }
-                bump3.call(|n| n.wrapping_add(1));
             }),
-            button("Once").tooltip("Capture once and translate immediately").on_click(move || {
-                let _ = s4.lock().unwrap().cmd_tx.send(PipelineCommand::ManualCapture);
-                bump4.call(|n| n.wrapping_add(1));
+            button("Once").tooltip("Capture once and translate immediately").on_click({
+                let cx = cx.clone();
+                move || cx.send_cmd(PipelineCommand::ManualCapture)
             }),
         ))
         .spacing(8.0),
@@ -137,22 +125,25 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 } else {
                     "Turn on preview image"
                 })
-                .on_click(move || {
-                    let ui = s5.lock().unwrap();
-                    let next = !ui.state.read().config.capture.show_preview;
-                    let _ = ui.cmd_tx.send(PipelineCommand::SetShowPreview(next));
-                    drop(ui);
-                    bump5.call(|n| n.wrapping_add(1));
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        let ui = cx.shared.lock().unwrap();
+                        let next = !ui.state.read().config.capture.show_preview;
+                        let _ = ui.cmd_tx.send(PipelineCommand::SetShowPreview(next));
+                        drop(ui);
+                        cx.refresh();
+                    }
                 }),
             button("Clear chat")
                 .tooltip("Clear the translation model conversation history")
-                .on_click(move || {
-                    let _ = s7.lock().unwrap().cmd_tx.send(PipelineCommand::ResetConversation);
-                    bump7.call(|n| n.wrapping_add(1));
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::ResetConversation)
                 }),
-            button("Stop all").tooltip("Stop capture immediately").on_click(move || {
-                let _ = s8.lock().unwrap().cmd_tx.send(PipelineCommand::StopCapture);
-                bump8.call(|n| n.wrapping_add(1));
+            button("Stop all").tooltip("Stop capture immediately").on_click({
+                let cx = cx.clone();
+                move || cx.send_cmd(PipelineCommand::StopCapture)
             }),
         ))
         .spacing(8.0),
@@ -164,16 +155,16 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                     "No translation in progress"
                 })
                 .enabled(in_flight)
-                .on_click(move || {
-                    let _ = s11.lock().unwrap().cmd_tx.send(PipelineCommand::CancelTranslate);
-                    bump11.call(|n| n.wrapping_add(1));
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::CancelTranslate)
                 }),
             button("Retry")
                 .tooltip("Retry the last failed translation")
                 .enabled(can_retry && !in_flight)
-                .on_click(move || {
-                    let _ = s12.lock().unwrap().cmd_tx.send(PipelineCommand::RetryTranslate);
-                    bump12.call(|n| n.wrapping_add(1));
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::RetryTranslate)
                 }),
         ))
         .spacing(8.0),

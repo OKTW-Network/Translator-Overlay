@@ -10,34 +10,11 @@ use crate::ui::{
         OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_password, card_slider_number, card_text,
         optional_number_row, optional_slider_row, optional_text_row,
     },
-    shared::{Snapshot, UiShared, mark_dirty},
+    shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
 
 pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
-    let s_url = Arc::clone(shared);
-    let s_key = Arc::clone(shared);
-    let s_model = Arc::clone(shared);
-    let s_temp = Arc::clone(shared);
-    let s_top = Arc::clone(shared);
-    let s_max = Arc::clone(shared);
-    let s_reason = Arc::clone(shared);
-    let s_timeout = Arc::clone(shared);
-    let s_retries = Arc::clone(shared);
-    let s_backoff = Arc::clone(shared);
-    let bump_u = bump.clone();
-    let bump_k = bump.clone();
-    let bump_m = bump.clone();
-    let bump_t = bump.clone();
-    let bump_p = bump.clone();
-    let bump_x = bump.clone();
-    let bump_r = bump.clone();
-    let bump_to = bump.clone();
-    let bump_re = bump.clone();
-    let bump_bo = bump.clone();
-    let bump_te = bump.clone();
-    let bump_pe = bump.clone();
-    let bump_xe = bump.clone();
-    let bump_re_en = bump.clone();
+    let cx = UiCx::new(shared, bump);
 
     let connection = vstack((
         section_header("Connection"),
@@ -47,12 +24,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             Some("OpenAI-compatible API endpoint."),
             snap.base_url.clone(),
             "https://api.openai.com/v1",
-            move |v| {
-                if let Ok(mut ui) = s_url.lock() {
-                    ui.draft.api.base_url = v;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.base_url = v;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_u.call(|n| n.wrapping_add(1));
             },
         ),
         card_password(
@@ -62,32 +41,31 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             snap.api_key.clone(),
             snap.api_key_revealed,
             {
-                let s = Arc::clone(&s_key);
+                let cx = cx.clone();
                 move |v| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.draft.api.api_key = v;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_k.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
             {
-                let s = s_key;
-                let bump = bump.clone();
+                let cx = cx.clone();
                 move || {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.api_key_revealed = !ui.api_key_revealed;
-                    }
-                    bump.call(|n| n.wrapping_add(1));
+                    });
                 }
             },
         ),
-        card_text("api-model", "Model", Some("Model name, e.g. gpt-4o-mini."), snap.draft_model.clone(), "gpt-4o-mini", move |v| {
-            if let Ok(mut ui) = s_model.lock() {
-                ui.draft.api.model = v;
-                mark_dirty(&mut ui);
+        card_text("api-model", "Model", Some("Model name, e.g. gpt-4o-mini."), snap.draft_model.clone(), "gpt-4o-mini", {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    ui.draft.api.model = v;
+                    mark_dirty(ui);
+                });
             }
-            bump_m.call(|n| n.wrapping_add(1));
         }),
     ))
     .spacing(4.0);
@@ -95,21 +73,19 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     // Note: windows-reactor TeachingTip emits CloseButtonText/ActionButtonText,
     // but the WinUI backend only handles CloseButton/ActionButton — using
     // close_button()/action_button() logs "unhandled prop". Light-dismiss only.
-    let tip = {
-        let s = Arc::clone(shared);
-        let bump_tip = bump.clone();
-        TeachingTip::new("Optional parameters")
-            .subtitle("Turn Off to leave a field out of the API request. Controls stay disabled while Off.")
-            .is_open(!snap.optional_tip_seen)
-            .light_dismiss()
-            .on_closed(move || {
-                if let Ok(mut ui) = s.lock() {
+    let tip = TeachingTip::new("Optional parameters")
+        .subtitle("Turn Off to leave a field out of the API request. Controls stay disabled while Off.")
+        .is_open(!snap.optional_tip_seen)
+        .light_dismiss()
+        .on_closed({
+            let cx = cx.clone();
+            move || {
+                cx.with_mut(|ui| {
                     ui.optional_tip_seen = true;
-                }
-                bump_tip.call(|n| n.wrapping_add(1));
-            })
-            .with_key("api-optional-tip")
-    };
+                });
+            }
+        })
+        .with_key("api-optional-tip");
 
     let sampling = vstack((
         section_header("Optional parameters"),
@@ -130,23 +106,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 step: 0.05,
             },
             {
-                let s = Arc::clone(&s_temp);
+                let cx = cx.clone();
                 move |v| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.temp_val = v;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_t.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
             {
-                let s = Arc::clone(&s_temp);
+                let cx = cx.clone();
                 move |on| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.temp_enabled = on;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_te.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
         ),
@@ -162,23 +136,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 step: 0.01,
             },
             {
-                let s = Arc::clone(&s_top);
+                let cx = cx.clone();
                 move |v| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.top_p_val = v;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_p.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
             {
-                let s = Arc::clone(&s_top);
+                let cx = cx.clone();
                 move |on| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.top_p_enabled = on;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_pe.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
         ),
@@ -194,23 +166,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 step: 1.0,
             },
             {
-                let s = Arc::clone(&s_max);
+                let cx = cx.clone();
                 move |v| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.max_tokens_val = v;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_x.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
             {
-                let s = Arc::clone(&s_max);
+                let cx = cx.clone();
                 move |on| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.max_tokens_enabled = on;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_xe.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
         ),
@@ -224,23 +194,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 placeholder: "low | medium | high".into(),
             },
             {
-                let s = Arc::clone(&s_reason);
+                let cx = cx.clone();
                 move |v| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.reasoning_str = v;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_r.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
             {
-                let s = s_reason;
+                let cx = cx.clone();
                 move |on| {
-                    if let Ok(mut ui) = s.lock() {
+                    cx.with_mut(|ui| {
                         ui.reasoning_enabled = on;
-                        mark_dirty(&mut ui);
-                    }
-                    bump_re_en.call(|n| n.wrapping_add(1));
+                        mark_dirty(ui);
+                    });
                 }
             },
         ),
@@ -259,12 +227,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 600.0,
                 step: 1.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_timeout.lock() {
-                    ui.draft.api.request_timeout_secs = v.max(0.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.request_timeout_secs = v.max(0.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_to.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -277,12 +247,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 10.0,
                 step: 1.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_retries.lock() {
-                    ui.draft.api.max_retries = v.max(0.0) as u32;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.max_retries = v.max(0.0) as u32;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_re.call(|n| n.wrapping_add(1));
             },
         ),
         card_slider_number(
@@ -295,12 +267,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 max: 30_000.0,
                 step: 50.0,
             },
-            move |v| {
-                if let Ok(mut ui) = s_backoff.lock() {
-                    ui.draft.api.retry_backoff_ms = v.max(50.0) as u64;
-                    mark_dirty(&mut ui);
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.retry_backoff_ms = v.max(50.0) as u64;
+                        mark_dirty(ui);
+                    });
                 }
-                bump_bo.call(|n| n.wrapping_add(1));
             },
         ),
     ))

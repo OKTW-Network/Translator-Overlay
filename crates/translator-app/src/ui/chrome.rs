@@ -7,7 +7,7 @@ use windows_reactor::*;
 use crate::{
     pipeline::PipelineCommand,
     ui::shared::{
-        ConfirmAction, Snapshot, UiShared, commit_optional_fields, do_discard, do_reload_from_disk, form_validation_error,
+        ConfirmAction, Snapshot, UiCx, UiShared, commit_optional_fields, do_discard, do_reload_from_disk, form_validation_error,
         is_settings_dirty,
     },
 };
@@ -215,10 +215,7 @@ pub fn app_status_strip(snap: &Snapshot) -> Element {
 /// `Button::accent()` cannot be cleared via Prop Unset (reactor no-op), so we
 /// remount with a different key when dirty toggles to force a fresh Default style.
 pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
-    let s_save = Arc::clone(shared);
-    let s_reload = Arc::clone(shared);
-    let bump_save = bump.clone();
-    let bump_reload = bump.clone();
+    let cx = UiCx::new(shared, bump);
     let dirty = snap.settings_dirty;
     let has_form_error = !snap.form_error.is_empty();
 
@@ -243,28 +240,32 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     if dirty || has_form_error {
         save = save.accent();
     }
-    let save = save.on_click(move || {
-        if let Ok(mut ui) = s_save.lock() {
-            if let Some(err) = form_validation_error(&ui) {
-                ui.form_error = Some(err);
-                bump_save.call(|n| n.wrapping_add(1));
-                return;
+    let save = save.on_click({
+        let cx = cx.clone();
+        move || {
+            if let Ok(mut ui) = cx.shared.lock() {
+                if let Some(err) = form_validation_error(&ui) {
+                    ui.form_error = Some(err);
+                    drop(ui);
+                    cx.refresh();
+                    return;
+                }
+                commit_optional_fields(&mut ui);
+                let cfg = ui.draft.clone();
+                ui.settings_dirty = false;
+                ui.form_error = None;
+                // Optimistic: align live config now so dirty clears this frame
+                // (pipeline ApplyConfig is async relative to the UI tick).
+                {
+                    let mut s = ui.state.write();
+                    s.config = cfg.clone();
+                    s.settings_message = None;
+                    s.last_error = None;
+                }
+                let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
             }
-            commit_optional_fields(&mut ui);
-            let cfg = ui.draft.clone();
-            ui.settings_dirty = false;
-            ui.form_error = None;
-            // Optimistic: align live config now so dirty clears this frame
-            // (pipeline ApplyConfig is async relative to the UI tick).
-            {
-                let mut s = ui.state.write();
-                s.config = cfg.clone();
-                s.settings_message = None;
-                s.last_error = None;
-            }
-            let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
+            cx.refresh();
         }
-        bump_save.call(|n| n.wrapping_add(1));
     });
 
     // Settings-only feedback (never routed to Dashboard InfoBar).
@@ -290,31 +291,31 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
         button("Reload")
             .tooltip("Reload config.toml from disk and apply")
             .with_key("btn-reload")
-            .on_click(move || {
-                if let Ok(mut ui) = s_reload.lock() {
-                    if is_settings_dirty(&ui) {
-                        ui.confirm = ConfirmAction::Reload;
-                    } else {
-                        do_reload_from_disk(&mut ui);
-                    }
+            .on_click({
+                let cx = cx.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        if is_settings_dirty(ui) {
+                            ui.confirm = ConfirmAction::Reload;
+                        } else {
+                            do_reload_from_disk(ui);
+                        }
+                    });
                 }
-                bump_reload.call(|n| n.wrapping_add(1));
             }),
         button("Discard")
             .tooltip("Discard edits and restore currently running settings")
             .with_key("btn-discard")
             .on_click({
-                let s = Arc::clone(shared);
-                let bump = bump.clone();
+                let cx = cx.clone();
                 move || {
-                    if let Ok(mut ui) = s.lock() {
-                        if is_settings_dirty(&ui) {
+                    cx.with_mut(|ui| {
+                        if is_settings_dirty(ui) {
                             ui.confirm = ConfirmAction::Discard;
                         } else {
-                            do_discard(&mut ui);
+                            do_discard(ui);
                         }
-                    }
-                    bump.call(|n| n.wrapping_add(1));
+                    });
                 }
             }),
     ))
@@ -383,26 +384,24 @@ fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater
         ConfirmAction::None => ("", "", "OK"),
     };
 
-    let s = Arc::clone(shared);
-    let bump_c = bump.clone();
+    let cx = UiCx::new(shared, bump);
     ContentDialog::new(title)
         .content(body)
         .primary_button_text(primary)
         .close_button_text("Cancel")
         .is_open(open)
         .on_closed(move |result: ContentDialogResult| {
-            if let Ok(mut ui) = s.lock() {
+            cx.with_mut(|ui| {
                 let action = ui.confirm;
                 ui.confirm = ConfirmAction::None;
                 if result == ContentDialogResult::Primary {
                     match action {
-                        ConfirmAction::Reload => do_reload_from_disk(&mut ui),
-                        ConfirmAction::Discard => do_discard(&mut ui),
+                        ConfirmAction::Reload => do_reload_from_disk(ui),
+                        ConfirmAction::Discard => do_discard(ui),
                         ConfirmAction::None => {}
                     }
                 }
-            }
-            bump_c.call(|n| n.wrapping_add(1));
+            });
         })
         .with_key("settings-confirm-dialog")
         .into()
