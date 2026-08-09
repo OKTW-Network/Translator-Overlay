@@ -306,8 +306,8 @@ impl BlockPersistenceFilter {
             }
 
             // Prefer same text; otherwise prefer closer centers.
-            let center_score = 1.0 - (dx / max_dx).max(0.0).min(1.0) * 0.5
-                - (dy / max_dy).max(0.0).min(1.0) * 0.5;
+            let center_score = 1.0 - (dx / max_dx).clamp(0.0, 1.0) * 0.5
+                - (dy / max_dy).clamp(0.0, 1.0) * 0.5;
             let score = if same_text {
                 iou + 1.0 + center_score
             } else {

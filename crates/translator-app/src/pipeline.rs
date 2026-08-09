@@ -84,6 +84,19 @@ struct TranslateCtx<'a> {
     overlay: Option<&'a OverlayController>,
 }
 
+/// OCR timing clocks shared across auto-capture frames.
+struct OcrTimers<'a> {
+    raw_empty_since: &'a mut Option<Instant>,
+    raw_content_since: &'a mut Option<Instant>,
+    remap_miss_since: &'a mut Option<Instant>,
+}
+
+/// Live gate + block persistence updated each OCR frame.
+struct OcrFilters<'a> {
+    gate: &'a mut StabilityGate,
+    persist: &'a mut BlockPersistenceFilter,
+}
+
 /// Live OCR filters / engine state updated when config is applied.
 struct ConfigApplyTargets<'a> {
     client: &'a mut TranslateClient,
@@ -496,11 +509,15 @@ fn pipeline_loop(state: SharedState, rx: CmdRx) {
                             overlay: overlay.as_ref(),
                         },
                         eng,
-                        &mut gate,
-                        &mut persist,
-                        &mut raw_empty_since,
-                        &mut raw_content_since,
-                        &mut remap_miss_since,
+                        OcrFilters {
+                            gate: &mut gate,
+                            persist: &mut persist,
+                        },
+                        OcrTimers {
+                            raw_empty_since: &mut raw_empty_since,
+                            raw_content_since: &mut raw_content_since,
+                            remap_miss_since: &mut remap_miss_since,
+                        },
                         &frame,
                     );
                 }
@@ -783,7 +800,9 @@ fn best_spatial_translation(
         if iou < 0.20 {
             continue;
         }
-        let score = iou * 3.0 + (1.0 - (dx / max_dx).min(1.0)) + (1.0 - (dy / max_dy).min(1.0));
+        let score = iou * 3.0
+            + (1.0 - (dx / max_dx).clamp(0.0, 1.0))
+            + (1.0 - (dy / max_dy).clamp(0.0, 1.0));
         if best.map(|(_, s)| score > s).unwrap_or(true) {
             best = Some((ti, score));
         }
@@ -820,11 +839,8 @@ fn translated_geometry_changed(previous: &[TranslatedBlock], remapped: &[Transla
 fn run_ocr_auto(
     ctx: &mut TranslateCtx<'_>,
     engine: &mut OcrEngine,
-    gate: &mut StabilityGate,
-    persist: &mut BlockPersistenceFilter,
-    raw_empty_since: &mut Option<Instant>,
-    raw_content_since: &mut Option<Instant>,
-    remap_miss_since: &mut Option<Instant>,
+    mut filters: OcrFilters<'_>,
+    timers: OcrTimers<'_>,
     frame: &CapturedFrame,
 ) {
     {
@@ -868,24 +884,24 @@ fn run_ocr_auto(
     // useful for the stability gate, but must NOT keep ghost text "alive" for the
     // gate after the screen is actually blank — otherwise captions stick forever
     // when capture stops sending frames on a static empty view.
-    let durable = persist.filter(raw.clone());
+    let durable = filters.persist.filter(raw.clone());
 
     if raw.is_empty() {
-        *raw_content_since = None;
-        *remap_miss_since = None;
-        let since = raw_empty_since.get_or_insert_with(Instant::now);
+        *timers.raw_content_since = None;
+        *timers.remap_miss_since = None;
+        let since = timers.raw_empty_since.get_or_insert_with(Instant::now);
         let grace = raw_empty_grace(ctx.state);
         if durable.is_empty() || since.elapsed() >= grace {
-            *raw_empty_since = None;
+            *timers.raw_empty_since = None;
             // Full reset including persistence tracks — screen is blank.
-            clear_stale_overlay(ctx, gate, persist, "raw OCR empty");
+            clear_stale_overlay(ctx, filters.gate, filters.persist, "raw OCR empty");
         }
         // During grace: leave the last overlay up, but do not feed hysteresis
         // copies back into the gate as if the text were still on screen.
         return;
     }
-    *raw_empty_since = None;
-    let content_since = *raw_content_since.get_or_insert_with(Instant::now);
+    *timers.raw_empty_since = None;
+    let content_since = *timers.raw_content_since.get_or_insert_with(Instant::now);
     let max_unstable_ms = ctx.state.read().config.ocr.max_unstable_ms;
     let content_elapsed = content_since.elapsed();
     let force_unstable = max_unstable_ms > 0
@@ -919,15 +935,14 @@ fn run_ocr_auto(
     let text = OcrEngine::blocks_to_text(&blocks);
     let fp = OcrFingerprint::from_blocks(&blocks);
 
-    match gate.observe(fp) {
+    match filters.gate.observe(fp) {
         StabilityOutcome::Changed => {
             // Keep previous captions while the new page settles. Immediate clear
             // made every OCR blip look like the overlay vanished.
             apply_sticky_overlay(
                 ctx,
-                gate,
-                persist,
-                remap_miss_since,
+                &mut filters,
+                timers.remap_miss_since,
                 &blocks,
                 &text,
                 frame.width,
@@ -940,9 +955,8 @@ fn run_ocr_auto(
         StabilityOutcome::Waiting { elapsed_ms } => {
             apply_sticky_overlay(
                 ctx,
-                gate,
-                persist,
-                remap_miss_since,
+                &mut filters,
+                timers.remap_miss_since,
                 &blocks,
                 &text,
                 frame.width,
@@ -965,16 +979,15 @@ fn run_ocr_auto(
             // Stick old translations (frozen size) until HTTP returns.
             apply_sticky_overlay(
                 ctx,
-                gate,
-                persist,
-                remap_miss_since,
+                &mut filters,
+                timers.remap_miss_since,
                 &blocks,
                 &text,
                 frame.width,
                 frame.height,
             );
             // Fresh content session for force-raw after this emit settles.
-            *raw_content_since = Some(Instant::now());
+            *timers.raw_content_since = Some(Instant::now());
             let page = PendingPage {
                 blocks: blocks.clone(),
                 source_text: text.clone(),
@@ -992,9 +1005,8 @@ fn run_ocr_auto(
         StabilityOutcome::AlreadyEmitted { .. } => {
             apply_sticky_overlay(
                 ctx,
-                gate,
-                persist,
-                remap_miss_since,
+                &mut filters,
+                timers.remap_miss_since,
                 &blocks,
                 &text,
                 frame.width,
@@ -1013,8 +1025,7 @@ fn run_ocr_auto(
 /// Sticky remap + delayed clear when nothing maps for a grace period.
 fn apply_sticky_overlay(
     ctx: &mut TranslateCtx<'_>,
-    gate: &mut StabilityGate,
-    persist: &mut BlockPersistenceFilter,
+    filters: &mut OcrFilters<'_>,
     remap_miss_since: &mut Option<Instant>,
     blocks: &[OcrBlock],
     text: &str,
@@ -1051,8 +1062,8 @@ fn apply_sticky_overlay(
                 *remap_miss_since = None;
                 clear_stale_overlay(
                     ctx,
-                    gate,
-                    persist,
+                    filters.gate,
+                    filters.persist,
                     "sticky remap empty past grace (layout gone)",
                 );
             }
