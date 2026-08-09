@@ -1,0 +1,13 @@
+[package]
+name = "translator-ocr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+oar-ocr = { version = "0.9", features = ["auto-download", "directml"] }
+thiserror = "2.0.19"
+tracing = "0.1.44"
+translator-core = { version = "0.1.0", path = "../translator-core" }
+translator-models = { version = "0.1.0", path = "../translator-models" }

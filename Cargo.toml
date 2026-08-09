@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/translator-app",
+    "crates/translator-capture",
+    "crates/translator-core",
+    "crates/translator-models",
+    "crates/translator-ocr",
+    "crates/translator-overlay",
+    "crates/translator-translate",
+]
+

@@ -1,0 +1,15 @@
+/target
+/dist
+**/*.rs.bk
+Cargo.lock.bak
+models/
+*.onnx
+*.mnn
+*.partial
+.DS_Store
+Thumbs.db
+config.toml
+!crates/**/config.toml
+.idea/
+.vscode/
+*.pdb

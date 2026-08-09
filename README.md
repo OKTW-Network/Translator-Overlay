@@ -1,0 +1,160 @@
+# Translator Overlay
+
+Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 翻譯 → 在原位置以可點穿（click-through）覆蓋層顯示譯文。
+
+## 功能
+
+- **視窗擷取**：Windows Graphics Capture，可選清單視窗或前景視窗
+- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
+- **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
+- **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（段落組裝）
+- **LLM 翻譯**：OpenAI 相容 Chat Completions（可接官方、代理或相容服務）
+- **對話上下文**：多輪歷史壓縮，維持用語一致
+- **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框
+- **設定 UI**：Dashboard + API / Translation / OCR / Overlay 分頁，設定寫入 `config.toml`
+
+## 系統需求
+
+| 項目 | 說明 |
+|------|------|
+| 作業系統 | Windows 10 / 11 **x64** |
+| 執行階段 | Windows App Runtime（framework-dependent） |
+| 執行庫 | Microsoft Visual C++ Redistributable（x64），若系統缺少 CRT |
+| 網路 | 首次下載 OCR 模型（若本機尚無）；翻譯 API 連線 |
+| 開發建置 | Rust（edition 2024）、Visual Studio Build Tools（Windows 目標） |
+
+## 快速開始（預建置 / 可攜包）
+
+1. 解壓 `TranslatorOverlay-*-win-x64.zip`（保持 DLL 與 exe 同目錄）
+2. 雙擊 `translator-app.exe`
+3. 在 **API** 頁填入 `api_key`（或編輯旁邊的 `config.toml`）並 **Save**
+4. 回 **Dashboard**：重新整理視窗清單 → 選取目標 → **Start**
+
+`config.toml` 與 `models/` 會放在可執行檔同目錄。
+
+可攜包內建議包含：
+
+- `translator-app.exe`
+- `Microsoft.WindowsAppRuntime.Bootstrap.dll`
+- `DirectML.dll`（ONNX Runtime DirectML EP）
+- `resources.pri`
+
+## 從原始碼建置
+
+```powershell
+cargo build --release -p translator-app
+```
+
+執行：
+
+```powershell
+.\target\release\translator-app.exe
+```
+
+打包可攜 ZIP：
+
+```powershell
+.\scripts\package-portable.ps1
+# 或略過編譯、只用現有 release 產物：
+.\scripts\package-portable.ps1 -SkipBuild
+```
+
+產物位於 `dist/TranslatorOverlay-<version>-win-x64.zip`。
+
+## 使用方式
+
+1. **API**：設定 `base_url`、`api_key`、`model`（預設 `https://api.openai.com/v1` + `gpt-4o-mini`）
+2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選 system prompt
+3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
+4. **Overlay**：文字色、背景色（ARGB）
+5. **Dashboard**：
+   - 選視窗後 **Start** 連續擷取
+   - **Manual** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
+   - 翻譯進行中可取消；失敗可 **Retry**
+   - 可重置對話歷史
+
+首次載入 OCR 時，若 `models/` 缺少對應 ONNX，會自動下載到 `models_dir`（預設 `models/`）。
+
+## 設定（`config.toml`）
+
+設定檔預設路徑：`{exe 目錄}/config.toml`。不存在時會自動建立預設值。
+
+精簡範例：
+
+```toml
+[api]
+base_url = "https://api.openai.com/v1"
+api_key = ""
+model = "gpt-4o-mini"
+request_timeout_secs = 60
+max_retries = 2
+retry_backoff_ms = 500
+# temperature = 0.3
+# top_p = 0.9
+# max_tokens = 2048
+# reasoning_effort = "medium"
+
+[translation]
+source_lang = "auto"
+target_lang = "zh-TW"
+history_max_items = 8
+conversation_max_turns = 20
+
+[ocr]
+model_tier = "small"   # tiny | small | medium
+models_dir = "models"
+confidence_threshold = 0.5
+stable_duration_ms = 500
+filter_single_char = true
+block_persist_ms = 450
+block_max_miss_ms = 700
+
+[ocr.line_merge]
+enabled = true
+
+[capture]
+min_interval_ms = 300
+show_preview = false
+
+[overlay]
+# ARGB hex: 0xAARRGGBB
+text_color_argb = "0xFFFFFFFF"
+background_color_argb = "0xC8000000"
+```
+
+### OCR 模型檔
+
+| 等級 | 偵測 | 辨識 | 字典 |
+|------|------|------|------|
+| tiny | `pp-ocrv6_tiny_det.onnx` | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt` |
+| small | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` |
+| medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt` |
+
+## 管線架構
+
+```
+┌─────────────┐    ┌──────────┐    ┌────────────────┐    ┌────────────┐    ┌─────────────┐
+│  Capture    │ →  │   OCR    │ →  │ Stability /    │ →  │  Translate │ →  │   Overlay   │
+│  (WGC)      │    │ PP-OCRv6 │    │ block filter   │    │  (LLM API) │    │ (layered)   │
+└─────────────┘    └──────────┘    └────────────────┘    └────────────┘    └─────────────┘
+        ▲                                                                          │
+        └────────────────── 跟隨目標 HWND / 客戶區 座標 ──────────────────────────┘
+```
+
+控制 UI（WinUI 3）與背景 pipeline 執行緒分離；UI 透過命令通道控制擷取、設定套用與翻譯取消。
+
+## 專案結構
+
+```
+crates/
+  translator-app/         # 主程式、UI、pipeline 協調
+  translator-capture/     # Windows Graphics Capture 視窗擷取
+  translator-core/        # config / state / 共用型別
+  translator-models/      # PP-OCRv6 模型目錄與路徑
+  translator-ocr/         # OCR 引擎、穩定門檻、行合併
+  translator-overlay/     # 透明點穿覆蓋視窗
+  translator-translate/   # OpenAI 相容翻譯客戶端
+scripts/
+  package-portable.ps1    # release 建置 + 可攜 ZIP
+config.toml               # 開發用預設設定範本
+```

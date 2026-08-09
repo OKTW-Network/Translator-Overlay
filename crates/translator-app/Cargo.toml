@@ -1,0 +1,22 @@
+[package]
+name = "translator-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+parking_lot = "0.12.5"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+translator-capture = { version = "0.1.0", path = "../translator-capture" }
+translator-core = { version = "0.1.0", path = "../translator-core" }
+translator-ocr = { version = "0.1.0", path = "../translator-ocr" }
+translator-overlay = { version = "0.1.0", path = "../translator-overlay" }
+translator-translate = { version = "0.1.0", path = "../translator-translate" }
+windows = { version = "0.62", features = ["Win32_UI_HiDpi"] }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", version = "0.100.0" }
+
+[build-dependencies]
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", version = "0.100.0" }
