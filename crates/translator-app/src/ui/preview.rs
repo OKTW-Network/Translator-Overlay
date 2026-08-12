@@ -7,7 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use windows_canvas::{AlphaMode, ColorF, GpuDevice, Rect};
-use windows_reactor::{CanvasImageSource, Element, ElementExt, HorizontalAlignment, Image, Stretch, Updater, text_block};
+use windows_reactor::{CanvasImageSource, Element, HorizontalAlignment, Image, KeyExt, LayoutExt, Stretch, Updater, text_block};
 
 thread_local! {
     static GPU: RefCell<Option<GpuDevice>> = const { RefCell::new(None) };

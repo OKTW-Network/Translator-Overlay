@@ -17,8 +17,8 @@ translator-ocr = { path = "../translator-ocr" }
 translator-overlay = { path = "../translator-overlay" }
 translator-translate = { path = "../translator-translate" }
 windows = { workspace = true, features = ["Win32_UI_HiDpi"] }
-windows-canvas = { git = "https://github.com/microsoft/windows-rs", rev = "785a0e27", version = "0.100.0" }
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "785a0e27", version = "0.100.0", features = ["canvas"] }
+windows-canvas = { git = "https://github.com/microsoft/windows-rs", rev = "5f8e1504", version = "0.100.0" }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "5f8e1504", version = "0.100.0", features = ["canvas"] }
 
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "785a0e27", version = "0.100.0" }
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "5f8e1504", version = "0.100.0" }

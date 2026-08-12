@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_core::ModelTier;
-use windows_reactor::*;
+use windows_reactor::{HorizontalAlignment, LayoutExt, RadioButton, StackPanel, Updater, VerticalAlignment, hstack, vstack};
 
 use crate::ui::{
     chrome::{section_header, settings_card, settings_expander, settings_page_shell},
@@ -20,7 +20,7 @@ fn set_merge_f32(cx: &UiCx, set: impl FnOnce(&mut translator_core::LineMergeConf
     });
 }
 
-pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
     let model = vstack((
@@ -443,12 +443,5 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     ))
     .spacing(4.0);
 
-    settings_page_shell(
-        shared,
-        snap,
-        bump,
-        vstack((model, detection, line_merge, line_merge_advanced, timing))
-            .spacing(8.0)
-            .into(),
-    )
+    settings_page_shell(shared, snap, bump, vstack((model, detection, line_merge, line_merge_advanced, timing)).spacing(8.0))
 }

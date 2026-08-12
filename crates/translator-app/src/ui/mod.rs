@@ -13,9 +13,9 @@ mod shared;
 use std::time::Duration;
 
 use windows_reactor::{
-    Backdrop, Color, DispatcherTimer, Element, ElementExt, GridLength, HorizontalAlignment, NavViewItem, NavigationView,
-    NavigationViewPaneDisplayMode, RenderCx, RequestedTheme, Symbol, Thickness, VerticalAlignment, grid, scroll_viewer, set_backdrop,
-    set_requested_theme,
+    Backdrop, BackgroundExt, Color, DispatcherTimer, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt,
+    NavViewItem, NavigationView, NavigationViewPaneDisplayMode, PaddingExt, RenderCx, RequestedTheme, ResourceExt, Symbol, Thickness,
+    VerticalAlignment, grid, scroll_viewer, set_backdrop, set_requested_theme,
 };
 
 use crate::ui::{

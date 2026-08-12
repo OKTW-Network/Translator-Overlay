@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::list_windows;
-use windows_reactor::*;
+use windows_reactor::{
+    ComboBox, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, StackPanel, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
+    VerticalAlignment, button, hstack, text_block, vstack,
+};
 
 use crate::{
     pipeline::PipelineCommand,
@@ -15,7 +18,7 @@ use crate::{
     },
 };
 
-pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
     let start_label = if snap.auto_running { "Stop" } else { "Start" };
@@ -168,5 +171,4 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
     ))
     .spacing(12.0)
     .horizontal_alignment(HorizontalAlignment::Stretch)
-    .into()
 }

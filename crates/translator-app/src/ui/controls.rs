@@ -1,6 +1,10 @@
 //! Reusable setting-row controls (text, toggle, slider, optional toggle+slider).
 
-use windows_reactor::*;
+use windows_reactor::{
+    BackgroundExt, Border, Color, ColorArgb, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, NumberBox,
+    PaddingExt, PasswordBox, PasswordRevealMode, Slider, StackPanel, TextStyleExt, ThemeRef, Thickness, ToggleSwitch, TooltipExt,
+    VerticalAlignment, border, button, color_picker, grid, hstack, text_block, text_box, vstack,
+};
 
 use crate::ui::{
     chrome::{settings_card, settings_card_stack, settings_row},
@@ -31,7 +35,7 @@ pub fn card_text(
     value: String,
     placeholder: impl Into<String>,
     on_changed: impl Fn(String) + 'static,
-) -> Element {
+) -> Border {
     let mut tb = text_box(value).placeholder_text(placeholder).on_text_changed(on_changed);
     tb.modifiers.min_width = Some(200.0);
     tb.modifiers.width = Some(280.0);
@@ -51,7 +55,7 @@ pub fn card_password(
     revealed: bool,
     on_changed: impl Fn(String) + 'static,
     on_reveal_toggled: impl Fn() + 'static,
-) -> Element {
+) -> Border {
     let mut pb = PasswordBox::new()
         .value(value)
         .reveal_button_enabled(false)
@@ -89,7 +93,7 @@ pub fn card_toggle(
     description: Option<&str>,
     is_on: bool,
     on_toggled: impl Fn(bool) + 'static,
-) -> Element {
+) -> Border {
     settings_card(key, header, description, compact_toggle(is_on, on_toggled))
 }
 
@@ -100,7 +104,7 @@ pub fn row_toggle(
     description: Option<&str>,
     is_on: bool,
     on_toggled: impl Fn(bool) + 'static,
-) -> Element {
+) -> Border {
     settings_row(key, header, description, compact_toggle(is_on, on_toggled))
 }
 
@@ -128,7 +132,7 @@ pub fn quantize_to_step(v: f64, min: f64, max: f64, step: f64) -> f64 {
     (min + steps * step).clamp(min, max)
 }
 
-fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Element {
+fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> StackPanel {
     let min = p.min;
     let max = p.max;
     let step = p.step;
@@ -150,17 +154,17 @@ fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clo
     nb.modifiers.width = Some(100.0);
     nb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
 
-    hstack((slider, nb)).spacing(12.0).into()
+    hstack((slider, nb)).spacing(12.0)
 }
 
 /// Slider + NumberBox on one row (labels left, controls flush-right) — standalone card.
-pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Element {
+pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Border {
     let controls = slider_number_controls(&p, on_changed);
     settings_card(p.key, p.header, p.description.as_deref(), controls)
 }
 
 /// Slider + NumberBox as a flat expander item (no nested card chrome).
-pub fn row_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Element {
+pub fn row_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Border {
     let controls = slider_number_controls(&p, on_changed);
     settings_row(p.key, p.header, p.description.as_deref(), controls)
 }
@@ -279,14 +283,14 @@ pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'st
     let toggle = compact_toggle(p.enabled, on_enabled);
 
     let header_el = text_block(p.header).semibold().font_size(14.0);
-    let labels: Element = match p.description.as_deref() {
-        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
-            .spacing(2.0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
-        _ => header_el.vertical_alignment(VerticalAlignment::Center).into(),
-    };
+    let labels = match p.description.as_deref() {
+        Some(d) if !d.is_empty() => {
+            vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap())).spacing(2.0)
+        }
+        _ => vstack((header_el,)),
+    }
+    .horizontal_alignment(HorizontalAlignment::Stretch)
+    .vertical_alignment(VerticalAlignment::Center);
 
     let mut nb = NumberBox::new(value)
         .range(min, max)
@@ -346,14 +350,14 @@ pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'stat
     let toggle = compact_toggle(p.enabled, on_enabled);
 
     let header_el = text_block(p.header).semibold().font_size(14.0);
-    let labels: Element = match p.description.as_deref() {
-        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
-            .spacing(2.0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
-        _ => header_el.vertical_alignment(VerticalAlignment::Center).into(),
-    };
+    let labels = match p.description.as_deref() {
+        Some(d) if !d.is_empty() => {
+            vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap())).spacing(2.0)
+        }
+        _ => vstack((header_el,)),
+    }
+    .horizontal_alignment(HorizontalAlignment::Stretch)
+    .vertical_alignment(VerticalAlignment::Center);
 
     let mut tb = text_box(p.text)
         .placeholder_text(p.placeholder)
@@ -420,7 +424,7 @@ pub fn card_color_popup(
     on_hex_changed: impl Fn(String) + 'static,
     on_color_changed: impl Fn((u8, u8, u8, u8)) + 'static,
     on_toggle_open: impl Fn() + 'static,
-) -> Element {
+) -> Border {
     let key = p.key;
     let (a, r, g, b) = argb_u32_to_parts(parse_hex_u32(&p.hex).unwrap_or(0xFF00_0000));
     // Swatch fill uses opaque RGB so low-alpha colors stay visible on the card.

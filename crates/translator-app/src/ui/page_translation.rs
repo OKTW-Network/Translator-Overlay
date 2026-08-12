@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use windows_reactor::*;
+use windows_reactor::{LayoutExt, StackPanel, Updater, text_box, vstack};
 
 use crate::ui::{
     chrome::{section_header, settings_card_stack, settings_page_shell},
@@ -11,7 +11,7 @@ use crate::ui::{
     shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
 
-pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
     let languages = vstack((
@@ -113,5 +113,5 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((languages, context, prompt)).spacing(8.0).into())
+    settings_page_shell(shared, snap, bump, vstack((languages, context, prompt)).spacing(8.0))
 }

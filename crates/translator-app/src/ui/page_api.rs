@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use windows_reactor::*;
+use windows_reactor::{KeyExt, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, text_block, vstack};
 
 use crate::ui::{
     chrome::{section_header, settings_page_shell},
@@ -14,7 +14,7 @@ use crate::ui::{
     shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
 
-pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
     let connection = vstack((
@@ -281,5 +281,5 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((connection, sampling, reliability)).spacing(8.0).into())
+    settings_page_shell(shared, snap, bump, vstack((connection, sampling, reliability)).spacing(8.0))
 }

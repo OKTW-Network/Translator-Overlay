@@ -3,7 +3,11 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use windows_reactor::*;
+use windows_reactor::{
+    BackgroundExt, Border, ContentDialog, ContentDialogResult, Element, Expander, Grid, GridChildExt, GridLength, HorizontalAlignment,
+    InfoBar, InfoBarSeverity, KeyExt, LayoutExt, PaddingExt, StackPanel, TextBlock, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
+    VerticalAlignment, border, button, grid, hstack, text_block, vstack,
+};
 
 use crate::{
     pipeline::PipelineCommand,
@@ -12,6 +16,15 @@ use crate::{
         is_settings_dirty,
     },
 };
+
+fn labeled_stack(header: TextBlock, description: Option<&str>) -> StackPanel {
+    match description {
+        Some(d) if !d.is_empty() => vstack((header, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap())).spacing(2.0),
+        _ => vstack((header,)),
+    }
+    .horizontal_alignment(HorizontalAlignment::Stretch)
+    .vertical_alignment(VerticalAlignment::Center)
+}
 
 /// Windows Settings–style page title + optional description.
 pub fn page_header(title: impl Into<String>, description: Option<&str>) -> Element {
@@ -25,17 +38,13 @@ pub fn page_header(title: impl Into<String>, description: Option<&str>) -> Eleme
 }
 
 /// Section label above a group of cards.
-pub fn section_header(title: impl Into<String>) -> Element {
-    text_block(title)
-        .font_size(14.0)
-        .semibold()
-        .margin(Thickness {
-            left: 0.0,
-            top: 12.0,
-            right: 0.0,
-            bottom: 4.0,
-        })
-        .into()
+pub fn section_header(title: impl Into<String>) -> TextBlock {
+    text_block(title).font_size(14.0).semibold().margin(Thickness {
+        left: 0.0,
+        top: 12.0,
+        right: 0.0,
+        bottom: 4.0,
+    })
 }
 
 /// Collapsible settings group (WinUI `Expander`, SettingsExpander-style).
@@ -50,11 +59,11 @@ pub fn settings_expander(
     header: impl Into<String>,
     expanded: bool,
     on_expanding: impl Fn(bool) + 'static,
-    child: impl Into<Element>,
-) -> Element {
+    child: impl Into<Element> + LayoutExt,
+) -> Expander {
     // Content is a list of flat rows; no extra margin that would look like a
     // nested card inset.
-    let body = child.into().horizontal_alignment(HorizontalAlignment::Stretch);
+    let body = child.horizontal_alignment(HorizontalAlignment::Stretch);
 
     Expander::new(body)
         .header(header)
@@ -68,20 +77,11 @@ pub fn settings_expander(
             right: 0.0,
             bottom: 0.0,
         })
-        .into()
 }
 
 /// Shared label + control layout for settings rows (card or flat).
-fn settings_row_body(header: impl Into<String>, description: Option<&str>, control: impl Into<Element>) -> Element {
-    let header_el = text_block(header).semibold().font_size(14.0);
-    let left: Element = match description {
-        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
-            .spacing(2.0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
-        _ => header_el.vertical_alignment(VerticalAlignment::Center).into(),
-    };
+fn settings_row_body(header: impl Into<String>, description: Option<&str>, control: impl Into<Element> + GridChildExt + LayoutExt) -> Grid {
+    let left = labeled_stack(text_block(header).semibold().font_size(14.0), description);
 
     // Grid must Stretch: otherwise Star collapses to content and controls pack left.
     grid((
@@ -96,7 +96,6 @@ fn settings_row_body(header: impl Into<String>, description: Option<&str>, contr
                 bottom: 0.0,
             }),
         control
-            .into()
             .grid_row(0)
             .grid_column(1)
             .horizontal_alignment(HorizontalAlignment::Right)
@@ -105,7 +104,6 @@ fn settings_row_body(header: impl Into<String>, description: Option<&str>, contr
     .rows([GridLength::Auto])
     .columns([GridLength::Star(1.0), GridLength::Auto])
     .horizontal_alignment(HorizontalAlignment::Stretch)
-    .into()
 }
 
 /// Flat settings row for use **inside** an [`settings_expander`].
@@ -114,7 +112,12 @@ fn settings_row_body(header: impl Into<String>, description: Option<&str>, contr
 /// same header/control layout as a card, but no `CardBackground` / corner radius
 /// (those belong to the outer expander only). A hairline bottom border separates
 /// items like the toolkit item style.
-pub fn settings_row(key: &str, header: impl Into<String>, description: Option<&str>, control: impl Into<Element>) -> Element {
+pub fn settings_row(
+    key: &str,
+    header: impl Into<String>,
+    description: Option<&str>,
+    control: impl Into<Element> + GridChildExt + LayoutExt,
+) -> Border {
     let body = settings_row_body(header, description, control);
     border(body)
         .border_thickness(Thickness {
@@ -132,7 +135,6 @@ pub fn settings_row(key: &str, header: impl Into<String>, description: Option<&s
         })
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .with_key(key)
-        .into()
 }
 
 /// Standalone settings card: Header + Description on the left, control flush-right.
@@ -141,25 +143,23 @@ pub fn settings_row(key: &str, header: impl Into<String>, description: Option<&s
 /// of label/description length (HStack would pack after the text width).
 ///
 /// Do **not** nest these inside an Expander — use [`settings_row`] instead.
-pub fn settings_card(key: &str, header: impl Into<String>, description: Option<&str>, control: impl Into<Element>) -> Element {
+pub fn settings_card(
+    key: &str,
+    header: impl Into<String>,
+    description: Option<&str>,
+    control: impl Into<Element> + GridChildExt + LayoutExt,
+) -> Border {
     border(settings_row_body(header, description, control))
         .background(ThemeRef::CardBackground)
         .corner_radius(8.0)
         .padding(Thickness::uniform(16.0))
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .with_key(key)
-        .into()
 }
 
 /// Card with header/description on top and full-width content below (sliders, multiline).
-pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Option<&str>, content: impl Into<Element>) -> Element {
-    let header_el = text_block(header).semibold().font_size(14.0);
-    let head: Element = match description {
-        Some(d) if !d.is_empty() => vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap()))
-            .spacing(2.0)
-            .into(),
-        _ => header_el.into(),
-    };
+pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Option<&str>, content: impl Into<Element>) -> Border {
+    let head = labeled_stack(text_block(header).semibold().font_size(14.0), description);
 
     border(
         vstack((head, content.into()))
@@ -171,7 +171,6 @@ pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Op
     .padding(Thickness::uniform(16.0))
     .horizontal_alignment(HorizontalAlignment::Stretch)
     .with_key(key)
-    .into()
 }
 
 /// Pipeline error InfoBar for the Dashboard only.
@@ -179,7 +178,7 @@ pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Op
 /// Settings save success lives on the settings chrome (next to Save), not here.
 /// Always mounts the same `InfoBar` (stable key) so open/close does not remount
 /// the rest of the page tree.
-pub fn status_infobar(snap: &Snapshot) -> Element {
+pub fn status_infobar(snap: &Snapshot) -> InfoBar {
     let (title, open) = if !snap.last_error.is_empty() {
         (snap.last_error.as_str(), true)
     } else {
@@ -192,11 +191,10 @@ pub fn status_infobar(snap: &Snapshot) -> Element {
         .is_open(open)
         .is_closable(false)
         .with_key("status-infobar")
-        .into()
 }
 
 /// Compact app status strip (not full runtime dump).
-pub fn app_status_strip(snap: &Snapshot) -> Element {
+pub fn app_status_strip(snap: &Snapshot) -> TextBlock {
     let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
     text_block(format!(
         "{}  ·  {}  ·  OCR {ocr_time}  ·  API key {}",
@@ -206,7 +204,6 @@ pub fn app_status_strip(snap: &Snapshot) -> Element {
     ))
     .font_size(12.0)
     .foreground(ThemeRef::SecondaryText)
-    .into()
 }
 
 /// Shared Save / Reload / Discard bar for settings pages.
@@ -215,7 +212,7 @@ pub fn app_status_strip(snap: &Snapshot) -> Element {
 ///
 /// `Button::accent()` cannot be cleared via Prop Unset (reactor no-op), so we
 /// remount with a different key when dirty toggles to force a fresh Default style.
-pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
     let dirty = snap.settings_dirty;
     let has_form_error = !snap.form_error.is_empty();
@@ -271,20 +268,18 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     });
 
     // Settings-only feedback (never routed to Dashboard InfoBar).
-    let status_hint: Element = if has_form_error {
+    let status_hint = if has_form_error {
         text_block(snap.form_error.clone())
             .font_size(12.0)
             .foreground(ThemeRef::SystemCritical)
             .with_key("settings-form-error")
-            .into()
     } else if !snap.settings_message.is_empty() {
         text_block(snap.settings_message.clone())
             .font_size(12.0)
             .foreground(ThemeRef::SystemSuccess)
             .with_key("settings-save-msg")
-            .into()
     } else {
-        text_block("").font_size(12.0).with_key("settings-status-empty").into()
+        text_block("").font_size(12.0).with_key("settings-status-empty")
     };
 
     hstack((
@@ -323,7 +318,6 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     ))
     .spacing(8.0)
     .with_key("settings-actions")
-    .into()
 }
 
 /// Sticky top bar: page title + description + Save actions (outside scroll).
@@ -333,14 +327,13 @@ pub fn settings_sticky_chrome(
     shared: &Arc<Mutex<UiShared>>,
     snap: &Snapshot,
     bump: &Updater<u32>,
-) -> Element {
+) -> Grid {
     let title_el = text_block(title).font_size(28.0).bold();
-    let head: Element = match description {
+    let head = match description {
         Some(d) if !d.is_empty() => vstack((title_el, text_block(d).font_size(13.0).foreground(ThemeRef::SecondaryText).wrap()))
             .spacing(4.0)
-            .vertical_alignment(VerticalAlignment::Center)
-            .into(),
-        _ => title_el.vertical_alignment(VerticalAlignment::Center).into(),
+            .vertical_alignment(VerticalAlignment::Center),
+        _ => vstack((title_el,)).vertical_alignment(VerticalAlignment::Center),
     };
 
     let actions = settings_actions(shared, snap, bump)
@@ -372,11 +365,10 @@ pub fn settings_sticky_chrome(
     })
     .horizontal_alignment(HorizontalAlignment::Stretch)
     .with_key("settings-sticky-chrome")
-    .into()
 }
 
 /// Confirm Reload / Discard when there are unsaved changes.
-fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> ContentDialog {
     let open = snap.confirm != ConfirmAction::None;
     let (title, body, primary) = match snap.confirm {
         ConfirmAction::Reload => {
@@ -406,16 +398,19 @@ fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater
             });
         })
         .with_key("settings-confirm-dialog")
-        .into()
 }
 
 /// Standard settings page body (cards only).
 ///
 /// Title + Save live in [`settings_sticky_chrome`] (fixed above the scroll area).
-pub fn settings_page_shell(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>, body: Element) -> Element {
+pub fn settings_page_shell(
+    shared: &Arc<Mutex<UiShared>>,
+    snap: &Snapshot,
+    bump: &Updater<u32>,
+    body: impl Into<Element> + LayoutExt,
+) -> StackPanel {
     vstack((body.horizontal_alignment(HorizontalAlignment::Stretch), confirm_dialog(shared, snap, bump)))
         .spacing(12.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .with_key("settings-page-shell")
-        .into()
 }

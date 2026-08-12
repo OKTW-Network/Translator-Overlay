@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use windows_reactor::*;
+use windows_reactor::{StackPanel, TextStyleExt, ThemeRef, Updater, text_block, vstack};
 
 use crate::ui::{
     chrome::{section_header, settings_page_shell},
@@ -11,7 +11,7 @@ use crate::ui::{
     shared::{Snapshot, UiCx, UiShared, mark_dirty, parts_to_argb_u32},
 };
 
-pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
     let colors = vstack((
@@ -120,5 +120,5 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updat
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((colors, notes)).spacing(8.0).into())
+    settings_page_shell(shared, snap, bump, vstack((colors, notes)).spacing(8.0))
 }
