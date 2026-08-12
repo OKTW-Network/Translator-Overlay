@@ -1,8 +1,7 @@
 //! Config apply and OCR engine load.
 
-use std::path::PathBuf;
-
-use tracing::{error, info, warn};
+use bytes::Bytes;
+use tracing::{error, info};
 use translator_capture::CapturedFrame;
 use translator_core::{AppConfig, OcrConfig};
 use translator_ocr::{BlockPersistenceFilter, OcrEngine, StabilityGate, prepare_engine};
@@ -13,7 +12,6 @@ impl Pipeline {
     pub(crate) fn apply_config(&mut self, cfg: AppConfig) {
         // Model tier change requires a full engine reload (new ONNX weights).
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier;
-        self.show_preview = cfg.capture.show_preview;
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         self.client.update_api(cfg.api.clone());
@@ -82,13 +80,7 @@ impl Pipeline {
         s.preview.width = frame.width;
         s.preview.height = frame.height;
         s.preview.sequence = frame.sequence;
-
-        if self.show_preview {
-            match save_preview(frame) {
-                Ok(path) => s.preview.path = Some(path.display().to_string()),
-                Err(e) => warn!(error = %e, "failed to save preview"),
-            }
-        }
+        s.preview.rgba = Some(Bytes::copy_from_slice(&frame.rgba));
     }
 }
 
@@ -96,13 +88,4 @@ pub(crate) fn load_engine(state: &crate::pipeline::SharedState, cfg: &OcrConfig)
     state.write().status = translator_core::PipelineStatus::LoadingModels;
     // May block while oar-ocr fetches missing registry files / loads ORT.
     prepare_engine(cfg)
-}
-
-fn save_preview(frame: &CapturedFrame) -> Result<PathBuf, String> {
-    let thumb = frame.thumbnail(480);
-    let png = thumb.to_png_bytes().map_err(|e| e.to_string())?;
-    let dir = translator_core::exe_dir().map_err(|e| e.to_string())?;
-    let path = dir.join("preview_last.png");
-    std::fs::write(&path, png).map_err(|e| e.to_string())?;
-    Ok(path)
 }

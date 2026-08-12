@@ -313,8 +313,11 @@ pub fn truncate(s: &str, max: usize) -> String {
 pub struct Snapshot {
     pub status: String,
     pub target: String,
-    pub preview: String,
-    pub show_preview: bool,
+    pub preview_sequence: u64,
+    pub preview_width: u32,
+    pub preview_height: u32,
+    /// Tightly packed RGBA8 (`preview_width * preview_height * 4`).
+    pub preview_rgba: Option<bytes::Bytes>,
     pub ocr_text: String,
     pub translation: String,
     pub model: String,
@@ -419,12 +422,10 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
     Snapshot {
         status: s.status.label(),
         target: s.target_window_title.clone().unwrap_or_else(|| "(none)".into()),
-        preview: if s.config.capture.show_preview {
-            format!("{}x{} seq={} {}", s.preview.width, s.preview.height, s.preview.sequence, s.preview.path.as_deref().unwrap_or(""))
-        } else {
-            "(preview off)".into()
-        },
-        show_preview: s.config.capture.show_preview,
+        preview_sequence: s.preview.sequence,
+        preview_width: s.preview.width,
+        preview_height: s.preview.height,
+        preview_rgba: s.preview.rgba.clone(),
         ocr_text: if s.latest_ocr_text.is_empty() {
             "(no OCR yet)".into()
         } else {

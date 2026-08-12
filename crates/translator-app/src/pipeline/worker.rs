@@ -53,7 +53,6 @@ pub(crate) struct PendingPage {
 pub(crate) struct Pipeline {
     pub state: SharedState,
     pub session: CaptureSession,
-    pub show_preview: bool,
     pub gate: StabilityGate,
     pub persist: BlockPersistenceFilter,
     pub engine: Option<OcrEngine>,
@@ -85,7 +84,6 @@ pub fn spawn_pipeline(state: SharedState, rx: CmdRx) -> std::thread::JoinHandle<
 
 impl Pipeline {
     fn new(state: SharedState) -> Self {
-        let show_preview = state.read().config.capture.show_preview;
         let ocr_cfg = state.read().config.ocr.clone();
         let ocr_tier = ocr_cfg.model_tier;
         let client = TranslateClient::new(state.read().config.api.clone());
@@ -104,7 +102,6 @@ impl Pipeline {
         let mut pipeline = Self {
             state,
             session: CaptureSession::new(),
-            show_preview,
             gate: StabilityGate::from_config(&ocr_cfg),
             persist: BlockPersistenceFilter::from_config(&ocr_cfg),
             engine: None,
@@ -190,17 +187,6 @@ impl Pipeline {
             }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg),
             PipelineCommand::StopCapture => self.stop_capture(),
-            PipelineCommand::StartForeground => {
-                let interval = self.state.read().config.capture.min_interval_ms;
-                self.cancel_inflight();
-                match self.session.start_foreground(interval) {
-                    Ok(()) => self.on_capture_started(),
-                    Err(e) => {
-                        error!(error = %e, "start foreground capture failed");
-                        self.state.write().set_error(e.to_string());
-                    }
-                }
-            }
             PipelineCommand::StartCapture { hwnd, title } => {
                 let interval = self.state.read().config.capture.min_interval_ms;
                 self.cancel_inflight();
@@ -213,11 +199,6 @@ impl Pipeline {
                 }
             }
             PipelineCommand::ManualCapture => self.manual_capture(),
-            PipelineCommand::SetShowPreview(v) => {
-                self.show_preview = v;
-                self.state.write().config.capture.show_preview = v;
-                let _ = self.state.read().config.save_default_path();
-            }
             PipelineCommand::ResetConversation => {
                 self.conversation.clear();
                 self.last_translated_fp = None;

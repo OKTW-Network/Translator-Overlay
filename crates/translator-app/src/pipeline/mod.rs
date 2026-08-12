@@ -17,11 +17,9 @@ pub enum PipelineCommand {
         hwnd: isize,
         title: String,
     },
-    StartForeground,
     StopCapture,
     /// Grab one frame and OCR + translate immediately (bypass stability wait).
     ManualCapture,
-    SetShowPreview(bool),
     /// Drop LLM conversation history (keeps OCR models).
     ResetConversation,
     /// Apply a full config snapshot (saved from the settings UI).

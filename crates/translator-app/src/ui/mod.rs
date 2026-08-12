@@ -7,6 +7,7 @@ mod page_api;
 mod page_ocr;
 mod page_overlay;
 mod page_translation;
+mod preview;
 mod shared;
 
 use std::time::Duration;

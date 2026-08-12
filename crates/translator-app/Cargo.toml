@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
+bytes = "1.12.1"
 parking_lot = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -16,7 +17,8 @@ translator-ocr = { path = "../translator-ocr" }
 translator-overlay = { path = "../translator-overlay" }
 translator-translate = { path = "../translator-translate" }
 windows = { workspace = true, features = ["Win32_UI_HiDpi"] }
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", version = "0.100.0" }
+windows-canvas = { git = "https://github.com/microsoft/windows-rs", rev = "785a0e27", version = "0.100.0" }
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "785a0e27", version = "0.100.0", features = ["canvas"] }
 
 [build-dependencies]
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", version = "0.100.0" }
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "785a0e27", version = "0.100.0" }

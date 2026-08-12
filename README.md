@@ -68,8 +68,8 @@ cargo build --release -p translator-app
 3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
 4. **Overlay**：文字色、背景色（ARGB）
 5. **Dashboard**：
-   - 選視窗後 **Start** 連續擷取
-   - **Manual** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
+   - 選視窗後 **Start** 連續擷取（畫面上直接顯示擷取預覽）
+   - **Once** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
    - 翻譯進行中可取消；失敗可 **Retry**
    - 可重置對話歷史
 
@@ -114,7 +114,6 @@ enabled = true
 
 [capture]
 min_interval_ms = 300
-show_preview = false
 
 [overlay]
 # ARGB hex: 0xAARRGGBB

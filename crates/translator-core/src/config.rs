@@ -392,15 +392,11 @@ impl OcrConfig {
 #[serde(default)]
 pub struct CaptureConfig {
     pub min_interval_ms: u64,
-    pub show_preview: bool,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self {
-            min_interval_ms: 250,
-            show_preview: false,
-        }
+        Self { min_interval_ms: 250 }
     }
 }
 

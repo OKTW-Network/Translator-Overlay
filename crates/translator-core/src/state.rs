@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -69,13 +70,14 @@ pub struct HistoryEntry {
     pub blocks: Vec<TranslatedBlock>,
 }
 
-/// Lightweight capture preview metadata for the control UI.
+/// Capture thumbnail shared with the control UI.
 #[derive(Debug, Clone, Default)]
 pub struct PreviewInfo {
     pub width: u32,
     pub height: u32,
     pub sequence: u64,
-    pub path: Option<String>,
+    /// Tightly packed RGBA8 (`width * height * 4`).
+    pub rgba: Option<Bytes>,
 }
 
 /// Mutable runtime state shared between UI and workers.

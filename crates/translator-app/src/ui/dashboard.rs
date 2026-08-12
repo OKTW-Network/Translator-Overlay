@@ -10,6 +10,7 @@ use crate::{
     pipeline::PipelineCommand,
     ui::{
         chrome::{app_status_strip, page_header, status_infobar},
+        preview::capture_preview,
         shared::{Snapshot, UiCx, UiShared},
     },
 };
@@ -23,7 +24,6 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
     } else {
         "Start continuous capture of the selected window"
     };
-    let show_preview = snap.show_preview;
     let in_flight = snap.translate_in_flight;
     let can_retry = snap.can_retry;
 
@@ -90,12 +90,6 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .with_key("window-picker-row")
         },
         hstack((
-            button("Foreground")
-                .tooltip("Capture the window that currently has focus")
-                .on_click({
-                    let cx = cx.clone();
-                    move || cx.send_cmd(PipelineCommand::StartForeground)
-                }),
             button(start_label).tooltip(start_tip).on_click({
                 let cx = cx.clone();
                 move || {
@@ -117,38 +111,12 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 let cx = cx.clone();
                 move || cx.send_cmd(PipelineCommand::ManualCapture)
             }),
-        ))
-        .spacing(8.0),
-        hstack((
-            button(if show_preview { "Preview on" } else { "Preview off" })
-                .tooltip(if show_preview {
-                    "Turn off preview image"
-                } else {
-                    "Turn on preview image"
-                })
-                .on_click({
-                    let cx = cx.clone();
-                    move || {
-                        let ui = cx.shared.lock();
-                        let next = !ui.state.read().config.capture.show_preview;
-                        let _ = ui.cmd_tx.send(PipelineCommand::SetShowPreview(next));
-                        drop(ui);
-                        cx.refresh();
-                    }
-                }),
             button("Clear chat")
                 .tooltip("Clear the translation model conversation history")
                 .on_click({
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::ResetConversation)
                 }),
-            button("Stop all").tooltip("Stop capture immediately").on_click({
-                let cx = cx.clone();
-                move || cx.send_cmd(PipelineCommand::StopCapture)
-            }),
-        ))
-        .spacing(8.0),
-        hstack((
             button("Cancel")
                 .tooltip(if in_flight {
                     "Cancel the translation in progress"
@@ -177,11 +145,13 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
         .foreground(ThemeRef::SecondaryText),
         text_block({
             let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
-            format!("Last OCR: {ocr_time}  ·  {} blocks  ·  Preview: {}", snap.last_ocr_block_count, snap.preview)
+            format!("Last OCR: {ocr_time}  ·  {} blocks", snap.last_ocr_block_count)
         })
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText),
         vstack((
+            text_block("Capture").semibold(),
+            capture_preview(snap.preview_sequence, snap.preview_width, snap.preview_height, snap.preview_rgba.as_ref(), bump),
             text_block({
                 let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
                 format!("OCR ({ocr_time})")
@@ -193,8 +163,10 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
             text_block("Recent").semibold(),
             text_block(snap.history_preview.clone()).wrap().selectable(),
         ))
-        .spacing(4.0),
+        .spacing(4.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch),
     ))
     .spacing(12.0)
+    .horizontal_alignment(HorizontalAlignment::Stretch)
     .into()
 }
