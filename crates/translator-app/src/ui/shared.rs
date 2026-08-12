@@ -55,7 +55,8 @@ pub struct UiShared {
     pub state: SharedState,
     pub cmd_tx: CmdTx,
     pub windows: Vec<WindowInfo>,
-    pub selected_idx: usize,
+    /// `None` until the user picks a window (ComboBox placeholder).
+    pub selected_idx: Option<usize>,
     /// Editable draft of settings (committed on Save).
     pub draft: AppConfig,
     pub settings_dirty: bool,
@@ -95,7 +96,7 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         state,
         cmd_tx,
         windows: list_windows().unwrap_or_default(),
-        selected_idx: 0,
+        selected_idx: None,
         draft,
         settings_dirty: false,
         temp_val: optional.temp_val,
@@ -447,10 +448,9 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         last_ocr_block_count: s.last_ocr_block_count,
         history_len: s.history.len(),
         history_preview,
-        selected_window_idx: if ui.windows.is_empty() {
-            -1
-        } else {
-            ui.selected_idx.min(ui.windows.len().saturating_sub(1)) as i32
+        selected_window_idx: match ui.selected_idx {
+            Some(i) if i < ui.windows.len() => i as i32,
+            _ => -1,
         },
         window_count: ui.windows.len(),
         window_labels: ui.windows.iter().map(|w| truncate(&w.title, 72)).collect(),

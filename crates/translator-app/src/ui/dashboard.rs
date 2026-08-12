@@ -21,11 +21,21 @@ use crate::{
 pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
+    let window_selected = snap.selected_window_idx;
+    let has_window = window_selected >= 0;
     let start_label = if snap.auto_running { "Stop" } else { "Start" };
     let start_tip = if snap.auto_running {
         "Stop continuous capture"
-    } else {
+    } else if has_window {
         "Start continuous capture of the selected window"
+    } else {
+        "Select a window first"
+    };
+    let start_enabled = snap.auto_running || has_window;
+    let once_tip = if snap.auto_running {
+        "Capture once and translate immediately"
+    } else {
+        "Start capture first"
     };
     let in_flight = snap.translate_in_flight;
     let can_retry = snap.can_retry;
@@ -37,7 +47,6 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
     } else {
         snap.window_labels.clone()
     };
-    let window_selected = if snap.window_count == 0 { -1 } else { snap.selected_window_idx };
 
     vstack((
         page_header("Dashboard", Some("Choose a window, capture text, and watch translations.")),
@@ -47,7 +56,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
             let mut picker = ComboBox::new(window_items)
                 .selected_index(window_selected)
                 .placeholder_text("Select window…")
-                .enabled(snap.window_count > 0)
+                .enabled(snap.window_count > 0 && !snap.auto_running)
                 .on_selection_changed({
                     let cx = cx.clone();
                     move |idx: i32| {
@@ -57,7 +66,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                         cx.with_mut(|ui| {
                             let i = idx as usize;
                             if i < ui.windows.len() {
-                                ui.selected_idx = i;
+                                ui.selected_idx = Some(i);
                             }
                         });
                     }
@@ -75,14 +84,19 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .min_width(40.0)
                 .min_height(36.0)
                 .vertical_alignment(VerticalAlignment::Center)
-                .tooltip("Refresh window list")
+                .tooltip(if snap.auto_running {
+                    "Stop capture to change window"
+                } else {
+                    "Refresh window list"
+                })
+                .enabled(!snap.auto_running)
                 .on_click({
                     let cx = cx.clone();
                     move || {
                         cx.with_mut(|ui| {
                             ui.windows = list_windows().unwrap_or_default();
-                            if ui.selected_idx >= ui.windows.len() && !ui.windows.is_empty() {
-                                ui.selected_idx = 0;
+                            if ui.selected_idx.is_some_and(|i| i >= ui.windows.len()) {
+                                ui.selected_idx = None;
                             }
                         });
                     }
@@ -93,24 +107,33 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .with_key("window-picker-row")
         },
         hstack((
-            button(start_label).tooltip(start_tip).on_click({
-                let cx = cx.clone();
-                move || {
-                    {
-                        let ui = cx.shared.lock();
-                        if ui.state.read().auto_running {
-                            let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
-                        } else if let Some(w) = ui.windows.get(ui.selected_idx).cloned() {
-                            let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
-                                hwnd: w.hwnd,
-                                title: w.title,
-                            });
-                        }
-                    }
-                    cx.refresh();
+            {
+                // Distinct keys remount so Accent style does not stick after Stop
+                // (`Button::accent()` cannot be cleared via Prop Unset).
+                let start_key = if snap.auto_running { "btn-stop" } else { "btn-start" };
+                let mut start = button(start_label).tooltip(start_tip).enabled(start_enabled).with_key(start_key);
+                if snap.auto_running {
+                    start = start.accent();
                 }
-            }),
-            button("Once").tooltip("Capture once and translate immediately").on_click({
+                start.on_click({
+                    let cx = cx.clone();
+                    move || {
+                        {
+                            let ui = cx.shared.lock();
+                            if ui.state.read().auto_running {
+                                let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+                            } else if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
+                                let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
+                                    hwnd: w.hwnd,
+                                    title: w.title,
+                                });
+                            }
+                        }
+                        cx.refresh();
+                    }
+                })
+            },
+            button("Once").tooltip(once_tip).enabled(snap.auto_running).on_click({
                 let cx = cx.clone();
                 move || cx.send_cmd(PipelineCommand::ManualCapture)
             }),
