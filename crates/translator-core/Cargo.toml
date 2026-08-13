@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
-bytes = "1.12.1"
+bytes = { workspace = true }
 chrono = { version = "0.4.45", features = ["serde"] }
 parking_lot = { workspace = true }
 serde = { workspace = true }

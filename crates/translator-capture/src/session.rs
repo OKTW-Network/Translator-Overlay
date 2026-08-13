@@ -1,14 +1,9 @@
-//! Free-threaded capture session that streams frames over a channel.
+//! Free-threaded capture session that publishes the latest frame.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, Sender, TryRecvError},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use tracing::{info, warn};
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
@@ -23,27 +18,56 @@ use windows_capture::{
 
 use crate::{CaptureError, CapturedFrame};
 
-/// Flags passed into the capture handler.
-#[derive(Clone)]
-struct HandlerFlags {
-    tx: Sender<CapturedFrame>,
-    sequence: Arc<AtomicU64>,
+/// Latest-wins slot: the capture thread overwrites; the pipeline takes the newest frame.
+struct SharedLatest {
+    slot: ArcSwapOption<CapturedFrame>,
+}
+
+impl SharedLatest {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            slot: ArcSwapOption::empty(),
+        })
+    }
+
+    fn publish(&self, frame: CapturedFrame) {
+        self.slot.store(Some(Arc::new(frame)));
+    }
+
+    fn latest(&self) -> Option<CapturedFrame> {
+        self.slot.load_full().map(|frame| (*frame).clone())
+    }
+}
+
+/// Copy tightly packed RGBA8 out of a mapped WGC buffer into owned [`Bytes`].
+///
+/// Mapped GPU memory cannot be retained. When the crate copies rows into `scratch`
+/// (padded pitch), that allocation is frozen into `Bytes` to avoid a second copy.
+fn pack_rgba(frame: &mut Frame<'_>, scratch: &mut Vec<u8>) -> Result<Bytes, CaptureError> {
+    let buffer = frame.buffer().map_err(|e| CaptureError::Frame(e.to_string()))?;
+    if buffer.has_padding() {
+        let n = buffer.as_nopadding_buffer(scratch).len();
+        scratch.truncate(n);
+        Ok(Bytes::from(std::mem::take(scratch)))
+    } else {
+        Ok(Bytes::copy_from_slice(buffer.as_nopadding_buffer(scratch)))
+    }
 }
 
 struct FrameHandler {
-    tx: Sender<CapturedFrame>,
-    sequence: Arc<AtomicU64>,
+    latest: Arc<SharedLatest>,
+    sequence: u64,
     scratch: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for FrameHandler {
     type Error = CaptureError;
-    type Flags = HandlerFlags;
+    type Flags = Arc<SharedLatest>;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
-            tx: ctx.flags.tx,
-            sequence: ctx.flags.sequence,
+            latest: ctx.flags,
+            sequence: 0,
             scratch: Vec::new(),
         })
     }
@@ -55,25 +79,9 @@ impl GraphicsCaptureApiHandler for FrameHandler {
             return Ok(());
         }
 
-        let buffer = frame.buffer().map_err(|e| CaptureError::Frame(e.to_string()))?;
-        let pixels = buffer.as_nopadding_buffer(&mut self.scratch);
-        let rgba = pixels.to_vec();
-
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let captured = CapturedFrame {
-            width,
-            height,
-            rgba,
-            sequence: seq,
-        };
-
-        // Drop frame if consumer is slow (keep only latest via try_send pattern
-        // using a bounded channel of 1 managed outside). Here we use unbounded
-        // but consumer drains and keeps latest.
-        if self.tx.send(captured).is_err() {
-            // Receiver dropped — stop capture on next iteration by erroring out.
-            return Err(CaptureError::Capture("frame receiver closed".into()));
-        }
+        let rgba = pack_rgba(frame, &mut self.scratch)?;
+        self.sequence += 1;
+        self.latest.publish(CapturedFrame::new(width, height, rgba, self.sequence));
         Ok(())
     }
 
@@ -83,15 +91,20 @@ impl GraphicsCaptureApiHandler for FrameHandler {
     }
 }
 
+struct CaptureTarget {
+    hwnd: isize,
+    title: String,
+}
+
+struct ActiveStream {
+    control: windows_capture::capture::CaptureControl<FrameHandler, CaptureError>,
+    latest: Arc<SharedLatest>,
+}
+
 /// Active capture session.
 pub struct CaptureSession {
-    control: Option<windows_capture::capture::CaptureControl<FrameHandler, CaptureError>>,
-    rx: Option<Receiver<CapturedFrame>>,
-    sequence: Arc<AtomicU64>,
-    pub target_title: Option<String>,
-    /// HWND of the capture target (for overlay tracking).
-    pub target_hwnd: Option<isize>,
-    pub running: bool,
+    stream: Option<ActiveStream>,
+    target: Option<CaptureTarget>,
 }
 
 impl Default for CaptureSession {
@@ -103,17 +116,21 @@ impl Default for CaptureSession {
 impl CaptureSession {
     pub fn new() -> Self {
         Self {
-            control: None,
-            rx: None,
-            sequence: Arc::new(AtomicU64::new(0)),
-            target_title: None,
-            target_hwnd: None,
-            running: false,
+            stream: None,
+            target: None,
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.running && self.control.as_ref().is_some_and(|c| !c.is_finished())
+        self.stream.as_ref().is_some_and(|s| !s.control.is_finished())
+    }
+
+    pub fn target_hwnd(&self) -> Option<isize> {
+        self.target.as_ref().map(|t| t.hwnd)
+    }
+
+    pub fn target_title(&self) -> Option<String> {
+        self.target.as_ref().map(|t| t.title.clone())
     }
 
     /// Start capturing a window by HWND.
@@ -121,15 +138,14 @@ impl CaptureSession {
         if self.is_running() {
             return Err(CaptureError::AlreadyRunning);
         }
+        self.stop_stream_inner(true);
 
         let window = Window::from_raw_hwnd(hwnd as *mut _);
         if !window.is_valid() {
             return Err(CaptureError::Window("invalid hwnd".into()));
         }
 
-        let (tx, rx) = mpsc::channel();
-        self.sequence.store(0, Ordering::Relaxed);
-
+        let latest = SharedLatest::new();
         let settings = Settings::new(
             window,
             CursorCaptureSettings::WithoutCursor,
@@ -138,20 +154,14 @@ impl CaptureSession {
             MinimumUpdateIntervalSettings::Custom(Duration::from_millis(min_interval_ms.max(50))),
             DirtyRegionSettings::Default,
             ColorFormat::Rgba8,
-            HandlerFlags {
-                tx,
-                sequence: Arc::clone(&self.sequence),
-            },
+            Arc::clone(&latest),
         );
 
         let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
-
-        self.control = Some(control);
-        self.rx = Some(rx);
-        self.target_title = Some(title.into());
-        self.target_hwnd = Some(hwnd);
-        self.running = true;
-        info!(title = ?self.target_title, hwnd, "capture started");
+        let title = title.into();
+        info!(%title, hwnd, "capture started");
+        self.stream = Some(ActiveStream { control, latest });
+        self.target = Some(CaptureTarget { hwnd, title });
         Ok(())
     }
 
@@ -163,7 +173,7 @@ impl CaptureSession {
         self.start_window(hwnd, title, min_interval_ms)
     }
 
-    /// Stop the capture stream but keep `target_hwnd` / `target_title` (overlay tracking).
+    /// Stop the capture stream but keep the target window (overlay tracking).
     pub fn stop_stream_keep_target(&mut self) {
         self.stop_stream_inner(true);
     }
@@ -174,60 +184,26 @@ impl CaptureSession {
     }
 
     fn stop_stream_inner(&mut self, keep_target: bool) {
-        if let Some(control) = self.control.take()
-            && let Err(e) = control.stop()
-        {
-            warn!(error = %e, "error stopping capture");
+        if let Some(stream) = self.stream.take() {
+            if let Err(e) = stream.control.stop() {
+                warn!(error = %e, "error stopping capture");
+            }
+            info!(keep_target, "capture stopped");
         }
-        self.rx = None;
-        self.running = false;
         if !keep_target {
-            self.target_hwnd = None;
-            self.target_title = None;
+            self.target = None;
         }
-        info!(keep_target, "capture stopped");
     }
 
-    /// Drain the channel and return the latest frame, if any.
-    ///
-    /// Frames are cropped to the **client area** (no title bar / window border).
-    pub fn take_latest_frame(&mut self) -> Option<CapturedFrame> {
-        let rx = self.rx.as_ref()?;
-        let mut latest = None;
-        loop {
-            match rx.try_recv() {
-                Ok(frame) => latest = Some(frame),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.running = false;
-                    break;
-                }
-            }
-        }
-        latest.map(|f| self.crop_to_client(f))
-    }
-
-    /// Blocking wait for the next frame with timeout.
-    ///
-    /// Frames are cropped to the client area.
-    pub fn recv_frame_timeout(&mut self, timeout: Duration) -> Option<CapturedFrame> {
-        let rx = self.rx.as_ref()?;
-        match rx.recv_timeout(timeout) {
-            Ok(frame) => {
-                // Drain extras, keep newest.
-                let mut latest = frame;
-                while let Ok(f) = rx.try_recv() {
-                    latest = f;
-                }
-                Some(self.crop_to_client(latest))
-            }
-            Err(_) => None,
-        }
+    /// Latest published frame, cropped to the client area. Does not consume the slot.
+    pub fn latest_frame(&self) -> Option<CapturedFrame> {
+        let frame = self.stream.as_ref()?.latest.latest()?;
+        Some(self.crop_to_client(frame))
     }
 
     fn crop_to_client(&self, frame: CapturedFrame) -> CapturedFrame {
-        match self.target_hwnd {
-            Some(hwnd) => crate::crop_frame_to_client(hwnd, frame),
+        match self.target_hwnd() {
+            Some(hwnd) => crate::client_area::crop_frame_to_client(hwnd, frame),
             None => frame,
         }
     }
@@ -236,5 +212,26 @@ impl CaptureSession {
 impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(seq: u64) -> CapturedFrame {
+        CapturedFrame::new(1, 1, Bytes::from_static(&[1, 2, 3, 4]), seq)
+    }
+
+    #[test]
+    fn latest_overwrites_unread() {
+        let slot = SharedLatest::new();
+        slot.publish(frame(1));
+        slot.publish(frame(2));
+        let got = slot.latest().expect("frame");
+        assert_eq!(got.sequence, 2);
+        assert_eq!(slot.latest().expect("still there").sequence, 2);
+        slot.publish(frame(3));
+        assert_eq!(slot.latest().expect("replaced").sequence, 3);
     }
 }

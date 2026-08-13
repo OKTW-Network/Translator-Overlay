@@ -1,6 +1,5 @@
 //! Config apply and OCR engine load.
 
-use bytes::Bytes;
 use tracing::{error, info};
 use translator_capture::CapturedFrame;
 use translator_core::{AppConfig, OcrConfig};
@@ -80,7 +79,7 @@ impl Pipeline {
         s.preview.width = frame.width;
         s.preview.height = frame.height;
         s.preview.sequence = frame.sequence;
-        s.preview.rgba = Some(Bytes::copy_from_slice(&frame.rgba));
+        s.preview.rgba = Some(frame.rgba.clone());
     }
 }
 

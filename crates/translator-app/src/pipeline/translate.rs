@@ -1,5 +1,7 @@
 //! Translate job lifecycle (start, finish, apply to overlay / state).
 
+use std::sync::Arc;
+
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -7,7 +9,10 @@ use translator_core::{PipelineStatus, TranslatedBlock};
 use translator_overlay::OverlayController;
 use translator_translate::{TranslateError, blocks_to_translated_text, merge_translations};
 
-use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobResult};
+use crate::pipeline::{
+    wake::NotifyOnDrop,
+    worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobResult},
+};
 
 impl Pipeline {
     pub(crate) fn start_translate(&mut self, page: PendingPage, force: bool) {
@@ -69,6 +74,7 @@ impl Pipeline {
         let cancel = CancellationToken::new();
         let cancel_job = cancel.clone();
         let client_clone = self.client.clone();
+        let wake = Arc::clone(&self.wake);
         let (tx, rx) = oneshot::channel();
 
         {
@@ -80,6 +86,7 @@ impl Pipeline {
         }
 
         self.rt.spawn(async move {
+            let _notify = NotifyOnDrop(wake);
             let result = client_clone.chat_completions_with_retry(&messages, &cancel_job).await;
             let _ = tx.send(TranslateJobResult {
                 result,

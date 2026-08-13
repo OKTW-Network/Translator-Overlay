@@ -101,6 +101,24 @@ impl Pipeline {
         self.clear_stale_overlay("raw OCR empty grace elapsed (no new frames)");
     }
 
+    /// Expire sticky captions when remap has been empty past grace (no new OCR needed).
+    pub(crate) fn maybe_expire_remap_miss(&mut self) {
+        let Some(since) = self.remap_miss_since else {
+            return;
+        };
+        if since.elapsed() < self.raw_empty_grace() {
+            return;
+        }
+        self.remap_miss_since = None;
+        self.clear_translated_captions_only("sticky remap empty past grace (layout gone)");
+    }
+
+    /// Run pending overlay expiry. Call every capture interval, including skipped OCR.
+    pub(crate) fn expire_pending(&mut self) {
+        self.maybe_expire_raw_empty();
+        self.maybe_expire_remap_miss();
+    }
+
     pub(crate) fn run_ocr_auto(&mut self, frame: &CapturedFrame) {
         {
             let mut s = self.state.write();
@@ -300,14 +318,8 @@ impl Pipeline {
 
         if remapped.is_empty() {
             if had_translated {
-                let grace = self.raw_empty_grace();
-                let since = *self.remap_miss_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= grace {
-                    self.remap_miss_since = None;
-                    // Captions only — keep gate/persist/OCR so a new page mid-settle
-                    // does not pay a full stability restart.
-                    self.clear_translated_captions_only("sticky remap empty past grace (layout gone)");
-                }
+                let _ = self.remap_miss_since.get_or_insert_with(Instant::now);
+                self.maybe_expire_remap_miss();
             }
             // Keep last captions as-is during short thrash / partial miss.
             return;

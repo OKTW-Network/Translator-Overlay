@@ -4,11 +4,9 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-anyhow = { workspace = true }
-image = { workspace = true }
+arc-swap = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
-translator-core = { path = "../translator-core" }
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm"] }
 windows-capture = "2.0.0"

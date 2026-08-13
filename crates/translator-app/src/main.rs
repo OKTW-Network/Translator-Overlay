@@ -42,8 +42,7 @@ fn main() {
     }
 
     let state: SharedState = Arc::new(RwLock::new(AppState::new(config)));
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-    let _pipeline = spawn_pipeline(state.clone(), cmd_rx);
+    let (_pipeline, cmd_tx) = spawn_pipeline(state.clone());
 
     APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
 

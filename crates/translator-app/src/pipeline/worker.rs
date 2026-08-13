@@ -9,17 +9,31 @@ use parking_lot::RwLock;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use translator_capture::{CaptureSession, CapturedFrame};
+use translator_capture::CaptureSession;
 use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
 use translator_ocr::{BlockPersistenceFilter, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::OverlayController;
 use translator_translate::{Conversation, TranslateClient, TranslateError};
 
-use crate::pipeline::{PipelineCommand, config_apply::load_engine};
+use crate::pipeline::{PipelineCommand, config_apply::load_engine, wake::Wake};
 
 pub type SharedState = Arc<RwLock<AppState>>;
-pub type CmdTx = std::sync::mpsc::Sender<PipelineCommand>;
 pub type CmdRx = std::sync::mpsc::Receiver<PipelineCommand>;
+
+/// UI → worker command sender. Wakes the pipeline thread after each send.
+#[derive(Clone, Debug)]
+pub struct CmdTx {
+    tx: std::sync::mpsc::Sender<PipelineCommand>,
+    wake: Arc<Wake>,
+}
+
+impl CmdTx {
+    pub fn send(&self, cmd: PipelineCommand) -> Result<(), std::sync::mpsc::SendError<PipelineCommand>> {
+        self.tx.send(cmd)?;
+        self.wake.notify();
+        Ok(())
+    }
+}
 
 /// Result of a background translate HTTP job.
 pub(crate) struct TranslateJobResult {
@@ -68,22 +82,27 @@ pub(crate) struct Pipeline {
     pub raw_content_since: Option<Instant>,
     /// Sticky remap failed while captions still present.
     pub remap_miss_since: Option<Instant>,
-    /// Last WGC frame (static windows often stop delivering samples).
-    pub last_frame: Option<CapturedFrame>,
-    pub last_ocr_at: Option<Instant>,
     pub overlay: Option<OverlayController>,
     pub rt: tokio::runtime::Runtime,
+    pub(crate) wake: Arc<Wake>,
 }
 
-pub fn spawn_pipeline(state: SharedState, rx: CmdRx) -> std::thread::JoinHandle<()> {
-    std::thread::Builder::new()
+pub fn spawn_pipeline(state: SharedState) -> (std::thread::JoinHandle<()>, CmdTx) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wake = Wake::new();
+    let cmd_tx = CmdTx {
+        tx,
+        wake: Arc::clone(&wake),
+    };
+    let handle = std::thread::Builder::new()
         .name("pipeline".into())
-        .spawn(move || Pipeline::new(state).run(rx))
-        .expect("spawn pipeline thread")
+        .spawn(move || Pipeline::new(state, wake).run(rx))
+        .expect("spawn pipeline thread");
+    (handle, cmd_tx)
 }
 
 impl Pipeline {
-    fn new(state: SharedState) -> Self {
+    fn new(state: SharedState, wake: Arc<Wake>) -> Self {
         let ocr_cfg = state.read().config.ocr.clone();
         let ocr_tier = ocr_cfg.model_tier;
         let client = TranslateClient::new(state.read().config.api.clone());
@@ -114,10 +133,9 @@ impl Pipeline {
             raw_empty_since: None,
             raw_content_since: None,
             remap_miss_since: None,
-            last_frame: None,
-            last_ocr_at: None,
             overlay,
             rt,
+            wake,
         };
 
         // Load OCR engine on start (oar-ocr may auto-download missing models).
@@ -142,8 +160,18 @@ impl Pipeline {
             }
 
             self.poll_translate();
-            self.tick_capture();
-            std::thread::sleep(Duration::from_millis(50));
+            self.drive_capture();
+            let wait = self.next_wait();
+            self.wake.wait(wait);
+        }
+    }
+
+    fn next_wait(&self) -> Option<Duration> {
+        if self.session.is_running() && self.inflight.is_none() {
+            let ms = self.state.read().config.capture.min_interval_ms.max(50);
+            Some(Duration::from_millis(ms))
+        } else {
+            None
         }
     }
 
@@ -223,14 +251,14 @@ impl Pipeline {
         self.reset_ocr_session(true);
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.clear();
-            if let Some(hwnd) = self.session.target_hwnd {
+            if let Some(hwnd) = self.session.target_hwnd() {
                 let _ = o.attach(hwnd);
             }
         }
         let mut s = self.state.write();
         s.auto_running = true;
-        s.target_window_title = self.session.target_title.clone();
-        s.target_hwnd = self.session.target_hwnd;
+        s.target_window_title = self.session.target_title();
+        s.target_hwnd = self.session.target_hwnd();
         s.translate_in_flight = false;
         s.last_error = None;
         s.status = PipelineStatus::Capturing;
@@ -251,7 +279,7 @@ impl Pipeline {
         s.status = PipelineStatus::Idle;
     }
 
-    /// Reset gate / timers / last frame / captions. Optionally clear LLM conversation.
+    /// Reset gate / timers / captions. Optionally clear LLM conversation.
     fn reset_ocr_session(&mut self, clear_conversation: bool) {
         self.gate.reset_all();
         self.persist.reset();
@@ -263,8 +291,6 @@ impl Pipeline {
         self.raw_empty_since = None;
         self.raw_content_since = None;
         self.remap_miss_since = None;
-        self.last_frame = None;
-        self.last_ocr_at = None;
         // Drop OCR + caption state so sticky remap cannot resurrect a prior session.
         let mut s = self.state.write();
         s.latest_ocr_blocks.clear();
@@ -284,71 +310,22 @@ impl Pipeline {
             return;
         }
 
-        // One-shot: attach overlay to the window we are about to capture.
-        let one_shot = !self.session.is_running();
-        let frame = if one_shot {
-            let interval = self.state.read().config.capture.min_interval_ms;
-            if let Err(e) = self.session.start_foreground(interval) {
-                self.state.write().set_error(e.to_string());
-                return;
+        match self.session.latest_frame() {
+            Some(frame) => {
+                self.update_preview(&frame);
+                self.run_ocr_manual(&frame);
             }
-            if let Some(o) = self.overlay.as_ref()
-                && let Some(hwnd) = self.session.target_hwnd
-            {
-                let _ = o.attach(hwnd);
-            }
-            {
-                let mut s = self.state.write();
-                s.target_window_title = self.session.target_title.clone();
-                s.target_hwnd = self.session.target_hwnd;
-            }
-            let f = self.session.recv_frame_timeout(Duration::from_secs(2));
-            // Keep target for overlay; stop only the capture stream.
-            self.session.stop_stream_keep_target();
-            f
-        } else {
-            self.session
-                .take_latest_frame()
-                .or_else(|| self.session.recv_frame_timeout(Duration::from_millis(500)))
-        };
-
-        if let Some(frame) = frame {
-            self.update_preview(&frame);
-            self.run_ocr_manual(&frame);
-        } else {
-            self.state.write().set_error("manual capture timeout");
+            None => self.state.write().set_error("no capture frame"),
         }
     }
 
-    fn tick_capture(&mut self) {
-        // Capture + OCR while not translating (OCR stays off the UI thread).
+    fn drive_capture(&mut self) {
         if !self.session.is_running() || self.inflight.is_some() {
             return;
         }
 
-        let interval_ms = self.state.read().config.capture.min_interval_ms.max(50);
-        let stale_due = self
-            .last_ocr_at
-            .map(|t| t.elapsed() >= Duration::from_millis(interval_ms))
-            .unwrap_or(true);
-
-        // New WGC frames always OCR immediately. Fully static windows often
-        // stop delivering frames entirely — re-OCR the last sample on the
-        // capture interval so block persistence + stability still advance
-        // and translation can fire without waiting for a screen change.
-        let frame_for_ocr = match self.session.take_latest_frame() {
-            Some(frame) => {
-                self.last_frame = Some(frame.clone());
-                Some(frame)
-            }
-            None if stale_due => self.last_frame.clone(),
-            None => None,
-        };
-
-        if let Some(frame) = frame_for_ocr {
-            self.last_ocr_at = Some(Instant::now());
+        if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
-
             if self.engine.is_none() {
                 let mut s = self.state.write();
                 if !matches!(
@@ -364,10 +341,8 @@ impl Pipeline {
             } else {
                 self.run_ocr_auto(&frame);
             }
-        } else {
-            // Between OCR ticks: still expire captions after raw-empty grace
-            // so blank screens do not keep the last translation forever.
-            self.maybe_expire_raw_empty();
         }
+
+        self.expire_pending();
     }
 }
