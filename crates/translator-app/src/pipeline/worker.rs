@@ -214,6 +214,7 @@ impl Pipeline {
                 }
             }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg),
+            PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
             PipelineCommand::StopCapture => self.stop_capture(),
             PipelineCommand::StartCapture { hwnd, title } => {
                 let interval = self.state.read().config.capture.min_interval_ms;

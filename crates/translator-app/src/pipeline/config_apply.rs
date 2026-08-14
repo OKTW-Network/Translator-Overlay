@@ -8,6 +8,26 @@ use translator_ocr::{BlockPersistenceFilter, OcrEngine, StabilityGate, prepare_e
 use crate::pipeline::worker::Pipeline;
 
 impl Pipeline {
+    /// Persist only overlay / reader visibility on the live config.
+    pub(crate) fn set_overlay_display(&mut self, enabled: bool, reader_enabled: bool) {
+        let overlay = {
+            let mut s = self.state.write();
+            s.config.overlay.enabled = enabled;
+            s.config.overlay.reader_enabled = reader_enabled;
+            s.config.overlay.clone()
+        };
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.update_config(overlay);
+        }
+        let save = self.state.read().config.clone();
+        if let Err(e) = save.save_default_path() {
+            error!(error = %e, "failed to save overlay display flags");
+            self.state.write().set_error(format!("save config: {e}"));
+            return;
+        }
+        info!(enabled, reader_enabled, "overlay display updated");
+    }
+
     pub(crate) fn apply_config(&mut self, cfg: AppConfig) {
         // Model tier change requires a full engine reload (new ONNX weights).
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier;

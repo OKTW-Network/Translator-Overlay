@@ -5,8 +5,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use translator_capture::list_windows;
 use windows_reactor::{
-    ComboBox, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, StackPanel, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
-    VerticalAlignment, button, hstack, text_block, vstack,
+    ComboBox, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, StackPanel, TextStyleExt, ThemeRef, Thickness, ToggleSwitch, TooltipExt,
+    Updater, VerticalAlignment, button, hstack, text_block, vstack,
 };
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     ui::{
         chrome::{app_status_strip, page_header, status_infobar},
         preview::capture_preview,
-        shared::{Snapshot, UiCx, UiShared},
+        shared::{Snapshot, UiCx, UiShared, send_overlay_display},
     },
 };
 
@@ -163,6 +163,40 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 }),
         ))
         .spacing(8.0),
+        {
+            let overlay_toggle = dashboard_toggle(snap.overlay_enabled, {
+                let cx = cx.clone();
+                move |on| {
+                    cx.with_mut(|ui| {
+                        if ui.draft.overlay.enabled != on {
+                            let reader = ui.draft.overlay.reader_enabled;
+                            send_overlay_display(ui, on, reader);
+                        }
+                    });
+                }
+            });
+            let reader_toggle = dashboard_toggle(snap.reader_enabled, {
+                let cx = cx.clone();
+                move |on| {
+                    cx.with_mut(|ui| {
+                        if ui.draft.overlay.reader_enabled != on {
+                            let enabled = ui.draft.overlay.enabled;
+                            send_overlay_display(ui, enabled, on);
+                        }
+                    });
+                }
+            });
+            hstack((
+                text_block("Overlay").font_size(12.0).vertical_alignment(VerticalAlignment::Center),
+                overlay_toggle,
+                text_block("Translation window")
+                    .font_size(12.0)
+                    .vertical_alignment(VerticalAlignment::Center),
+                reader_toggle,
+            ))
+            .spacing(8.0)
+            .with_key("display-toggles")
+        },
         text_block(format!(
             "Model {}  ·  {} → {}  ·  OCR {}  ·  frames {}  ·  history {}",
             snap.model, snap.source_lang, snap.target_lang, snap.tier, snap.frame_count, snap.history_len
@@ -194,4 +228,13 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
     ))
     .spacing(12.0)
     .horizontal_alignment(HorizontalAlignment::Stretch)
+}
+
+fn dashboard_toggle(is_on: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
+    let mut sw = ToggleSwitch::new(is_on).on_toggled(on_toggled);
+    sw.modifiers.width = Some(40.0);
+    sw.modifiers.min_width = Some(40.0);
+    sw.modifiers.max_width = Some(44.0);
+    sw.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+    sw
 }

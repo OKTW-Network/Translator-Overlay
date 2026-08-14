@@ -403,6 +403,12 @@ impl Default for CaptureConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayConfig {
+    /// Draw the click-through overlay on the capture target.
+    pub enabled: bool,
+    /// Show the independent always-on-top translation window.
+    pub reader_enabled: bool,
+    /// Translation-window font size in pixels (Segoe UI). Clamped when applied.
+    pub reader_font_px: u32,
     /// Text colour including alpha (`0xAARRGGBB` in config.toml).
     #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
     pub text_color_argb: u32,
@@ -414,9 +420,26 @@ pub struct OverlayConfig {
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
+            reader_enabled: true,
+            reader_font_px: READER_FONT_PX_DEFAULT,
             text_color_argb: 0xFFFF_FFFF,
             background_color_argb: 0xC800_0000,
         }
+    }
+}
+
+/// Smallest translation-window font (CreateFont cell height).
+pub const READER_FONT_PX_MIN: u32 = 8;
+/// Largest translation-window font.
+pub const READER_FONT_PX_MAX: u32 = 72;
+/// Default translation-window font.
+pub const READER_FONT_PX_DEFAULT: u32 = 20;
+
+impl OverlayConfig {
+    /// Font size used by the translation window (clamped).
+    pub fn reader_font_px_clamped(&self) -> i32 {
+        self.reader_font_px.clamp(READER_FONT_PX_MIN, READER_FONT_PX_MAX) as i32
     }
 }
 
@@ -580,5 +603,46 @@ target_lang = "ja"
         assert_eq!(config.api.model, "my-model");
         assert_eq!(config.translation.target_lang, "ja");
         assert_eq!(config.ocr.model_tier, ModelTier::Small);
+        assert!(config.overlay.enabled);
+        assert!(config.overlay.reader_enabled);
+    }
+
+    #[test]
+    fn overlay_display_defaults_on() {
+        let overlay = OverlayConfig::default();
+        assert!(overlay.enabled);
+        assert!(overlay.reader_enabled);
+        assert_eq!(overlay.reader_font_px, READER_FONT_PX_DEFAULT);
+        assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_DEFAULT as i32);
+    }
+
+    #[test]
+    fn overlay_reader_font_clamps() {
+        let mut overlay = OverlayConfig::default();
+        overlay.reader_font_px = 0;
+        assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_MIN as i32);
+        overlay.reader_font_px = 200;
+        assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_MAX as i32);
+    }
+
+    #[test]
+    fn overlay_display_flags_roundtrip_and_partial() {
+        let text = r#"
+[overlay]
+enabled = false
+reader_enabled = false
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
+        assert!(!config.overlay.enabled);
+        assert!(!config.overlay.reader_enabled);
+
+        let partial = r#"
+[overlay]
+text_color_argb = "0xFFFFFFFF"
+"#;
+        let config: AppConfig = toml::from_str(partial).unwrap();
+        assert!(config.overlay.enabled);
+        assert!(config.overlay.reader_enabled);
+        assert_eq!(config.overlay.reader_font_px, READER_FONT_PX_DEFAULT);
     }
 }

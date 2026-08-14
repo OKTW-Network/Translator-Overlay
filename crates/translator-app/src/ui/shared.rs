@@ -9,6 +9,13 @@ use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
 
+/// Apply overlay / reader visibility immediately (live config + disk), and keep the draft in sync.
+pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bool) {
+    ui.draft.overlay.enabled = enabled;
+    ui.draft.overlay.reader_enabled = reader_enabled;
+    let _ = ui.cmd_tx.send(PipelineCommand::SetOverlayDisplay { enabled, reader_enabled });
+}
+
 /// Shared UI handle for event closures. Clone once per handler (cheap Arc bumps).
 #[derive(Clone)]
 pub struct UiCx {
@@ -354,6 +361,9 @@ pub struct Snapshot {
     pub top_p_enabled: bool,
     pub max_tokens_enabled: bool,
     pub reasoning_enabled: bool,
+    pub overlay_enabled: bool,
+    pub reader_enabled: bool,
+    pub reader_font_px: f64,
     pub text_argb_str: String,
     pub bg_argb_str: String,
     pub text_color_picker_open: bool,
@@ -475,6 +485,9 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         top_p_enabled: ui.top_p_enabled,
         max_tokens_enabled: ui.max_tokens_enabled,
         reasoning_enabled: ui.reasoning_enabled,
+        overlay_enabled: ui.draft.overlay.enabled,
+        reader_enabled: ui.draft.overlay.reader_enabled,
+        reader_font_px: ui.draft.overlay.reader_font_px as f64,
         text_argb_str: ui.text_argb_str.clone(),
         bg_argb_str: ui.bg_argb_str.clone(),
         text_color_picker_open: ui.text_color_picker_open,

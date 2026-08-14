@@ -10,7 +10,8 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（段落組裝）
 - **LLM 翻譯**：OpenAI 相容 Chat Completions（可接官方、代理或相容服務）
 - **對話上下文**：多輪歷史壓縮，維持用語一致
-- **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框
+- **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
+- **譯文懸浮窗**：無邊框半透明置頂視窗顯示最新譯文（拖曳移動、邊緣縮放），樣式與 overlay 相同，不跟隨遊戲焦點
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay 分頁，設定寫入 `config.toml`
 
 ## 系統需求
@@ -66,7 +67,7 @@ cargo build --release -p translator-app
 1. **API**：設定 `base_url`、`api_key`、`model`（預設 `https://api.openai.com/v1` + `gpt-4o-mini`）
 2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選 system prompt
 3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
-4. **Overlay**：文字色、背景色（ARGB）
+4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
 5. **Dashboard**：
    - 選視窗後 **Start** 連續擷取（畫面上直接顯示擷取預覽）
    - **Once** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
@@ -116,6 +117,9 @@ enabled = true
 min_interval_ms = 300
 
 [overlay]
+enabled = true          # in-place click-through overlay
+reader_enabled = true   # independent always-on-top translation window
+reader_font_px = 20     # translation-window font size
 # ARGB hex: 0xAARRGGBB
 text_color_argb = "0xFFFFFFFF"
 background_color_argb = "0xC8000000"

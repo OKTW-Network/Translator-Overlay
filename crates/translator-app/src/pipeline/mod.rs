@@ -25,6 +25,11 @@ pub enum PipelineCommand {
     ResetConversation,
     /// Apply a full config snapshot (saved from the settings UI).
     ApplyConfig(Box<AppConfig>),
+    /// Persist and apply overlay / reader visibility without saving the rest of the draft.
+    SetOverlayDisplay {
+        enabled: bool,
+        reader_enabled: bool,
+    },
     /// Cancel the in-flight translation request (if any).
     CancelTranslate,
     /// Re-run translation on the latest OCR blocks.

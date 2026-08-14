@@ -70,7 +70,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
         "api" => Some(("API", Some("Connect to an OpenAI-compatible translation API."))),
         "translation" => Some(("Translation", Some("Languages and translation context."))),
         "ocr" => Some(("OCR", Some("Text recognition and capture timing."))),
-        "overlay" => Some(("Overlay", Some("How the translation overlay looks."))),
+        "overlay" => Some(("Overlay", Some("Where and how translations are shown."))),
         _ => None,
     };
 
