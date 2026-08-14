@@ -246,12 +246,13 @@ impl Pipeline {
                 let mut s = self.state.write();
                 s.region_select_draft.clear();
             }
-            PipelineCommand::SetCaptureRegions { regions } => self.apply_ocr_regions(regions),
-            PipelineCommand::StartCapture { hwnd, title } => {
-                let prev = self.state.read().target_hwnd;
-                if prev.is_some() && prev != Some(hwnd) {
-                    self.clear_ocr_regions();
+            PipelineCommand::SetCaptureRegions { regions } => {
+                if let Some(o) = self.overlay.as_ref() {
+                    let _ = o.cancel_region_select();
                 }
+                self.apply_ocr_regions(regions);
+            }
+            PipelineCommand::StartCapture { hwnd, title } => {
                 let interval = self.state.read().config.capture.min_interval_ms;
                 self.cancel_inflight();
                 match self.session.start_window(hwnd, title, interval) {
@@ -362,7 +363,6 @@ impl Pipeline {
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.cancel_region_select();
         }
-        self.clear_ocr_regions();
         self.cancel_inflight();
         self.session.stop();
         self.reset_ocr_session(false);

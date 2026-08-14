@@ -465,18 +465,4 @@ impl Pipeline {
             let _ = o.clear();
         }
     }
-
-    pub(crate) fn clear_ocr_regions(&mut self) {
-        let had = !self.state.read().ocr_regions.is_empty() || self.state.read().region_select_active;
-        if !had {
-            return;
-        }
-        {
-            let mut s = self.state.write();
-            s.ocr_regions.clear();
-            s.region_select_draft.clear();
-            s.region_select_active = false;
-        }
-        self.on_regions_changed();
-    }
 }

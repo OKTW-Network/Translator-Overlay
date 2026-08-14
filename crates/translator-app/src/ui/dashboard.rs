@@ -65,8 +65,17 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                         }
                         cx.with_mut(|ui| {
                             let i = idx as usize;
-                            if i < ui.windows.len() {
-                                ui.selected_idx = Some(i);
+                            let Some(new_hwnd) = ui.windows.get(i).map(|w| w.hwnd) else {
+                                return;
+                            };
+                            let old_hwnd = ui.selected_idx.and_then(|j| ui.windows.get(j).map(|w| w.hwnd));
+                            ui.selected_idx = Some(i);
+                            let had_regions = {
+                                let s = ui.state.read();
+                                !s.ocr_regions.is_empty() || s.region_select_active
+                            };
+                            if old_hwnd != Some(new_hwnd) && had_regions {
+                                let _ = ui.cmd_tx.send(PipelineCommand::SetCaptureRegions { regions: Vec::new() });
                             }
                         });
                     }
