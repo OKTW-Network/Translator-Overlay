@@ -12,12 +12,12 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect,
-            HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST, MINMAXINFO,
-            RegisterClassExW, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, ULW_ALPHA,
-            UnregisterClassW, UpdateLayeredWindow, WM_CLOSE, WM_DESTROY, WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WNDCLASSEXW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW,
+            GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST,
+            MINMAXINFO, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, UnregisterClassW, UpdateLayeredWindow,
+            WM_CLOSE, WM_DESTROY, WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
         },
     },
     core::{PCWSTR, w},
@@ -35,7 +35,6 @@ const DEFAULT_W: i32 = 440;
 const DEFAULT_H: i32 = 200;
 const MIN_W: i32 = 160;
 const MIN_H: i32 = 80;
-const MARGIN: i32 = 24;
 const EDGE: i32 = 8;
 const TEXT_INSET: i32 = 12;
 
@@ -80,14 +79,15 @@ impl ReaderWindow {
             };
             let atom = RegisterClassExW(&wc);
 
-            let (x, y) = default_placement();
+            // CW_USEDEFAULT is ignored for WS_POPUP (the window lands at 0,0).
+            // Create overlapped so the window manager can cascade, then drop chrome.
             let hwnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 CLASS_NAME,
                 w!("Translation"),
-                WS_POPUP,
-                x,
-                y,
+                WS_OVERLAPPED,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
                 DEFAULT_W,
                 DEFAULT_H,
                 None,
@@ -96,6 +96,8 @@ impl ReaderWindow {
                 None,
             )
             .map_err(|e| OverlayError::Other(format!("CreateWindowExW(reader): {e}")))?;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as isize);
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
             let hdc_screen = GetDC(Some(hwnd));
             if hdc_screen.is_invalid() {
@@ -400,18 +402,6 @@ impl Drop for ReaderWindow {
     fn drop(&mut self) {
         self.teardown();
     }
-}
-
-fn default_placement() -> (i32, i32) {
-    unsafe {
-        let mut work = RECT::default();
-        if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some((&raw mut work).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok() {
-            let x = (work.right - DEFAULT_W - MARGIN).max(work.left);
-            let y = (work.bottom - DEFAULT_H - MARGIN).max(work.top);
-            return (x, y);
-        }
-    }
-    (CW_USEDEFAULT, 0)
 }
 
 unsafe extern "system" fn reader_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
