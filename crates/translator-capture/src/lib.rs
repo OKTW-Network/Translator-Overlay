@@ -1,6 +1,7 @@
 //! Window capture via Windows Graphics Capture API (`windows-capture`).
 
 mod client_area;
+mod resize_watch;
 mod session;
 
 use bytes::Bytes;

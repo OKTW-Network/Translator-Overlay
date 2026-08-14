@@ -436,6 +436,20 @@ mod tests {
     }
 
     #[test]
+    fn persistence_reset_drops_confirmed_tracks() {
+        let mut f = BlockPersistenceFilter::new(50, 300);
+        let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(f.filter(vec![block("Menu", 100.0, 200.0)]).len(), 1);
+
+        f.reset();
+        // Same text at a scaled position after a capture resize: must not emit
+        // the old-pixel box (or any box) until the track persists again.
+        let scaled = f.filter(vec![block("Menu", 150.0, 300.0)]);
+        assert!(scaled.is_empty(), "reset must drop confirmed tracks");
+    }
+
+    #[test]
     fn persistence_disabled_passthrough() {
         let mut f = BlockPersistenceFilter::with_max_unstable(0, 0, 0);
         let blocks = vec![block("now", 0.0, 0.0)];

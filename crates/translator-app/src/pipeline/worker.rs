@@ -408,6 +408,7 @@ impl Pipeline {
             return;
         }
 
+        self.session.sync_stream();
         match self.session.latest_frame() {
             Some(frame) => {
                 self.update_preview(&frame);
@@ -422,6 +423,7 @@ impl Pipeline {
             return;
         }
 
+        self.session.sync_stream();
         if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
             if self.engine.is_none() {

@@ -154,6 +154,13 @@ impl Pipeline {
         }
         debug!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
 
+        let content_resized = self.capture_content_resized(frame.width, frame.height);
+        if content_resized {
+            // Old tracks are in the previous pixel space; hysteresis would paint
+            // those boxes onto the new content size and freeze captions.
+            self.persist.reset();
+        }
+
         // Persistence keeps vanished text for a short grace (icons/jitter). That is
         // useful for the stability gate, but must NOT keep ghost text "alive" for the
         // gate after the screen is actually blank — otherwise captions stick forever
@@ -183,7 +190,11 @@ impl Pipeline {
         // Prefer durable (linger-filtered) blocks. If OCR never settles long enough
         // for persistence, after max_unstable force the latest raw reading through
         // so thrash still translates instead of spinning on Capturing forever.
-        let (blocks, forced_raw) = if !durable.is_empty() {
+        // After a capture-surface resize, persist was reset — use raw immediately
+        // so sticky remap can adopt boxes in the new pixel space.
+        let (blocks, forced_raw) = if content_resized {
+            (raw.clone(), false)
+        } else if !durable.is_empty() {
             (durable, false)
         } else if force_unstable {
             info!(elapsed_ms = content_elapsed.as_millis() as u64, raw = raw.len(), "OCR thrash — forcing raw blocks past persistence");
@@ -273,11 +284,7 @@ impl Pipeline {
             s.latest_ocr_text = text.to_string();
             return;
         }
-        let content_resized = self
-            .last_page
-            .as_ref()
-            .map(|p| p.content_width != frame_w || p.content_height != frame_h)
-            .unwrap_or(true);
+        let content_resized = self.capture_content_resized(frame_w, frame_h) || self.last_page.is_none();
         let remapped = {
             let s = self.state.read();
             remap_translations_to_ocr(&s.latest_translated_blocks, blocks, content_resized)
@@ -298,11 +305,7 @@ impl Pipeline {
 
     /// Sticky remap + delayed caption-only clear when nothing maps for a grace period.
     fn apply_sticky_overlay(&mut self, blocks: &[OcrBlock], text: &str, frame_w: u32, frame_h: u32) {
-        let content_resized = self
-            .last_page
-            .as_ref()
-            .map(|p| p.content_width != frame_w || p.content_height != frame_h)
-            .unwrap_or(true);
+        let content_resized = self.capture_content_resized(frame_w, frame_h) || self.last_page.is_none();
 
         let (had_translated, remapped, geometry_changed) = {
             let s = self.state.read();
@@ -337,7 +340,10 @@ impl Pipeline {
         self.remap_miss_since = None;
 
         // Unchanged geometry: skip set_blocks (avoids re-layout flicker).
-        if !geometry_changed && !content_resized {
+        // Also skip when only the capture size changed but boxes are still in
+        // the old pixel space — overlay host stretch keeps captions aligned
+        // until remap adopts new-space boxes (`content_resized` + new OCR).
+        if !geometry_changed {
             return;
         }
 
@@ -407,6 +413,12 @@ impl Pipeline {
         }
         // Manual always forces a new API call (user intent).
         self.start_translate(page, true);
+    }
+
+    fn capture_content_resized(&self, frame_w: u32, frame_h: u32) -> bool {
+        self.last_page
+            .as_ref()
+            .is_some_and(|p| p.content_width != frame_w || p.content_height != frame_h)
     }
 
     pub(crate) fn ocr_pixel_regions(&self, frame_w: u32, frame_h: u32) -> Vec<Rect> {

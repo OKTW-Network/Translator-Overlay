@@ -16,7 +16,7 @@ use windows_capture::{
     window::Window,
 };
 
-use crate::{CaptureError, CapturedFrame};
+use crate::{CaptureError, CapturedFrame, resize_watch::ResizeWatch};
 
 /// Latest-wins slot: the capture thread overwrites; the pipeline takes the newest frame.
 struct SharedLatest {
@@ -91,6 +91,7 @@ impl GraphicsCaptureApiHandler for FrameHandler {
     }
 }
 
+#[derive(Clone)]
 struct CaptureTarget {
     hwnd: isize,
     title: String,
@@ -105,6 +106,8 @@ struct ActiveStream {
 pub struct CaptureSession {
     stream: Option<ActiveStream>,
     target: Option<CaptureTarget>,
+    min_interval_ms: u64,
+    resize: ResizeWatch,
 }
 
 impl Default for CaptureSession {
@@ -118,6 +121,8 @@ impl CaptureSession {
         Self {
             stream: None,
             target: None,
+            min_interval_ms: 250,
+            resize: ResizeWatch::new(),
         }
     }
 
@@ -160,8 +165,10 @@ impl CaptureSession {
         let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
         let title = title.into();
         info!(%title, hwnd, "capture started");
+        self.min_interval_ms = min_interval_ms;
         self.stream = Some(ActiveStream { control, latest });
         self.target = Some(CaptureTarget { hwnd, title });
+        self.resize.set_target(hwnd);
         Ok(())
     }
 
@@ -192,7 +199,39 @@ impl CaptureSession {
         }
         if !keep_target {
             self.target = None;
+            self.resize.set_target(0);
         }
+    }
+
+    /// Recreate the WGC session after a target-window resize settles.
+    ///
+    /// Graphics Capture keeps the buffer layout from session start; a fresh
+    /// session matches a manual Stop + Start. Edge-drag waits for
+    /// `EVENT_SYSTEM_MOVESIZEEND`. Maximize / snap restart on the first
+    /// size-changing `EVENT_OBJECT_LOCATIONCHANGE`.
+    pub fn sync_stream(&mut self) -> bool {
+        if !self.is_running() || !self.resize.take_pending() {
+            return false;
+        }
+
+        match self.restart_stream() {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "failed to restart capture after target resize");
+                false
+            }
+        }
+    }
+
+    fn restart_stream(&mut self) -> Result<(), CaptureError> {
+        let target = self
+            .target
+            .clone()
+            .ok_or_else(|| CaptureError::Window("no capture target".into()))?;
+        let interval = self.min_interval_ms;
+        info!(hwnd = target.hwnd, "restarting capture after target resize");
+        self.stop_stream_inner(true);
+        self.start_window(target.hwnd, target.title, interval)
     }
 
     /// Latest published frame, cropped to the client area. Does not consume the slot.
