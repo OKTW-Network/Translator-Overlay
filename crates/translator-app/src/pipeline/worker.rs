@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 use translator_capture::CaptureSession;
 use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
 use translator_ocr::{BlockPersistenceFilter, OcrEngine, OcrFingerprint, StabilityGate};
-use translator_overlay::OverlayController;
+use translator_overlay::{OverlayController, OverlayEvent};
 use translator_translate::{Conversation, TranslateClient, TranslateError};
 
 use crate::pipeline::{PipelineCommand, config_apply::load_engine, wake::Wake};
@@ -159,6 +159,7 @@ impl Pipeline {
                 }
             }
 
+            self.poll_overlay_events();
             self.poll_translate();
             self.drive_capture();
             let wait = self.next_wait();
@@ -167,6 +168,10 @@ impl Pipeline {
     }
 
     fn next_wait(&self) -> Option<Duration> {
+        let selecting = self.state.read().region_select_active;
+        if selecting {
+            return Some(Duration::from_millis(33));
+        }
         if self.session.is_running() && self.inflight.is_none() {
             let ms = self.state.read().config.capture.min_interval_ms.max(50);
             Some(Duration::from_millis(ms))
@@ -216,7 +221,30 @@ impl Pipeline {
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg),
             PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
             PipelineCommand::StopCapture => self.stop_capture(),
+            PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
+            PipelineCommand::CancelRegionSelect => {
+                if let Some(o) = self.overlay.as_ref() {
+                    let _ = o.cancel_region_select();
+                }
+            }
+            PipelineCommand::ConfirmRegionSelect => {
+                if let Some(o) = self.overlay.as_ref() {
+                    let _ = o.confirm_region_select();
+                }
+            }
+            PipelineCommand::ClearRegionSelect => {
+                if let Some(o) = self.overlay.as_ref() {
+                    let _ = o.clear_region_select();
+                }
+                let mut s = self.state.write();
+                s.region_select_draft.clear();
+            }
+            PipelineCommand::SetCaptureRegions { regions } => self.apply_ocr_regions(regions),
             PipelineCommand::StartCapture { hwnd, title } => {
+                let prev = self.state.read().target_hwnd;
+                if prev.is_some() && prev != Some(hwnd) {
+                    self.clear_ocr_regions();
+                }
                 let interval = self.state.read().config.capture.min_interval_ms;
                 self.cancel_inflight();
                 match self.session.start_window(hwnd, title, interval) {
@@ -238,7 +266,7 @@ impl Pipeline {
         false
     }
 
-    fn cancel_inflight(&mut self) {
+    pub(crate) fn cancel_inflight(&mut self) {
         if let Some(job) = self.inflight.take() {
             job.cancel.cancel();
             // Drop the pending user turn so stop/shutdown mid-request does not
@@ -265,7 +293,62 @@ impl Pipeline {
         s.status = PipelineStatus::Capturing;
     }
 
+    fn begin_region_select(&mut self, hwnd: isize) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            self.state.write().set_error("overlay is not available".to_string());
+            return;
+        };
+        if let Err(e) = overlay.attach(hwnd) {
+            self.state.write().set_error(format!("region select: {e}"));
+            return;
+        }
+        let regions = self.state.read().ocr_regions.clone();
+        if let Err(e) = overlay.begin_region_select(regions.clone()) {
+            self.state.write().set_error(format!("region select: {e}"));
+            return;
+        }
+        let mut s = self.state.write();
+        if s.target_hwnd.is_none() {
+            s.target_hwnd = Some(hwnd);
+        }
+        s.region_select_active = true;
+        s.region_select_draft = regions;
+        info!("region picker started");
+    }
+
+    fn poll_overlay_events(&mut self) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return;
+        };
+        let mut events = Vec::new();
+        while let Some(ev) = overlay.try_recv_event() {
+            events.push(ev);
+        }
+        for ev in events {
+            match ev {
+                OverlayEvent::RegionsCommitted(regions) => {
+                    info!(count = regions.len(), "OCR regions committed");
+                    self.apply_ocr_regions(regions);
+                }
+                OverlayEvent::RegionSelectCancelled => {
+                    let mut s = self.state.write();
+                    s.region_select_active = false;
+                    s.region_select_draft.clear();
+                    info!("region picker cancelled");
+                }
+                OverlayEvent::RegionSelectUpdated(regions) => {
+                    let mut s = self.state.write();
+                    s.region_select_draft = regions;
+                }
+            }
+        }
+    }
+
     fn stop_capture(&mut self) {
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.cancel_region_select();
+        }
+        self.clear_ocr_regions();
         self.cancel_inflight();
         self.session.stop();
         self.reset_ocr_session(false);

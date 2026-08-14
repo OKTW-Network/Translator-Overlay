@@ -144,6 +144,32 @@ impl OcrEngine {
         Ok(blocks)
     }
 
+    /// Run OCR on each crop and offset boxes back into full-frame coordinates.
+    ///
+    /// Empty `regions` → whole frame (same as [`recognize_rgba`]). Line merge
+    /// stays per-crop so independent boxes do not glue together.
+    pub fn recognize_rgba_regions(&mut self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
+        if regions.is_empty() {
+            return self.recognize_rgba(width, height, rgba);
+        }
+
+        let mut all = Vec::new();
+        for region in regions {
+            let Some(crop) = crate::crop::crop_rgba(width, height, rgba, *region) else {
+                continue;
+            };
+            let ox = crop.x as f32;
+            let oy = crop.y as f32;
+            let mut blocks = self.recognize_rgba(crop.width, crop.height, &crop.rgba)?;
+            for block in &mut blocks {
+                block.bbox.x += ox;
+                block.bbox.y += oy;
+            }
+            all.extend(blocks);
+        }
+        Ok(reindex_ids(all))
+    }
+
     /// Run OCR on RGBA pixel buffer (e.g. capture frame).
     pub fn recognize_rgba(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<Vec<OcrBlock>, OcrError> {
         let expected = (width as usize)

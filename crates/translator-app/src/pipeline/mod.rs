@@ -34,5 +34,16 @@ pub enum PipelineCommand {
     CancelTranslate,
     /// Re-run translation on the latest OCR blocks.
     RetryTranslate,
+    /// Open the on-target region picker (`hwnd` is the capture / selected window).
+    BeginRegionSelect {
+        hwnd: isize,
+    },
+    CancelRegionSelect,
+    ConfirmRegionSelect,
+    ClearRegionSelect,
+    /// Replace session OCR crops (empty = whole window). Not persisted.
+    SetCaptureRegions {
+        regions: Vec<translator_core::NormRect>,
+    },
     Shutdown,
 }

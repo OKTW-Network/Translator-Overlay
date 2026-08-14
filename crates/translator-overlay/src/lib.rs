@@ -8,6 +8,7 @@
 mod draw;
 mod host;
 mod layout;
+mod picker;
 mod reader;
 mod text;
 
@@ -18,7 +19,7 @@ use std::{
 
 use thiserror::Error;
 use tracing::{error, info};
-use translator_core::{OverlayConfig, TranslatedBlock};
+use translator_core::{NormRect, OverlayConfig, TranslatedBlock};
 
 use crate::host::{OverlayCommand, OverlayHost};
 
@@ -35,6 +36,7 @@ pub enum OverlayError {
 /// Handle to a background overlay window thread.
 pub struct OverlayController {
     tx: Sender<OverlayCommand>,
+    event_rx: std::sync::mpsc::Receiver<OverlayEvent>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -42,11 +44,12 @@ impl OverlayController {
     /// Spawn the overlay host thread and create the layered window.
     pub fn spawn(config: OverlayConfig) -> Result<Self, OverlayError> {
         let (tx, rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
 
         let join = std::thread::Builder::new()
             .name("overlay".into())
-            .spawn(move || match OverlayHost::create(config) {
+            .spawn(move || match OverlayHost::create(config, event_tx) {
                 Ok(mut host) => {
                     let _ = ready_tx.send(Ok(()));
                     host.run(rx);
@@ -60,7 +63,11 @@ impl OverlayController {
         match ready_rx.recv() {
             Ok(Ok(())) => {
                 info!("overlay host ready");
-                Ok(Self { tx, join: Some(join) })
+                Ok(Self {
+                    tx,
+                    event_rx,
+                    join: Some(join),
+                })
             }
             Ok(Err(e)) => {
                 let _ = join.join();
@@ -104,6 +111,26 @@ impl OverlayController {
         self.send(OverlayCommand::UpdateConfig(config))
     }
 
+    pub fn begin_region_select(&self, regions: Vec<NormRect>) -> Result<(), OverlayError> {
+        self.send(OverlayCommand::BeginRegionSelect { regions })
+    }
+
+    pub fn cancel_region_select(&self) -> Result<(), OverlayError> {
+        self.send(OverlayCommand::CancelRegionSelect)
+    }
+
+    pub fn confirm_region_select(&self) -> Result<(), OverlayError> {
+        self.send(OverlayCommand::ConfirmRegionSelect)
+    }
+
+    pub fn clear_region_select(&self) -> Result<(), OverlayError> {
+        self.send(OverlayCommand::ClearRegionSelect)
+    }
+
+    pub fn try_recv_event(&self) -> Option<OverlayEvent> {
+        self.event_rx.try_recv().ok()
+    }
+
     /// Request shutdown (also called from `Drop`).
     pub fn shutdown(&mut self) {
         let _ = self.tx.send(OverlayCommand::Shutdown);
@@ -126,4 +153,7 @@ impl Drop for OverlayController {
 }
 
 // Re-export pure helpers for tests / callers.
-pub use crate::draw::{Rgba, SurfaceRect, SurfaceSize, argb_channels, map_rect_to_surface};
+pub use crate::{
+    draw::{Rgba, SurfaceRect, SurfaceSize, argb_channels, map_rect_to_surface},
+    host::OverlayEvent,
+};

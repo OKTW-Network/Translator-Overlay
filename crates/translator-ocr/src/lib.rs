@@ -1,5 +1,6 @@
 //! PP-OCRv6 inference via `oar-ocr` (ONNX Runtime) and text stability gate.
 
+mod crop;
 mod engine;
 mod filter;
 mod merge;
@@ -9,7 +10,7 @@ mod stability;
 use thiserror::Error;
 use translator_core::OcrConfig;
 
-pub use crate::{engine::*, filter::*, merge::*, models::*, stability::*};
+pub use crate::{crop::*, engine::*, filter::*, merge::*, models::*, stability::*};
 
 #[derive(Debug, Error)]
 pub enum OcrError {

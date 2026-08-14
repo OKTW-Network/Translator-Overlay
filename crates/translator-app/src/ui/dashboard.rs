@@ -106,6 +106,69 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                 .spacing(8.0)
                 .with_key("window-picker-row")
         },
+        {
+            let select_hwnd = if snap.auto_running { snap.target_hwnd } else { snap.selected_hwnd };
+            let can_select = select_hwnd.is_some();
+            let selecting = snap.region_select_active;
+            let regions_label = if snap.ocr_region_count == 0 {
+                "OCR regions: whole window".to_string()
+            } else {
+                format!("OCR regions: {}", snap.ocr_region_count)
+            };
+
+            // Distinct keys remount so Accent does not stick after Done
+            // (`Button::accent()` cannot be cleared via Prop Unset).
+            let select_label = if selecting { "Done" } else { "Select regions" };
+            let select_key = if selecting { "btn-done-regions" } else { "btn-select-regions" };
+            let select_tip = if selecting {
+                "Use the selected areas"
+            } else if can_select {
+                "Only recognize text in the areas you select on the window"
+            } else {
+                "Select a window first"
+            };
+            let mut select_btn = button(select_label)
+                .tooltip(select_tip)
+                .enabled(selecting || can_select)
+                .with_key(select_key);
+            if selecting {
+                select_btn = select_btn.accent();
+            }
+            let select_btn = select_btn.on_click({
+                let cx = cx.clone();
+                let hwnd = select_hwnd;
+                move || {
+                    if selecting {
+                        cx.send_cmd(PipelineCommand::ConfirmRegionSelect);
+                    } else if let Some(hwnd) = hwnd {
+                        cx.send_cmd(PipelineCommand::BeginRegionSelect { hwnd });
+                    }
+                }
+            });
+
+            hstack((
+                select_btn,
+                button("Clear")
+                    .tooltip("Recognize text on the whole window")
+                    .enabled(selecting || snap.ocr_region_count > 0)
+                    .on_click({
+                        let cx = cx.clone();
+                        move || {
+                            if selecting {
+                                cx.send_cmd(PipelineCommand::ClearRegionSelect);
+                            } else {
+                                cx.send_cmd(PipelineCommand::SetCaptureRegions { regions: Vec::new() });
+                            }
+                        }
+                    }),
+                text_block(regions_label)
+                    .font_size(12.0)
+                    .foreground(ThemeRef::SecondaryText)
+                    .vertical_alignment(VerticalAlignment::Center),
+            ))
+            .spacing(8.0)
+            .with_key("region-select-row")
+        },
         hstack((
             {
                 // Distinct keys remount so Accent style does not stick after Stop
@@ -211,7 +274,14 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
         .foreground(ThemeRef::SecondaryText),
         vstack((
             text_block("Capture").semibold(),
-            capture_preview(snap.preview_sequence, snap.preview_width, snap.preview_height, snap.preview_rgba.as_ref(), bump),
+            capture_preview(
+                snap.preview_sequence,
+                snap.preview_width,
+                snap.preview_height,
+                snap.preview_rgba.as_ref(),
+                &snap.preview_regions,
+                bump,
+            ),
             text_block({
                 let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
                 format!("OCR ({ocr_time})")

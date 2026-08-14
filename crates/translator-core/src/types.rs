@@ -75,6 +75,70 @@ impl Rect {
     }
 }
 
+/// Axis-aligned region as fractions of the capture client area (`0..=1`).
+///
+/// Runtime-only (not persisted). Empty list means “whole window”.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NormRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl NormRect {
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self { x, y, width, height }
+    }
+
+    /// Flip negative size, clamp to `[0, 1]`, drop if too small to OCR.
+    pub fn sanitize(self) -> Option<Self> {
+        let mut x = self.x;
+        let mut y = self.y;
+        let mut w = self.width;
+        let mut h = self.height;
+        if !x.is_finite() || !y.is_finite() || !w.is_finite() || !h.is_finite() {
+            return None;
+        }
+        if w < 0.0 {
+            x += w;
+            w = -w;
+        }
+        if h < 0.0 {
+            y += h;
+            h = -h;
+        }
+        let x1 = (x + w).clamp(0.0, 1.0);
+        let y1 = (y + h).clamp(0.0, 1.0);
+        x = x.clamp(0.0, 1.0);
+        y = y.clamp(0.0, 1.0);
+        w = (x1 - x).max(0.0);
+        h = (y1 - y).max(0.0);
+        // ~0.4% of a side is too thin for useful OCR.
+        if w < 0.004 || h < 0.004 {
+            return None;
+        }
+        Some(Self { x, y, width: w, height: h })
+    }
+
+    pub fn to_pixel(self, frame_w: u32, frame_h: u32) -> Rect {
+        let fw = frame_w as f32;
+        let fh = frame_h as f32;
+        Rect::new(self.x * fw, self.y * fh, self.width * fw, self.height * fh)
+    }
+
+    pub fn from_pixel(rect: Rect, frame_w: u32, frame_h: u32) -> Self {
+        let fw = frame_w.max(1) as f32;
+        let fh = frame_h.max(1) as f32;
+        Self {
+            x: rect.x / fw,
+            y: rect.y / fh,
+            width: rect.width / fw,
+            height: rect.height / fh,
+        }
+    }
+}
+
 fn default_source_lines() -> u32 {
     1
 }
@@ -182,5 +246,29 @@ mod tests {
         assert!((a.iou(a) - 1.0).abs() < 1e-5);
         let b = Rect::new(20.0, 20.0, 10.0, 10.0);
         assert_eq!(a.iou(b), 0.0);
+    }
+
+    #[test]
+    fn norm_rect_sanitize_flips_and_clamps() {
+        let flipped = NormRect::new(0.4, 0.5, -0.2, -0.1).sanitize().unwrap();
+        assert!((flipped.x - 0.2).abs() < 1e-5);
+        assert!((flipped.y - 0.4).abs() < 1e-5);
+        assert!((flipped.width - 0.2).abs() < 1e-5);
+        assert!((flipped.height - 0.1).abs() < 1e-5);
+        assert!(NormRect::new(0.0, 0.0, 0.001, 0.5).sanitize().is_none());
+        assert!(NormRect::new(f32::NAN, 0.0, 0.2, 0.2).sanitize().is_none());
+    }
+
+    #[test]
+    fn norm_rect_pixel_roundtrip() {
+        let n = NormRect::new(0.1, 0.2, 0.3, 0.4);
+        let px = n.to_pixel(1000, 500);
+        assert!((px.x - 100.0).abs() < 1e-3);
+        assert!((px.y - 100.0).abs() < 1e-3);
+        assert!((px.width - 300.0).abs() < 1e-3);
+        assert!((px.height - 200.0).abs() < 1e-3);
+        let back = NormRect::from_pixel(px, 1000, 500);
+        assert!((back.x - n.x).abs() < 1e-5);
+        assert!((back.width - n.width).abs() < 1e-5);
     }
 }

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
 use translator_capture::CapturedFrame;
-use translator_core::{OcrBlock, PipelineStatus};
+use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
 use translator_ocr::{OcrEngine, OcrFingerprint, StabilityOutcome};
 use translator_translate::blocks_to_translated_text;
 
@@ -133,8 +133,9 @@ impl Pipeline {
         }
 
         let ocr_start = Instant::now();
+        let regions = self.ocr_pixel_regions(frame.width, frame.height);
         let raw = match self.engine.as_mut() {
-            Some(engine) => engine.recognize_rgba(frame.width, frame.height, &frame.rgba),
+            Some(engine) => engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions),
             None => return,
         };
         let raw = match raw {
@@ -357,8 +358,9 @@ impl Pipeline {
         }
 
         let ocr_start = Instant::now();
+        let regions = self.ocr_pixel_regions(frame.width, frame.height);
         let blocks = match self.engine.as_mut() {
-            Some(engine) => engine.recognize_rgba(frame.width, frame.height, &frame.rgba),
+            Some(engine) => engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions),
             None => return,
         };
         let blocks = match blocks {
@@ -397,5 +399,64 @@ impl Pipeline {
         }
         // Manual always forces a new API call (user intent).
         self.start_translate(page, true);
+    }
+
+    pub(crate) fn ocr_pixel_regions(&self, frame_w: u32, frame_h: u32) -> Vec<Rect> {
+        self.state
+            .read()
+            .ocr_regions
+            .iter()
+            .copied()
+            .filter_map(NormRect::sanitize)
+            .map(|n| n.to_pixel(frame_w, frame_h))
+            .collect()
+    }
+
+    pub(crate) fn apply_ocr_regions(&mut self, regions: Vec<NormRect>) {
+        let regions: Vec<NormRect> = regions.into_iter().filter_map(NormRect::sanitize).collect();
+        {
+            let mut s = self.state.write();
+            s.ocr_regions = regions;
+            s.region_select_draft.clear();
+            s.region_select_active = false;
+        }
+        self.on_regions_changed();
+    }
+
+    pub(crate) fn on_regions_changed(&mut self) {
+        self.cancel_inflight();
+        self.gate.reset_all();
+        self.persist.reset();
+        self.last_translated_fp = None;
+        self.last_page = None;
+        self.raw_empty_since = None;
+        self.raw_content_since = None;
+        self.remap_miss_since = None;
+        {
+            let mut s = self.state.write();
+            s.latest_ocr_blocks.clear();
+            s.latest_ocr_text.clear();
+            s.latest_translated_blocks.clear();
+            s.latest_translated_text.clear();
+            s.can_retry_translate = false;
+            s.translate_in_flight = false;
+        }
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.clear();
+        }
+    }
+
+    pub(crate) fn clear_ocr_regions(&mut self) {
+        let had = !self.state.read().ocr_regions.is_empty() || self.state.read().region_select_active;
+        if !had {
+            return;
+        }
+        {
+            let mut s = self.state.write();
+            s.ocr_regions.clear();
+            s.region_select_draft.clear();
+            s.region_select_active = false;
+        }
+        self.on_regions_changed();
     }
 }

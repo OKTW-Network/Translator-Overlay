@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, ModelTier};
+use translator_core::{AppConfig, ModelTier, NormRect};
 use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
@@ -338,9 +338,14 @@ pub struct Snapshot {
     /// Last OCR inference time in ms (`None` → show "—").
     pub last_ocr_ms: Option<u64>,
     pub last_ocr_block_count: u32,
+    pub region_select_active: bool,
+    pub ocr_region_count: usize,
+    pub preview_regions: Vec<NormRect>,
     pub history_len: usize,
     pub history_preview: String,
     pub selected_window_idx: i32,
+    pub selected_hwnd: Option<isize>,
+    pub target_hwnd: Option<isize>,
     pub window_count: usize,
     pub window_labels: Vec<String>,
     pub translate_in_flight: bool,
@@ -456,12 +461,25 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         frame_count: s.frame_count,
         last_ocr_ms: s.last_ocr_ms,
         last_ocr_block_count: s.last_ocr_block_count,
+        region_select_active: s.region_select_active,
+        ocr_region_count: if s.region_select_active {
+            s.region_select_draft.len()
+        } else {
+            s.ocr_regions.len()
+        },
+        preview_regions: if s.region_select_active {
+            s.region_select_draft.clone()
+        } else {
+            s.ocr_regions.clone()
+        },
         history_len: s.history.len(),
         history_preview,
         selected_window_idx: match ui.selected_idx {
             Some(i) if i < ui.windows.len() => i as i32,
             _ => -1,
         },
+        selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
+        target_hwnd: s.target_hwnd,
         window_count: ui.windows.len(),
         window_labels: ui.windows.iter().map(|w| truncate(&w.title, 72)).collect(),
         translate_in_flight: s.translate_in_flight,

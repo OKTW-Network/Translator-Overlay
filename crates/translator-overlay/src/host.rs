@@ -2,12 +2,15 @@
 
 use std::{
     mem::size_of,
-    sync::mpsc::Receiver,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, Sender},
+    },
     time::{Duration, Instant},
 };
 
 use tracing::{debug, warn};
-use translator_core::{OverlayConfig, TranslatedBlock};
+use translator_core::{NormRect, OverlayConfig, TranslatedBlock};
 use windows::{
     Win32::{
         Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
@@ -18,13 +21,19 @@ use windows::{
             SetStretchBltMode, StretchBlt, TEXTMETRICW,
         },
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT, GetAncestor,
-            GetClientRect, GetForegroundWindow, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, IsChild, IsIconic, IsWindow,
-            IsWindowVisible, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE,
-            SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
-            UnregisterClassW, UpdateLayeredWindow, WM_DESTROY, WM_NCHITTEST, WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+        UI::{
+            Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
+            WindowsAndMessaging::{
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
+                GWL_EXSTYLE, GetAncestor, GetClientRect, GetForegroundWindow, GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, HWND_NOTOPMOST,
+                HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IsChild, IsIconic,
+                IsWindow, IsWindowVisible, LoadCursorW, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW,
+                SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
+                UnregisterClassW, UpdateLayeredWindow, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+                WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+            },
         },
     },
     core::{PCWSTR, w},
@@ -32,11 +41,16 @@ use windows::{
 
 use crate::{
     OverlayError,
-    draw::{self, SurfaceRect},
+    draw::{self, Rgba, SurfaceRect},
     layout::{label_pad, place_label},
+    picker::{HANDLE_SIZE, PickerAction, PickerCursor, RegionPicker},
     reader::{ReaderWindow, format_reader_text},
     text::{self, LabelStyle},
 };
+
+/// `wnd_proc` cannot reach `OverlayHost`; picker hit-testing is a process-wide flag
+/// because this crate hosts a single overlay window.
+static PICKER_HIT_TEST: AtomicBool = AtomicBool::new(false);
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayLayer.v1");
 const TICK: Duration = Duration::from_millis(33);
@@ -53,7 +67,21 @@ pub enum OverlayCommand {
     },
     Clear,
     UpdateConfig(OverlayConfig),
+    BeginRegionSelect {
+        regions: Vec<NormRect>,
+    },
+    CancelRegionSelect,
+    ConfirmRegionSelect,
+    ClearRegionSelect,
     Shutdown,
+}
+
+/// Overlay thread → pipeline (picker results).
+#[derive(Debug, Clone)]
+pub enum OverlayEvent {
+    RegionsCommitted(Vec<NormRect>),
+    RegionSelectCancelled,
+    RegionSelectUpdated(Vec<NormRect>),
 }
 
 pub struct OverlayHost {
@@ -82,10 +110,12 @@ pub struct OverlayHost {
     hfont: HFONT,
     font_px: i32,
     reader: Option<Box<ReaderWindow>>,
+    picker: Option<RegionPicker>,
+    event_tx: Sender<OverlayEvent>,
 }
 
 impl OverlayHost {
-    pub fn create(config: OverlayConfig) -> Result<Self, OverlayError> {
+    pub fn create(config: OverlayConfig, event_tx: Sender<OverlayEvent>) -> Result<Self, OverlayError> {
         unsafe {
             let hinstance = GetModuleHandleW(None).map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
 
@@ -170,6 +200,8 @@ impl OverlayHost {
                 hfont,
                 font_px,
                 reader: None,
+                picker: None,
+                event_tx,
             };
 
             let _ = ShowWindow(hwnd, SW_HIDE);
@@ -210,6 +242,10 @@ impl OverlayHost {
                         self.teardown();
                         return;
                     }
+                    if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
+                        self.dispatch_picker_msg(&msg);
+                        continue;
+                    }
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -238,6 +274,9 @@ impl OverlayHost {
                 }
             }
             OverlayCommand::Detach => {
+                if self.picker.is_some() {
+                    self.finish_picker(PickerEnd::Cancel);
+                }
                 self.target = None;
                 self.hide();
             }
@@ -275,15 +314,95 @@ impl OverlayHost {
                 if let Some(reader) = self.reader.as_mut() {
                     reader.apply_config(&self.config);
                 }
-                if !self.config.enabled {
+                if !self.config.enabled && self.picker.is_none() {
                     self.hide();
+                }
+            }
+            OverlayCommand::BeginRegionSelect { regions } => self.begin_picker(regions),
+            OverlayCommand::CancelRegionSelect => {
+                if self.picker.is_some() {
+                    self.finish_picker(PickerEnd::Cancel);
+                }
+            }
+            OverlayCommand::ConfirmRegionSelect => {
+                if self.picker.is_some() {
+                    self.finish_picker(PickerEnd::Confirm);
+                }
+            }
+            OverlayCommand::ClearRegionSelect => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.regions.clear();
+                    p.selected = None;
+                    let _ = self.event_tx.send(OverlayEvent::RegionSelectUpdated(Vec::new()));
+                    self.dirty = true;
                 }
             }
             OverlayCommand::Shutdown => {}
         }
     }
 
+    fn begin_picker(&mut self, regions: Vec<NormRect>) {
+        let (cw, ch) = self
+            .target
+            .and_then(client_screen_rect)
+            .map(|(_, _, w, h)| (w, h))
+            .unwrap_or((800, 600));
+        self.picker = Some(RegionPicker::new(regions, cw, ch));
+        self.set_click_through(false);
+        PICKER_HIT_TEST.store(true, Ordering::Relaxed);
+        self.dirty = true;
+        // Dashboard just received the click, so this process may set foreground.
+        // Bring the target up so the picker is visible without an extra click.
+        if let Some(target) = self.target {
+            unsafe {
+                let _ = SetForegroundWindow(target);
+            }
+        }
+    }
+
+    fn finish_picker(&mut self, end: PickerEnd) {
+        let Some(picker) = self.picker.take() else {
+            return;
+        };
+        self.set_click_through(true);
+        PICKER_HIT_TEST.store(false, Ordering::Relaxed);
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        match end {
+            PickerEnd::Confirm => {
+                let _ = self.event_tx.send(OverlayEvent::RegionsCommitted(picker.regions));
+            }
+            PickerEnd::Cancel => {
+                let _ = self.event_tx.send(OverlayEvent::RegionSelectCancelled);
+            }
+        }
+        self.dirty = true;
+        if self.blocks.is_empty() || !self.config.enabled {
+            self.hide();
+        }
+    }
+
+    fn set_click_through(&self, through: bool) {
+        unsafe {
+            let raw = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
+            let mut style = WINDOW_EX_STYLE(raw);
+            if through {
+                style |= WS_EX_TRANSPARENT;
+            } else {
+                style &= !WS_EX_TRANSPARENT;
+            }
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style.0 as isize);
+            let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+
     fn tick(&mut self) {
+        if self.picker.is_some() {
+            self.tick_picker();
+            return;
+        }
+
         if !self.config.enabled {
             self.hide();
             return;
@@ -354,12 +473,204 @@ impl OverlayHost {
         }
     }
 
+    fn tick_picker(&mut self) {
+        let Some(target) = self.target else {
+            self.finish_picker(PickerEnd::Cancel);
+            return;
+        };
+
+        unsafe {
+            if !IsWindow(Some(target)).as_bool() {
+                debug!("target window gone — cancelling region picker");
+                self.target = None;
+                self.finish_picker(PickerEnd::Cancel);
+                return;
+            }
+            if IsIconic(target).as_bool() || !IsWindowVisible(target).as_bool() {
+                self.abort_picker_drag();
+                self.hide();
+                return;
+            }
+
+            // Same rule as the translation overlay: only cover the target
+            // while it (or a child) is the foreground window. The picker
+            // itself must also count — a clickable TOPMOST layer often
+            // becomes GetForegroundWindow despite WS_EX_NOACTIVATE, and
+            // hiding on that would abort the drag. Keep picker state so
+            // Dashboard Done/Cancel/Clear still apply after hide.
+            let dragging = self.picker.as_ref().is_some_and(RegionPicker::is_dragging);
+            let fg = GetForegroundWindow();
+            if !is_picker_allowed_foreground(target, self.hwnd, fg) && !dragging {
+                self.abort_picker_drag();
+                self.hide();
+                return;
+            }
+
+            let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
+                return;
+            };
+
+            if let Some(p) = self.picker.as_mut() {
+                p.set_client_size(client_w, client_h);
+            }
+
+            self.surface_w = client_w;
+            self.surface_h = client_h;
+
+            if let Err(e) = self.repaint_picker() {
+                warn!(error = %e, "picker repaint failed");
+                return;
+            }
+
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+
+            if let Err(e) = self.present(x, y, client_w, client_h) {
+                warn!(error = %e, "UpdateLayeredWindow failed (picker)");
+            }
+        }
+    }
+
     fn hide(&mut self) {
         unsafe {
             // Drop topmost so we never stay above unrelated apps after hide.
             let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    fn abort_picker_drag(&mut self) {
+        if let Some(p) = self.picker.as_mut() {
+            p.cancel_drag();
+        }
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+    }
+
+    fn dispatch_picker_msg(&mut self, msg: &MSG) {
+        let (px, py) = mouse_pos(msg.lParam);
+        match msg.message {
+            WM_LBUTTONDOWN => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.on_left_down(px, py);
+                    unsafe {
+                        let _ = SetCapture(self.hwnd);
+                    }
+                    self.dirty = true;
+                }
+            }
+            WM_MOUSEMOVE => {
+                if let Some(p) = self.picker.as_mut() {
+                    let hit = p.on_move(px, py);
+                    set_picker_cursor(hit.cursor());
+                    self.dirty = true;
+                }
+            }
+            WM_LBUTTONUP => {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                let action = self.picker.as_mut().map(|p| p.on_left_up(px, py)).unwrap_or(PickerAction::None);
+                self.apply_picker_action(action);
+            }
+            WM_RBUTTONUP => {
+                let action = self.picker.as_mut().map(|p| p.on_right_up(px, py)).unwrap_or(PickerAction::None);
+                self.apply_picker_action(action);
+            }
+            // Swallow SETCURSOR so DefWindowProc does not reset to the arrow.
+            WM_SETCURSOR => {}
+            _ => {}
+        }
+    }
+
+    fn apply_picker_action(&mut self, action: PickerAction) {
+        match action {
+            PickerAction::None => self.dirty = true,
+            PickerAction::RegionsChanged => {
+                if let Some(p) = self.picker.as_ref() {
+                    let _ = self.event_tx.send(OverlayEvent::RegionSelectUpdated(p.regions.clone()));
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn repaint_picker(&mut self) -> Result<(), OverlayError> {
+        let w = self.surface_w.max(1);
+        let h = self.surface_h.max(1);
+        self.ensure_bitmap(w, h)?;
+
+        let len = (w as usize) * (h as usize) * 4;
+        let buf = unsafe { std::slice::from_raw_parts_mut(self.bits, len) };
+        draw::clear(buf);
+
+        let surface = draw::SurfaceSize::new(w, h);
+        // UpdateLayeredWindow hit-tests per-pixel alpha *before* WM_NCHITTEST.
+        // Alpha 0 pixels are click-through, so the whole client must have a
+        // non-zero veil or empty areas cannot start a drag.
+        draw::fill_rect(buf, surface, SurfaceRect { x: 0, y: 0, w, h }, Rgba::new(6, 14, 24, 20));
+        let bounds = Rgba::new(0, 200, 255, 220);
+        let region_stroke = Rgba::new(80, 220, 255, 230);
+        let selected_stroke = Rgba::new(255, 210, 60, 255);
+        let fill = Rgba::new(80, 220, 255, 24);
+        let handle = Rgba::new(255, 255, 255, 240);
+        let text = Rgba::new(255, 255, 255, 255);
+
+        // Selectable area = full client; inset so the stroke is not clipped.
+        draw::stroke_rect(
+            buf,
+            surface,
+            SurfaceRect {
+                x: 2,
+                y: 2,
+                w: (w - 4).max(1),
+                h: (h - 4).max(1),
+            },
+            bounds,
+            2,
+        );
+
+        let (rects, band) = {
+            let Some(picker) = self.picker.as_ref() else {
+                return Ok(());
+            };
+            (picker.live_pixel_rects(), picker.rubber_band())
+        };
+
+        for (i, (pr, selected)) in rects.into_iter().enumerate() {
+            let stroke = if selected { selected_stroke } else { region_stroke };
+            let thick = if selected { 3 } else { 2 };
+            draw::fill_rect(buf, surface, pr.to_surface(), fill);
+            draw::stroke_rect(buf, surface, pr.to_surface(), stroke, thick);
+            for (hx, hy) in [(pr.x, pr.y), (pr.x + pr.w, pr.y), (pr.x, pr.y + pr.h), (pr.x + pr.w, pr.y + pr.h)] {
+                draw::fill_rect(
+                    buf,
+                    surface,
+                    SurfaceRect {
+                        x: hx - HANDLE_SIZE / 2,
+                        y: hy - HANDLE_SIZE / 2,
+                        w: HANDLE_SIZE,
+                        h: HANDLE_SIZE,
+                    },
+                    handle,
+                );
+            }
+            let label = format!("{}", i + 1);
+            let label_rect = SurfaceRect {
+                x: pr.x + 4,
+                y: pr.y + 4,
+                w: 22,
+                h: 18,
+            };
+            draw::fill_rect(buf, surface, label_rect, Rgba::new(0, 0, 0, 160));
+            self.draw_text_label(buf, surface, label_rect, &label, LabelStyle { font_px: 13, color: text })?;
+        }
+
+        if let Some(band) = band {
+            draw::stroke_rect(buf, surface, band.to_surface(), selected_stroke, 2);
+        }
+        Ok(())
     }
 
     fn ensure_bitmap(&mut self, w: i32, h: i32) -> Result<(), OverlayError> {
@@ -784,6 +1095,15 @@ impl Drop for OverlayHost {
     }
 }
 
+/// True when the picker may stay visible: target focused, or the picker
+/// window itself (clicks on the layer must not hide it).
+fn is_picker_allowed_foreground(target: HWND, overlay: HWND, fg: HWND) -> bool {
+    if is_target_in_foreground(target, fg) {
+        return true;
+    }
+    !overlay.is_invalid() && !fg.is_invalid() && fg == overlay
+}
+
 /// True when `fg` is the capture target or a child / same top-level tree.
 fn is_target_in_foreground(target: HWND, fg: HWND) -> bool {
     unsafe {
@@ -830,10 +1150,58 @@ fn client_screen_rect(target: HWND) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+enum PickerEnd {
+    Confirm,
+    Cancel,
+}
+
+fn is_picker_message(msg: u32) -> bool {
+    matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_RBUTTONUP | WM_SETCURSOR)
+}
+
+fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
+    let v = lparam.0 as u32;
+    let x = (v & 0xFFFF) as i16 as i32;
+    let y = ((v >> 16) & 0xFFFF) as i16 as i32;
+    (x, y)
+}
+
+fn set_picker_cursor(kind: PickerCursor) {
+    unsafe {
+        let id = match kind {
+            PickerCursor::Cross => IDC_CROSS,
+            PickerCursor::SizeAll => IDC_SIZEALL,
+            PickerCursor::SizeNs => IDC_SIZENS,
+            PickerCursor::SizeWe => IDC_SIZEWE,
+            PickerCursor::SizeNwse => IDC_SIZENWSE,
+            PickerCursor::SizeNesw => IDC_SIZENESW,
+        };
+        if let Ok(cur) = LoadCursorW(None, id) {
+            let _ = SetCursor(Some(cur));
+        }
+    }
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
-            WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+            WM_NCHITTEST => {
+                if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                    LRESULT(HTCLIENT as isize)
+                } else {
+                    LRESULT(HTTRANSPARENT as isize)
+                }
+            }
+            // Picker is WS_EX_NOACTIVATE, but a TOPMOST layered window can
+            // still be activated on click. Refuse activation so the target
+            // stays foreground while the user draws boxes.
+            WM_MOUSEACTIVATE => {
+                if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                    LRESULT(MA_NOACTIVATE as isize)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
             WM_DESTROY => {
                 PostQuitMessage(0);
                 LRESULT(0)

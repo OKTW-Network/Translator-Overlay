@@ -145,6 +145,58 @@ fn blend_over(buf: &mut [u8], idx: usize, r: u8, g: u8, b: u8, a: u8) {
     buf[idx + 3] = out_a.min(255) as u8;
 }
 
+/// Stroke an axis-aligned rectangle (`thickness` inward from `rect` edges).
+pub fn stroke_rect(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect, color: Rgba, thickness: i32) {
+    let t = thickness.max(1);
+    let Some(rect) = rect.clamp_to(surface.width, surface.height) else {
+        return;
+    };
+    fill_rect(
+        buf,
+        surface,
+        SurfaceRect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: t,
+        },
+        color,
+    );
+    fill_rect(
+        buf,
+        surface,
+        SurfaceRect {
+            x: rect.x,
+            y: (rect.y + rect.h - t).max(rect.y),
+            w: rect.w,
+            h: t,
+        },
+        color,
+    );
+    fill_rect(
+        buf,
+        surface,
+        SurfaceRect {
+            x: rect.x,
+            y: rect.y,
+            w: t,
+            h: rect.h,
+        },
+        color,
+    );
+    fill_rect(
+        buf,
+        surface,
+        SurfaceRect {
+            x: (rect.x + rect.w - t).max(rect.x),
+            y: rect.y,
+            w: t,
+            h: rect.h,
+        },
+        color,
+    );
+}
+
 /// Fill a rectangle with a straight RGBA colour (composited over existing).
 pub fn fill_rect(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect, color: Rgba) {
     let Some(rect) = rect.clamp_to(surface.width, surface.height) else {
@@ -208,6 +260,20 @@ mod tests {
     fn map_rect_rejects_empty() {
         assert!(map_rect_to_surface(Rect::new(0.0, 0.0, 0.0, 10.0), 100, 100, 100, 100).is_none());
         assert!(map_rect_to_surface(Rect::new(0.0, 0.0, 10.0, 10.0), 0, 100, 100, 100).is_none());
+    }
+
+    #[test]
+    fn stroke_rect_draws_border() {
+        let mut buf = vec![0u8; 8 * 8 * 4];
+        let surface = SurfaceSize::new(8, 8);
+        stroke_rect(&mut buf, surface, SurfaceRect { x: 1, y: 1, w: 6, h: 6 }, Rgba::new(0, 0, 255, 255), 1);
+        // top-left of stroke
+        let i = (1 * 8 + 1) * 4;
+        assert_eq!(buf[i], 255); // B
+        assert_eq!(buf[i + 3], 255);
+        // interior pixel (3,3) untouched
+        let mid = (3 * 8 + 3) * 4;
+        assert_eq!(buf[mid + 3], 0);
     }
 
     #[test]

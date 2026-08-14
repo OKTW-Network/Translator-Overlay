@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::AppConfig,
-    types::{OcrBlock, TranslatedBlock},
+    types::{NormRect, OcrBlock, TranslatedBlock},
 };
 
 /// High-level pipeline status shown in the control UI.
@@ -108,6 +108,12 @@ pub struct AppState {
     pub last_ocr_ms: Option<u64>,
     /// Number of text blocks from the last OCR pass (pre-merge raw or durable).
     pub last_ocr_block_count: u32,
+    /// Session OCR crops (normalized client rects). Empty = whole window.
+    pub ocr_regions: Vec<NormRect>,
+    /// True while the on-target region picker is open.
+    pub region_select_active: bool,
+    /// Working copy while picking (for Dashboard count / preview outlines).
+    pub region_select_draft: Vec<NormRect>,
 }
 
 impl AppState {
@@ -132,6 +138,9 @@ impl AppState {
             settings_message: None,
             last_ocr_ms: None,
             last_ocr_block_count: 0,
+            ocr_regions: Vec::new(),
+            region_select_active: false,
+            region_select_draft: Vec::new(),
         }
     }
 
