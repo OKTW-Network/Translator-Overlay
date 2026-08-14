@@ -133,7 +133,7 @@ impl OverlayController {
 
     /// Request shutdown (also called from `Drop`).
     pub fn shutdown(&mut self) {
-        let _ = self.tx.send(OverlayCommand::Shutdown);
+        let _ = self.send(OverlayCommand::Shutdown);
         if let Some(join) = self.join.take()
             && let Err(e) = join.join()
         {
@@ -142,7 +142,9 @@ impl OverlayController {
     }
 
     fn send(&self, cmd: OverlayCommand) -> Result<(), OverlayError> {
-        self.tx.send(cmd).map_err(|_| OverlayError::NotRunning)
+        self.tx.send(cmd).map_err(|_| OverlayError::NotRunning)?;
+        crate::host::wake_overlay_thread();
+        Ok(())
     }
 }
 

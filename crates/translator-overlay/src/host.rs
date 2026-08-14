@@ -1,12 +1,15 @@
 //! Win32 layered-window host thread.
+//!
+//! Target follow uses out-of-context `SetWinEventHook`. The overlay thread
+//! already pumps messages, so the hooks live here. `WM_APP` wakes `WaitMessage`
+//! when an [`OverlayCommand`] arrives or a WinEvent needs a sync.
 
 use std::{
     mem::size_of,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, Ordering},
         mpsc::{Receiver, Sender},
     },
-    time::{Duration, Instant},
 };
 
 use tracing::{debug, warn};
@@ -20,19 +23,21 @@ use windows::{
             DeleteDC, DeleteObject, DrawTextW, GetDC, GetTextMetricsW, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, ReleaseDC, SelectObject,
             SetStretchBltMode, StretchBlt, TEXTMETRICW,
         },
-        System::LibraryLoader::GetModuleHandleW,
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
         UI::{
+            Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
             WindowsAndMessaging::{
-                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GA_ROOT,
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+                EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT,
                 GWL_EXSTYLE, GetAncestor, GetClientRect, GetForegroundWindow, GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, HWND_NOTOPMOST,
                 HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IsChild, IsIconic,
-                IsWindow, IsWindowVisible, LoadCursorW, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW,
-                SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-                SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
-                UnregisterClassW, UpdateLayeredWindow, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-                WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                IsWindow, IsWindowVisible, LoadCursorW, MA_NOACTIVATE, MSG, OBJID_WINDOW, PM_REMOVE, PeekMessageW, PostQuitMessage,
+                PostThreadMessageW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+                ShowWindow, TranslateMessage, ULW_ALPHA, UnregisterClassW, UpdateLayeredWindow, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
+                WM_APP, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP,
+                WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP, WaitMessage,
             },
         },
     },
@@ -51,9 +56,15 @@ use crate::{
 /// `wnd_proc` cannot reach `OverlayHost`; picker hit-testing is a process-wide flag
 /// because this crate hosts a single overlay window.
 static PICKER_HIT_TEST: AtomicBool = AtomicBool::new(false);
+/// Last picker cursor. `WM_SETCURSOR` is sent (not posted) and hits `wnd_proc`
+/// inside `PeekMessage` / `WaitMessage`, so the Peek-loop swallow cannot win.
+static PICKER_CURSOR: AtomicU8 = AtomicU8::new(0);
+
+static FOLLOW_TARGET: AtomicIsize = AtomicIsize::new(0);
+static FOLLOW_THREAD: AtomicU32 = AtomicU32::new(0);
+static FOLLOW_SYNC: AtomicBool = AtomicBool::new(false);
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayLayer.v1");
-const TICK: Duration = Duration::from_millis(33);
 
 pub enum OverlayCommand {
     Attach {
@@ -112,6 +123,7 @@ pub struct OverlayHost {
     reader: Option<Box<ReaderWindow>>,
     picker: Option<RegionPicker>,
     event_tx: Sender<OverlayEvent>,
+    follow_hooks: [HWINEVENTHOOK; 3],
 }
 
 impl OverlayHost {
@@ -202,7 +214,10 @@ impl OverlayHost {
                 reader: None,
                 picker: None,
                 event_tx,
+                follow_hooks: [HWINEVENTHOOK::default(); 3],
             };
+
+            FOLLOW_THREAD.store(GetCurrentThreadId(), Ordering::Release);
 
             let _ = ShowWindow(hwnd, SW_HIDE);
             host.ensure_bitmap(100, 100)?;
@@ -218,15 +233,20 @@ impl OverlayHost {
     }
 
     pub fn run(&mut self, rx: Receiver<OverlayCommand>) {
-        let mut last_tick = Instant::now();
+        self.follow_hooks = install_follow_hooks();
+
         loop {
+            let mut sync = false;
             loop {
                 match rx.try_recv() {
                     Ok(OverlayCommand::Shutdown) => {
                         self.teardown();
                         return;
                     }
-                    Ok(cmd) => self.handle(cmd),
+                    Ok(cmd) => {
+                        self.handle(cmd);
+                        sync = true;
+                    }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         self.teardown();
@@ -235,29 +255,44 @@ impl OverlayHost {
                 }
             }
 
-            unsafe {
-                let mut msg = MSG::default();
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    if msg.message == WM_QUIT {
-                        self.teardown();
-                        return;
-                    }
-                    if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
-                        self.dispatch_picker_msg(&msg);
-                        continue;
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
+            if self.drain_thread_messages(&mut sync) {
+                self.teardown();
+                return;
             }
 
-            if last_tick.elapsed() >= TICK {
-                last_tick = Instant::now();
+            if FOLLOW_SYNC.swap(false, Ordering::AcqRel) || sync {
                 self.tick();
-            } else {
-                std::thread::sleep(Duration::from_millis(5));
+            }
+
+            if unsafe { WaitMessage() }.is_err() {
+                warn!("WaitMessage failed");
+                self.teardown();
+                return;
             }
         }
+    }
+
+    /// Returns `true` when the thread should exit (`WM_QUIT`).
+    fn drain_thread_messages(&mut self, sync: &mut bool) -> bool {
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    return true;
+                }
+                if msg.hwnd.is_invalid() && msg.message == WM_APP {
+                    continue;
+                }
+                if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
+                    self.dispatch_picker_msg(&msg);
+                    *sync = true;
+                    continue;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        false
     }
 
     fn handle(&mut self, cmd: OverlayCommand) {
@@ -266,11 +301,13 @@ impl OverlayHost {
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { IsWindow(Some(hwnd)).as_bool() } {
                     self.target = Some(hwnd);
+                    FOLLOW_TARGET.store(target_hwnd, Ordering::Release);
                     self.dirty = true;
                     debug!(?target_hwnd, "overlay attached");
                 } else {
                     warn!(?target_hwnd, "attach ignored — invalid hwnd");
                     self.target = None;
+                    FOLLOW_TARGET.store(0, Ordering::Release);
                 }
             }
             OverlayCommand::Detach => {
@@ -278,6 +315,7 @@ impl OverlayHost {
                     self.finish_picker(PickerEnd::Cancel);
                 }
                 self.target = None;
+                FOLLOW_TARGET.store(0, Ordering::Release);
                 self.hide();
             }
             OverlayCommand::SetBlocks {
@@ -350,6 +388,7 @@ impl OverlayHost {
         self.picker = Some(RegionPicker::new(regions, cw, ch));
         self.set_click_through(false);
         PICKER_HIT_TEST.store(true, Ordering::Relaxed);
+        set_picker_cursor(PickerCursor::Cross);
         self.dirty = true;
         // Dashboard just received the click, so this process may set foreground.
         // Bring the target up so the picker is visible without an extra click.
@@ -425,9 +464,7 @@ impl OverlayHost {
             }
 
             // Only show while the capture target (or one of its children) is
-            // the foreground window. Use TOPMOST only in that window so the
-            // overlay is not stuck under the target (HWND_TOP is not enough
-            // for many apps) and is cleared when focus leaves.
+            // the foreground window.
             let fg = GetForegroundWindow();
             if !is_target_in_foreground(target, fg) {
                 self.hide();
@@ -578,8 +615,6 @@ impl OverlayHost {
                 let action = self.picker.as_mut().map(|p| p.on_right_up(px, py)).unwrap_or(PickerAction::None);
                 self.apply_picker_action(action);
             }
-            // Swallow SETCURSOR so DefWindowProc does not reset to the arrow.
-            WM_SETCURSOR => {}
             _ => {}
         }
     }
@@ -1046,6 +1081,10 @@ impl OverlayHost {
     }
 
     fn teardown(&mut self) {
+        FOLLOW_TARGET.store(0, Ordering::Release);
+        FOLLOW_THREAD.store(0, Ordering::Release);
+        FOLLOW_SYNC.store(false, Ordering::Release);
+        uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();
         }
@@ -1092,6 +1131,73 @@ impl OverlayHost {
 impl Drop for OverlayHost {
     fn drop(&mut self) {
         self.teardown();
+    }
+}
+
+pub(crate) fn wake_overlay_thread() {
+    let thread_id = FOLLOW_THREAD.load(Ordering::Relaxed);
+    if thread_id != 0 {
+        let _ = unsafe { PostThreadMessageW(thread_id, WM_APP, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+fn request_follow_sync() {
+    if !FOLLOW_SYNC.swap(true, Ordering::AcqRel) {
+        wake_overlay_thread();
+    }
+}
+
+fn is_follow_target(hwnd: HWND) -> bool {
+    let target = FOLLOW_TARGET.load(Ordering::Relaxed);
+    target != 0 && hwnd.0 as isize == target
+}
+
+fn install_follow_hooks() -> [HWINEVENTHOOK; 3] {
+    // SAFETY: callback only touches atomics and may `PostThreadMessageW` to this thread.
+    unsafe {
+        let foreground =
+            SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        let minimize =
+            SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT);
+        let location = SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            None,
+            Some(on_follow_event),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if foreground.is_invalid() || minimize.is_invalid() || location.is_invalid() {
+            warn!("overlay follow WinEvent hooks failed to install");
+        }
+        [foreground, minimize, location]
+    }
+}
+
+fn uninstall_follow_hooks(hooks: &mut [HWINEVENTHOOK; 3]) {
+    for hook in hooks {
+        if !hook.is_invalid() {
+            let _ = unsafe { UnhookWinEvent(*hook) };
+            *hook = HWINEVENTHOOK::default();
+        }
+    }
+}
+
+unsafe extern "system" fn on_follow_event(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _id_event_thread: u32,
+    _dwms_event_time: u32,
+) {
+    match event {
+        EVENT_SYSTEM_FOREGROUND => request_follow_sync(),
+        EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND if is_follow_target(hwnd) => request_follow_sync(),
+        EVENT_OBJECT_LOCATIONCHANGE if id_object == OBJID_WINDOW.0 && is_follow_target(hwnd) => request_follow_sync(),
+        _ => {}
     }
 }
 
@@ -1156,7 +1262,7 @@ enum PickerEnd {
 }
 
 fn is_picker_message(msg: u32) -> bool {
-    matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_RBUTTONUP | WM_SETCURSOR)
+    matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_RBUTTONUP)
 }
 
 fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
@@ -1166,7 +1272,29 @@ fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
     (x, y)
 }
 
-fn set_picker_cursor(kind: PickerCursor) {
+fn picker_cursor_code(kind: PickerCursor) -> u8 {
+    match kind {
+        PickerCursor::Cross => 0,
+        PickerCursor::SizeAll => 1,
+        PickerCursor::SizeNs => 2,
+        PickerCursor::SizeWe => 3,
+        PickerCursor::SizeNwse => 4,
+        PickerCursor::SizeNesw => 5,
+    }
+}
+
+fn picker_cursor_from_code(code: u8) -> PickerCursor {
+    match code {
+        1 => PickerCursor::SizeAll,
+        2 => PickerCursor::SizeNs,
+        3 => PickerCursor::SizeWe,
+        4 => PickerCursor::SizeNwse,
+        5 => PickerCursor::SizeNesw,
+        _ => PickerCursor::Cross,
+    }
+}
+
+fn apply_picker_cursor(kind: PickerCursor) {
     unsafe {
         let id = match kind {
             PickerCursor::Cross => IDC_CROSS,
@@ -1182,6 +1310,11 @@ fn set_picker_cursor(kind: PickerCursor) {
     }
 }
 
+fn set_picker_cursor(kind: PickerCursor) {
+    PICKER_CURSOR.store(picker_cursor_code(kind), Ordering::Relaxed);
+    apply_picker_cursor(kind);
+}
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -1190,6 +1323,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     LRESULT(HTCLIENT as isize)
                 } else {
                     LRESULT(HTTRANSPARENT as isize)
+                }
+            }
+            WM_SETCURSOR => {
+                if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                    apply_picker_cursor(picker_cursor_from_code(PICKER_CURSOR.load(Ordering::Relaxed)));
+                    LRESULT(1)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
             }
             // Picker is WS_EX_NOACTIVATE, but a TOPMOST layered window can
