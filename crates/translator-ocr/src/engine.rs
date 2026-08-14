@@ -61,6 +61,7 @@ impl OcrEngine {
         let ort = OrtSessionConfig::new().with_execution_providers(default_execution_providers());
 
         let inner = OAROCRBuilder::new(det, rec, dict)
+            .region_batch_size(4)
             .ort_session(ort)
             .build()
             .map_err(|e| OcrError::Engine(e.to_string()))?;
