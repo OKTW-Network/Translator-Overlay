@@ -251,7 +251,8 @@ impl Pipeline {
                 self.start_translate(page, false);
             }
             StabilityOutcome::AlreadyEmitted { .. } => {
-                // Same content: sticky remap follows real moves, absorbs jitter.
+                // Persist-frozen page: keep frozen captions while durable OCR
+                // still matches the last sources. Raw jitter must not hide them.
                 self.apply_sticky_overlay(&blocks, &text, frame.width, frame.height);
                 if self.state.read().auto_running {
                     let mut s = self.state.write();
@@ -318,11 +319,18 @@ impl Pipeline {
         }
 
         if remapped.is_empty() {
+            if had_translated && !blocks.is_empty() {
+                // Durable OCR changed (persist adopted a new string). Raw
+                // single-frame jitter must not reach here — persist still
+                // emits the last source until the new reading lingers.
+                self.clear_translated_captions_only("source no longer matches captions");
+                return;
+            }
             if had_translated {
                 let _ = self.remap_miss_since.get_or_insert_with(Instant::now);
                 self.maybe_expire_remap_miss();
             }
-            // Keep last captions as-is during short thrash / partial miss.
+            // Empty OCR: keep last captions during short miss / vanish grace.
             return;
         }
 

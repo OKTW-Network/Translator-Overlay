@@ -1,18 +1,14 @@
-//! Sticky remapping of prior translations onto new OCR geometry.
+//! Sticky remapping of prior translations onto current OCR *source text*.
 
-use translator_core::{OcrBlock, Rect, TranslatedBlock, normalize_ocr_text};
+use translator_core::{OcrBlock, TranslatedBlock, normalize_ocr_text};
 
 /// Rebuild displayed translations from current OCR.
 ///
-/// Match order:
-/// 1. Exact normalized source text
-/// 2. Same region (center + IoU) — OCR thrash often flips trailing glyphs so the
-///    string no longer equals the last translated source, but the caption should
-///    stay put until a real re-translate.
-///
-/// Sticky geometry: absorb OCR jitter via [`Rect::stabilize_against`], but adopt
-/// real layout moves (scroll/reflow). Capture-surface resize always takes the
-/// latest OCR box so scale stays correct.
+/// A caption is valid only while its normalized source string is still in OCR.
+/// Different text is **not** reused — a new box appears only after
+/// `finish_translate`. Same-text remaps keep the previous box (no follow-move)
+/// so persist/detector swings cannot walk or re-fit the caption. Capture-surface
+/// resize takes the latest OCR box so scale stays correct.
 pub fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock], content_resized: bool) -> Vec<TranslatedBlock> {
     let mut used = vec![false; translated.len()];
     let mut out = Vec::new();
@@ -30,22 +26,14 @@ pub fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock
             if normalize_ocr_text(&t.source) == key { Some(ti) } else { None }
         });
 
-        let spatial_hit = text_hit.or_else(|| best_spatial_translation(translated, &used, ob.bbox));
-
-        let Some(ti) = spatial_hit else {
+        let Some(ti) = text_hit else {
             continue;
         };
         used[ti] = true;
         let tb = &translated[ti];
-        // Jitter-stable sticky: keep previous box under noise; follow real moves.
-        let bbox = if content_resized {
-            ob.bbox
-        } else {
-            tb.bbox.stabilize_against(ob.bbox)
-        };
+        let bbox = if content_resized { ob.bbox } else { tb.bbox };
         out.push(TranslatedBlock {
             id: i as u32,
-            // Keep the last translated source/translation; OCR string may thrash.
             source: tb.source.clone(),
             translation: tb.translation.clone(),
             confidence: ob.confidence,
@@ -54,35 +42,6 @@ pub fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock
         });
     }
     out
-}
-
-/// Prefer a prior translation whose box still overlaps this OCR hit.
-fn best_spatial_translation(translated: &[TranslatedBlock], used: &[bool], bbox: Rect) -> Option<usize> {
-    let (cx, cy) = bbox.center();
-    let mut best: Option<(usize, f32)> = None;
-    for (ti, t) in translated.iter().enumerate() {
-        if used[ti] {
-            continue;
-        }
-        let (tcx, tcy) = t.bbox.center();
-        let dx = (cx - tcx).abs();
-        let dy = (cy - tcy).abs();
-        let max_dx = (bbox.width.max(t.bbox.width) * 0.55).max(20.0);
-        let max_dy = (bbox.height.max(t.bbox.height) * 0.75).max(14.0);
-        if dx > max_dx || dy > max_dy {
-            continue;
-        }
-        let iou = bbox.iou(t.bbox);
-        // Require meaningful overlap so neighboring lines do not steal captions.
-        if iou < 0.20 {
-            continue;
-        }
-        let score = iou * 3.0 + (1.0 - (dx / max_dx).clamp(0.0, 1.0)) + (1.0 - (dy / max_dy).clamp(0.0, 1.0));
-        if best.map(|(_, s)| score > s).unwrap_or(true) {
-            best = Some((ti, score));
-        }
-    }
-    best.map(|(i, _)| i)
 }
 
 /// True when the remapped overlay set differs in count, text, or bbox.
@@ -106,4 +65,76 @@ pub fn translated_geometry_changed(previous: &[TranslatedBlock], remapped: &[Tra
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use translator_core::Rect;
+
+    use super::*;
+
+    fn ocr(text: &str, bbox: Rect) -> OcrBlock {
+        OcrBlock {
+            id: 0,
+            text: text.to_string(),
+            confidence: 0.9,
+            bbox,
+            source_lines: 1,
+        }
+    }
+
+    fn translated(source: &str, translation: &str, bbox: Rect) -> TranslatedBlock {
+        TranslatedBlock {
+            id: 0,
+            source: source.to_string(),
+            translation: translation.to_string(),
+            confidence: 0.9,
+            bbox,
+            source_lines: 1,
+        }
+    }
+
+    #[test]
+    fn remap_keeps_size_when_same_source_grows() {
+        let prev_box = Rect::new(100.0, 200.0, 80.0, 24.0);
+        let wider = Rect::new(100.0, 200.0, 160.0, 24.0);
+        let prior = [translated("セリフ", "line", prev_box)];
+        let now = [ocr("セリフ", wider)];
+        let out = remap_translations_to_ocr(&prior, &now, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].translation, "line");
+        assert_eq!(out[0].bbox, prev_box);
+    }
+
+    #[test]
+    fn remap_freezes_box_until_retranslate() {
+        let prev_box = Rect::new(100.0, 200.0, 180.0, 28.0);
+        let moved = Rect::new(100.0, 320.0, 180.0, 28.0);
+        let prior = [translated("menu", "選單", prev_box)];
+        let now = [ocr("menu", moved)];
+        let out = remap_translations_to_ocr(&prior, &now, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bbox, prev_box, "same source must not walk the caption");
+    }
+
+    #[test]
+    fn remap_drops_caption_when_source_differs() {
+        let box_a = Rect::new(100.0, 200.0, 80.0, 24.0);
+        let box_b = Rect::new(98.0, 198.0, 160.0, 26.0);
+        let prior = [translated("セリフ", "old line", box_a)];
+        let now = [ocr("次の台詞", box_b)];
+        let out = remap_translations_to_ocr(&prior, &now, false);
+        assert!(out.is_empty(), "different source must not reuse the caption");
+    }
+
+    #[test]
+    fn remap_adopts_ocr_box_after_content_resize() {
+        let prev_box = Rect::new(50.0, 80.0, 100.0, 20.0);
+        let scaled = Rect::new(75.0, 120.0, 150.0, 30.0);
+        let prior = [translated("hello", "你好", prev_box)];
+        let now = [ocr("hello", scaled)];
+        let out = remap_translations_to_ocr(&prior, &now, true);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bbox, scaled);
+    }
 }

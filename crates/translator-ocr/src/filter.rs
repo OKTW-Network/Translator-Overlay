@@ -29,6 +29,17 @@ fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
     blocks
 }
 
+/// Swap a confirmed track to a new OCR reading (text + box together).
+fn adopt_reading(track: &mut Track, block: OcrBlock, now: Instant) {
+    track.text = block.text.clone();
+    track.bbox = block.bbox;
+    track.last_block = block;
+    track.pending_text = None;
+    track.pending_since = None;
+    track.thrash_since = None;
+    track.first_stable_since = now;
+}
+
 /// Tracks per-region text over time and only emits blocks that stay put.
 ///
 /// Fast-changing OCR (animated icons, particle effects) never reaches the
@@ -154,47 +165,29 @@ impl BlockPersistenceFilter {
                         track.confirmed = true;
                     }
                 } else if track.confirmed {
-                    // Confirmed region, OCR string thrashing: keep emitted text
-                    // frozen so the page fingerprint does not churn every frame.
-                    // Adopt a new reading after it lingers, or after max_unstable
-                    // of continuous thrash (use latest sample).
+                    // Confirmed region, different OCR string: keep emitted text
+                    // *and* the last caption box so overlay does not walk to the
+                    // new line (and re-fit font/width) before a real re-translate.
+                    // Adopt text + bbox together after linger or max_unstable.
                     track.last_seen = now;
                     if track.thrash_since.is_none() {
                         track.thrash_since = Some(now);
                     }
-                    let bbox = track.bbox.stabilize_against(block.bbox);
-                    track.bbox = bbox;
-                    track.last_block.bbox = bbox;
-                    track.last_block.confidence = block.confidence;
 
                     let pending_key = track.pending_text.as_deref().map(normalize_ocr_text).unwrap_or_default();
-                    if pending_key == text_key {
-                        let since = track.pending_since.unwrap_or(now);
-                        if now.saturating_duration_since(since) >= persist {
-                            track.text = block.text.clone();
-                            track.last_block.text = block.text.clone();
-                            track.pending_text = None;
-                            track.pending_since = None;
-                            track.thrash_since = None;
-                            track.first_stable_since = now;
-                        }
-                    } else {
+                    if pending_key != text_key {
                         track.pending_text = Some(block.text.clone());
                         track.pending_since = Some(now);
                     }
-
+                    let linger_ready =
+                        pending_key == text_key && now.saturating_duration_since(track.pending_since.unwrap_or(now)) >= persist;
                     let thrash_force = !max_unstable.is_zero()
                         && track
                             .thrash_since
                             .map(|t| now.saturating_duration_since(t) >= max_unstable)
                             .unwrap_or(false);
-                    if thrash_force && normalize_ocr_text(&track.text) != text_key {
-                        track.text = block.text.clone();
-                        track.last_block.text = block.text.clone();
-                        track.pending_text = None;
-                        track.pending_since = None;
-                        track.thrash_since = None;
-                        track.first_stable_since = now;
+                    if linger_ready || thrash_force {
+                        adopt_reading(track, block, now);
                     }
                 } else {
                     // Unconfirmed text flip: restart same-text timer, keep first_seen.
@@ -416,6 +409,30 @@ mod tests {
         let out = f.filter(vec![moved.clone()]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].bbox, moved.bbox);
+    }
+
+    #[test]
+    fn persistence_pending_text_keeps_bbox_until_adopt() {
+        let mut f = BlockPersistenceFilter::new(50, 300);
+        let origin = block_wh("セリフ", 100.0, 200.0, 80.0, 22.0);
+        let _ = f.filter(vec![origin.clone()]);
+        std::thread::sleep(Duration::from_millis(60));
+        let confirmed = f.filter(vec![origin.clone()]);
+        assert_eq!(confirmed.len(), 1);
+        let frozen = confirmed[0].bbox;
+
+        // New line in the same region: wider box, different text.
+        let next = block_wh("次の台詞です", 100.0, 200.0, 200.0, 24.0);
+        let held = f.filter(vec![next.clone()]);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].text, "セリフ");
+        assert_eq!(held[0].bbox, frozen, "pending text must not walk or resize the box");
+
+        std::thread::sleep(Duration::from_millis(60));
+        let adopted = f.filter(vec![next.clone()]);
+        assert_eq!(adopted.len(), 1);
+        assert_eq!(adopted[0].text, "次の台詞です");
+        assert_eq!(adopted[0].bbox, next.bbox, "adopt new text and its box together");
     }
 
     #[test]
