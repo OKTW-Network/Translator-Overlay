@@ -46,9 +46,9 @@ function Get-RepoRoot {
 }
 
 function Get-AppVersion {
-    param([string]$CargoToml)
-    $text = Get-Content -LiteralPath $CargoToml -Raw
-    if ($text -match '(?m)^\s*version\s*=\s*"([^"]+)"') {
+    param([string]$WorkspaceToml)
+    $text = Get-Content -LiteralPath $WorkspaceToml -Raw
+    if ($text -match '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
         return $Matches[1]
     }
     return "0.0.0"
@@ -57,7 +57,7 @@ function Get-AppVersion {
 $Root = Get-RepoRoot
 Set-Location -LiteralPath $Root
 
-$Version = Get-AppVersion (Join-Path $Root "crates\translator-app\Cargo.toml")
+$Version = Get-AppVersion (Join-Path $Root "Cargo.toml")
 if (-not $OutDir) {
     $OutDir = Join-Path $Root "dist"
 }
