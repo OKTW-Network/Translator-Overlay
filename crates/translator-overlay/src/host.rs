@@ -128,28 +128,28 @@ pub struct OverlayHost {
 
 impl OverlayHost {
     pub fn create(config: OverlayConfig, event_tx: Sender<OverlayEvent>) -> Result<Self, OverlayError> {
-        unsafe {
-            let hinstance = GetModuleHandleW(None).map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
+        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
 
-            let wc = WNDCLASSEXW {
-                cbSize: size_of::<WNDCLASSEXW>() as u32,
-                style: CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(wnd_proc),
-                hInstance: hinstance.into(),
-                hCursor: LoadCursorW(None, IDC_ARROW).map_err(|e| OverlayError::Other(format!("LoadCursorW: {e}")))?,
-                lpszClassName: CLASS_NAME,
-                ..Default::default()
-            };
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.map_err(|e| OverlayError::Other(format!("LoadCursorW: {e}")))?,
+            lpszClassName: CLASS_NAME,
+            ..Default::default()
+        };
 
-            let atom = RegisterClassExW(&wc);
-            if atom == 0 {
-                // Class may already exist from a previous run in the same process.
-                // Continue — CreateWindowEx will still work if registered.
-            }
+        let atom = unsafe { RegisterClassExW(&wc) };
+        if atom == 0 {
+            // Class may already exist from a previous run in the same process.
+            // Continue — CreateWindowEx will still work if registered.
+        }
 
-            // Not TOPMOST: only float above the target while it is in the
-            // foreground; otherwise we hide so other apps are not covered.
-            let hwnd = CreateWindowExW(
+        // Not TOPMOST: only float above the target while it is in the
+        // foreground; otherwise we hide so other apps are not covered.
+        let hwnd = unsafe {
+            CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 CLASS_NAME,
                 w!("Translator Overlay"),
@@ -163,73 +163,73 @@ impl OverlayHost {
                 Some(hinstance.into()),
                 None,
             )
-            .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
-
-            let hdc_screen = GetDC(Some(hwnd));
-            if hdc_screen.is_invalid() {
-                let _ = DestroyWindow(hwnd);
-                return Err(OverlayError::Other("GetDC failed".into()));
-            }
-            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-            if hdc_mem.is_invalid() {
-                ReleaseDC(Some(hwnd), hdc_screen);
-                let _ = DestroyWindow(hwnd);
-                return Err(OverlayError::Other("CreateCompatibleDC failed".into()));
-            }
-
-            let font_px = 16;
-            let hfont = text::create_segoe_font(font_px)?;
-
-            let hdc_present = CreateCompatibleDC(Some(hdc_screen));
-            if hdc_present.is_invalid() {
-                let _ = DeleteDC(hdc_mem);
-                ReleaseDC(Some(hwnd), hdc_screen);
-                let _ = DestroyWindow(hwnd);
-                return Err(OverlayError::Other("CreateCompatibleDC(present) failed".into()));
-            }
-
-            let mut host = Self {
-                hwnd,
-                class_atom: atom,
-                config,
-                target: None,
-                blocks: Vec::new(),
-                content_w: 0,
-                content_h: 0,
-                surface_w: 0,
-                surface_h: 0,
-                dirty: true,
-                hdc_screen,
-                hdc_mem,
-                hbmp: HBITMAP::default(),
-                bits: std::ptr::null_mut(),
-                bmp_w: 0,
-                bmp_h: 0,
-                hdc_present,
-                hbmp_present: HBITMAP::default(),
-                present_w: 0,
-                present_h: 0,
-                hfont,
-                font_px,
-                reader: None,
-                picker: None,
-                event_tx,
-                follow_hooks: [HWINEVENTHOOK::default(); 3],
-            };
-
-            FOLLOW_THREAD.store(GetCurrentThreadId(), Ordering::Release);
-
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            host.ensure_bitmap(100, 100)?;
-            match ReaderWindow::create(&host.config) {
-                Ok(reader) => host.reader = Some(reader),
-                Err(e) => {
-                    host.teardown();
-                    return Err(e);
-                }
-            }
-            Ok(host)
         }
+        .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
+
+        let hdc_screen = unsafe { GetDC(Some(hwnd)) };
+        if hdc_screen.is_invalid() {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(OverlayError::Other("GetDC failed".into()));
+        }
+        let hdc_mem = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
+        if hdc_mem.is_invalid() {
+            unsafe { ReleaseDC(Some(hwnd), hdc_screen) };
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(OverlayError::Other("CreateCompatibleDC failed".into()));
+        }
+
+        let font_px = 16;
+        let hfont = text::create_segoe_font(font_px)?;
+
+        let hdc_present = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
+        if hdc_present.is_invalid() {
+            let _ = unsafe { DeleteDC(hdc_mem) };
+            unsafe { ReleaseDC(Some(hwnd), hdc_screen) };
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(OverlayError::Other("CreateCompatibleDC(present) failed".into()));
+        }
+
+        let mut host = Self {
+            hwnd,
+            class_atom: atom,
+            config,
+            target: None,
+            blocks: Vec::new(),
+            content_w: 0,
+            content_h: 0,
+            surface_w: 0,
+            surface_h: 0,
+            dirty: true,
+            hdc_screen,
+            hdc_mem,
+            hbmp: HBITMAP::default(),
+            bits: std::ptr::null_mut(),
+            bmp_w: 0,
+            bmp_h: 0,
+            hdc_present,
+            hbmp_present: HBITMAP::default(),
+            present_w: 0,
+            present_h: 0,
+            hfont,
+            font_px,
+            reader: None,
+            picker: None,
+            event_tx,
+            follow_hooks: [HWINEVENTHOOK::default(); 3],
+        };
+
+        FOLLOW_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+
+        let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+        host.ensure_bitmap(100, 100)?;
+        match ReaderWindow::create(&host.config) {
+            Ok(reader) => host.reader = Some(reader),
+            Err(e) => {
+                host.teardown();
+                return Err(e);
+            }
+        }
+        Ok(host)
     }
 
     pub fn run(&mut self, rx: Receiver<OverlayCommand>) {
@@ -274,23 +274,21 @@ impl OverlayHost {
 
     /// Returns `true` when the thread should exit (`WM_QUIT`).
     fn drain_thread_messages(&mut self, sync: &mut bool) -> bool {
-        unsafe {
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    return true;
-                }
-                if msg.hwnd.is_invalid() && msg.message == WM_APP {
-                    continue;
-                }
-                if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
-                    self.dispatch_picker_msg(&msg);
-                    *sync = true;
-                    continue;
-                }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                return true;
             }
+            if msg.hwnd.is_invalid() && msg.message == WM_APP {
+                continue;
+            }
+            if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
+                self.dispatch_picker_msg(&msg);
+                *sync = true;
+                continue;
+            }
+            let _ = unsafe { TranslateMessage(&msg) };
+            unsafe { DispatchMessageW(&msg) };
         }
         false
     }
@@ -299,7 +297,7 @@ impl OverlayHost {
         match cmd {
             OverlayCommand::Attach { target_hwnd } => {
                 let hwnd = HWND(target_hwnd as *mut _);
-                if unsafe { IsWindow(Some(hwnd)).as_bool() } {
+                if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
                     FOLLOW_TARGET.store(target_hwnd, Ordering::Release);
                     self.dirty = true;
@@ -393,9 +391,7 @@ impl OverlayHost {
         // Dashboard just received the click, so this process may set foreground.
         // Bring the target up so the picker is visible without an extra click.
         if let Some(target) = self.target {
-            unsafe {
-                let _ = SetForegroundWindow(target);
-            }
+            let _ = unsafe { SetForegroundWindow(target) };
         }
     }
 
@@ -405,9 +401,7 @@ impl OverlayHost {
         };
         self.set_click_through(true);
         PICKER_HIT_TEST.store(false, Ordering::Relaxed);
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        let _ = unsafe { ReleaseCapture() };
         match end {
             PickerEnd::Confirm => {
                 let _ = self.event_tx.send(OverlayEvent::RegionsCommitted(picker.regions));
@@ -423,17 +417,17 @@ impl OverlayHost {
     }
 
     fn set_click_through(&self, through: bool) {
-        unsafe {
-            let raw = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32;
-            let mut style = WINDOW_EX_STYLE(raw);
-            if through {
-                style |= WS_EX_TRANSPARENT;
-            } else {
-                style &= !WS_EX_TRANSPARENT;
-            }
-            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style.0 as isize);
-            let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        let raw = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32;
+        let mut style = WINDOW_EX_STYLE(raw);
+        if through {
+            style |= WS_EX_TRANSPARENT;
+        } else {
+            style &= !WS_EX_TRANSPARENT;
         }
+        unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style.0 as isize) };
+        let _ = unsafe {
+            SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+        };
     }
 
     fn tick(&mut self) {
@@ -451,62 +445,60 @@ impl OverlayHost {
             return;
         };
 
-        unsafe {
-            if !IsWindow(Some(target)).as_bool() {
-                debug!("target window gone — detaching overlay");
-                self.target = None;
-                self.hide();
+        if !unsafe { IsWindow(Some(target)) }.as_bool() {
+            debug!("target window gone — detaching overlay");
+            self.target = None;
+            self.hide();
+            return;
+        }
+        if unsafe { IsIconic(target) }.as_bool() || !unsafe { IsWindowVisible(target) }.as_bool() {
+            self.hide();
+            return;
+        }
+
+        // Only show while the capture target (or one of its children) is
+        // the foreground window.
+        let fg = unsafe { GetForegroundWindow() };
+        if !is_target_in_foreground(target, fg) {
+            self.hide();
+            return;
+        }
+
+        // Align to **client area** (matches cropped capture frames).
+        let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
+            return;
+        };
+
+        if self.blocks.is_empty() || self.content_w == 0 || self.content_h == 0 {
+            self.hide();
+            return;
+        }
+
+        // Paint in capture/OCR pixel space (1:1 with bboxes), then stretch to
+        // the live client rect. Avoids DPI / DWM size drift mis-mapping boxes.
+        let paint_w = self.content_w as i32;
+        let paint_h = self.content_h as i32;
+        let size_changed = paint_w != self.surface_w || paint_h != self.surface_h;
+        if size_changed {
+            self.surface_w = paint_w;
+            self.surface_h = paint_h;
+            self.dirty = true;
+        }
+
+        if self.dirty {
+            if let Err(e) = self.repaint() {
+                warn!(error = %e, "overlay repaint failed");
                 return;
             }
-            if IsIconic(target).as_bool() || !IsWindowVisible(target).as_bool() {
-                self.hide();
-                return;
-            }
+            self.dirty = false;
+        }
 
-            // Only show while the capture target (or one of its children) is
-            // the foreground window.
-            let fg = GetForegroundWindow();
-            if !is_target_in_foreground(target, fg) {
-                self.hide();
-                return;
-            }
+        // TOPMOST only while target is focused — otherwise other apps get covered.
+        let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
+        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
 
-            // Align to **client area** (matches cropped capture frames).
-            let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
-                return;
-            };
-
-            if self.blocks.is_empty() || self.content_w == 0 || self.content_h == 0 {
-                self.hide();
-                return;
-            }
-
-            // Paint in capture/OCR pixel space (1:1 with bboxes), then stretch to
-            // the live client rect. Avoids DPI / DWM size drift mis-mapping boxes.
-            let paint_w = self.content_w as i32;
-            let paint_h = self.content_h as i32;
-            let size_changed = paint_w != self.surface_w || paint_h != self.surface_h;
-            if size_changed {
-                self.surface_w = paint_w;
-                self.surface_h = paint_h;
-                self.dirty = true;
-            }
-
-            if self.dirty {
-                if let Err(e) = self.repaint() {
-                    warn!(error = %e, "overlay repaint failed");
-                    return;
-                }
-                self.dirty = false;
-            }
-
-            // TOPMOST only while target is focused — otherwise other apps get covered.
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-
-            if let Err(e) = self.present(x, y, client_w, client_h) {
-                warn!(error = %e, "UpdateLayeredWindow failed");
-            }
+        if let Err(e) = self.present(x, y, client_w, client_h) {
+            warn!(error = %e, "UpdateLayeredWindow failed");
         }
     }
 
@@ -516,73 +508,68 @@ impl OverlayHost {
             return;
         };
 
-        unsafe {
-            if !IsWindow(Some(target)).as_bool() {
-                debug!("target window gone — cancelling region picker");
-                self.target = None;
-                self.finish_picker(PickerEnd::Cancel);
-                return;
-            }
-            if IsIconic(target).as_bool() || !IsWindowVisible(target).as_bool() {
-                self.abort_picker_drag();
-                self.hide();
-                return;
-            }
+        if !unsafe { IsWindow(Some(target)) }.as_bool() {
+            debug!("target window gone — cancelling region picker");
+            self.target = None;
+            self.finish_picker(PickerEnd::Cancel);
+            return;
+        }
+        if unsafe { IsIconic(target) }.as_bool() || !unsafe { IsWindowVisible(target) }.as_bool() {
+            self.abort_picker_drag();
+            self.hide();
+            return;
+        }
 
-            // Same rule as the translation overlay: only cover the target
-            // while it (or a child) is the foreground window. The picker
-            // itself must also count — a clickable TOPMOST layer often
-            // becomes GetForegroundWindow despite WS_EX_NOACTIVATE, and
-            // hiding on that would abort the drag. Keep picker state so
-            // Dashboard Done/Cancel/Clear still apply after hide.
-            let dragging = self.picker.as_ref().is_some_and(RegionPicker::is_dragging);
-            let fg = GetForegroundWindow();
-            if !is_picker_allowed_foreground(target, self.hwnd, fg) && !dragging {
-                self.abort_picker_drag();
-                self.hide();
-                return;
-            }
+        // Same rule as the translation overlay: only cover the target
+        // while it (or a child) is the foreground window. The picker
+        // itself must also count — a clickable TOPMOST layer often
+        // becomes GetForegroundWindow despite WS_EX_NOACTIVATE, and
+        // hiding on that would abort the drag. Keep picker state so
+        // Dashboard Done/Cancel/Clear still apply after hide.
+        let dragging = self.picker.as_ref().is_some_and(RegionPicker::is_dragging);
+        let fg = unsafe { GetForegroundWindow() };
+        if !is_picker_allowed_foreground(target, self.hwnd, fg) && !dragging {
+            self.abort_picker_drag();
+            self.hide();
+            return;
+        }
 
-            let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
-                return;
-            };
+        let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
+            return;
+        };
 
-            if let Some(p) = self.picker.as_mut() {
-                p.set_client_size(client_w, client_h);
-            }
+        if let Some(p) = self.picker.as_mut() {
+            p.set_client_size(client_w, client_h);
+        }
 
-            self.surface_w = client_w;
-            self.surface_h = client_h;
+        self.surface_w = client_w;
+        self.surface_h = client_h;
 
-            if let Err(e) = self.repaint_picker() {
-                warn!(error = %e, "picker repaint failed");
-                return;
-            }
+        if let Err(e) = self.repaint_picker() {
+            warn!(error = %e, "picker repaint failed");
+            return;
+        }
 
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
+        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
 
-            if let Err(e) = self.present(x, y, client_w, client_h) {
-                warn!(error = %e, "UpdateLayeredWindow failed (picker)");
-            }
+        if let Err(e) = self.present(x, y, client_w, client_h) {
+            warn!(error = %e, "UpdateLayeredWindow failed (picker)");
         }
     }
 
     fn hide(&mut self) {
-        unsafe {
-            // Drop topmost so we never stay above unrelated apps after hide.
-            let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
-        }
+        // Drop topmost so we never stay above unrelated apps after hide.
+        let _ =
+            unsafe { SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW) };
+        let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
     }
 
     fn abort_picker_drag(&mut self) {
         if let Some(p) = self.picker.as_mut() {
             p.cancel_drag();
         }
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        let _ = unsafe { ReleaseCapture() };
     }
 
     fn dispatch_picker_msg(&mut self, msg: &MSG) {
@@ -591,9 +578,7 @@ impl OverlayHost {
             WM_LBUTTONDOWN => {
                 if let Some(p) = self.picker.as_mut() {
                     p.on_left_down(px, py);
-                    unsafe {
-                        let _ = SetCapture(self.hwnd);
-                    }
+                    let _ = unsafe { SetCapture(self.hwnd) };
                     self.dirty = true;
                 }
             }
@@ -605,9 +590,7 @@ impl OverlayHost {
                 }
             }
             WM_LBUTTONUP => {
-                unsafe {
-                    let _ = ReleaseCapture();
-                }
+                let _ = unsafe { ReleaseCapture() };
                 let action = self.picker.as_mut().map(|p| p.on_left_up(px, py)).unwrap_or(PickerAction::None);
                 self.apply_picker_action(action);
             }
@@ -716,41 +699,39 @@ impl OverlayHost {
             return Ok(());
         }
 
-        unsafe {
-            if !self.hbmp.is_invalid() {
-                let _ = SelectObject(self.hdc_mem, HGDIOBJ::default());
-                let _ = DeleteObject(self.hbmp.into());
-                self.hbmp = HBITMAP::default();
-                self.bits = std::ptr::null_mut();
-            }
-
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbmp = CreateDIBSection(Some(self.hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-                .map_err(|e| OverlayError::Other(format!("CreateDIBSection: {e}")))?;
-
-            if hbmp.is_invalid() || bits.is_null() {
-                return Err(OverlayError::Other("CreateDIBSection returned null".into()));
-            }
-
-            let _ = SelectObject(self.hdc_mem, HGDIOBJ(hbmp.0));
-            self.hbmp = hbmp;
-            self.bits = bits.cast();
-            self.bmp_w = w;
-            self.bmp_h = h;
+        if !self.hbmp.is_invalid() {
+            let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ::default()) };
+            let _ = unsafe { DeleteObject(self.hbmp.into()) };
+            self.hbmp = HBITMAP::default();
+            self.bits = std::ptr::null_mut();
         }
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbmp = unsafe { CreateDIBSection(Some(self.hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
+            .map_err(|e| OverlayError::Other(format!("CreateDIBSection: {e}")))?;
+
+        if hbmp.is_invalid() || bits.is_null() {
+            return Err(OverlayError::Other("CreateDIBSection returned null".into()));
+        }
+
+        let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ(hbmp.0)) };
+        self.hbmp = hbmp;
+        self.bits = bits.cast();
+        self.bmp_w = w;
+        self.bmp_h = h;
         Ok(())
     }
 
@@ -815,14 +796,12 @@ impl OverlayHost {
 
         for _ in 0..6 {
             self.ensure_font(px)?;
-            let cell = unsafe {
-                let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
-                let mut tm = TEXTMETRICW::default();
-                if GetTextMetricsW(self.hdc_mem, &mut tm).as_bool() {
-                    (tm.tmAscent + tm.tmDescent).max(1)
-                } else {
-                    px
-                }
+            let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0)) };
+            let mut tm = TEXTMETRICW::default();
+            let cell = if unsafe { GetTextMetricsW(self.hdc_mem, &mut tm) }.as_bool() {
+                (tm.tmAscent + tm.tmDescent).max(1)
+            } else {
+                px
             };
             if cell <= max_cell {
                 break;
@@ -898,54 +877,48 @@ impl OverlayHost {
     /// Unwrapped single-line extent (width, height) in pixels.
     fn measure_single_line(&mut self, text: &str, font_px: i32) -> Result<(i32, i32), OverlayError> {
         self.ensure_font(font_px)?;
-        unsafe {
-            let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
-            let mut calc = RECT {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let flags = DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT;
-            let measured_h = DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags);
-            let w = (calc.right - calc.left).max(1);
-            let h = if measured_h > 0 { measured_h } else { font_px + 2 };
-            Ok((w, h))
-        }
+        let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0)) };
+        let mut calc = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let flags = DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT;
+        let measured_h = unsafe { DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags) };
+        let w = (calc.right - calc.left).max(1);
+        let h = if measured_h > 0 { measured_h } else { font_px + 2 };
+        Ok((w, h))
     }
 
     /// Word-wrapped extent for a fixed text area width.
     fn measure_wrapped(&mut self, text: &str, font_px: i32, text_area_w: i32) -> Result<(i32, i32), OverlayError> {
         self.ensure_font(font_px)?;
-        unsafe {
-            let _ = SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0));
-            let mut calc = RECT {
-                left: 0,
-                top: 0,
-                right: text_area_w.max(8),
-                bottom: 0,
-            };
-            let mut wide: Vec<u16> = text.encode_utf16().collect();
-            let flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT;
-            let measured_h = DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags);
-            let w = (calc.right - calc.left).max(1);
-            let h = if measured_h > 0 { measured_h } else { font_px + 2 };
-            Ok((w, h))
-        }
+        let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ(self.hfont.0)) };
+        let mut calc = RECT {
+            left: 0,
+            top: 0,
+            right: text_area_w.max(8),
+            bottom: 0,
+        };
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT;
+        let measured_h = unsafe { DrawTextW(self.hdc_mem, &mut wide, &mut calc, flags) };
+        let w = (calc.right - calc.left).max(1);
+        let h = if measured_h > 0 { measured_h } else { font_px + 2 };
+        Ok((w, h))
     }
 
     fn ensure_font(&mut self, font_px: i32) -> Result<(), OverlayError> {
         if font_px == self.font_px && !self.hfont.is_invalid() {
             return Ok(());
         }
-        unsafe {
-            if !self.hfont.is_invalid() {
-                let _ = DeleteObject(self.hfont.into());
-            }
-            self.hfont = text::create_segoe_font(font_px)?;
-            self.font_px = font_px;
+        if !self.hfont.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hfont.into()) };
         }
+        self.hfont = text::create_segoe_font(font_px)?;
+        self.font_px = font_px;
         Ok(())
     }
 
@@ -969,22 +942,22 @@ impl OverlayHost {
             return Err(OverlayError::Other("invalid client size".into()));
         }
 
-        unsafe {
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            };
-            let ppt_dst = POINT { x, y };
-            let psize = SIZE {
-                cx: client_w,
-                cy: client_h,
-            };
-            let ppt_src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let ppt_dst = POINT { x, y };
+        let psize = SIZE {
+            cx: client_w,
+            cy: client_h,
+        };
+        let ppt_src = POINT { x: 0, y: 0 };
 
-            // Same size: present paint buffer directly (common path).
-            if self.bmp_w == client_w && self.bmp_h == client_h {
+        // Same size: present paint buffer directly (common path).
+        if self.bmp_w == client_w && self.bmp_h == client_h {
+            unsafe {
                 UpdateLayeredWindow(
                     self.hwnd,
                     Some(self.hdc_screen),
@@ -996,14 +969,16 @@ impl OverlayHost {
                     Some(&blend),
                     ULW_ALPHA,
                 )
-                .map_err(|e| OverlayError::Other(format!("UpdateLayeredWindow: {e}")))?;
-                return Ok(());
             }
+            .map_err(|e| OverlayError::Other(format!("UpdateLayeredWindow: {e}")))?;
+            return Ok(());
+        }
 
-            // Stretch content-space paint into client-sized present buffer.
-            self.ensure_present_bitmap(client_w, client_h)?;
-            let _ = SetStretchBltMode(self.hdc_present, HALFTONE);
-            let ok = StretchBlt(
+        // Stretch content-space paint into client-sized present buffer.
+        self.ensure_present_bitmap(client_w, client_h)?;
+        let _ = unsafe { SetStretchBltMode(self.hdc_present, HALFTONE) };
+        let ok = unsafe {
+            StretchBlt(
                 self.hdc_present,
                 0,
                 0,
@@ -1015,11 +990,13 @@ impl OverlayHost {
                 self.bmp_w,
                 self.bmp_h,
                 windows::Win32::Graphics::Gdi::SRCCOPY,
-            );
-            if !ok.as_bool() {
-                return Err(OverlayError::Other("StretchBlt failed".into()));
-            }
+            )
+        };
+        if !ok.as_bool() {
+            return Err(OverlayError::Other("StretchBlt failed".into()));
+        }
 
+        unsafe {
             UpdateLayeredWindow(
                 self.hwnd,
                 Some(self.hdc_screen),
@@ -1031,8 +1008,8 @@ impl OverlayHost {
                 Some(&blend),
                 ULW_ALPHA,
             )
-            .map_err(|e| OverlayError::Other(format!("UpdateLayeredWindow: {e}")))?;
         }
+        .map_err(|e| OverlayError::Other(format!("UpdateLayeredWindow: {e}")))?;
         Ok(())
     }
 
@@ -1044,39 +1021,37 @@ impl OverlayHost {
             return Ok(());
         }
 
-        unsafe {
-            if !self.hbmp_present.is_invalid() {
-                let _ = SelectObject(self.hdc_present, HGDIOBJ::default());
-                let _ = DeleteObject(self.hbmp_present.into());
-                self.hbmp_present = HBITMAP::default();
-            }
-
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbmp = CreateDIBSection(Some(self.hdc_present), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-                .map_err(|e| OverlayError::Other(format!("CreateDIBSection(present): {e}")))?;
-
-            if hbmp.is_invalid() || bits.is_null() {
-                return Err(OverlayError::Other("CreateDIBSection(present) returned null".into()));
-            }
-
-            let _ = SelectObject(self.hdc_present, HGDIOBJ(hbmp.0));
-            self.hbmp_present = hbmp;
-            self.present_w = w;
-            self.present_h = h;
+        if !self.hbmp_present.is_invalid() {
+            let _ = unsafe { SelectObject(self.hdc_present, HGDIOBJ::default()) };
+            let _ = unsafe { DeleteObject(self.hbmp_present.into()) };
+            self.hbmp_present = HBITMAP::default();
         }
+
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbmp = unsafe { CreateDIBSection(Some(self.hdc_present), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
+            .map_err(|e| OverlayError::Other(format!("CreateDIBSection(present): {e}")))?;
+
+        if hbmp.is_invalid() || bits.is_null() {
+            return Err(OverlayError::Other("CreateDIBSection(present) returned null".into()));
+        }
+
+        let _ = unsafe { SelectObject(self.hdc_present, HGDIOBJ(hbmp.0)) };
+        self.hbmp_present = hbmp;
+        self.present_w = w;
+        self.present_h = h;
         Ok(())
     }
 
@@ -1088,42 +1063,40 @@ impl OverlayHost {
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();
         }
-        unsafe {
-            if !self.hwnd.is_invalid() {
-                let _ = DestroyWindow(self.hwnd);
-                self.hwnd = HWND::default();
+        if !self.hwnd.is_invalid() {
+            let _ = unsafe { DestroyWindow(self.hwnd) };
+            self.hwnd = HWND::default();
+        }
+        if !self.hfont.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hfont.into()) };
+            self.hfont = HFONT::default();
+        }
+        if !self.hbmp.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hbmp.into()) };
+            self.hbmp = HBITMAP::default();
+            self.bits = std::ptr::null_mut();
+        }
+        if !self.hbmp_present.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hbmp_present.into()) };
+            self.hbmp_present = HBITMAP::default();
+        }
+        if !self.hdc_mem.is_invalid() {
+            let _ = unsafe { DeleteDC(self.hdc_mem) };
+            self.hdc_mem = HDC::default();
+        }
+        if !self.hdc_present.is_invalid() {
+            let _ = unsafe { DeleteDC(self.hdc_present) };
+            self.hdc_present = HDC::default();
+        }
+        if !self.hdc_screen.is_invalid() {
+            unsafe { ReleaseDC(None, self.hdc_screen) };
+            self.hdc_screen = HDC::default();
+        }
+        if self.class_atom != 0 {
+            if let Ok(hi) = unsafe { GetModuleHandleW(None) } {
+                let _ = unsafe { UnregisterClassW(CLASS_NAME, Some(hi.into())) };
             }
-            if !self.hfont.is_invalid() {
-                let _ = DeleteObject(self.hfont.into());
-                self.hfont = HFONT::default();
-            }
-            if !self.hbmp.is_invalid() {
-                let _ = DeleteObject(self.hbmp.into());
-                self.hbmp = HBITMAP::default();
-                self.bits = std::ptr::null_mut();
-            }
-            if !self.hbmp_present.is_invalid() {
-                let _ = DeleteObject(self.hbmp_present.into());
-                self.hbmp_present = HBITMAP::default();
-            }
-            if !self.hdc_mem.is_invalid() {
-                let _ = DeleteDC(self.hdc_mem);
-                self.hdc_mem = HDC::default();
-            }
-            if !self.hdc_present.is_invalid() {
-                let _ = DeleteDC(self.hdc_present);
-                self.hdc_present = HDC::default();
-            }
-            if !self.hdc_screen.is_invalid() {
-                ReleaseDC(None, self.hdc_screen);
-                self.hdc_screen = HDC::default();
-            }
-            if self.class_atom != 0 {
-                if let Ok(hi) = GetModuleHandleW(None) {
-                    let _ = UnregisterClassW(CLASS_NAME, Some(hi.into()));
-                }
-                self.class_atom = 0;
-            }
+            self.class_atom = 0;
         }
     }
 }
@@ -1153,26 +1126,19 @@ fn is_follow_target(hwnd: HWND) -> bool {
 }
 
 fn install_follow_hooks() -> [HWINEVENTHOOK; 3] {
-    // SAFETY: callback only touches atomics and may `PostThreadMessageW` to this thread.
-    unsafe {
-        let foreground =
-            SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        let minimize =
-            SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        let location = SetWinEventHook(
-            EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_OBJECT_LOCATIONCHANGE,
-            None,
-            Some(on_follow_event),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT,
-        );
-        if foreground.is_invalid() || minimize.is_invalid() || location.is_invalid() {
-            warn!("overlay follow WinEvent hooks failed to install");
-        }
-        [foreground, minimize, location]
+    let foreground = unsafe {
+        SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT)
+    };
+    let minimize = unsafe {
+        SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT)
+    };
+    let location = unsafe {
+        SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT)
+    };
+    if foreground.is_invalid() || minimize.is_invalid() || location.is_invalid() {
+        warn!("overlay follow WinEvent hooks failed to install");
     }
+    [foreground, minimize, location]
 }
 
 fn uninstall_follow_hooks(hooks: &mut [HWINEVENTHOOK; 3]) {
@@ -1212,48 +1178,41 @@ fn is_picker_allowed_foreground(target: HWND, overlay: HWND, fg: HWND) -> bool {
 
 /// True when `fg` is the capture target or a child / same top-level tree.
 fn is_target_in_foreground(target: HWND, fg: HWND) -> bool {
-    unsafe {
-        if fg.is_invalid() || target.is_invalid() {
-            return false;
-        }
-        if fg == target {
-            return true;
-        }
-        // Focused child control inside the target window.
-        if IsChild(target, fg).as_bool() {
-            return true;
-        }
-        // Same top-level root (e.g. owned popups under the target).
-        let fg_root = GetAncestor(fg, GA_ROOT);
-        if !fg_root.is_invalid() && fg_root == target {
-            return true;
-        }
-        false
+    if fg.is_invalid() || target.is_invalid() {
+        return false;
     }
+    if fg == target {
+        return true;
+    }
+    // Focused child control inside the target window.
+    if unsafe { IsChild(target, fg) }.as_bool() {
+        return true;
+    }
+    // Same top-level root (e.g. owned popups under the target).
+    let fg_root = unsafe { GetAncestor(fg, GA_ROOT) };
+    !fg_root.is_invalid() && fg_root == target
 }
 
 /// Client-area rectangle in screen coordinates (left, top, width, height).
 fn client_screen_rect(target: HWND) -> Option<(i32, i32, i32, i32)> {
-    unsafe {
-        let mut client = RECT::default();
-        if GetClientRect(target, &mut client).is_err() {
-            return None;
-        }
-        let mut tl = POINT {
-            x: client.left,
-            y: client.top,
-        };
-        let mut br = POINT {
-            x: client.right,
-            y: client.bottom,
-        };
-        if !ClientToScreen(target, &mut tl).as_bool() || !ClientToScreen(target, &mut br).as_bool() {
-            return None;
-        }
-        let w = (br.x - tl.x).max(1);
-        let h = (br.y - tl.y).max(1);
-        Some((tl.x, tl.y, w, h))
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(target, &mut client) }.is_err() {
+        return None;
     }
+    let mut tl = POINT {
+        x: client.left,
+        y: client.top,
+    };
+    let mut br = POINT {
+        x: client.right,
+        y: client.bottom,
+    };
+    if !unsafe { ClientToScreen(target, &mut tl) }.as_bool() || !unsafe { ClientToScreen(target, &mut br) }.as_bool() {
+        return None;
+    }
+    let w = (br.x - tl.x).max(1);
+    let h = (br.y - tl.y).max(1);
+    Some((tl.x, tl.y, w, h))
 }
 
 enum PickerEnd {
@@ -1295,18 +1254,16 @@ fn picker_cursor_from_code(code: u8) -> PickerCursor {
 }
 
 fn apply_picker_cursor(kind: PickerCursor) {
-    unsafe {
-        let id = match kind {
-            PickerCursor::Cross => IDC_CROSS,
-            PickerCursor::SizeAll => IDC_SIZEALL,
-            PickerCursor::SizeNs => IDC_SIZENS,
-            PickerCursor::SizeWe => IDC_SIZEWE,
-            PickerCursor::SizeNwse => IDC_SIZENWSE,
-            PickerCursor::SizeNesw => IDC_SIZENESW,
-        };
-        if let Ok(cur) = LoadCursorW(None, id) {
-            let _ = SetCursor(Some(cur));
-        }
+    let id = match kind {
+        PickerCursor::Cross => IDC_CROSS,
+        PickerCursor::SizeAll => IDC_SIZEALL,
+        PickerCursor::SizeNs => IDC_SIZENS,
+        PickerCursor::SizeWe => IDC_SIZEWE,
+        PickerCursor::SizeNwse => IDC_SIZENWSE,
+        PickerCursor::SizeNesw => IDC_SIZENESW,
+    };
+    if let Ok(cur) = unsafe { LoadCursorW(None, id) } {
+        let _ = unsafe { SetCursor(Some(cur)) };
     }
 }
 
@@ -1316,38 +1273,36 @@ fn set_picker_cursor(kind: PickerCursor) {
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_NCHITTEST => {
-                if PICKER_HIT_TEST.load(Ordering::Relaxed) {
-                    LRESULT(HTCLIENT as isize)
-                } else {
-                    LRESULT(HTTRANSPARENT as isize)
-                }
+    match msg {
+        WM_NCHITTEST => {
+            if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                LRESULT(HTCLIENT as isize)
+            } else {
+                LRESULT(HTTRANSPARENT as isize)
             }
-            WM_SETCURSOR => {
-                if PICKER_HIT_TEST.load(Ordering::Relaxed) {
-                    apply_picker_cursor(picker_cursor_from_code(PICKER_CURSOR.load(Ordering::Relaxed)));
-                    LRESULT(1)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
-            }
-            // Picker is WS_EX_NOACTIVATE, but a TOPMOST layered window can
-            // still be activated on click. Refuse activation so the target
-            // stays foreground while the user draws boxes.
-            WM_MOUSEACTIVATE => {
-                if PICKER_HIT_TEST.load(Ordering::Relaxed) {
-                    LRESULT(MA_NOACTIVATE as isize)
-                } else {
-                    DefWindowProcW(hwnd, msg, wparam, lparam)
-                }
-            }
-            WM_DESTROY => {
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+        WM_SETCURSOR => {
+            if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                apply_picker_cursor(picker_cursor_from_code(PICKER_CURSOR.load(Ordering::Relaxed)));
+                LRESULT(1)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
+        // Picker is WS_EX_NOACTIVATE, but a TOPMOST layered window can
+        // still be activated on click. Refuse activation so the target
+        // stays foreground while the user draws boxes.
+        WM_MOUSEACTIVATE => {
+            if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                LRESULT(MA_NOACTIVATE as isize)
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            }
+        }
+        WM_DESTROY => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }

@@ -122,42 +122,33 @@ fn mark_if_resized(target: isize) {
 }
 
 fn hook_thread(ready: std::sync::mpsc::Sender<u32>) {
-    // SAFETY: this thread owns the message queue and both hooks; `on_win_event`
-    // only touches atomics and `GetWindowRect`. `GetMessageW` runs until `WM_QUIT`.
-    unsafe {
-        let mut msg = MSG::default();
-        // Create the thread message queue before advertising `thread_id`.
-        let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
-        let thread_id = GetCurrentThreadId();
-        let movesize =
-            SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, None, Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT);
-        let location = SetWinEventHook(
-            EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_OBJECT_LOCATIONCHANGE,
-            None,
-            Some(on_win_event),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT,
-        );
-        if movesize.is_invalid() || location.is_invalid() {
-            if !movesize.is_invalid() {
-                let _ = UnhookWinEvent(movesize);
-            }
-            if !location.is_invalid() {
-                let _ = UnhookWinEvent(location);
-            }
-            let _ = ready.send(0);
-            return;
+    let mut msg = MSG::default();
+    // Create the thread message queue before advertising `thread_id`.
+    let _ = unsafe { PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE) };
+    let thread_id = unsafe { GetCurrentThreadId() };
+    let movesize = unsafe {
+        SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, None, Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT)
+    };
+    let location = unsafe {
+        SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_win_event), 0, 0, WINEVENT_OUTOFCONTEXT)
+    };
+    if movesize.is_invalid() || location.is_invalid() {
+        if !movesize.is_invalid() {
+            let _ = unsafe { UnhookWinEvent(movesize) };
         }
-        let _ = ready.send(thread_id);
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if !location.is_invalid() {
+            let _ = unsafe { UnhookWinEvent(location) };
         }
-        let _ = UnhookWinEvent(movesize);
-        let _ = UnhookWinEvent(location);
+        let _ = ready.send(0);
+        return;
     }
+    let _ = ready.send(thread_id);
+    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        let _ = unsafe { TranslateMessage(&msg) };
+        unsafe { DispatchMessageW(&msg) };
+    }
+    let _ = unsafe { UnhookWinEvent(movesize) };
+    let _ = unsafe { UnhookWinEvent(location) };
 }
 
 unsafe extern "system" fn on_win_event(

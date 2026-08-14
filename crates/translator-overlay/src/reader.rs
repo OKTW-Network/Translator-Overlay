@@ -67,21 +67,21 @@ pub(crate) struct ReaderWindow {
 
 impl ReaderWindow {
     pub(crate) fn create(config: &OverlayConfig) -> Result<Box<Self>, OverlayError> {
-        unsafe {
-            let hinstance = GetModuleHandleW(None).map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
+        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
 
-            let wc = WNDCLASSEXW {
-                cbSize: size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(reader_wnd_proc),
-                hInstance: hinstance.into(),
-                lpszClassName: CLASS_NAME,
-                ..Default::default()
-            };
-            let atom = RegisterClassExW(&wc);
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(reader_wnd_proc),
+            hInstance: hinstance.into(),
+            lpszClassName: CLASS_NAME,
+            ..Default::default()
+        };
+        let atom = unsafe { RegisterClassExW(&wc) };
 
-            // CW_USEDEFAULT is ignored for WS_POPUP (the window lands at 0,0).
-            // Create overlapped so the window manager can cascade, then drop chrome.
-            let hwnd = CreateWindowExW(
+        // CW_USEDEFAULT is ignored for WS_POPUP (the window lands at 0,0).
+        // Create overlapped so the window manager can cascade, then drop chrome.
+        let hwnd = unsafe {
+            CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 CLASS_NAME,
                 w!("Translation"),
@@ -95,61 +95,61 @@ impl ReaderWindow {
                 Some(hinstance.into()),
                 None,
             )
-            .map_err(|e| OverlayError::Other(format!("CreateWindowExW(reader): {e}")))?;
-            SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as isize);
-            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+        .map_err(|e| OverlayError::Other(format!("CreateWindowExW(reader): {e}")))?;
+        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as isize) };
+        let _ = unsafe { SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
 
-            let hdc_screen = GetDC(Some(hwnd));
-            if hdc_screen.is_invalid() {
-                let _ = DestroyWindow(hwnd);
-                return Err(OverlayError::Other("GetDC(reader) failed".into()));
-            }
-            let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-            if hdc_mem.is_invalid() {
-                ReleaseDC(Some(hwnd), hdc_screen);
-                let _ = DestroyWindow(hwnd);
-                return Err(OverlayError::Other("CreateCompatibleDC(reader) failed".into()));
-            }
+        let hdc_screen = unsafe { GetDC(Some(hwnd)) };
+        if hdc_screen.is_invalid() {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(OverlayError::Other("GetDC(reader) failed".into()));
+        }
+        let hdc_mem = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
+        if hdc_mem.is_invalid() {
+            unsafe { ReleaseDC(Some(hwnd), hdc_screen) };
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(OverlayError::Other("CreateCompatibleDC(reader) failed".into()));
+        }
 
-            let font_px = config.reader_font_px_clamped();
-            let hfont = match text::create_segoe_font(font_px) {
-                Ok(font) => font,
-                Err(e) => {
-                    let _ = DeleteDC(hdc_mem);
-                    ReleaseDC(Some(hwnd), hdc_screen);
-                    let _ = DestroyWindow(hwnd);
-                    return Err(e);
-                }
-            };
-
-            let mut reader = Box::new(Self {
-                hwnd,
-                class_atom: atom,
-                config: config.clone(),
-                hdc_screen,
-                hdc_mem,
-                hbmp: HBITMAP::default(),
-                bits: std::ptr::null_mut(),
-                bmp_w: 0,
-                bmp_h: 0,
-                hfont,
-                font_px,
-                last_text: EMPTY_PLACEHOLDER.to_string(),
-                dismissed: false,
-            });
-
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, &raw mut *reader as isize);
-            if let Err(e) = reader.repaint() {
-                reader.teardown();
+        let font_px = config.reader_font_px_clamped();
+        let hfont = match text::create_segoe_font(font_px) {
+            Ok(font) => font,
+            Err(e) => {
+                let _ = unsafe { DeleteDC(hdc_mem) };
+                unsafe { ReleaseDC(Some(hwnd), hdc_screen) };
+                let _ = unsafe { DestroyWindow(hwnd) };
                 return Err(e);
             }
-            if config.reader_enabled {
-                reader.show();
-            } else {
-                reader.hide();
-            }
-            Ok(reader)
+        };
+
+        let mut reader = Box::new(Self {
+            hwnd,
+            class_atom: atom,
+            config: config.clone(),
+            hdc_screen,
+            hdc_mem,
+            hbmp: HBITMAP::default(),
+            bits: std::ptr::null_mut(),
+            bmp_w: 0,
+            bmp_h: 0,
+            hfont,
+            font_px,
+            last_text: EMPTY_PLACEHOLDER.to_string(),
+            dismissed: false,
+        });
+
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, &raw mut *reader as isize) };
+        if let Err(e) = reader.repaint() {
+            reader.teardown();
+            return Err(e);
         }
+        if config.reader_enabled {
+            reader.show();
+        } else {
+            reader.hide();
+        }
+        Ok(reader)
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
@@ -173,10 +173,8 @@ impl ReaderWindow {
         if font_px != self.font_px
             && let Ok(font) = text::create_segoe_font(font_px)
         {
-            unsafe {
-                if !self.hfont.is_invalid() {
-                    let _ = DeleteObject(self.hfont.into());
-                }
+            if !self.hfont.is_invalid() {
+                let _ = unsafe { DeleteObject(self.hfont.into()) };
             }
             self.hfont = font;
             self.font_px = font_px;
@@ -188,35 +186,33 @@ impl ReaderWindow {
     }
 
     pub(crate) fn teardown(&mut self) {
-        unsafe {
-            if !self.hwnd.is_invalid() {
-                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
-                let _ = DestroyWindow(self.hwnd);
-                self.hwnd = HWND::default();
+        if !self.hwnd.is_invalid() {
+            unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) };
+            let _ = unsafe { DestroyWindow(self.hwnd) };
+            self.hwnd = HWND::default();
+        }
+        if !self.hfont.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hfont.into()) };
+            self.hfont = HFONT::default();
+        }
+        if !self.hbmp.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hbmp.into()) };
+            self.hbmp = HBITMAP::default();
+            self.bits = std::ptr::null_mut();
+        }
+        if !self.hdc_mem.is_invalid() {
+            let _ = unsafe { DeleteDC(self.hdc_mem) };
+            self.hdc_mem = HDC::default();
+        }
+        if !self.hdc_screen.is_invalid() {
+            unsafe { ReleaseDC(None, self.hdc_screen) };
+            self.hdc_screen = HDC::default();
+        }
+        if self.class_atom != 0 {
+            if let Ok(hi) = unsafe { GetModuleHandleW(None) } {
+                let _ = unsafe { UnregisterClassW(CLASS_NAME, Some(hi.into())) };
             }
-            if !self.hfont.is_invalid() {
-                let _ = DeleteObject(self.hfont.into());
-                self.hfont = HFONT::default();
-            }
-            if !self.hbmp.is_invalid() {
-                let _ = DeleteObject(self.hbmp.into());
-                self.hbmp = HBITMAP::default();
-                self.bits = std::ptr::null_mut();
-            }
-            if !self.hdc_mem.is_invalid() {
-                let _ = DeleteDC(self.hdc_mem);
-                self.hdc_mem = HDC::default();
-            }
-            if !self.hdc_screen.is_invalid() {
-                ReleaseDC(None, self.hdc_screen);
-                self.hdc_screen = HDC::default();
-            }
-            if self.class_atom != 0 {
-                if let Ok(hi) = GetModuleHandleW(None) {
-                    let _ = UnregisterClassW(CLASS_NAME, Some(hi.into()));
-                }
-                self.class_atom = 0;
-            }
+            self.class_atom = 0;
         }
     }
 
@@ -233,19 +229,16 @@ impl ReaderWindow {
     }
 
     fn show(&mut self) {
-        unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-        }
+        let _ =
+            unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) };
+        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         if let Err(e) = self.present() {
             tracing::warn!(error = %e, "reader present failed");
         }
     }
 
     fn hide(&mut self) {
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
-        }
+        let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
     }
 
     fn dismiss(&mut self) {
@@ -260,48 +253,44 @@ impl ReaderWindow {
         if w == self.bmp_w && h == self.bmp_h && !self.bits.is_null() && !self.hbmp.is_invalid() {
             return Ok(());
         }
-        unsafe {
-            if !self.hbmp.is_invalid() {
-                let _ = SelectObject(self.hdc_mem, HGDIOBJ::default());
-                let _ = DeleteObject(self.hbmp.into());
-                self.hbmp = HBITMAP::default();
-                self.bits = std::ptr::null_mut();
-            }
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbmp = CreateDIBSection(Some(self.hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-                .map_err(|e| OverlayError::Other(format!("CreateDIBSection(reader): {e}")))?;
-            if hbmp.is_invalid() || bits.is_null() {
-                return Err(OverlayError::Other("CreateDIBSection(reader) returned null".into()));
-            }
-            let _ = SelectObject(self.hdc_mem, HGDIOBJ(hbmp.0));
-            self.hbmp = hbmp;
-            self.bits = bits.cast();
-            self.bmp_w = w;
-            self.bmp_h = h;
+        if !self.hbmp.is_invalid() {
+            let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ::default()) };
+            let _ = unsafe { DeleteObject(self.hbmp.into()) };
+            self.hbmp = HBITMAP::default();
+            self.bits = std::ptr::null_mut();
         }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbmp = unsafe { CreateDIBSection(Some(self.hdc_mem), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
+            .map_err(|e| OverlayError::Other(format!("CreateDIBSection(reader): {e}")))?;
+        if hbmp.is_invalid() || bits.is_null() {
+            return Err(OverlayError::Other("CreateDIBSection(reader) returned null".into()));
+        }
+        let _ = unsafe { SelectObject(self.hdc_mem, HGDIOBJ(hbmp.0)) };
+        self.hbmp = hbmp;
+        self.bits = bits.cast();
+        self.bmp_w = w;
+        self.bmp_h = h;
         Ok(())
     }
 
     fn client_size(&self) -> (i32, i32) {
-        unsafe {
-            let mut client = RECT::default();
-            if GetClientRect(self.hwnd, &mut client).is_err() {
-                return (DEFAULT_W, DEFAULT_H);
-            }
-            ((client.right - client.left).max(1), (client.bottom - client.top).max(1))
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(self.hwnd, &mut client) }.is_err() {
+            return (DEFAULT_W, DEFAULT_H);
         }
+        ((client.right - client.left).max(1), (client.bottom - client.top).max(1))
     }
 
     fn repaint(&mut self) -> Result<(), OverlayError> {
@@ -334,23 +323,23 @@ impl ReaderWindow {
         if self.bits.is_null() || self.bmp_w <= 0 || self.bmp_h <= 0 {
             return Err(OverlayError::Other("reader paint bitmap missing".into()));
         }
+        let mut wnd = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd, &mut wnd) }.is_err() {
+            return Err(OverlayError::Other("GetWindowRect(reader) failed".into()));
+        }
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let ppt_dst = POINT { x: wnd.left, y: wnd.top };
+        let psize = SIZE {
+            cx: self.bmp_w,
+            cy: self.bmp_h,
+        };
+        let ppt_src = POINT { x: 0, y: 0 };
         unsafe {
-            let mut wnd = RECT::default();
-            if GetWindowRect(self.hwnd, &mut wnd).is_err() {
-                return Err(OverlayError::Other("GetWindowRect(reader) failed".into()));
-            }
-            let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_OVER as u8,
-                BlendFlags: 0,
-                SourceConstantAlpha: 255,
-                AlphaFormat: AC_SRC_ALPHA as u8,
-            };
-            let ppt_dst = POINT { x: wnd.left, y: wnd.top };
-            let psize = SIZE {
-                cx: self.bmp_w,
-                cy: self.bmp_h,
-            };
-            let ppt_src = POINT { x: 0, y: 0 };
             UpdateLayeredWindow(
                 self.hwnd,
                 Some(self.hdc_screen),
@@ -362,39 +351,37 @@ impl ReaderWindow {
                 Some(&blend),
                 ULW_ALPHA,
             )
-            .map_err(|e| OverlayError::Other(format!("UpdateLayeredWindow(reader): {e}")))?;
         }
+        .map_err(|e| OverlayError::Other(format!("UpdateLayeredWindow(reader): {e}")))?;
         Ok(())
     }
 
     fn hit_test(&self, lparam: LPARAM) -> LRESULT {
-        unsafe {
-            // GET_X_LPARAM / GET_Y_LPARAM: signed 16-bit halves of screen coords.
-            let packed = lparam.0 as u32;
-            let sx = (packed & 0xFFFF) as i16 as i32;
-            let sy = ((packed >> 16) & 0xFFFF) as i16 as i32;
-            let mut pt = POINT { x: sx, y: sy };
-            if !ScreenToClient(self.hwnd, &mut pt).as_bool() {
-                return LRESULT(HTCAPTION as isize);
-            }
-            let (w, h) = self.client_size();
-            let left = pt.x < EDGE;
-            let right = pt.x >= w - EDGE;
-            let top = pt.y < EDGE;
-            let bottom = pt.y >= h - EDGE;
-            let ht = match (top, bottom, left, right) {
-                (true, _, true, _) => HTTOPLEFT,
-                (true, _, _, true) => HTTOPRIGHT,
-                (_, true, true, _) => HTBOTTOMLEFT,
-                (_, true, _, true) => HTBOTTOMRIGHT,
-                (true, _, _, _) => HTTOP,
-                (_, true, _, _) => HTBOTTOM,
-                (_, _, true, _) => HTLEFT,
-                (_, _, _, true) => HTRIGHT,
-                _ => HTCAPTION,
-            };
-            LRESULT(ht as isize)
+        // GET_X_LPARAM / GET_Y_LPARAM: signed 16-bit halves of screen coords.
+        let packed = lparam.0 as u32;
+        let sx = (packed & 0xFFFF) as i16 as i32;
+        let sy = ((packed >> 16) & 0xFFFF) as i16 as i32;
+        let mut pt = POINT { x: sx, y: sy };
+        if !unsafe { ScreenToClient(self.hwnd, &mut pt) }.as_bool() {
+            return LRESULT(HTCAPTION as isize);
         }
+        let (w, h) = self.client_size();
+        let left = pt.x < EDGE;
+        let right = pt.x >= w - EDGE;
+        let top = pt.y < EDGE;
+        let bottom = pt.y >= h - EDGE;
+        let ht = match (top, bottom, left, right) {
+            (true, _, true, _) => HTTOPLEFT,
+            (true, _, _, true) => HTTOPRIGHT,
+            (_, true, true, _) => HTBOTTOMLEFT,
+            (_, true, _, true) => HTBOTTOMRIGHT,
+            (true, _, _, _) => HTTOP,
+            (_, true, _, _) => HTBOTTOM,
+            (_, _, true, _) => HTLEFT,
+            (_, _, _, true) => HTRIGHT,
+            _ => HTCAPTION,
+        };
+        LRESULT(ht as isize)
     }
 }
 
@@ -405,37 +392,35 @@ impl Drop for ReaderWindow {
 }
 
 unsafe extern "system" fn reader_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        if msg == WM_GETMINMAXINFO {
-            let info = lparam.0 as *mut MINMAXINFO;
-            if !info.is_null() {
-                (*info).ptMinTrackSize = POINT { x: MIN_W, y: MIN_H };
-            }
-            return LRESULT(0);
+    if msg == WM_GETMINMAXINFO {
+        let info = lparam.0 as *mut MINMAXINFO;
+        if !info.is_null() {
+            unsafe { (*info).ptMinTrackSize = POINT { x: MIN_W, y: MIN_H } };
         }
-        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-        if ptr == 0 {
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        return LRESULT(0);
+    }
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+    if ptr == 0 {
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+    let reader = unsafe { &mut *(ptr as *mut ReaderWindow) };
+    match msg {
+        WM_NCHITTEST => reader.hit_test(lparam),
+        WM_SIZE => {
+            if let Err(e) = reader.repaint() {
+                tracing::warn!(error = %e, "reader resize paint failed");
+            }
+            LRESULT(0)
         }
-        let reader = &mut *(ptr as *mut ReaderWindow);
-        match msg {
-            WM_NCHITTEST => reader.hit_test(lparam),
-            WM_SIZE => {
-                if let Err(e) = reader.repaint() {
-                    tracing::warn!(error = %e, "reader resize paint failed");
-                }
-                LRESULT(0)
-            }
-            WM_CLOSE => {
-                reader.dismiss();
-                LRESULT(0)
-            }
-            WM_DESTROY => {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        WM_CLOSE => {
+            reader.dismiss();
+            LRESULT(0)
         }
+        WM_DESTROY => {
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
