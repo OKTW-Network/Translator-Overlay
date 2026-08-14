@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use translator_capture::CapturedFrame;
 use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
 use translator_ocr::{OcrEngine, OcrFingerprint, StabilityOutcome};
@@ -152,7 +152,7 @@ impl Pipeline {
             s.last_ocr_ms = Some(ocr_ms);
             s.last_ocr_block_count = raw.len() as u32;
         }
-        info!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
+        debug!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
 
         // Persistence keeps vanished text for a short grace (icons/jitter). That is
         // useful for the stability gate, but must NOT keep ghost text "alive" for the
