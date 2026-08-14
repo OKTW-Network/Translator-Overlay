@@ -21,8 +21,10 @@ pub enum PipelineCommand {
     StopCapture,
     /// Grab one frame and OCR + translate immediately (bypass stability wait).
     ManualCapture,
-    /// Drop LLM conversation history (keeps OCR models).
+    /// Drop LLM conversation history (keeps OCR models and translation cache).
     ResetConversation,
+    /// Drop the session translation cache (keeps conversation history).
+    ClearTranslationCache,
     /// Apply a full config snapshot (saved from the settings UI).
     ApplyConfig(Box<AppConfig>),
     /// Persist and apply overlay / reader visibility without saving the rest of the draft.

@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
 use translator_overlay::OverlayController;
-use translator_translate::{TranslateError, blocks_to_translated_text, merge_translations};
+use translator_translate::{TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed};
 
 use crate::pipeline::{
     wake::NotifyOnDrop,
@@ -68,8 +68,36 @@ impl Pipeline {
         };
         self.client.update_api(api);
 
+        let resolved = self.translation_cache.resolve(&page.blocks, &tcfg, force);
+        let hit_count = resolved.hits.iter().filter(|h| h.is_some()).count();
+        if resolved.misses.is_empty() {
+            info!(hits = hit_count, blocks = page.blocks.len(), "translate cache — all hits, skipping API");
+            let translated = TranslationCache::stitch(&page.blocks, &resolved.hits, &[]);
+            let translated_text = blocks_to_translated_text(&translated);
+            self.last_translated_fp = Some(page.fingerprint);
+            self.state.write().translation_cache_len = self.translation_cache.len();
+            apply_translated(
+                &self.state,
+                self.overlay.as_ref(),
+                page.source_text,
+                translated,
+                translated_text,
+                page.content_width,
+                page.content_height,
+            );
+            return;
+        }
+
+        info!(hits = hit_count, unique_misses = resolved.misses.len(), blocks = page.blocks.len(), force, "translate cache partition");
+
+        // Show remembered captions now; new lines wait for the API.
+        let preview = TranslationCache::hits_only(&page.blocks, &resolved.hits);
+        if !preview.is_empty() {
+            apply_cached_preview(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
+        }
+
         // Canonical conversation prepare (shared with translate_blocks_*).
-        let (messages, messages_len_after_user) = self.conversation.begin_translate_request(&tcfg, &page.blocks);
+        let (messages, messages_len_after_user) = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
 
         let cancel = CancellationToken::new();
         let cancel_job = cancel.clone();
@@ -103,17 +131,29 @@ impl Pipeline {
             content_width: page.content_width,
             content_height: page.content_height,
             messages_len_after_user,
+            miss_blocks: resolved.misses,
+            cached_hits: resolved.hits,
         });
     }
 
     pub(crate) fn finish_translate(&mut self, job: InflightTranslate, job_result: TranslateJobResult) {
         match job_result.result {
-            Ok(content) => match merge_translations(&job.blocks, &content) {
-                Ok(translated) => {
+            Ok(content) => match merge_translations_detailed(&job.miss_blocks, &content) {
+                Ok(outcome) => {
                     self.conversation.push_assistant(&content);
+                    let tcfg = self.state.read().config.translation.clone();
+                    self.translation_cache
+                        .store_model_pairs(&job.miss_blocks, &outcome.blocks, &outcome.model_ids, &tcfg);
+                    let translated = TranslationCache::stitch(&job.blocks, &job.cached_hits, &outcome.blocks);
                     let translated_text = blocks_to_translated_text(&translated);
-                    info!(blocks = translated.len(), turns = self.conversation.turn_count, "translation complete");
+                    info!(
+                        blocks = translated.len(),
+                        cached = job.cached_hits.iter().filter(|h| h.is_some()).count(),
+                        turns = self.conversation.turn_count,
+                        "translation complete"
+                    );
                     self.last_translated_fp = Some(job.fingerprint);
+                    self.state.write().translation_cache_len = self.translation_cache.len();
                     apply_translated(
                         &self.state,
                         self.overlay.as_ref(),
@@ -178,6 +218,29 @@ impl Pipeline {
             }
         }
     }
+}
+
+/// Paint cache hits immediately. Does not finish the job or append history.
+fn apply_cached_preview(
+    state: &SharedState,
+    overlay: Option<&OverlayController>,
+    translated: Vec<TranslatedBlock>,
+    content_width: u32,
+    content_height: u32,
+) {
+    if let Some(o) = overlay {
+        if let Some(hwnd) = state.read().target_hwnd {
+            let _ = o.attach(hwnd);
+        }
+        if let Err(e) = o.set_blocks(translated.clone(), content_width, content_height) {
+            warn!(error = %e, "failed to preview cached overlay");
+        }
+    }
+
+    let translated_text = blocks_to_translated_text(&translated);
+    let mut s = state.write();
+    s.latest_translated_blocks = translated;
+    s.latest_translated_text = translated_text;
 }
 
 fn apply_translated(

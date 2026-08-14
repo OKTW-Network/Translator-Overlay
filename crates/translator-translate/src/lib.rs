@@ -1,11 +1,15 @@
 //! OpenAI-compatible translation client and conversation context management.
 
-use std::time::Duration;
+mod cache;
+
+use std::{collections::HashSet, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use translator_core::{ApiConfig, ChatMessage, OcrBlock, TranslatedBlock, TranslationConfig};
+
+pub use crate::cache::{CacheResolve, TranslationCache};
 
 #[derive(Debug, Error)]
 pub enum TranslateError {
@@ -200,16 +204,22 @@ where
 
 /// Merge LLM JSON output with original OCR blocks.
 pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<Vec<TranslatedBlock>, TranslateError> {
-    let blocks = parse_translation_blocks(response_json)?;
+    Ok(merge_translations_detailed(source, response_json)?.blocks)
+}
 
-    let mut out = Vec::with_capacity(source.len());
+/// Same as [`merge_translations`], plus which block ids the model actually returned.
+pub fn merge_translations_detailed(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
+    let parsed = parse_translation_blocks(response_json)?;
+    let model_ids: HashSet<u32> = parsed.iter().map(|b| b.id).collect();
+
+    let mut blocks = Vec::with_capacity(source.len());
     for src in source {
-        let translation = blocks
+        let translation = parsed
             .iter()
             .find(|b| b.id == src.id)
             .map(|b| b.translation.clone())
             .unwrap_or_else(|| src.text.clone());
-        out.push(TranslatedBlock {
+        blocks.push(TranslatedBlock {
             id: src.id,
             source: src.text.clone(),
             translation,
@@ -218,7 +228,14 @@ pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<Ve
             source_lines: src.source_lines.max(1),
         });
     }
-    Ok(out)
+    Ok(MergeOutcome { blocks, model_ids })
+}
+
+/// Parsed model translations plus the ids present in the JSON (not fallbacks).
+#[derive(Debug, Clone)]
+pub struct MergeOutcome {
+    pub blocks: Vec<TranslatedBlock>,
+    pub model_ids: HashSet<u32>,
 }
 
 fn parse_translation_blocks(response_json: &str) -> Result<Vec<TranslationBlockOut>, TranslateError> {
@@ -556,25 +573,36 @@ pub async fn translate_blocks(
     translation_cfg: &TranslationConfig,
     blocks: &[OcrBlock],
 ) -> Result<Vec<TranslatedBlock>, TranslateError> {
-    translate_blocks_cancellable(client, conversation, translation_cfg, blocks, &CancellationToken::new()).await
+    translate_blocks_cancellable(client, conversation, translation_cfg, blocks, None, false, &CancellationToken::new()).await
 }
 
 /// Same as [`translate_blocks`], but aborts when `cancel` is triggered.
 ///
-/// On failure / cancel the pending user message is popped so the conversation
-/// stays consistent for a later retry.
+/// When `cache` is `Some` and `force` is false, cached block texts are omitted
+/// from the HTTP payload. On failure / cancel the pending user message is popped
+/// so the conversation stays consistent for a later retry.
 pub async fn translate_blocks_cancellable(
     client: &TranslateClient,
     conversation: &mut Conversation,
     translation_cfg: &TranslationConfig,
     blocks: &[OcrBlock],
+    mut cache: Option<&mut TranslationCache>,
+    force: bool,
     cancel: &CancellationToken,
 ) -> Result<Vec<TranslatedBlock>, TranslateError> {
     if blocks.is_empty() {
         return Ok(Vec::new());
     }
 
-    let (messages, messages_len_after_user) = conversation.begin_translate_request(translation_cfg, blocks);
+    let resolved = cache.as_mut().map(|c| c.resolve(blocks, translation_cfg, force));
+    if let Some(resolved) = resolved.as_ref()
+        && resolved.misses.is_empty()
+    {
+        return Ok(TranslationCache::stitch(blocks, &resolved.hits, &[]));
+    }
+
+    let to_send: &[OcrBlock] = resolved.as_ref().map(|r| r.misses.as_slice()).unwrap_or(blocks);
+    let (messages, messages_len_after_user) = conversation.begin_translate_request(translation_cfg, to_send);
 
     let content = match client.chat_completions_with_retry(&messages, cancel).await {
         Ok(c) => c,
@@ -584,9 +612,16 @@ pub async fn translate_blocks_cancellable(
         }
     };
 
-    match merge_translations(blocks, &content) {
-        Ok(translated) => {
+    match merge_translations_detailed(to_send, &content) {
+        Ok(outcome) => {
             conversation.push_assistant(&content);
+            if let (Some(cache), Some(resolved)) = (cache.as_mut(), resolved.as_ref()) {
+                cache.store_model_pairs(&resolved.misses, &outcome.blocks, &outcome.model_ids, translation_cfg);
+            }
+            let translated = match resolved.as_ref() {
+                Some(resolved) => TranslationCache::stitch(blocks, &resolved.hits, &outcome.blocks),
+                None => outcome.blocks,
+            };
             Ok(translated)
         }
         Err(e) => {
@@ -702,6 +737,31 @@ Hope that helps!"#;
         let json = r#"{"blocks":[{"id":"2","text":"T4"}]}"#;
         let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "T4");
+    }
+
+    #[test]
+    fn merge_detailed_reports_model_ids() {
+        let source = vec![
+            OcrBlock {
+                id: 1,
+                text: "A".into(),
+                confidence: 1.0,
+                bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+                source_lines: 1,
+            },
+            OcrBlock {
+                id: 2,
+                text: "B".into(),
+                confidence: 1.0,
+                bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+                source_lines: 1,
+            },
+        ];
+        let json = r#"{"blocks":[{"id":1,"translation":"T"}]}"#;
+        let out = merge_translations_detailed(&source, json).unwrap();
+        assert!(out.model_ids.contains(&1));
+        assert!(!out.model_ids.contains(&2));
+        assert_eq!(out.blocks[1].translation, "B");
     }
 
     #[test]

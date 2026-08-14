@@ -3,12 +3,16 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use windows_reactor::{LayoutExt, StackPanel, Updater, text_box, vstack};
+use translator_core::{TRANSLATION_CACHE_SLIDER_MAX, TRANSLATION_CACHE_SLIDER_MIN};
+use windows_reactor::{LayoutExt, StackPanel, TooltipExt, Updater, button, text_box, vstack};
 
-use crate::ui::{
-    chrome::{section_header, settings_card_stack, settings_page_shell},
-    controls::{SliderNumberParams, card_slider_number, card_text},
-    shared::{Snapshot, UiCx, UiShared, mark_dirty},
+use crate::{
+    pipeline::PipelineCommand,
+    ui::{
+        chrome::{section_header, settings_card, settings_card_stack, settings_page_shell},
+        controls::{SliderNumberParams, card_slider_number, card_text, card_toggle},
+        shared::{Snapshot, UiCx, UiShared, mark_dirty},
+    },
 };
 
 pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
@@ -89,6 +93,64 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     ))
     .spacing(4.0);
 
+    let cache = vstack((
+        section_header("Cache"),
+        card_toggle(
+            "tr-cache-enabled",
+            "Enable translation cache",
+            Some("Reuse translations for source text already seen this session. Skips the API for repeats."),
+            snap.cache_enabled,
+            {
+                let cx = cx.clone();
+                move |on| {
+                    cx.with_mut(|ui| {
+                        ui.draft.translation.cache_enabled = on;
+                        mark_dirty(ui);
+                    });
+                }
+            },
+        ),
+        card_slider_number(
+            SliderNumberParams {
+                key: "tr-cache-max",
+                header: "Cache size".into(),
+                description: Some("Max unique phrases kept in memory. Full cache evicts the least-used first.".into()),
+                value: snap.cache_max,
+                min: TRANSLATION_CACHE_SLIDER_MIN as f64,
+                max: TRANSLATION_CACHE_SLIDER_MAX as f64,
+                step: 1.0,
+            },
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.translation.cache_max_entries = v
+                            .round()
+                            .clamp(TRANSLATION_CACHE_SLIDER_MIN as f64, TRANSLATION_CACHE_SLIDER_MAX as f64)
+                            as usize;
+                        mark_dirty(ui);
+                    });
+                }
+            },
+        ),
+        settings_card(
+            "tr-cache-clear",
+            "Clear cache",
+            Some(&format!(
+                "{} of {} phrases cached this session. Closing the app also clears it.",
+                snap.cache_len, snap.cache_max as usize
+            )),
+            button("Clear cache")
+                .enabled(snap.cache_len > 0)
+                .tooltip("Drop all cached translations. Does not clear chat history.")
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::ClearTranslationCache)
+                }),
+        ),
+    ))
+    .spacing(4.0);
+
     let prompt = vstack((
         section_header("Prompt"),
         settings_card_stack(
@@ -113,5 +175,5 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((languages, context, prompt)).spacing(8.0))
+    settings_page_shell(shared, snap, bump, vstack((languages, context, cache, prompt)).spacing(8.0))
 }

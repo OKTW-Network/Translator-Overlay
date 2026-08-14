@@ -10,6 +10,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
 - **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（段落組裝）
 - **LLM 翻譯**：OpenAI 相容 Chat Completions（可接官方、代理或相容服務）
+- **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
 - **對話上下文**：多輪歷史壓縮，維持用語一致
 - **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
 - **譯文懸浮窗**：無邊框半透明置頂視窗顯示最新譯文（拖曳移動、邊緣縮放），樣式與 overlay 相同，不跟隨遊戲焦點
@@ -66,7 +67,7 @@ cargo build --release -p translator-app
 ## 使用方式
 
 1. **API**：設定 `base_url`、`api_key`、`model`（預設 `https://api.openai.com/v1` + `gpt-4o-mini`）
-2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選 system prompt
+2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選提示詞。可開關翻譯記憶、設定記住多少句，以及清空已記住的譯文。譯文不滿意時按 **Retry** 會重翻這一頁並更新記憶
 3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
 4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
 5. **Dashboard**：
@@ -102,6 +103,8 @@ source_lang = "auto"
 target_lang = "zh-TW"
 history_max_items = 8
 conversation_max_turns = 20
+cache_enabled = true
+cache_max_entries = 128
 
 [ocr]
 model_tier = "small"   # tiny | small | medium

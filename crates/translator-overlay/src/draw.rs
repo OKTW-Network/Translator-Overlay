@@ -267,8 +267,8 @@ mod tests {
         let mut buf = vec![0u8; 8 * 8 * 4];
         let surface = SurfaceSize::new(8, 8);
         stroke_rect(&mut buf, surface, SurfaceRect { x: 1, y: 1, w: 6, h: 6 }, Rgba::new(0, 0, 255, 255), 1);
-        // top-left of stroke
-        let i = (1 * 8 + 1) * 4;
+        // top-left of stroke: pixel (1, 1), stride 8
+        let i = (8 + 1) * 4;
         assert_eq!(buf[i], 255); // B
         assert_eq!(buf[i + 3], 255);
         // interior pixel (3,3) untouched

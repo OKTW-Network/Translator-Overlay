@@ -114,6 +114,8 @@ pub struct AppState {
     pub region_select_active: bool,
     /// Working copy while picking (for Dashboard count / preview outlines).
     pub region_select_draft: Vec<NormRect>,
+    /// Unique source strings currently in the session translation cache.
+    pub translation_cache_len: usize,
 }
 
 impl AppState {
@@ -141,6 +143,7 @@ impl AppState {
             ocr_regions: Vec::new(),
             region_select_active: false,
             region_select_draft: Vec::new(),
+            translation_cache_len: 0,
         }
     }
 

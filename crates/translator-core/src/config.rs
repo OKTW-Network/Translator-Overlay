@@ -189,6 +189,17 @@ impl ChatMessage {
     }
 }
 
+/// Smallest allowed translation-cache capacity.
+pub const TRANSLATION_CACHE_MAX_MIN: usize = 1;
+/// Default translation-cache capacity (session LFU).
+pub const TRANSLATION_CACHE_MAX_DEFAULT: usize = 128;
+/// Hard cap applied when reading config / constructing the cache.
+pub const TRANSLATION_CACHE_MAX_CAP: usize = 8192;
+/// Translation-page slider lower bound.
+pub const TRANSLATION_CACHE_SLIDER_MIN: usize = 1;
+/// Translation-page slider upper bound.
+pub const TRANSLATION_CACHE_SLIDER_MAX: usize = 8192;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranslationConfig {
@@ -196,6 +207,10 @@ pub struct TranslationConfig {
     pub target_lang: String,
     pub history_max_items: usize,
     pub conversation_max_turns: usize,
+    /// Skip the API for OCR block texts already translated this session.
+    pub cache_enabled: bool,
+    /// Max unique source strings kept in the in-memory LFU cache.
+    pub cache_max_entries: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
@@ -207,8 +222,17 @@ impl Default for TranslationConfig {
             target_lang: "zh-TW".to_string(),
             history_max_items: 8,
             conversation_max_turns: 20,
+            cache_enabled: true,
+            cache_max_entries: TRANSLATION_CACHE_MAX_DEFAULT,
             system_prompt: None,
         }
+    }
+}
+
+impl TranslationConfig {
+    /// Cache capacity clamped to `[TRANSLATION_CACHE_MAX_MIN, TRANSLATION_CACHE_MAX_CAP]`.
+    pub fn cache_max_entries_clamped(&self) -> usize {
+        self.cache_max_entries.clamp(TRANSLATION_CACHE_MAX_MIN, TRANSLATION_CACHE_MAX_CAP)
     }
 }
 
@@ -618,11 +642,33 @@ target_lang = "ja"
 
     #[test]
     fn overlay_reader_font_clamps() {
-        let mut overlay = OverlayConfig::default();
-        overlay.reader_font_px = 0;
+        let mut overlay = OverlayConfig {
+            reader_font_px: 0,
+            ..OverlayConfig::default()
+        };
         assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_MIN as i32);
         overlay.reader_font_px = 200;
         assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_MAX as i32);
+    }
+
+    #[test]
+    fn translation_cache_defaults_and_clamp() {
+        let text = r#"
+[translation]
+target_lang = "ja"
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
+        assert!(config.translation.cache_enabled);
+        assert_eq!(config.translation.cache_max_entries, TRANSLATION_CACHE_MAX_DEFAULT);
+        assert_eq!(config.translation.cache_max_entries_clamped(), TRANSLATION_CACHE_MAX_DEFAULT);
+
+        let mut cfg = TranslationConfig {
+            cache_max_entries: 0,
+            ..TranslationConfig::default()
+        };
+        assert_eq!(cfg.cache_max_entries_clamped(), TRANSLATION_CACHE_MAX_MIN);
+        cfg.cache_max_entries = 1_000_000;
+        assert_eq!(cfg.cache_max_entries_clamped(), TRANSLATION_CACHE_MAX_CAP);
     }
 
     #[test]

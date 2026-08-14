@@ -8,16 +8,18 @@ Rust workspace (Windows) for real-time OCR + LLM translation overlay. Crates liv
 
 ```powershell
 cargo +nightly fmt
-cargo clippy
+cargo clippy --all-targets
 ```
 
 Use `cargo +nightly fmt` (not plain `cargo fmt`) so workspace `rustfmt` unstable options apply.
+
+Use `cargo clippy --all-targets` (not plain `cargo clippy`) so unit/integration tests are linted too.
 
 Requirements:
 
 - Both commands must exit **0**.
 - Format with nightly so style matches the repo `rustfmt` config.
-- Fix **all** Clippy warnings in code you touch; do not leave new warnings behind.
+- Fix **all** Clippy warnings in code you touch, including tests; do not leave new warnings behind.
 - Prefer fixing warnings over `#[allow(...)]` unless there is a documented, local reason.
 
 If format or Clippy fails or warns, fix the code and re-run until clean. Do not hand off or commit with either still dirty.

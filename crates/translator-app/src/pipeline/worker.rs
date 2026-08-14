@@ -13,7 +13,7 @@ use translator_capture::CaptureSession;
 use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
 use translator_ocr::{BlockPersistenceFilter, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{OverlayController, OverlayEvent};
-use translator_translate::{Conversation, TranslateClient, TranslateError};
+use translator_translate::{Conversation, TranslateClient, TranslateError, TranslationCache};
 
 use crate::pipeline::{PipelineCommand, config_apply::load_engine, wake::Wake};
 
@@ -52,6 +52,10 @@ pub(crate) struct InflightTranslate {
     pub content_height: u32,
     /// Conversation length after the user turn was pushed (rollback on cancel/drop).
     pub messages_len_after_user: usize,
+    /// Unique miss blocks actually sent to the model (ids preserved).
+    pub miss_blocks: Vec<OcrBlock>,
+    /// Per-source-block cache hits (`None` = wait for the model / fallback).
+    pub cached_hits: Vec<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -71,6 +75,7 @@ pub(crate) struct Pipeline {
     pub persist: BlockPersistenceFilter,
     pub engine: Option<OcrEngine>,
     pub conversation: Conversation,
+    pub translation_cache: TranslationCache,
     pub client: TranslateClient,
     pub last_translated_fp: Option<OcrFingerprint>,
     pub last_page: Option<PendingPage>,
@@ -106,6 +111,7 @@ impl Pipeline {
         let ocr_cfg = state.read().config.ocr.clone();
         let ocr_tier = ocr_cfg.model_tier;
         let client = TranslateClient::new(state.read().config.api.clone());
+        let cache_max = state.read().config.translation.cache_max_entries_clamped();
         let overlay = match OverlayController::spawn(state.read().config.overlay.clone()) {
             Ok(o) => Some(o),
             Err(e) => {
@@ -125,6 +131,7 @@ impl Pipeline {
             persist: BlockPersistenceFilter::from_config(&ocr_cfg),
             engine: None,
             conversation: Conversation::new(),
+            translation_cache: TranslationCache::new(cache_max),
             client,
             last_translated_fp: None,
             last_page: None,
@@ -261,6 +268,13 @@ impl Pipeline {
                 self.last_translated_fp = None;
                 info!("LLM conversation reset");
                 self.state.write().restore_operational_status();
+            }
+            PipelineCommand::ClearTranslationCache => {
+                self.translation_cache.clear();
+                let mut s = self.state.write();
+                s.translation_cache_len = 0;
+                info!("translation cache cleared");
+                s.restore_operational_status();
             }
         }
         false

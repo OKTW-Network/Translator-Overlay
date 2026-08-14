@@ -83,7 +83,8 @@ mod tests {
         assert_eq!(crop.y, 2);
         assert_eq!(crop.width, 8);
         assert_eq!(crop.height, 8);
-        let dest = ((3 - 2) * 8 + (5 - 4)) * 4;
+        // source (5, 3) → crop-local (1, 1) in an 8-wide crop
+        let dest = (8 + 1) * 4;
         assert_eq!(&crop.rgba[dest..dest + 4], &[9, 8, 7, 6]);
     }
 

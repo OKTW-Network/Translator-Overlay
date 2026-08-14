@@ -34,6 +34,7 @@ impl Pipeline {
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         self.client.update_api(cfg.api.clone());
+        self.translation_cache.set_max(cfg.translation.cache_max_entries_clamped());
 
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.update_config(cfg.overlay.clone());
@@ -50,6 +51,7 @@ impl Pipeline {
         {
             let mut s = self.state.write();
             s.config = cfg.clone();
+            s.translation_cache_len = self.translation_cache.len();
             // Single short line for the UI InfoBar title (avoid title+message pair).
             s.settings_message = Some("Saved".into());
             s.last_error = None;
