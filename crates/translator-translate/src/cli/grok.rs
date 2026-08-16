@@ -7,7 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{TranslateError, cli::rpc::JsonRpcChild};
 
-pub fn spawn_args(model: &str, reasoning_effort: Option<&str>) -> Vec<String> {
+pub fn spawn_args(model: &str, reasoning_effort: Option<&str>, system: &str) -> Vec<String> {
+    // Global flags first: `grok [flags] agent stdio`. Flags after `agent` are rejected.
     let mut args = vec![
         "--no-subagents".into(),
         "--no-memory".into(),
@@ -18,18 +19,40 @@ pub fn spawn_args(model: &str, reasoning_effort: Option<&str>) -> Vec<String> {
         "run_terminal_cmd,search_replace,web_search,web_fetch,read_file,grep,list_dir,Agent".into(),
         "--sandbox".into(),
         "read-only".into(),
-        "agent".into(),
+        "--system-prompt-override".into(),
+        system.to_string(),
     ];
     if !model.trim().is_empty() {
         args.push("--model".into());
         args.push(model.trim().into());
     }
     if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty()) {
-        args.push("--reasoning-effort".into());
+        args.push("--effort".into());
         args.push(effort.into());
     }
+    args.push("agent".into());
     args.push("stdio".into());
     args
+}
+
+fn auth_required_error(detail: &str) -> TranslateError {
+    TranslateError::CliProtocol(format!("Grok CLI is not authenticated. Run `grok login` or set XAI_API_KEY. ({detail})"))
+}
+
+fn is_auth_failure(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("auth_required")
+        || m.contains("authentication")
+        || m.contains("unauthor")
+        || m.contains("not authenticated")
+        || (m.contains("login") && (m.contains("required") || m.contains("needed") || m.contains("run")))
+}
+
+fn map_grok_rpc(err: TranslateError) -> TranslateError {
+    match err {
+        TranslateError::CliProtocol(msg) if is_auth_failure(&msg) => auth_required_error(&msg),
+        other => other,
+    }
 }
 
 pub struct GrokSession {
@@ -47,7 +70,7 @@ impl GrokSession {
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<Self, TranslateError> {
-        let args = spawn_args(model, reasoning_effort);
+        let args = spawn_args(model, reasoning_effort, system);
         let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[], true).await?;
 
         rpc.request(
@@ -63,7 +86,8 @@ impl GrokSession {
             cancel,
             timeout,
         )
-        .await?;
+        .await
+        .map_err(map_grok_rpc)?;
 
         let created = rpc
             .request(
@@ -79,7 +103,8 @@ impl GrokSession {
                 cancel,
                 timeout,
             )
-            .await?;
+            .await
+            .map_err(map_grok_rpc)?;
 
         let session_id = created
             .get("sessionId")
@@ -109,6 +134,9 @@ impl GrokSession {
         if saw_tool {
             return Err(TranslateError::CliProtocol("Grok session invoked a tool".into()));
         }
+        if text.trim().is_empty() {
+            return Err(TranslateError::CliProtocol("Grok session produced no assistant text".into()));
+        }
         Ok(text)
     }
 
@@ -119,7 +147,20 @@ impl GrokSession {
             .await;
     }
 
-    pub fn shutdown(&mut self) {
+    pub async fn close(&mut self) {
+        let _ = self
+            .rpc
+            .request(
+                "session/close",
+                serde_json::json!({ "sessionId": self.session_id }),
+                &CancellationToken::new(),
+                Duration::from_secs(2),
+            )
+            .await;
+        self.rpc.kill_and_wait().await;
+    }
+
+    pub fn kill(&mut self) {
         self.rpc.shutdown();
     }
 }
@@ -146,6 +187,32 @@ fn collect_acp_update(method: &str, params: &Value, text: &mut String, saw_tool:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_args_are_global_then_agent_stdio() {
+        let args = spawn_args("grok-4.5", Some("low"), "You are a translation engine.");
+        let agent = args.iter().position(|a| a == "agent").expect("agent");
+        assert_eq!(args.get(agent + 1).map(String::as_str), Some("stdio"));
+        assert!(args[..agent].windows(2).any(|w| w[0] == "--model" && w[1] == "grok-4.5"));
+        assert!(args[..agent].windows(2).any(|w| w[0] == "--effort" && w[1] == "low"));
+        assert!(
+            args[..agent]
+                .windows(2)
+                .any(|w| w[0] == "--system-prompt-override" && w[1] == "You are a translation engine.")
+        );
+        assert!(args[agent + 1..].iter().all(|a| !a.starts_with("--")));
+    }
+
+    #[test]
+    fn auth_failures_map_to_login_hint() {
+        assert!(is_auth_failure("ACP error: auth_required"));
+        assert!(is_auth_failure("authentication required"));
+        let err = map_grok_rpc(TranslateError::CliProtocol("auth_required".into()));
+        assert!(err.to_string().contains("grok login"));
+        assert!(err.to_string().contains("XAI_API_KEY"));
+        let other = map_grok_rpc(TranslateError::CliProtocol("session/new missing sessionId".into()));
+        assert!(!other.to_string().contains("grok login"));
+    }
 
     #[test]
     fn session_new_override_is_in_params() {

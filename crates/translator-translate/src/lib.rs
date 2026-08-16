@@ -559,7 +559,7 @@ impl TranslateClient {
         let epoch = self.cli.epoch.load(Ordering::SeqCst);
         let mut backend = self.cli.backend.lock().await;
         if epoch != self.cli.epoch.load(Ordering::SeqCst) {
-            backend.shutdown();
+            backend.close().await;
         }
         backend.complete(&self.api, messages, cancel, timeout, epoch).await
     }

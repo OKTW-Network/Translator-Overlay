@@ -135,11 +135,11 @@ pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<std
         if path.is_file() {
             return Some(path);
         }
-        // Allow a bare name even when it is not yet an absolute path.
+        // Bare command names still resolve through PATH; missing absolute paths stay None.
         if path.components().count() == 1 {
             return find_on_path(trimmed);
         }
-        return Some(path);
+        return None;
     }
     find_on_path(provider.default_bin())
 }
@@ -694,6 +694,13 @@ model = "my-model"
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.api.provider, ModelProvider::GrokCli);
         assert_eq!(parsed.api.cli_path, r"C:\tools\grok.exe");
+    }
+
+    #[test]
+    fn resolve_cli_missing_path_is_none() {
+        assert!(resolve_cli_binary(ModelProvider::OpenaiCompatible, "").is_none());
+        assert!(resolve_cli_binary(ModelProvider::GrokCli, r"C:\definitely-missing\grok.exe").is_none());
+        assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
     }
 
     #[test]

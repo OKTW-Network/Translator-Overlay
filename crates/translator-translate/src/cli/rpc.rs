@@ -134,10 +134,10 @@ impl JsonRpcChild {
                 }
                 match serde_json::from_str::<Value>(line) {
                     Ok(value) => {
-                        if let Some(incoming) = classify_rpc(value) {
-                            if tx.send(incoming).is_err() {
-                                break;
-                            }
+                        if let Some(incoming) = classify_rpc(value)
+                            && tx.send(incoming).is_err()
+                        {
+                            break;
                         }
                     }
                     Err(e) => tracing::warn!(target: "translator_translate::cli", error = %e, "ignored non-JSON stdout line"),
@@ -263,6 +263,11 @@ impl JsonRpcChild {
     pub fn shutdown(&mut self) {
         let _ = self.child.start_kill();
     }
+
+    pub async fn kill_and_wait(&mut self) {
+        let _ = self.child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
+    }
 }
 
 impl Drop for JsonRpcChild {
@@ -363,10 +368,13 @@ mod tests {
 
     #[test]
     fn argv_builders_never_yolo() {
-        let args = crate::cli::grok::spawn_args("grok-4.5", Some("low"));
+        let args = crate::cli::grok::spawn_args("grok-4.5", Some("low"), "sys");
         assert!(args.iter().all(|a| !a.contains("always-approve") && !a.contains("yolo")));
         assert!(args.contains(&"stdio".into()));
         assert!(args.contains(&"--disallowed-tools".into()));
+        assert!(args.contains(&"--system-prompt-override".into()));
+        let agent = args.iter().position(|a| a == "agent").expect("agent");
+        assert_eq!(args.get(agent + 1).map(String::as_str), Some("stdio"));
         let args = crate::cli::codex::spawn_args();
         assert_eq!(args, ["app-server"]);
     }

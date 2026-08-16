@@ -18,7 +18,7 @@ pub fn thread_start_params(model: &str, cwd: &Path, system: &str) -> Value {
     serde_json::json!({
         "model": model,
         "cwd": cwd.to_string_lossy(),
-        "sandbox": "read-only",
+        "sandbox": "readOnly",
         "approvalPolicy": "untrusted",
         "ephemeral": true,
         "developerInstructions": system,
@@ -44,6 +44,7 @@ pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> V
 pub struct CodexSession {
     rpc: JsonRpcChild,
     thread_id: String,
+    turn_id: Option<String>,
 }
 
 impl CodexSession {
@@ -82,7 +83,11 @@ impl CodexSession {
             .ok_or_else(|| TranslateError::CliProtocol("thread/start missing thread.id".into()))?
             .to_string();
 
-        Ok(Self { rpc, thread_id })
+        Ok(Self {
+            rpc,
+            thread_id,
+            turn_id: None,
+        })
     }
 
     pub async fn prompt(
@@ -94,22 +99,51 @@ impl CodexSession {
     ) -> Result<String, TranslateError> {
         let mut text = String::new();
         let mut saw_tool = false;
+        let mut completed = None;
+        let mut seen_turn_id = None;
 
-        self.rpc
+        let started = self
+            .rpc
             .request_with_notes("turn/start", turn_start_params(&self.thread_id, user, effort), cancel, timeout, |method, params| {
-                collect_codex_event(method, params, &mut text, &mut saw_tool)
+                collect_codex_event(method, params, &mut text, &mut saw_tool);
+                if let Some(id) = extract_turn_id(params) {
+                    seen_turn_id = Some(id);
+                }
+                if method == "turn/completed" {
+                    completed = Some(params.clone());
+                }
             })
             .await?;
 
-        let completed = self
-            .rpc
-            .wait_notification(
-                cancel,
-                timeout,
-                |method, _| method == "turn/completed",
-                |method, params| collect_codex_event(method, params, &mut text, &mut saw_tool),
-            )
-            .await?;
+        if let Some(id) = extract_turn_id(&started) {
+            seen_turn_id = Some(id);
+        }
+        self.turn_id = seen_turn_id;
+
+        let completed = match completed {
+            Some(params) => params,
+            None => {
+                let mut later_turn_id = None;
+                let params = self
+                    .rpc
+                    .wait_notification(
+                        cancel,
+                        timeout,
+                        |method, _| method == "turn/completed",
+                        |method, params| {
+                            collect_codex_event(method, params, &mut text, &mut saw_tool);
+                            if let Some(id) = extract_turn_id(params) {
+                                later_turn_id = Some(id);
+                            }
+                        },
+                    )
+                    .await?;
+                if later_turn_id.is_some() {
+                    self.turn_id = later_turn_id;
+                }
+                params
+            }
+        };
 
         if saw_tool {
             return Err(TranslateError::CliProtocol("Codex session invoked a tool".into()));
@@ -131,15 +165,31 @@ impl CodexSession {
     }
 
     pub async fn cancel_turn(&mut self) {
+        let mut params = serde_json::json!({ "threadId": self.thread_id });
+        if let Some(turn_id) = &self.turn_id {
+            params["turnId"] = Value::from(turn_id.as_str());
+        }
         let _ = self
             .rpc
-            .request("turn/interrupt", serde_json::json!({ "threadId": self.thread_id }), &CancellationToken::new(), Duration::from_secs(2))
+            .request("turn/interrupt", params, &CancellationToken::new(), Duration::from_secs(2))
             .await;
     }
 
-    pub fn shutdown(&mut self) {
+    pub async fn close(&mut self) {
+        self.rpc.kill_and_wait().await;
+    }
+
+    pub fn kill(&mut self) {
         self.rpc.shutdown();
     }
+}
+
+fn extract_turn_id(value: &Value) -> Option<String> {
+    value
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("turnId").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 fn collect_codex_event(method: &str, params: &Value, text: &mut String, saw_tool: &mut bool) {
@@ -181,7 +231,7 @@ mod tests {
     #[test]
     fn thread_start_is_read_only_and_ephemeral() {
         let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys");
-        assert_eq!(params["sandbox"], "read-only");
+        assert_eq!(params["sandbox"], "readOnly");
         assert_eq!(params["ephemeral"], true);
         assert_eq!(params["approvalPolicy"], "untrusted");
         assert_eq!(params["developerInstructions"], "sys");
@@ -213,5 +263,12 @@ mod tests {
         );
         assert_eq!(text, "{\"blocks\":[]}");
         assert!(!saw_tool);
+    }
+
+    #[test]
+    fn extracts_turn_id_from_result_and_notification() {
+        assert_eq!(extract_turn_id(&serde_json::json!({ "turn": { "id": "turn_1" } })).as_deref(), Some("turn_1"));
+        assert_eq!(extract_turn_id(&serde_json::json!({ "turnId": "turn_2", "threadId": "thr" })).as_deref(), Some("turn_2"));
+        assert_eq!(extract_turn_id(&serde_json::json!({ "threadId": "thr" })), None);
     }
 }

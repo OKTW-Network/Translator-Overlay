@@ -150,10 +150,17 @@ impl LiveSession {
         }
     }
 
-    fn shutdown(&mut self) {
+    async fn close(&mut self) {
         match self {
-            Self::Grok(s) => s.shutdown(),
-            Self::Codex(s) => s.shutdown(),
+            Self::Grok(s) => s.close().await,
+            Self::Codex(s) => s.close().await,
+        }
+    }
+
+    fn kill(&mut self) {
+        match self {
+            Self::Grok(s) => s.kill(),
+            Self::Codex(s) => s.kill(),
         }
     }
 }
@@ -177,12 +184,18 @@ impl CliBackend {
 
     pub fn shutdown(&mut self) {
         if let Some(mut live) = self.live.take() {
-            live.shutdown();
+            live.kill();
         }
         self.mirrored.clear();
-        if let Some(dir) = self.isolated_cwd.take() {
-            let _ = std::fs::remove_dir_all(dir);
+        remove_isolated_cwd(self.isolated_cwd.take());
+    }
+
+    pub async fn close(&mut self) {
+        if let Some(mut live) = self.live.take() {
+            live.close().await;
         }
+        self.mirrored.clear();
+        remove_isolated_cwd(self.isolated_cwd.take());
     }
 
     pub async fn complete(
@@ -194,7 +207,7 @@ impl CliBackend {
         epoch: u64,
     ) -> Result<String, TranslateError> {
         if self.session_epoch != epoch {
-            self.shutdown();
+            self.close().await;
             self.session_epoch = epoch;
         }
         let plan = plan_turn(&self.mirrored, messages)?;
@@ -249,7 +262,7 @@ impl CliBackend {
             }
             Err(e) => {
                 // Remote now has a dangling user turn (or is dead). Force recreate next time.
-                self.shutdown();
+                self.close().await;
                 Err(e)
             }
         }
@@ -262,7 +275,7 @@ impl CliBackend {
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<(), TranslateError> {
-        self.shutdown();
+        self.close().await;
         let cwd = make_isolated_cwd()?;
         self.isolated_cwd = Some(cwd.clone());
         let program = resolve_cli_binary(api.provider, &api.cli_path).ok_or_else(|| {
@@ -293,6 +306,28 @@ impl CliBackend {
 impl Default for CliBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn try_remove_isolated_cwd(dir: &Path) -> bool {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => !dir.exists(),
+    }
+}
+
+fn remove_isolated_cwd(dir: Option<PathBuf>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    for attempt in 0..5 {
+        if try_remove_isolated_cwd(&dir) {
+            return;
+        }
+        if attempt + 1 < 5 {
+            std::thread::sleep(Duration::from_millis(50 * (attempt as u64 + 1)));
+        }
     }
 }
 
