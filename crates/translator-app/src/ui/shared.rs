@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, ModelTier, NormRect};
+use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, resolve_cli_binary};
 use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
@@ -253,7 +253,7 @@ pub fn form_validation_error(ui: &UiShared) -> Option<String> {
     if ui.draft.api.model.trim().is_empty() {
         return Some("Model name is required.".into());
     }
-    if ui.draft.api.base_url.trim().is_empty() {
+    if !ui.draft.api.provider.is_cli() && ui.draft.api.base_url.trim().is_empty() {
         return Some("Base URL is required.".into());
     }
     // Optional numbers always have a value; toggle off = omit. No empty checks.
@@ -332,6 +332,10 @@ pub struct Snapshot {
     pub target_lang: String,
     pub source_lang: String,
     pub api_ready: bool,
+    pub api_status: String,
+    pub provider: ModelProvider,
+    pub provider_idx: i32,
+    pub cli_path: String,
     pub tier: String,
     pub auto_running: bool,
     pub frame_count: u64,
@@ -458,7 +462,33 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         model: s.config.api.model.clone(),
         target_lang: s.config.translation.target_lang.clone(),
         source_lang: s.config.translation.source_lang.clone(),
-        api_ready: !s.config.api.api_key.trim().is_empty(),
+        api_ready: match s.config.api.provider {
+            ModelProvider::OpenaiCompatible => !s.config.api.api_key.trim().is_empty(),
+            ModelProvider::GrokCli | ModelProvider::CodexCli => resolve_cli_binary(s.config.api.provider, &s.config.api.cli_path).is_some(),
+        },
+        api_status: match s.config.api.provider {
+            ModelProvider::OpenaiCompatible => {
+                if s.config.api.api_key.trim().is_empty() {
+                    "API key missing".into()
+                } else {
+                    "API ready".into()
+                }
+            }
+            ModelProvider::GrokCli | ModelProvider::CodexCli => {
+                if resolve_cli_binary(s.config.api.provider, &s.config.api.cli_path).is_some() {
+                    "CLI ready".into()
+                } else {
+                    "CLI missing".into()
+                }
+            }
+        },
+        provider: ui.draft.api.provider,
+        provider_idx: match ui.draft.api.provider {
+            ModelProvider::OpenaiCompatible => 0,
+            ModelProvider::GrokCli => 1,
+            ModelProvider::CodexCli => 2,
+        },
+        cli_path: ui.draft.api.cli_path.clone(),
         tier: s.config.ocr.model_tier.to_string(),
         auto_running: s.auto_running,
         frame_count: s.frame_count,

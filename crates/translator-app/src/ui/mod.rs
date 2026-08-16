@@ -67,7 +67,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
 
     // Settings pages: pin title + Save above the scroll (color = unsaved).
     let settings_meta: Option<(&str, Option<&str>)> = match page_tag.as_str() {
-        "api" => Some(("API", Some("Connect to an OpenAI-compatible translation API."))),
+        "api" => Some(("API", Some("Choose how to reach a translation model."))),
         "translation" => Some(("Translation", Some("Languages and translation context."))),
         "ocr" => Some(("OCR", Some("Text recognition and capture timing."))),
         "overlay" => Some(("Overlay", Some("Where and how translations are shown."))),

@@ -266,6 +266,7 @@ impl Pipeline {
             PipelineCommand::ManualCapture => self.manual_capture(),
             PipelineCommand::ResetConversation => {
                 self.conversation.clear();
+                self.client.reset_session();
                 self.last_translated_fp = None;
                 info!("LLM conversation reset");
                 self.state.write().restore_operational_status();
@@ -383,6 +384,7 @@ impl Pipeline {
         self.persist.reset();
         if clear_conversation {
             self.conversation.clear();
+            self.client.reset_session();
         }
         self.last_translated_fp = None;
         self.last_page = None;

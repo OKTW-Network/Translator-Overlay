@@ -9,7 +9,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
 - **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
 - **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（段落組裝）
-- **LLM 翻譯**：OpenAI 相容 Chat Completions（可接官方、代理或相容服務）
+- **LLM 翻譯**：OpenAI 相容 Chat Completions，或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
 - **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
 - **對話上下文**：多輪歷史壓縮，維持用語一致
 - **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
@@ -30,7 +30,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 1. 解壓 `TranslatorOverlay-*-win-x64.zip`（保持 DLL 與 exe 同目錄）
 2. 雙擊 `translator-app.exe`
-3. 在 **API** 頁填入 `api_key`（或編輯旁邊的 `config.toml`）並 **Save**
+3. 在 **API** 頁選 Provider：HTTP 填 `api_key`，或改用本機 Grok / Codex CLI；然後 **Save**
 4. 回 **Dashboard**：重新整理視窗清單 → 選取目標 → **Start**
 
 `config.toml` 與 `models/` 會放在可執行檔同目錄。
@@ -66,7 +66,7 @@ cargo build --release -p translator-app
 
 ## 使用方式
 
-1. **API**：設定 `base_url`、`api_key`、`model`（預設 `https://api.openai.com/v1` + `gpt-4o-mini`）
+1. **API**：選 Provider（OpenAI-compatible / Grok CLI / Codex CLI）。HTTP 填 `base_url`、`api_key`、`model`；CLI 用本機已登入的 `grok` / `codex`，可選 `cli_path`
 2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選提示詞。可開關翻譯記憶、設定記住多少句，以及清空已記住的譯文。譯文不滿意時按 **Retry** 會重翻這一頁並更新記憶
 3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
 4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
@@ -87,6 +87,8 @@ cargo build --release -p translator-app
 
 ```toml
 [api]
+provider = "openai_compatible"   # openai_compatible | grok_cli | codex_cli
+# cli_path = ""                  # 空 = PATH 上的 grok / codex
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = "gpt-4o-mini"
@@ -160,7 +162,7 @@ crates/
   translator-core/        # config / state / 共用型別
   translator-ocr/         # OCR 引擎、模型目錄、穩定門檻、行合併
   translator-overlay/     # 透明點穿覆蓋視窗
-  translator-translate/   # OpenAI 相容翻譯客戶端
+  translator-translate/   # HTTP / Grok ACP / Codex app-server 翻譯客戶端
 scripts/
   package-portable.ps1    # release 建置 + 可攜 ZIP
 config.toml               # 開發用預設設定範本
