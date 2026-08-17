@@ -331,7 +331,6 @@ pub struct Snapshot {
     pub model: String,
     pub target_lang: String,
     pub source_lang: String,
-    pub api_ready: bool,
     pub api_status: String,
     pub provider: ModelProvider,
     pub provider_idx: i32,
@@ -462,10 +461,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         model: s.config.api.model.clone(),
         target_lang: s.config.translation.target_lang.clone(),
         source_lang: s.config.translation.source_lang.clone(),
-        api_ready: match s.config.api.provider {
-            ModelProvider::OpenaiCompatible => !s.config.api.api_key.trim().is_empty(),
-            ModelProvider::GrokCli | ModelProvider::CodexCli => resolve_cli_binary(s.config.api.provider, &s.config.api.cli_path).is_some(),
-        },
         api_status: match s.config.api.provider {
             ModelProvider::OpenaiCompatible => {
                 if s.config.api.api_key.trim().is_empty() {

@@ -1,6 +1,9 @@
 //! Codex app-server client (`codex app-server` over stdio).
 
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -19,21 +22,54 @@ pub fn thread_start_params(model: &str, cwd: &Path, system: &str) -> Value {
         "model": model,
         "cwd": cwd.to_string_lossy(),
         "sandbox": "readOnly",
-        "approvalPolicy": "untrusted",
+        "approvalPolicy": "never",
         "ephemeral": true,
         "developerInstructions": system,
         "baseInstructions": system,
         "serviceName": "translator-overlay",
         "personality": "none",
+        "config": {
+            "web_search": "disabled",
+            "features.apps": false,
+            "features.apply_patch_freeform": false,
+            "features.browser_use": false,
+            "features.code_mode": false,
+            "features.computer_use": false,
+            "features.image_generation": false,
+            "features.in_app_browser": false,
+            "features.js_repl": false,
+            "features.memory_tool": false,
+            "features.multi_agent": false,
+            "features.plugins": false,
+            "features.request_permissions_tool": false,
+            "features.shell_tool": false,
+            "features.standalone_web_search": false,
+            "features.tool_search": false,
+            "features.tool_suggest": false,
+            "features.unified_exec": false,
+            "features.view_image": false,
+            "features.web_search": false,
+            "features.web_search_request": false,
+            "features.workspace_dependencies": false,
+            "include_apps_instructions": false,
+            "include_collaboration_mode_instructions": false,
+        },
     })
 }
 
-pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> Value {
+pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>, cwd: &Path) -> Value {
     let mut params = serde_json::json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": user }],
         "outputSchema": translation_output_schema(),
-        "sandboxPolicy": { "type": "readOnly" },
+        "sandboxPolicy": {
+            "type": "readOnly",
+            "access": {
+                "type": "restricted",
+                "includePlatformDefaults": false,
+                "readableRoots": [cwd.to_string_lossy()],
+            },
+        },
     });
     if let Some(effort) = effort.map(str::trim).filter(|s| !s.is_empty()) {
         params["effort"] = Value::from(effort);
@@ -45,6 +81,8 @@ pub struct CodexSession {
     rpc: JsonRpcChild,
     thread_id: String,
     turn_id: Option<String>,
+    sandbox_root: PathBuf,
+    _codex_home: IsolatedCodexHome,
 }
 
 impl CodexSession {
@@ -56,8 +94,10 @@ impl CodexSession {
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<Self, TranslateError> {
+        let codex_home = prepare_isolated_codex_home(cwd)?;
+        let codex_home_text = codex_home.0.to_string_lossy();
         let args = spawn_args();
-        let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[], false).await?;
+        let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[("CODEX_HOME", codex_home_text.as_ref())], false).await?;
 
         rpc.request(
             "initialize",
@@ -87,6 +127,8 @@ impl CodexSession {
             rpc,
             thread_id,
             turn_id: None,
+            sandbox_root: cwd.to_path_buf(),
+            _codex_home: codex_home,
         })
     }
 
@@ -104,15 +146,21 @@ impl CodexSession {
 
         let started = self
             .rpc
-            .request_with_notes("turn/start", turn_start_params(&self.thread_id, user, effort), cancel, timeout, |method, params| {
-                collect_codex_event(method, params, &mut text, &mut saw_tool);
-                if let Some(id) = extract_turn_id(params) {
-                    seen_turn_id = Some(id);
-                }
-                if method == "turn/completed" {
-                    completed = Some(params.clone());
-                }
-            })
+            .request_with_notes(
+                "turn/start",
+                turn_start_params(&self.thread_id, user, effort, &self.sandbox_root),
+                cancel,
+                timeout,
+                |method, params| {
+                    collect_codex_event(method, params, &mut text, &mut saw_tool);
+                    if let Some(id) = extract_turn_id(params) {
+                        seen_turn_id = Some(id);
+                    }
+                    if method == "turn/completed" {
+                        completed = Some(params.clone());
+                    }
+                },
+            )
             .await?;
 
         if let Some(id) = extract_turn_id(&started) {
@@ -184,6 +232,45 @@ impl CodexSession {
     }
 }
 
+struct IsolatedCodexHome(PathBuf);
+
+impl Drop for IsolatedCodexHome {
+    fn drop(&mut self) {
+        remove_isolated_codex_home(&self.0);
+    }
+}
+
+fn prepare_isolated_codex_home(cwd: &Path) -> Result<IsolatedCodexHome, TranslateError> {
+    let codex_home = IsolatedCodexHome(cwd.with_extension("codex-home"));
+    std::fs::create_dir_all(&codex_home.0).map_err(|e| TranslateError::CliProtocol(format!("create isolated Codex home: {e}")))?;
+
+    if let Some(source_home) = source_codex_home() {
+        let source_auth = source_home.join("auth.json");
+        if source_auth.is_file()
+            && let Err(error) = std::fs::copy(&source_auth, codex_home.0.join("auth.json"))
+        {
+            return Err(TranslateError::CliProtocol(format!("copy Codex authentication: {error}")));
+        }
+    }
+    Ok(codex_home)
+}
+
+fn source_codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(PathBuf::from)
+            .map(|home| home.join(".codex"))
+    })
+}
+
+fn remove_isolated_codex_home(codex_home: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(codex_home)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %codex_home.display(), %error, "failed to remove isolated Codex home");
+    }
+}
+
 fn extract_turn_id(value: &Value) -> Option<String> {
     value
         .pointer("/turn/id")
@@ -207,14 +294,15 @@ fn collect_codex_event(method: &str, params: &Value, text: &mut String, saw_tool
             let item = params.get("item").unwrap_or(params);
             let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
             match kind {
-                "agent_message" => {
+                "agentMessage" => {
                     if let Some(full) = item.get("text").and_then(Value::as_str)
                         && text.is_empty()
                     {
                         text.push_str(full);
                     }
                 }
-                "command_execution" | "file_change" | "mcp_tool_call" | "web_search" => *saw_tool = true,
+                "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "collabToolCall" | "webSearch"
+                | "imageGeneration" | "imageView" => *saw_tool = true,
                 _ => {}
             }
         }
@@ -233,20 +321,27 @@ mod tests {
         let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys");
         assert_eq!(params["sandbox"], "readOnly");
         assert_eq!(params["ephemeral"], true);
-        assert_eq!(params["approvalPolicy"], "untrusted");
+        assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["developerInstructions"], "sys");
+        assert_eq!(params["config"]["web_search"], "disabled");
+        assert_eq!(params["config"]["features.shell_tool"], false);
+        assert_eq!(params["config"]["features.plugins"], false);
         assert_ne!(params["sandbox"], "danger-full-access");
     }
 
     #[test]
     fn turn_start_sends_only_user_text() {
-        let params = turn_start_params("thr_1", "---BEGIN_UNTRUSTED_OCR---\n{}\n---END_UNTRUSTED_OCR---", Some("low"));
+        let params =
+            turn_start_params("thr_1", "---BEGIN_UNTRUSTED_OCR---\n{}\n---END_UNTRUSTED_OCR---", Some("low"), Path::new("C:/tmp/iso"));
         assert_eq!(params["threadId"], "thr_1");
         assert_eq!(params["input"].as_array().map(Vec::len), Some(1));
         assert_eq!(params["input"][0]["type"], "text");
         assert!(params["outputSchema"].is_object());
         assert_eq!(params["effort"], "low");
         assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+        assert_eq!(params["sandboxPolicy"]["access"]["type"], "restricted");
+        assert_eq!(params["sandboxPolicy"]["access"]["includePlatformDefaults"], false);
+        assert_eq!(params["sandboxPolicy"]["access"]["readableRoots"][0], "C:/tmp/iso");
     }
 
     #[test]
@@ -256,13 +351,37 @@ mod tests {
         collect_codex_event(
             "item/completed",
             &serde_json::json!({
-                "item": { "id": "item_3", "type": "agent_message", "text": "{\"blocks\":[]}" }
+                "item": { "id": "item_3", "type": "agentMessage", "text": "{\"blocks\":[]}" }
             }),
             &mut text,
             &mut saw_tool,
         );
         assert_eq!(text, "{\"blocks\":[]}");
         assert!(!saw_tool);
+    }
+
+    #[test]
+    fn detects_all_tool_item_types() {
+        for kind in [
+            "commandExecution",
+            "fileChange",
+            "mcpToolCall",
+            "dynamicToolCall",
+            "collabToolCall",
+            "webSearch",
+            "imageGeneration",
+            "imageView",
+        ] {
+            let mut text = String::new();
+            let mut saw_tool = false;
+            collect_codex_event(
+                "item/started",
+                &serde_json::json!({ "item": { "id": "item_tool", "type": kind } }),
+                &mut text,
+                &mut saw_tool,
+            );
+            assert!(saw_tool, "missed tool item {kind}");
+        }
     }
 
     #[test]

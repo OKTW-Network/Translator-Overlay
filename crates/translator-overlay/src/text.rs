@@ -91,7 +91,7 @@ pub(crate) fn draw_text_label(
         let count = rw * 4;
         if src + count <= buf.len() {
             bg_copy[dst..dst + count].copy_from_slice(&buf[src..src + count]);
-            for px in buf[src..src + count].chunks_exact_mut(4) {
+            for px in buf[src..src + count].as_chunks_mut::<4>().0 {
                 px.fill(0);
             }
         }
