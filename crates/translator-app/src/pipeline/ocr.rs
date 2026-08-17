@@ -122,7 +122,7 @@ impl Pipeline {
     pub(crate) fn run_ocr_auto(&mut self, frame: &CapturedFrame) {
         {
             let mut s = self.state.write();
-            if s.translate_in_flight || matches!(s.status, PipelineStatus::Translating) {
+            if s.translate_in_flight || s.status.is_translating() {
                 return;
             }
             // OCR can take hundreds of ms; avoid clobbering "waiting / overlay" so the

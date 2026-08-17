@@ -435,6 +435,7 @@ impl Pipeline {
                     PipelineStatus::Error { .. }
                         | PipelineStatus::LoadingModels
                         | PipelineStatus::Translating
+                        | PipelineStatus::RetryingTranslate { .. }
                         | PipelineStatus::OverlayActive
                         | PipelineStatus::Cancelled
                 ) {

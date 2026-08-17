@@ -179,15 +179,19 @@ pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Op
 /// Always mounts the same `InfoBar` (stable key) so open/close does not remount
 /// the rest of the page tree.
 pub fn status_infobar(snap: &Snapshot) -> InfoBar {
-    let (title, open) = if !snap.last_error.is_empty() {
-        (snap.last_error.as_str(), true)
+    let retry_msg;
+    let (title, message, open, severity) = if snap.retrying && !snap.last_error.is_empty() {
+        retry_msg = format!("Retrying {} of {}", snap.retry_attempt, snap.retry_max);
+        (snap.last_error.as_str(), retry_msg.as_str(), true, InfoBarSeverity::Warning)
+    } else if !snap.last_error.is_empty() {
+        (snap.last_error.as_str(), "", true, InfoBarSeverity::Error)
     } else {
-        ("", false)
+        ("", "", false, InfoBarSeverity::Error)
     };
 
     InfoBar::new(title)
-        .message("")
-        .severity(InfoBarSeverity::Error)
+        .message(message)
+        .severity(severity)
         .is_open(open)
         .is_closable(false)
         .with_key("status-infobar")

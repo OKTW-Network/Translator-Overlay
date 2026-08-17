@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, resolve_cli_binary};
+use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, PipelineStatus, resolve_cli_binary};
 use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
@@ -331,7 +331,6 @@ pub struct Snapshot {
     pub model: String,
     pub target_lang: String,
     pub source_lang: String,
-    pub api_ready: bool,
     pub api_status: String,
     pub provider: ModelProvider,
     pub provider_idx: i32,
@@ -355,6 +354,9 @@ pub struct Snapshot {
     pub translate_in_flight: bool,
     pub can_retry: bool,
     pub last_error: String,
+    pub retrying: bool,
+    pub retry_attempt: u32,
+    pub retry_max: u32,
     pub settings_message: String,
     pub settings_dirty: bool,
     pub form_error: String,
@@ -462,10 +464,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         model: s.config.api.model.clone(),
         target_lang: s.config.translation.target_lang.clone(),
         source_lang: s.config.translation.source_lang.clone(),
-        api_ready: match s.config.api.provider {
-            ModelProvider::OpenaiCompatible => !s.config.api.api_key.trim().is_empty(),
-            ModelProvider::GrokCli | ModelProvider::CodexCli => resolve_cli_binary(s.config.api.provider, &s.config.api.cli_path).is_some(),
-        },
         api_status: match s.config.api.provider {
             ModelProvider::OpenaiCompatible => {
                 if s.config.api.api_key.trim().is_empty() {
@@ -518,6 +516,15 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         translate_in_flight: s.translate_in_flight,
         can_retry: s.can_retry_translate,
         last_error: s.last_error.clone().unwrap_or_default(),
+        retrying: matches!(s.status, PipelineStatus::RetryingTranslate { .. }),
+        retry_attempt: match &s.status {
+            PipelineStatus::RetryingTranslate { attempt, .. } => *attempt,
+            _ => 0,
+        },
+        retry_max: match &s.status {
+            PipelineStatus::RetryingTranslate { max_retries, .. } => *max_retries,
+            _ => 0,
+        },
         settings_message: s.settings_message.clone().unwrap_or_default(),
         // Compare draft↔live config (not a sticky flag) so re-bind events
         // from Slider/NumberBox do not show false "Unsaved changes".

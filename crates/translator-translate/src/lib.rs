@@ -58,6 +58,11 @@ impl TranslateError {
     }
 }
 
+/// True when another attempt should run after `attempt` (0-based completed tries).
+pub fn should_retry(error: &TranslateError, attempt: u32, max_retries: u32) -> bool {
+    !error.is_cancelled() && error.is_retryable() && attempt < max_retries
+}
+
 /// In-memory multi-turn conversation reused across translations.
 #[derive(Debug, Clone, Default)]
 pub struct Conversation {
@@ -570,6 +575,18 @@ impl TranslateClient {
         messages: &[ChatMessage],
         cancel: &CancellationToken,
     ) -> Result<String, TranslateError> {
+        self.chat_completions_with_retry_on(messages, cancel, |_, _, _, _| {}).await
+    }
+
+    /// Same as [`Self::chat_completions_with_retry`], calling `on_retry` before each backoff.
+    ///
+    /// `on_retry(attempt, max_retries, error, backoff_ms)` — `attempt` is 1-based.
+    pub async fn chat_completions_with_retry_on(
+        &self,
+        messages: &[ChatMessage],
+        cancel: &CancellationToken,
+        mut on_retry: impl FnMut(u32, u32, &TranslateError, u64),
+    ) -> Result<String, TranslateError> {
         let max_retries = self.api.max_retries;
         let mut backoff_ms = self.api.retry_backoff_ms.max(50);
         let mut attempt = 0u32;
@@ -577,8 +594,7 @@ impl TranslateClient {
         loop {
             match self.chat_completions_cancellable(messages, cancel).await {
                 Ok(content) => return Ok(content),
-                Err(e) if e.is_cancelled() => return Err(e),
-                Err(e) if e.is_retryable() && attempt < max_retries => {
+                Err(e) if should_retry(&e, attempt, max_retries) => {
                     attempt += 1;
                     tracing::warn!(
                         attempt,
@@ -587,6 +603,7 @@ impl TranslateClient {
                         error = %e,
                         "translate request failed; retrying"
                     );
+                    on_retry(attempt, max_retries, &e, backoff_ms);
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return Err(TranslateError::Cancelled),
@@ -863,5 +880,36 @@ Hope that helps!"#;
         assert!(TranslateError::CliExit("closed stdout".into()).is_retryable());
         assert!(TranslateError::CliProtocol("CLI turn timed out".into()).is_retryable());
         assert!(!TranslateError::CliProtocol("Grok session invoked a tool".into()).is_retryable());
+    }
+
+    #[test]
+    fn should_retry_api_status_until_budget() {
+        let err = TranslateError::ApiStatus {
+            status: 429,
+            body: "rate limited".into(),
+        };
+        assert!(should_retry(&err, 0, 2));
+        assert!(should_retry(&err, 1, 2));
+        assert!(!should_retry(&err, 2, 2));
+        assert!(!should_retry(&TranslateError::Cancelled, 0, 2));
+        assert!(!should_retry(&TranslateError::MissingApiKey, 0, 2));
+    }
+
+    #[test]
+    fn retry_hook_invoked_for_retryable_api_error() {
+        let err = TranslateError::ApiStatus {
+            status: 503,
+            body: "unavailable".into(),
+        };
+        let mut notices = Vec::new();
+        let max_retries = 2u32;
+        let mut attempt = 0u32;
+        while should_retry(&err, attempt, max_retries) {
+            attempt += 1;
+            notices.push((attempt, max_retries, err.to_string()));
+        }
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0], (1, 2, "API returned status 503: unavailable".into()));
+        assert_eq!(notices[1].0, 2);
     }
 }

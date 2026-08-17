@@ -26,6 +26,14 @@ pub enum PipelineStatus {
     /// OCR engine load (may block while oar-ocr fetches models).
     LoadingModels,
     Translating,
+    /// Auto-retry after a transient translate API / network / CLI error.
+    RetryingTranslate {
+        /// 1-based retry about to run.
+        attempt: u32,
+        max_retries: u32,
+        /// Display of the error that triggered this retry.
+        message: String,
+    },
     /// In-flight translation was aborted by the user.
     Cancelled,
     OverlayActive,
@@ -46,6 +54,9 @@ impl PipelineStatus {
             }
             Self::LoadingModels => "Loading OCR models".to_string(),
             Self::Translating => "Translating".to_string(),
+            Self::RetryingTranslate { attempt, max_retries, .. } => {
+                format!("Retrying translation ({attempt}/{max_retries})")
+            }
             Self::Cancelled => "Cancelled".to_string(),
             Self::OverlayActive => "Overlay active".to_string(),
             Self::Error { message } => format!("Error: {message}"),
@@ -56,8 +67,40 @@ impl PipelineStatus {
         matches!(self, Self::Error { .. })
     }
 
+    pub fn is_translating(&self) -> bool {
+        matches!(self, Self::Translating | Self::RetryingTranslate { .. })
+    }
+
     pub fn is_busy(&self) -> bool {
-        matches!(self, Self::RunningOcr | Self::Translating | Self::LoadingModels | Self::WaitingForStable { .. })
+        matches!(
+            self,
+            Self::RunningOcr | Self::Translating | Self::RetryingTranslate { .. } | Self::LoadingModels | Self::WaitingForStable { .. }
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retrying_status_label_is_compact() {
+        let status = PipelineStatus::RetryingTranslate {
+            attempt: 1,
+            max_retries: 2,
+            message: "API returned status 429: {\"error\":\"rate\"}".into(),
+        };
+        assert_eq!(status.label(), "Retrying translation (1/2)");
+        assert!(status.is_translating());
+        assert!(status.is_busy());
+        assert!(!status.is_error());
+    }
+
+    #[test]
+    fn translating_is_busy_and_translating() {
+        assert!(PipelineStatus::Translating.is_translating());
+        assert!(PipelineStatus::Translating.is_busy());
+        assert!(!PipelineStatus::Capturing.is_translating());
     }
 }
 

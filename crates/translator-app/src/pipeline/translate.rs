@@ -103,6 +103,7 @@ impl Pipeline {
         let cancel_job = cancel.clone();
         let client_clone = self.client.clone();
         let wake = Arc::clone(&self.wake);
+        let state_cb = Arc::clone(&self.state);
         let (tx, rx) = oneshot::channel();
 
         {
@@ -115,7 +116,18 @@ impl Pipeline {
 
         self.rt.spawn(async move {
             let _notify = NotifyOnDrop(wake);
-            let result = client_clone.chat_completions_with_retry(&messages, &cancel_job).await;
+            let result = client_clone
+                .chat_completions_with_retry_on(&messages, &cancel_job, move |attempt, max_retries, error, _backoff_ms| {
+                    let message = error.to_string();
+                    let mut s = state_cb.write();
+                    s.last_error = Some(message.clone());
+                    s.status = PipelineStatus::RetryingTranslate {
+                        attempt,
+                        max_retries,
+                        message,
+                    };
+                })
+                .await;
             let _ = tx.send(TranslateJobResult {
                 result,
                 messages_len_after_user,
