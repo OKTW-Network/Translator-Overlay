@@ -7,12 +7,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
 use translator_overlay::OverlayController;
-use translator_translate::{TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed};
+use translator_translate::{TranslationCache, blocks_to_translated_text, merge_translations_detailed};
 
-use crate::pipeline::{
-    wake::NotifyOnDrop,
-    worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobResult},
-};
+use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobResult};
 
 impl Pipeline {
     pub(crate) fn start_translate(&mut self, page: PendingPage, force: bool) {
@@ -102,7 +99,6 @@ impl Pipeline {
         let cancel = CancellationToken::new();
         let cancel_job = cancel.clone();
         let client_clone = self.client.clone();
-        let wake = Arc::clone(&self.wake);
         let state_cb = Arc::clone(&self.state);
         let (tx, rx) = oneshot::channel();
 
@@ -114,8 +110,7 @@ impl Pipeline {
             s.can_retry_translate = true;
         }
 
-        self.rt.spawn(async move {
-            let _notify = NotifyOnDrop(wake);
+        tokio::spawn(async move {
             let result = client_clone
                 .chat_completions_with_retry_on(&messages, &cancel_job, move |attempt, max_retries, error, _backoff_ms| {
                     let message = error.to_string();
@@ -206,27 +201,6 @@ impl Pipeline {
                 s.translate_in_flight = false;
                 s.can_retry_translate = true;
                 s.set_error(format!("translate: {e}"));
-            }
-        }
-    }
-
-    pub(crate) fn poll_translate(&mut self) {
-        let Some(job) = self.inflight.as_mut() else {
-            return;
-        };
-        match job.rx.try_recv() {
-            Ok(job_result) => {
-                let finished = self.inflight.take().expect("inflight present");
-                self.finish_translate(finished, job_result);
-            }
-            Err(oneshot::error::TryRecvError::Empty) => {}
-            Err(oneshot::error::TryRecvError::Closed) => {
-                let finished = self.inflight.take().expect("inflight present");
-                let messages_len_after_user = finished.messages_len_after_user;
-                self.finish_translate(finished, TranslateJobResult {
-                    result: Err(TranslateError::Other("translate task dropped".into())),
-                    messages_len_after_user,
-                });
             }
         }
     }

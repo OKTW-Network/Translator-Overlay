@@ -3350,6 +3350,7 @@ dependencies = [
  "image",
  "oar-ocr",
  "thiserror",
+ "tokio",
  "tracing",
  "translator-core",
 ]

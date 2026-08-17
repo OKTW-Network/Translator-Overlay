@@ -8,5 +8,6 @@ anyhow = { workspace = true }
 image = { workspace = true }
 oar-ocr = { version = "0.9", features = ["auto-download", "directml"] }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 translator-core = { path = "../translator-core" }

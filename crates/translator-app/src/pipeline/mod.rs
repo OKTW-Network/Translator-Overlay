@@ -4,7 +4,6 @@ mod config_apply;
 mod ocr;
 mod remap;
 mod translate;
-mod wake;
 mod worker;
 
 use translator_core::AppConfig;

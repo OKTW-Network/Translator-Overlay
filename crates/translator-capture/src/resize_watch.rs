@@ -5,7 +5,7 @@
 //! loop; those go through `EVENT_OBJECT_LOCATIONCHANGE` and restart as soon as
 //! the size changes.
 //!
-//! The pipeline thread has no Win32 message pump, so the hooks live on a
+//! The capture session has no Win32 message pump, so the hooks live on a
 //! dedicated thread. One session / process — the callback reads process-wide
 //! atomics.
 
@@ -42,6 +42,7 @@ pub(crate) struct ResizeWatch {
 impl ResizeWatch {
     pub(crate) fn new() -> Self {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        // SetWinEventHook callbacks run on this thread; needs GetMessageW.
         let join = std::thread::Builder::new()
             .name("capture-resize".into())
             .spawn(move || hook_thread(ready_tx))

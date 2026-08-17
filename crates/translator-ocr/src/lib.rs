@@ -8,7 +8,6 @@ mod models;
 mod stability;
 
 use thiserror::Error;
-use translator_core::OcrConfig;
 
 pub use crate::{crop::*, engine::*, filter::*, merge::*, models::*, stability::*};
 
@@ -24,9 +23,4 @@ pub enum OcrError {
     Path(#[from] translator_core::PathError),
     #[error("{0}")]
     Other(String),
-}
-
-/// Load the OCR engine (oar-ocr may fetch missing models into `models_dir`).
-pub fn prepare_engine(config: &OcrConfig) -> Result<OcrEngine, OcrError> {
-    OcrEngine::load(config)
 }

@@ -119,7 +119,7 @@ impl Pipeline {
         self.maybe_expire_remap_miss();
     }
 
-    pub(crate) fn run_ocr_auto(&mut self, frame: &CapturedFrame) {
+    pub(crate) async fn run_ocr_auto(&mut self, frame: &CapturedFrame) {
         {
             let mut s = self.state.write();
             if s.translate_in_flight || s.status.is_translating() {
@@ -134,11 +134,13 @@ impl Pipeline {
 
         let ocr_start = Instant::now();
         let regions = self.ocr_pixel_regions(frame.width, frame.height);
-        let raw = match self.engine.as_mut() {
-            Some(engine) => engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions),
-            None => return,
+        let Some(engine) = self.engine.as_ref() else {
+            return;
         };
-        let raw = match raw {
+        let raw = match engine
+            .recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions)
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 error!(error = %e, "OCR failed");
@@ -365,7 +367,7 @@ impl Pipeline {
         s.latest_translated_text = translated_text;
     }
 
-    pub(crate) fn run_ocr_manual(&mut self, frame: &CapturedFrame) {
+    pub(crate) async fn run_ocr_manual(&mut self, frame: &CapturedFrame) {
         {
             let mut s = self.state.write();
             s.status = PipelineStatus::RunningOcr;
@@ -373,11 +375,13 @@ impl Pipeline {
 
         let ocr_start = Instant::now();
         let regions = self.ocr_pixel_regions(frame.width, frame.height);
-        let blocks = match self.engine.as_mut() {
-            Some(engine) => engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions),
-            None => return,
+        let Some(engine) = self.engine.as_ref() else {
+            return;
         };
-        let blocks = match blocks {
+        let blocks = match engine
+            .recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions)
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 error!(error = %e, "manual OCR failed");

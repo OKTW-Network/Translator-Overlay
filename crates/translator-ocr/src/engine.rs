@@ -1,6 +1,9 @@
 //! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + DirectML on Windows).
 
-use std::{path::Path, sync::Once};
+use std::{
+    path::Path,
+    sync::{Arc, Once},
+};
 
 use image::{DynamicImage, RgbaImage};
 use oar_ocr::{
@@ -16,7 +19,7 @@ use crate::{OcrError, models::ModelPaths};
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
 pub struct OcrEngine {
     // OAROCR is not exposed as a public type alias in all versions; use the builder output type.
-    inner: oar_ocr::oarocr::OAROCR,
+    inner: Arc<oar_ocr::oarocr::OAROCR>,
     confidence_threshold: f32,
     filter_single_char: bool,
     line_merge: LineMergeConfig,
@@ -51,20 +54,23 @@ impl OcrEngine {
     ///
     /// Uses full paths when files already exist under `models_dir`. Otherwise
     /// passes bare registry names so oar-ocr can auto-download into `OAR_HOME`.
-    pub fn load(config: &OcrConfig) -> Result<Self, OcrError> {
+    pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
         Self::configure_model_home(&models_dir)?;
 
         let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
         let (det, rec, dict) = model_source_args(&paths);
-
         let ort = OrtSessionConfig::new().with_execution_providers(default_execution_providers());
 
-        let inner = OAROCRBuilder::new(det, rec, dict)
-            .region_batch_size(4)
-            .ort_session(ort)
-            .build()
-            .map_err(|e| OcrError::Engine(e.to_string()))?;
+        let inner = tokio::task::spawn_blocking(move || {
+            OAROCRBuilder::new(det, rec, dict)
+                .region_batch_size(4)
+                .ort_session(ort)
+                .build()
+                .map_err(|e| OcrError::Engine(e.to_string()))
+        })
+        .await
+        .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR load task: {e}"))))?;
 
         log_gpu_once();
 
@@ -76,7 +82,7 @@ impl OcrEngine {
         );
 
         Ok(Self {
-            inner,
+            inner: Arc::new(inner),
             confidence_threshold: config.confidence_threshold,
             filter_single_char: config.filter_single_char,
             line_merge: config.line_merge.clone(),
@@ -96,11 +102,13 @@ impl OcrEngine {
     }
 
     /// Run OCR on a dynamic image.
-    pub fn recognize(&mut self, image: &DynamicImage) -> Result<Vec<OcrBlock>, OcrError> {
+    async fn recognize(&self, image: &DynamicImage) -> Result<Vec<OcrBlock>, OcrError> {
         // oar-ocr predict takes RGB8 ImageBuffer.
         let rgb = image.to_rgb8();
-
-        let results = self.inner.predict(vec![rgb]).map_err(|e| OcrError::Engine(e.to_string()))?;
+        let inner = Arc::clone(&self.inner);
+        let results = tokio::task::spawn_blocking(move || inner.predict(vec![rgb]).map_err(|e| OcrError::Engine(e.to_string())))
+            .await
+            .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR task: {e}"))))?;
 
         let Some(page) = results.into_iter().next() else {
             return Ok(Vec::new());
@@ -147,11 +155,11 @@ impl OcrEngine {
 
     /// Run OCR on each crop and offset boxes back into full-frame coordinates.
     ///
-    /// Empty `regions` → whole frame (same as [`recognize_rgba`]). Line merge
-    /// stays per-crop so independent boxes do not glue together.
-    pub fn recognize_rgba_regions(&mut self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
+    /// Empty `regions` → whole frame. Line merge stays per-crop so independent
+    /// boxes do not glue together.
+    pub async fn recognize_rgba_regions(&self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
         if regions.is_empty() {
-            return self.recognize_rgba(width, height, rgba);
+            return self.recognize_rgba(width, height, rgba).await;
         }
 
         let mut all = Vec::new();
@@ -161,7 +169,7 @@ impl OcrEngine {
             };
             let ox = crop.x as f32;
             let oy = crop.y as f32;
-            let mut blocks = self.recognize_rgba(crop.width, crop.height, &crop.rgba)?;
+            let mut blocks = self.recognize_rgba(crop.width, crop.height, &crop.rgba).await?;
             for block in &mut blocks {
                 block.bbox.x += ox;
                 block.bbox.y += oy;
@@ -172,7 +180,7 @@ impl OcrEngine {
     }
 
     /// Run OCR on RGBA pixel buffer (e.g. capture frame).
-    pub fn recognize_rgba(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<Vec<OcrBlock>, OcrError> {
+    async fn recognize_rgba(&self, width: u32, height: u32, rgba: &[u8]) -> Result<Vec<OcrBlock>, OcrError> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4))
@@ -184,7 +192,7 @@ impl OcrEngine {
         let rgba_img =
             RgbaImage::from_raw(width, height, rgba[..expected].to_vec()).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))?;
         let dyn_img = DynamicImage::ImageRgba8(rgba_img);
-        self.recognize(&dyn_img)
+        self.recognize(&dyn_img).await
     }
 
     /// Join block texts for UI display.

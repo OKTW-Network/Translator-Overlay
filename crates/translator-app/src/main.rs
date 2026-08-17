@@ -15,7 +15,8 @@ use crate::pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline};
 /// Process-wide handles for the UI render function (set before App::render).
 pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Must run before any HWND is created (pipeline spawns the overlay window).
     // Otherwise GetClientRect / ClientToScreen stay in a mismatched DPI space
     // vs Graphics Capture physical pixels → overlay position/size drift.
@@ -42,7 +43,7 @@ fn main() {
     }
 
     let state: SharedState = Arc::new(RwLock::new(AppState::new(config)));
-    let (_pipeline, cmd_tx) = spawn_pipeline(state.clone());
+    let (cmd_tx, pipeline) = spawn_pipeline(state.clone());
 
     APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
 
@@ -51,9 +52,12 @@ fn main() {
     if let Err(e) = windows_reactor::bootstrap() {
         error!(error = %e, "Windows App Runtime bootstrap failed");
         let _ = cmd_tx.send(PipelineCommand::Shutdown);
+        let _ = pipeline.await;
         std::process::exit(1);
     }
 
+    // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
+    // `block_on`s this future on that thread — do not move render off-thread.
     let result = App::new()
         .title("Translator Overlay")
         .inner_size(960.0, 720.0)
@@ -61,6 +65,7 @@ fn main() {
         .render(ui::app);
 
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
+    let _ = pipeline.await;
 
     if let Err(e) = result {
         error!(error = %e, "App::render failed");

@@ -6,7 +6,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_capture::CaptureSession;
@@ -15,23 +15,20 @@ use translator_ocr::{BlockPersistenceFilter, OcrEngine, OcrFingerprint, Stabilit
 use translator_overlay::{OverlayController, OverlayEvent};
 use translator_translate::{Conversation, TranslateClient, TranslateError, TranslationCache};
 
-use crate::pipeline::{PipelineCommand, config_apply::load_engine, wake::Wake};
+use crate::pipeline::PipelineCommand;
 
 pub type SharedState = Arc<RwLock<AppState>>;
-pub type CmdRx = std::sync::mpsc::Receiver<PipelineCommand>;
+pub type CmdRx = mpsc::UnboundedReceiver<PipelineCommand>;
 
-/// UI → worker command sender. Wakes the pipeline thread after each send.
+/// UI → pipeline command sender (safe to call from the WinUI thread).
 #[derive(Clone, Debug)]
 pub struct CmdTx {
-    tx: std::sync::mpsc::Sender<PipelineCommand>,
-    wake: Arc<Wake>,
+    tx: mpsc::UnboundedSender<PipelineCommand>,
 }
 
 impl CmdTx {
-    pub fn send(&self, cmd: PipelineCommand) -> Result<(), std::sync::mpsc::SendError<PipelineCommand>> {
-        self.tx.send(cmd)?;
-        self.wake.notify();
-        Ok(())
+    pub fn send(&self, cmd: PipelineCommand) -> Result<(), mpsc::error::SendError<PipelineCommand>> {
+        self.tx.send(cmd)
     }
 }
 
@@ -67,7 +64,7 @@ pub(crate) struct PendingPage {
     pub content_height: u32,
 }
 
-/// Owned pipeline state machine (one instance per background thread).
+/// Owned pipeline state machine (one Tokio task).
 pub(crate) struct Pipeline {
     pub state: SharedState,
     pub session: CaptureSession,
@@ -88,26 +85,20 @@ pub(crate) struct Pipeline {
     /// Sticky remap failed while captions still present.
     pub remap_miss_since: Option<Instant>,
     pub overlay: Option<OverlayController>,
-    pub rt: tokio::runtime::Runtime,
-    pub(crate) wake: Arc<Wake>,
 }
 
-pub fn spawn_pipeline(state: SharedState) -> (std::thread::JoinHandle<()>, CmdTx) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let wake = Wake::new();
-    let cmd_tx = CmdTx {
-        tx,
-        wake: Arc::clone(&wake),
-    };
-    let handle = std::thread::Builder::new()
-        .name("pipeline".into())
-        .spawn(move || Pipeline::new(state, wake).run(rx))
-        .expect("spawn pipeline thread");
-    (handle, cmd_tx)
+pub fn spawn_pipeline(state: SharedState) -> (CmdTx, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cmd_tx = CmdTx { tx };
+    let join = tokio::spawn(async move {
+        let mut pipeline = Pipeline::new(state).await;
+        pipeline.run(rx).await;
+    });
+    (cmd_tx, join)
 }
 
 impl Pipeline {
-    fn new(state: SharedState, wake: Arc<Wake>) -> Self {
+    async fn new(state: SharedState) -> Self {
         let ocr_cfg = state.read().config.ocr.clone();
         let ocr_tier = ocr_cfg.model_tier;
         let client = TranslateClient::new(state.read().config.api.clone());
@@ -119,10 +110,6 @@ impl Pipeline {
                 None
             }
         };
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
 
         let mut pipeline = Self {
             state,
@@ -141,13 +128,12 @@ impl Pipeline {
             raw_content_since: None,
             remap_miss_since: None,
             overlay,
-            rt,
-            wake,
         };
 
         // Load OCR engine on start (oar-ocr may auto-download missing models).
         let cfg = pipeline.state.read().config.ocr.clone();
-        match load_engine(&pipeline.state, &cfg) {
+        pipeline.state.write().status = PipelineStatus::LoadingModels;
+        match OcrEngine::load(&cfg).await {
             Ok(e) => pipeline.engine = Some(e),
             Err(e) => {
                 error!(error = %e, "initial model load failed");
@@ -158,19 +144,34 @@ impl Pipeline {
         pipeline
     }
 
-    fn run(mut self, rx: CmdRx) {
+    async fn run(&mut self, mut rx: CmdRx) {
         loop {
             while let Ok(cmd) = rx.try_recv() {
-                if self.handle_command(cmd) {
+                if self.handle_command(cmd).await {
                     return;
                 }
             }
 
             self.poll_overlay_events();
-            self.poll_translate();
-            self.drive_capture();
+            self.drive_capture().await;
             let wait = self.next_wait();
-            self.wake.wait(wait);
+            match next_event(&mut rx, self.inflight.as_mut(), wait).await {
+                PipelineEvent::Command(None) => return,
+                PipelineEvent::Command(Some(cmd)) => {
+                    if self.handle_command(cmd).await {
+                        return;
+                    }
+                }
+                PipelineEvent::Translate(result) => {
+                    let job = self.inflight.take().expect("inflight present");
+                    let job_result = result.unwrap_or_else(|_| TranslateJobResult {
+                        result: Err(TranslateError::Other("translate task dropped".into())),
+                        messages_len_after_user: job.messages_len_after_user,
+                    });
+                    self.finish_translate(job, job_result);
+                }
+                PipelineEvent::Tick => {}
+            }
         }
     }
 
@@ -188,7 +189,7 @@ impl Pipeline {
     }
 
     /// Returns `true` when the worker should shut down.
-    fn handle_command(&mut self, cmd: PipelineCommand) -> bool {
+    async fn handle_command(&mut self, cmd: PipelineCommand) -> bool {
         match cmd {
             PipelineCommand::Shutdown => {
                 self.cancel_inflight();
@@ -225,7 +226,7 @@ impl Pipeline {
                     self.state.write().set_error("nothing to retry".to_string());
                 }
             }
-            PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg),
+            PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg).await,
             PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
             PipelineCommand::StopCapture => self.stop_capture(),
             PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
@@ -263,7 +264,7 @@ impl Pipeline {
                     }
                 }
             }
-            PipelineCommand::ManualCapture => self.manual_capture(),
+            PipelineCommand::ManualCapture => self.manual_capture().await,
             PipelineCommand::ResetConversation => {
                 self.conversation.clear();
                 self.client.reset_session();
@@ -401,12 +402,12 @@ impl Pipeline {
         s.translate_in_flight = false;
     }
 
-    fn manual_capture(&mut self) {
+    async fn manual_capture(&mut self) {
         if self.inflight.is_some() {
             warn!("manual capture ignored — translation in flight (cancel first)");
             return;
         }
-        if !self.ensure_engine() {
+        if !self.ensure_engine().await {
             return;
         }
 
@@ -414,13 +415,13 @@ impl Pipeline {
         match self.session.latest_frame() {
             Some(frame) => {
                 self.update_preview(&frame);
-                self.run_ocr_manual(&frame);
+                self.run_ocr_manual(&frame).await;
             }
             None => self.state.write().set_error("no capture frame"),
         }
     }
 
-    fn drive_capture(&mut self) {
+    async fn drive_capture(&mut self) {
         if !self.session.is_running() || self.inflight.is_some() {
             return;
         }
@@ -442,10 +443,40 @@ impl Pipeline {
                     s.status = PipelineStatus::Capturing;
                 }
             } else {
-                self.run_ocr_auto(&frame);
+                self.run_ocr_auto(&frame).await;
             }
         }
 
         self.expire_pending();
+    }
+}
+
+enum PipelineEvent {
+    Command(Option<PipelineCommand>),
+    Translate(Result<TranslateJobResult, oneshot::error::RecvError>),
+    Tick,
+}
+
+async fn next_event(rx: &mut CmdRx, inflight: Option<&mut InflightTranslate>, wait: Option<Duration>) -> PipelineEvent {
+    if let Some(job) = inflight {
+        tokio::select! {
+            biased;
+            cmd = rx.recv() => PipelineEvent::Command(cmd),
+            result = &mut job.rx => PipelineEvent::Translate(result),
+            () = sleep_or_pending(wait) => PipelineEvent::Tick,
+        }
+    } else {
+        tokio::select! {
+            biased;
+            cmd = rx.recv() => PipelineEvent::Command(cmd),
+            () = sleep_or_pending(wait) => PipelineEvent::Tick,
+        }
+    }
+}
+
+async fn sleep_or_pending(wait: Option<Duration>) {
+    match wait {
+        Some(d) => tokio::time::sleep(d).await,
+        None => std::future::pending().await,
     }
 }

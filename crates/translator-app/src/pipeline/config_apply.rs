@@ -2,8 +2,8 @@
 
 use tracing::{error, info};
 use translator_capture::CapturedFrame;
-use translator_core::{AppConfig, OcrConfig};
-use translator_ocr::{BlockPersistenceFilter, OcrEngine, StabilityGate, prepare_engine};
+use translator_core::{AppConfig, PipelineStatus};
+use translator_ocr::{BlockPersistenceFilter, OcrEngine, StabilityGate};
 
 use crate::pipeline::worker::Pipeline;
 
@@ -28,7 +28,7 @@ impl Pipeline {
         info!(enabled, reader_enabled, "overlay display updated");
     }
 
-    pub(crate) fn apply_config(&mut self, cfg: AppConfig) {
+    pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
         // Model tier change requires a full engine reload (new ONNX weights).
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier;
         self.gate = StabilityGate::from_config(&cfg.ocr);
@@ -62,7 +62,8 @@ impl Pipeline {
             // Reload weights / ORT session for the new tier.
             self.ocr_tier = cfg.ocr.model_tier;
             self.engine = None;
-            match load_engine(&self.state, &cfg.ocr) {
+            self.state.write().status = PipelineStatus::LoadingModels;
+            match OcrEngine::load(&cfg.ocr).await {
                 Ok(e) => self.engine = Some(e),
                 Err(e) => {
                     self.state.write().set_error(format!("models: {e}"));
@@ -78,12 +79,13 @@ impl Pipeline {
         self.state.write().restore_operational_status();
     }
 
-    pub(crate) fn ensure_engine(&mut self) -> bool {
+    pub(crate) async fn ensure_engine(&mut self) -> bool {
         if self.engine.is_some() {
             return true;
         }
         let cfg = self.state.read().config.ocr.clone();
-        match load_engine(&self.state, &cfg) {
+        self.state.write().status = PipelineStatus::LoadingModels;
+        match OcrEngine::load(&cfg).await {
             Ok(e) => {
                 self.engine = Some(e);
                 true
@@ -103,10 +105,4 @@ impl Pipeline {
         s.preview.sequence = frame.sequence;
         s.preview.rgba = Some(frame.rgba.clone());
     }
-}
-
-pub(crate) fn load_engine(state: &crate::pipeline::SharedState, cfg: &OcrConfig) -> Result<OcrEngine, translator_ocr::OcrError> {
-    state.write().status = translator_core::PipelineStatus::LoadingModels;
-    // May block while oar-ocr fetches missing registry files / loads ORT.
-    prepare_engine(cfg)
 }

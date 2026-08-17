@@ -47,6 +47,7 @@ impl OverlayController {
         let (event_tx, event_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
 
+        // HWND + WaitMessage are bound to this OS thread; not a Tokio task.
         let join = std::thread::Builder::new()
             .name("overlay".into())
             .spawn(move || match OverlayHost::create(config, event_tx) {
