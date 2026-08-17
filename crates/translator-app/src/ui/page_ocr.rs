@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use translator_core::ModelTier;
+use translator_core::{LineMergeOrder, ModelTier};
 use windows_reactor::{HorizontalAlignment, LayoutExt, RadioButton, StackPanel, Updater, VerticalAlignment, hstack, vstack};
 
 use crate::ui::{
-    chrome::{section_header, settings_card, settings_expander, settings_page_shell},
+    chrome::{section_header, settings_card, settings_expander, settings_page_shell, settings_row},
     controls::{SliderNumberParams, card_slider_number, card_toggle, row_slider_number, row_toggle},
     shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
@@ -98,11 +98,33 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     .spacing(4.0);
 
     // Flat rows inside Expander (SettingsExpander.Items style) — no nested cards.
+    let order_idx = snap.merge_order_idx;
+    let cx_order = cx.clone();
+    let pick_order = move |choice: i32| {
+        let cx = cx_order.clone();
+        move || {
+            cx.with_mut(|ui| {
+                ui.draft.ocr.line_merge.order = match choice {
+                    1 => LineMergeOrder::LeftToRightTopToBottom,
+                    _ => LineMergeOrder::TopToBottomLeftToRight,
+                };
+                mark_dirty(ui);
+            });
+        }
+    };
+    let order_radio = |label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>| {
+        let mut rb = RadioButton::new(label).group("ocr-merge-order").checked(checked).on_checked(on);
+        rb.modifiers.min_width = Some(width);
+        rb.modifiers.width = Some(width);
+        rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+        rb
+    };
+
     let line_merge_body = vstack((
         row_toggle(
             "ocr-line-merge",
-            "Merge lines into paragraphs",
-            Some("Join stacked OCR lines that look like one paragraph (geometry only)."),
+            "Merge lines",
+            Some("Join stacked OCR lines that look like a wrapped paragraph (upper line longer than the one below)."),
             snap.merge_enabled,
             {
                 let cx = cx.clone();
@@ -114,170 +136,50 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 }
             },
         ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-max-gap",
-                header: "Max gap (× line height)".into(),
-                description: Some("Larger → more merges; too large glues menu lists.".into()),
-                value: snap.merge_max_gap,
-                min: 0.10,
-                max: 1.20,
-                step: 0.01,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.max_gap_ratio = x.max(0.05), v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-min-gap",
-                header: "Min gap (× line height)".into(),
-                description: Some("Negative allows slightly overlapping OCR boxes.".into()),
-                value: snap.merge_min_gap,
-                min: -1.0,
-                max: 0.5,
-                step: 0.01,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.min_gap_ratio = x, v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-gap-slack",
-                header: "Leading slack".into(),
-                description: Some("Adaptive max gap = typical leading × slack.".into()),
-                value: snap.merge_gap_slack,
-                min: 1.0,
-                max: 2.5,
-                step: 0.05,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.gap_slack = x.max(0.5), v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-list-gap-min",
-                header: "List gap min (× h)".into(),
-                description: Some("Gaps larger than this may be UI list spacing (not wraps).".into()),
-                value: snap.merge_list_gap_min,
-                min: 0.05,
-                max: 0.80,
-                step: 0.01,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.list_gap_min_ratio = x.max(0.0), v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-wrap-width",
-                header: "Wrap width ratio".into(),
-                description: Some("Wide line above shorter line (≥ this factor) counts as wrap.".into()),
-                value: snap.merge_wrap_width,
-                min: 1.1,
-                max: 3.0,
-                step: 0.05,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.wrap_width_ratio = x.max(1.0), v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-height-ratio",
-                header: "Height match min".into(),
-                description: Some("Lines must be similar height to merge (0–1).".into()),
-                value: snap.merge_height_ratio,
-                min: 0.20,
-                max: 1.0,
-                step: 0.01,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.height_ratio_min = x.clamp(0.1, 1.0), v)
-            },
-        ),
-    ))
-    .spacing(0.0)
-    .horizontal_alignment(HorizontalAlignment::Stretch);
-
-    let line_merge_adv_body = vstack((
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-left-align",
-                header: "Column align (× h)".into(),
-                description: Some("Left-edge tolerance for same-column detection.".into()),
-                value: snap.merge_left_align,
-                min: 0.10,
-                max: 1.5,
-                step: 0.05,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.left_align_ratio = x.max(0.05), v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-short-max-gap",
-                header: "Short–short max gap (× h)".into(),
-                description: Some("Two short boxes only merge when almost touching.".into()),
-                value: snap.merge_short_max_gap,
-                min: 0.0,
-                max: 0.80,
-                step: 0.01,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.short_max_gap_ratio = x.max(0.0), v)
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-list-peers",
-                header: "List min peers".into(),
-                description: Some("Column needs this many lines to use list-pitch rules.".into()),
-                value: snap.merge_list_min_peers,
-                min: 2.0,
-                max: 12.0,
-                step: 1.0,
-            },
+        row_toggle(
+            "ocr-merge-whole-region",
+            "Merge entire selected region",
+            Some("When OCR regions are set, join every line inside each region. Ignored for whole-window OCR."),
+            snap.merge_whole_region,
             {
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
-                        ui.draft.ocr.line_merge.list_min_peers = v.max(2.0) as u32;
+                        ui.draft.ocr.line_merge.merge_whole_region = v;
                         mark_dirty(ui);
                     });
                 }
             },
         ),
+        settings_row(
+            "ocr-merge-order",
+            "Merge order",
+            Some("Reading order when joining lines inside a merged block."),
+            vstack((
+                order_radio("Top to bottom, then left to right", 280.0, order_idx == 0, Box::new(pick_order(0))),
+                order_radio("Left to right, then top to bottom", 280.0, order_idx == 1, Box::new(pick_order(1))),
+            ))
+            .spacing(4.0),
+        ),
         row_slider_number(
             SliderNumberParams {
-                key: "merge-compact-aspect",
-                header: "Compact box max w/h".into(),
-                description: Some("Buttons/pills below this aspect under a wide heading.".into()),
-                value: snap.merge_compact_aspect,
-                min: 1.0,
-                max: 4.0,
+                key: "merge-max-gap",
+                header: "Max gap (% of window height)".into(),
+                description: Some("Only used by rule-based merge. Larger → more merges.".into()),
+                value: snap.merge_max_gap_pct,
+                min: 0.5,
+                max: 8.0,
                 step: 0.1,
             },
             {
                 let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.compact_aspect_max = x.max(0.5), v)
+                move |v| set_merge_f32(&cx, |m, x| m.max_gap_ratio = (x / 100.0).clamp(0.001, 0.20), v)
             },
         ),
         row_toggle(
             "merge-nameplate",
             "Keep nameplates separate",
-            Some("Short narrow box above a wider line stays its own block."),
+            Some("On: speaker tag stays its own block. Off: join it into the line below."),
             snap.merge_keep_nameplate,
             {
                 let cx = cx.clone();
@@ -287,21 +189,6 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                         mark_dirty(ui);
                     });
                 }
-            },
-        ),
-        row_slider_number(
-            SliderNumberParams {
-                key: "merge-nameplate-body",
-                header: "Nameplate body width ratio".into(),
-                description: Some("Body must be at least this × nameplate width.".into()),
-                value: snap.merge_nameplate_body,
-                min: 1.0,
-                max: 3.0,
-                step: 0.05,
-            },
-            {
-                let cx = cx.clone();
-                move |v| set_merge_f32(&cx, |m, x| m.nameplate_body_width_ratio = x.max(1.0), v)
             },
         ),
     ))
@@ -321,21 +208,6 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             }
         },
         line_merge_body,
-    );
-
-    let line_merge_advanced = settings_expander(
-        "ocr-exp-line-merge-adv",
-        "Line merge · advanced",
-        snap.expand_line_merge_adv,
-        {
-            let cx = cx.clone();
-            move |open| {
-                cx.with_mut(|ui| {
-                    ui.expand_line_merge_adv = open;
-                });
-            }
-        },
-        line_merge_adv_body,
     );
 
     let timing = vstack((
@@ -443,5 +315,5 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((model, detection, line_merge, line_merge_advanced, timing)).spacing(8.0))
+    settings_page_shell(shared, snap, bump, vstack((model, detection, line_merge, timing)).spacing(8.0))
 }

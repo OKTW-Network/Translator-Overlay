@@ -1,54 +1,91 @@
 //! Merge OCR line boxes into paragraph blocks.
 //!
 //! Strategy (tunable via [`LineMergeConfig`]):
-//! 1. **Page metrics** — median line height; sample vertical gaps between body lines.
-//! 2. **Adaptive leading** — max merge gap from typical tight gaps, clamped by config.
-//! 3. **Nearest-below linking** — each line links only its nearest compatible neighbour.
-//! 4. **Union-Find** — components become one text block; bbox height stays **one line**
-//!    tall so the overlay can size itself from the translation, not the OCR union.
+//! 1. **Frame-relative gaps** — vertical / align tolerances use the full capture
+//!    frame size, not median line height.
+//! 2. **Paragraph** — nearest-below link when the upper line is longer (wrap).
+//! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
+//! 4. **Reading order** — row-major or column-major join / emit order.
 
-use translator_core::{LineMergeConfig, OcrBlock, Rect};
+use translator_core::{LineMergeConfig, LineMergeOrder, OcrBlock, Rect};
 
-/// Merge with default config (tests / simple callers).
+/// Default test / simple-caller frame (1080p). Production always passes the capture size.
+const DEFAULT_FRAME_W: u32 = 1920;
+const DEFAULT_FRAME_H: u32 = 1080;
+
+/// Nameplate width/height below this looks like a speaker plate.
+const NAMEPLATE_ASPECT_MAX: f32 = 4.5;
+/// Body must be at least this × nameplate width.
+const NAMEPLATE_BODY_WIDTH_RATIO: f32 = 1.2;
+/// Nameplate only when vertical gap ≤ this × frame height.
+const NAMEPLATE_MAX_GAP_RATIO: f32 = 0.02;
+/// Nameplate width must stay below this × frame width.
+const NAMEPLATE_MAX_WIDTH_RATIO: f32 = 0.12;
+/// Row / column banding as a fraction of frame height / width.
+const ORDER_BAND_RATIO: f32 = 0.012;
+/// Upper must be at least this fraction longer than lower to count as a wrap.
+const WRAP_WIDTH_SLACK: f32 = 0.05;
+
+/// Merge with default config and a 1080p frame (tests / simple callers).
 pub fn merge_line_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    merge_line_blocks_with(blocks, &LineMergeConfig::default())
+    merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_W, DEFAULT_FRAME_H, false)
 }
 
 /// Merge consecutive line-level OCR boxes that belong to the same paragraph.
-pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> Vec<OcrBlock> {
+///
+/// `frame_w` / `frame_h` are the **full capture** size even when `blocks` came
+/// from a crop. `merge_all` joins every remaining line (whole selected region).
+pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
     if !cfg.enabled || blocks.len() <= 1 {
-        return blocks;
+        return reindex(blocks);
     }
 
+    let frame_w = frame_w.max(1);
+    let frame_h = frame_h.max(1);
+
+    if merge_all {
+        return merge_whole_region(blocks, cfg, frame_w, frame_h);
+    }
+
+    merge_paragraph(blocks, cfg, frame_w, frame_h)
+}
+
+fn merge_whole_region(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) -> Vec<OcrBlock> {
     let n = blocks.len();
-    let med_h = median_f32(blocks.iter().map(|b| b.bbox.height.max(1.0)).collect());
-    let max_gap = estimate_max_gap(&blocks, med_h, cfg);
-    let min_gap = cfg.min_gap_ratio * med_h;
+    let mut nameplates: Vec<usize> = Vec::new();
+    let mut rest: Vec<usize> = Vec::new();
+
+    for i in 0..n {
+        let is_nameplate = cfg.keep_speaker_separate
+            && blocks
+                .iter()
+                .enumerate()
+                .any(|(j, body)| i != j && is_nameplate_above_body(&blocks[i], body, frame_w, frame_h));
+        if is_nameplate {
+            nameplates.push(i);
+        } else {
+            rest.push(i);
+        }
+    }
+
+    let mut merged: Vec<OcrBlock> = Vec::with_capacity(nameplates.len() + 1);
+    if !rest.is_empty() {
+        merged.push(assemble_group(&blocks, rest, cfg.order, frame_w, frame_h));
+    }
+    for idx in nameplates {
+        merged.push(blocks[idx].clone());
+    }
+    sort_blocks(&mut merged, cfg.order, frame_w, frame_h);
+    reindex(merged)
+}
+
+fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) -> Vec<OcrBlock> {
+    let n = blocks.len();
+    let max_gap = cfg.max_gap_ratio * frame_h as f32;
+    let min_gap = cfg.min_gap_ratio * frame_h as f32;
 
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank = vec![0u8; n];
-
-    fn find(parent: &mut [usize], mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
-    fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
-        let mut ra = find(parent, a);
-        let mut rb = find(parent, b);
-        if ra == rb {
-            return;
-        }
-        if rank[ra] < rank[rb] {
-            std::mem::swap(&mut ra, &mut rb);
-        }
-        parent[rb] = ra;
-        if rank[ra] == rank[rb] {
-            rank[ra] = rank[ra].saturating_add(1);
-        }
-    }
 
     for i in 0..n {
         let mut best: Option<(usize, f32)> = None;
@@ -59,16 +96,10 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
             let Some(gap) = vertical_gap_if_below(&blocks[i], &blocks[j]) else {
                 continue;
             };
-            let pair_max = pair_max_gap(&blocks[i], &blocks[j], med_h, max_gap, cfg);
-            if gap < min_gap || gap > pair_max {
+            if gap < min_gap || gap > max_gap {
                 continue;
             }
-            if !can_link_lines(&blocks[i], &blocks[j], med_h, cfg) {
-                continue;
-            }
-            // Settings lists / radio stacks look like short paragraphs but sit
-            // further apart than true wrapped dialogue lines.
-            if is_spaced_list_pair(&blocks, i, j, med_h, cfg) {
+            if !can_link_lines(&blocks[i], &blocks[j], frame_w, frame_h, cfg) {
                 continue;
             }
             if best.map(|(_, g)| gap < g).unwrap_or(true) {
@@ -76,7 +107,7 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
             }
         }
         if let Some((j, _)) = best
-            && !has_intervening_line(&blocks, i, j, med_h, cfg)
+            && !has_intervening_line(&blocks, i, j, frame_w, cfg)
         {
             union(&mut parent, &mut rank, i, j);
         }
@@ -84,107 +115,154 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig) -> V
 
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); n];
     for i in 0..n {
-        let r = find(&mut parent, i);
-        groups[r].push(i);
+        groups[find(&mut parent, i)].push(i);
     }
 
     let mut merged: Vec<OcrBlock> = Vec::with_capacity(n);
-    for mut members in groups {
+    for members in groups {
         if members.is_empty() {
             continue;
         }
-        members.sort_by(|&a, &b| {
-            let ya = blocks[a].bbox.y as i32;
-            let yb = blocks[b].bbox.y as i32;
-            ya.cmp(&yb).then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
-        });
-
-        let mut text = String::new();
-        let mut conf = 0.0f32;
-        let mut x0 = f32::MAX;
-        let mut y0 = f32::MAX;
-        let mut x1 = f32::MIN;
-        let mut heights: Vec<f32> = Vec::with_capacity(members.len());
-
-        for (k, &idx) in members.iter().enumerate() {
-            let b = &blocks[idx];
-            text = if k == 0 { b.text.clone() } else { join_text(&text, &b.text) };
-            conf += b.confidence;
-            x0 = x0.min(b.bbox.x);
-            y0 = y0.min(b.bbox.y);
-            x1 = x1.max(b.bbox.x + b.bbox.width);
-            heights.push(b.bbox.height.max(1.0));
-        }
-        conf /= members.len() as f32;
-
-        // One-line-tall anchor: full horizontal span, median line height.
-        // Overlay expands height from measured translation text, not OCR union.
-        let line_h = median_f32(heights);
-        let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
-        // Sum source_lines so re-merge / multi-member groups keep the true count.
-        let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
-
-        merged.push(OcrBlock {
-            id: 0,
-            text,
-            confidence: conf,
-            bbox,
-            source_lines,
-        });
+        merged.push(assemble_group(&blocks, members, cfg.order, frame_w, frame_h));
     }
-
-    merged.sort_by(|a, b| {
-        (a.bbox.y as i32)
-            .cmp(&(b.bbox.y as i32))
-            .then_with(|| (a.bbox.x as i32).cmp(&(b.bbox.x as i32)))
-    });
-    for (i, b) in merged.iter_mut().enumerate() {
-        b.id = i as u32;
-    }
-    merged
+    sort_blocks(&mut merged, cfg.order, frame_w, frame_h);
+    reindex(merged)
 }
 
-fn estimate_max_gap(blocks: &[OcrBlock], med_h: f32, cfg: &LineMergeConfig) -> f32 {
-    let mut tight_gaps: Vec<f32> = Vec::new();
-    // Only sample true paragraph leading (almost-touching lines). Including
-    // menu item pitch inflated max_gap and glued whole lists.
-    let sample_ceil = cfg.leading_sample_max_ratio * med_h;
+fn find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
 
-    for (i, a) in blocks.iter().enumerate() {
-        for (j, b) in blocks.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let Some(gap) = vertical_gap_if_below(a, b) else {
-                continue;
-            };
-            if gap < 0.0 || gap > sample_ceil {
-                continue;
-            }
-            if !is_body_line(a, cfg) && !is_body_line(b, cfg) {
-                continue;
-            }
-            if !can_link_lines(a, b, med_h, cfg) {
-                continue;
-            }
-            tight_gaps.push(gap);
+fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+    let mut ra = find(parent, a);
+    let mut rb = find(parent, b);
+    if ra == rb {
+        return;
+    }
+    if rank[ra] < rank[rb] {
+        std::mem::swap(&mut ra, &mut rb);
+    }
+    parent[rb] = ra;
+    if rank[ra] == rank[rb] {
+        rank[ra] = rank[ra].saturating_add(1);
+    }
+}
+
+fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, order: LineMergeOrder, frame_w: u32, frame_h: u32) -> OcrBlock {
+    sort_indices(blocks, &mut members, order, frame_w, frame_h);
+
+    let mut text = String::new();
+    let mut conf = 0.0f32;
+    let mut x0 = f32::MAX;
+    let mut y0 = f32::MAX;
+    let mut x1 = f32::MIN;
+    let mut heights: Vec<f32> = Vec::with_capacity(members.len());
+
+    for (k, &idx) in members.iter().enumerate() {
+        let b = &blocks[idx];
+        text = if k == 0 { b.text.clone() } else { join_text(&text, &b.text) };
+        conf += b.confidence;
+        x0 = x0.min(b.bbox.x);
+        y0 = y0.min(b.bbox.y);
+        x1 = x1.max(b.bbox.x + b.bbox.width);
+        heights.push(b.bbox.height.max(1.0));
+    }
+    conf /= members.len() as f32;
+
+    // One-line-tall anchor: full horizontal span, median line height.
+    // Overlay expands height from measured translation text, not OCR union.
+    let line_h = median_f32(heights);
+    let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
+    let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
+
+    OcrBlock {
+        id: 0,
+        text,
+        confidence: conf,
+        bbox,
+        source_lines,
+    }
+}
+
+fn sort_blocks(blocks: &mut Vec<OcrBlock>, order: LineMergeOrder, frame_w: u32, frame_h: u32) {
+    if blocks.len() <= 1 {
+        return;
+    }
+    let mut members: Vec<usize> = (0..blocks.len()).collect();
+    sort_indices(blocks, &mut members, order, frame_w, frame_h);
+    let mut slots: Vec<Option<OcrBlock>> = std::mem::take(blocks).into_iter().map(Some).collect();
+    *blocks = members
+        .into_iter()
+        .map(|i| slots[i].take().expect("sort permutation is unique"))
+        .collect();
+}
+
+fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], order: LineMergeOrder, frame_w: u32, frame_h: u32) {
+    match order {
+        LineMergeOrder::TopToBottomLeftToRight => {
+            let band = ORDER_BAND_RATIO * frame_h as f32;
+            let rows = assign_bands(blocks, members, Axis::Y, band);
+            members.sort_by(|&a, &b| {
+                rows[a]
+                    .cmp(&rows[b])
+                    .then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
+                    .then_with(|| (blocks[a].bbox.y as i32).cmp(&(blocks[b].bbox.y as i32)))
+            });
+        }
+        LineMergeOrder::LeftToRightTopToBottom => {
+            let band = ORDER_BAND_RATIO * frame_w as f32;
+            let cols = assign_bands(blocks, members, Axis::X, band);
+            members.sort_by(|&a, &b| {
+                cols[a]
+                    .cmp(&cols[b])
+                    .then_with(|| (blocks[a].bbox.y as i32).cmp(&(blocks[b].bbox.y as i32)))
+                    .then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
+            });
         }
     }
+}
 
-    let floor = cfg.max_gap_ratio_floor * med_h;
-    let ceil = cfg.max_gap_ratio * med_h;
+#[derive(Clone, Copy)]
+enum Axis {
+    X,
+    Y,
+}
 
-    if tight_gaps.is_empty() {
-        // Prefer conservative leading when the page has no near-touching pairs
-        // (settings UIs, sparse labels) so list pitch is not treated as wrap.
-        return (cfg.empty_leading_fallback_ratio * med_h).clamp(floor.max(4.0), ceil.max(floor));
+/// Greedy 1-D clusters along `axis` (sorted), band width in pixels.
+fn assign_bands(blocks: &[OcrBlock], members: &[usize], axis: Axis, band: f32) -> Vec<u32> {
+    let mut order: Vec<usize> = members.to_vec();
+    order.sort_by(|&a, &b| {
+        let ca = axis_coord(&blocks[a], axis);
+        let cb = axis_coord(&blocks[b], axis);
+        ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut ids = vec![0u32; blocks.len()];
+    let mut current = 0u32;
+    let mut last: Option<f32> = None;
+    let band = band.max(1.0);
+    for i in order {
+        let c = axis_coord(&blocks[i], axis);
+        if let Some(prev) = last
+            && c - prev > band
+        {
+            current = current.saturating_add(1);
+        }
+        ids[i] = current;
+        last = Some(c);
     }
+    ids
+}
 
-    tight_gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let q_idx = (tight_gaps.len().saturating_sub(1) * 2) / 5;
-    let typical = tight_gaps[q_idx];
-    let adaptive = typical * cfg.gap_slack;
-    adaptive.clamp(floor, ceil.max(floor))
+fn axis_coord(b: &OcrBlock, axis: Axis) -> f32 {
+    match axis {
+        Axis::X => b.bbox.x,
+        Axis::Y => b.bbox.y + b.bbox.height * 0.5,
+    }
 }
 
 fn vertical_gap_if_below(upper: &OcrBlock, lower: &OcrBlock) -> Option<f32> {
@@ -197,138 +275,26 @@ fn vertical_gap_if_below(upper: &OcrBlock, lower: &OcrBlock) -> Option<f32> {
     Some(lower_top - upper_bottom)
 }
 
-fn can_link_lines(upper: &OcrBlock, lower: &OcrBlock, med_h: f32, cfg: &LineMergeConfig) -> bool {
+fn can_link_lines(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, frame_h: u32, cfg: &LineMergeConfig) -> bool {
     if !height_compatible(upper, lower, cfg) {
         return false;
     }
-    if !horiz_compatible(upper, lower, med_h, cfg) {
+    if !horiz_compatible(upper, lower, frame_w, cfg) {
         return false;
     }
-    if is_short_label_above_long_body(upper, lower, cfg) {
-        return false;
-    }
-    // Wide heading above a compact control (geometry only). Require non-tight
-    // vertical gap so short wrap remainders (wide line → short last line) still merge.
-    if is_compact_box(lower, cfg)
-        && upper.bbox.width > cfg.control_under_heading_width_ratio * lower.bbox.width.max(1.0)
-        && let Some(gap) = vertical_gap_if_below(upper, lower)
-        && gap > cfg.control_under_heading_gap_ratio * med_h
-    {
-        return false;
-    }
-    // Short nameplate-like box directly above a wider body line (geometry only).
-    if cfg.keep_speaker_separate && is_nameplate_above_body(upper, lower, med_h, cfg) {
-        return false;
-    }
-    true
-}
-
-/// True when `i`→`j` looks like two items in a vertical UI list rather than a
-/// line wrap. Decision uses **bbox geometry and column gap statistics only**
-/// (no vocabulary / language-specific character lists). Thresholds come from
-/// [`LineMergeConfig`].
-fn is_spaced_list_pair(blocks: &[OcrBlock], i: usize, j: usize, med_h: f32, cfg: &LineMergeConfig) -> bool {
-    let upper = &blocks[i];
-    let lower = &blocks[j];
-    let Some(gap) = vertical_gap_if_below(upper, lower) else {
-        return false;
-    };
-    let list_gap_min = cfg.list_gap_min_ratio * med_h;
-    if gap <= list_gap_min {
-        return false;
-    }
-
-    // Full-width line + shorter remainder is classic wrap layout.
-    let uw = upper.bbox.width.max(1.0);
-    let lw = lower.bbox.width.max(1.0);
-    let uh = upper.bbox.height.max(1.0);
-    if uw >= cfg.wrap_width_ratio * lw && uw >= cfg.wrap_min_aspect * uh {
-        return false;
-    }
-
-    let tol = (cfg.left_align_ratio * med_h).max(8.0);
-    let mut col: Vec<&OcrBlock> = blocks
-        .iter()
-        .filter(|b| {
-            (height_compatible(upper, b, cfg) || height_compatible(lower, b, cfg))
-                && ((b.bbox.x - upper.bbox.x).abs() <= tol
-                    || (b.bbox.x - lower.bbox.x).abs() <= tol
-                    || horiz_compatible(upper, b, med_h, cfg)
-                    || horiz_compatible(lower, b, med_h, cfg))
-        })
-        .collect();
-    if col.len() < cfg.list_min_peers as usize {
-        return false;
-    }
-
-    col.sort_by(|a, b| {
-        (a.bbox.y as i32)
-            .cmp(&(b.bbox.y as i32))
-            .then_with(|| (a.bbox.x as i32).cmp(&(b.bbox.x as i32)))
-    });
-
-    // Consecutive gaps in this column → estimate regular item pitch.
-    let mut gaps: Vec<f32> = Vec::new();
-    for w in col.windows(2) {
-        let top = w[0];
-        let bot = w[1];
-        let g = bot.bbox.y - (top.bbox.y + top.bbox.height);
-        // Ignore heavy overlap / reverse order noise.
-        if g > -0.15 * med_h {
-            gaps.push(g.max(0.0));
-        }
-    }
-    if gaps.len() < 2 {
-        // Fallback: similar widths + non-tight gap + enough peers.
-        let width_ratio = uw.min(lw) / uw.max(lw);
-        return width_ratio >= cfg.list_width_similarity * 0.9;
-    }
-
-    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    // Prefer larger gaps when estimating *item* pitch (skip pure wrap leading).
-    let itemish: Vec<f32> = gaps
-        .iter()
-        .copied()
-        .filter(|g| *g >= cfg.item_pitch_gap_min_ratio * med_h)
-        .collect();
-    let pitch = if itemish.is_empty() {
-        gaps[gaps.len() / 2]
-    } else {
-        itemish[itemish.len() / 2]
-    };
-
-    // Gap sits on the column’s regular rhythm → list peers.
-    if pitch >= cfg.list_pitch_min_ratio * med_h && gap >= cfg.list_pitch_match_lo * pitch && gap <= cfg.list_pitch_match_hi * pitch {
+    if upper_is_longer(upper, lower) {
         return true;
     }
-    // Clearly tighter than item pitch → wrap leading, not list.
-    if pitch > 0.0 && gap < cfg.wrap_vs_pitch_ratio * pitch {
-        return false;
-    }
-
-    // Ambiguous: similar-width stack with non-tight gap among many peers.
-    let width_ratio = uw.min(lw) / uw.max(lw);
-    width_ratio >= cfg.list_width_similarity && col.len() >= cfg.list_fallback_peers as usize
+    // Nameplates are shorter than the body, so they fail the wrap-width rule.
+    // Off = glue speaker into the line below; on = keep them split.
+    !cfg.keep_speaker_separate && is_nameplate_above_body(upper, lower, frame_w, frame_h)
 }
 
-/// Compact control-sized box (pill / short button), geometry only.
-fn is_compact_box(b: &OcrBlock, cfg: &LineMergeConfig) -> bool {
-    let h = b.bbox.height.max(1.0);
-    let w = b.bbox.width.max(1.0);
-    w < cfg.compact_aspect_max * h
-}
-
-fn is_body_line(b: &OcrBlock, cfg: &LineMergeConfig) -> bool {
-    let h = b.bbox.height.max(1.0);
-    b.bbox.width >= cfg.body_aspect_min * h || b.bbox.width >= cfg.body_min_width
-}
-
-fn pair_max_gap(upper: &OcrBlock, lower: &OcrBlock, med_h: f32, page_max: f32, cfg: &LineMergeConfig) -> f32 {
-    if is_body_line(upper, cfg) || is_body_line(lower, cfg) {
-        page_max
-    } else {
-        (cfg.short_max_gap_ratio * med_h).min(page_max).max(4.0)
-    }
+/// Wrap remainder: the line above must be meaningfully longer than the one below.
+fn upper_is_longer(upper: &OcrBlock, lower: &OcrBlock) -> bool {
+    let uw = upper.bbox.width.max(1.0);
+    let lw = lower.bbox.width.max(1.0);
+    uw > lw * (1.0 + WRAP_WIDTH_SLACK)
 }
 
 fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool {
@@ -337,36 +303,27 @@ fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool 
     ah.min(bh) / ah.max(bh) >= cfg.height_ratio_min
 }
 
-fn is_short_label_above_long_body(upper: &OcrBlock, lower: &OcrBlock, cfg: &LineMergeConfig) -> bool {
-    let uw = upper.bbox.width.max(1.0);
-    let lw = lower.bbox.width.max(1.0);
-    let uh = upper.bbox.height.max(1.0);
-    uw < cfg.label_width_ratio * lw && lw >= cfg.label_body_min_aspect * uh
-}
-
 /// Short, narrow plate directly above a wider line (speaker / name tag layout).
-/// Uses bbox aspect and relative widths only — no character vocabulary.
-fn is_nameplate_above_body(upper: &OcrBlock, lower: &OcrBlock, med_h: f32, cfg: &LineMergeConfig) -> bool {
+fn is_nameplate_above_body(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, frame_h: u32) -> bool {
     let uh = upper.bbox.height.max(1.0);
     let uw = upper.bbox.width.max(1.0);
     let lw = lower.bbox.width.max(1.0);
-    if uw >= cfg.nameplate_aspect_max * uh {
+    if uw >= NAMEPLATE_ASPECT_MAX * uh {
         return false;
     }
-    if lw < cfg.nameplate_body_width_ratio * uw {
+    if lw < NAMEPLATE_BODY_WIDTH_RATIO * uw {
         return false;
     }
-    let max_name_w = (cfg.speaker_max_chars as f32) * med_h * cfg.nameplate_char_width_scale;
-    if uw > max_name_w.max(3.2 * uh) {
+    if uw > NAMEPLATE_MAX_WIDTH_RATIO * frame_w as f32 {
         return false;
     }
     matches!(
         vertical_gap_if_below(upper, lower),
-        Some(gap) if gap <= cfg.nameplate_max_gap_ratio * med_h
+        Some(gap) if gap <= NAMEPLATE_MAX_GAP_RATIO * frame_h as f32
     )
 }
 
-fn horiz_compatible(a: &OcrBlock, b: &OcrBlock, med_h: f32, cfg: &LineMergeConfig) -> bool {
+fn horiz_compatible(a: &OcrBlock, b: &OcrBlock, frame_w: u32, cfg: &LineMergeConfig) -> bool {
     let a_left = a.bbox.x;
     let a_right = a.bbox.x + a.bbox.width;
     let b_left = b.bbox.x;
@@ -379,21 +336,22 @@ fn horiz_compatible(a: &OcrBlock, b: &OcrBlock, med_h: f32, cfg: &LineMergeConfi
         return true;
     }
 
+    let align = cfg.left_align_ratio * frame_w as f32;
     let left_delta = (a_left - b_left).abs();
-    if left_delta <= cfg.left_align_ratio * med_h && overlap >= 0.10 * min_w {
+    if left_delta <= align && overlap >= 0.10 * min_w {
         return true;
     }
 
     let a_cx = a_left + a.bbox.width * 0.5;
     let b_cx = b_left + b.bbox.width * 0.5;
-    if (a_cx - b_cx).abs() <= cfg.left_align_ratio * med_h && overlap >= 0.12 * min_w {
+    if (a_cx - b_cx).abs() <= align && overlap >= 0.12 * min_w {
         return true;
     }
 
     false
 }
 
-fn has_intervening_line(blocks: &[OcrBlock], upper: usize, lower: usize, med_h: f32, cfg: &LineMergeConfig) -> bool {
+fn has_intervening_line(blocks: &[OcrBlock], upper: usize, lower: usize, frame_w: u32, cfg: &LineMergeConfig) -> bool {
     let u = &blocks[upper];
     let l = &blocks[lower];
     let y0 = u.bbox.y + u.bbox.height;
@@ -410,7 +368,7 @@ fn has_intervening_line(blocks: &[OcrBlock], upper: usize, lower: usize, med_h: 
         if cy <= y0 || cy >= y1 {
             continue;
         }
-        if horiz_compatible(u, b, med_h, cfg) && horiz_compatible(b, l, med_h, cfg) {
+        if horiz_compatible(u, b, frame_w, cfg) && horiz_compatible(b, l, frame_w, cfg) {
             return true;
         }
     }
@@ -476,6 +434,13 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
+fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.id = i as u32;
+    }
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,13 +455,16 @@ mod tests {
         }
     }
 
+    fn merge_with(blocks: Vec<OcrBlock>, cfg: LineMergeConfig, merge_all: bool) -> Vec<OcrBlock> {
+        merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, merge_all)
+    }
+
     #[test]
     fn merges_stacked_english_lines() {
         let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Hello world");
-        // One-line-tall anchor for overlay.
         assert!(merged[0].bbox.height <= 22.0, "h={}", merged[0].bbox.height);
         assert_eq!(merged[0].source_lines, 2, "merged block tracks line count");
     }
@@ -508,25 +476,66 @@ mod tests {
             ..Default::default()
         };
         let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
-        let merged = merge_line_blocks_with(blocks, &cfg);
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn disabled_ignores_merge_all() {
+        let cfg = LineMergeConfig {
+            enabled: false,
+            merge_whole_region: true,
+            ..Default::default()
+        };
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
+        let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged.len(), 2);
     }
 
     #[test]
     fn merges_cjk_without_space() {
-        let blocks = vec![line(0, "甲乙", 10.0, 10.0, 80.0, 20.0), line(1, "丙丁", 10.0, 34.0, 80.0, 20.0)];
+        let blocks = vec![line(0, "甲乙", 10.0, 10.0, 100.0, 20.0), line(1, "丙丁", 10.0, 34.0, 80.0, 20.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "甲乙丙丁");
     }
 
     #[test]
+    fn equal_width_lines_stay_separate() {
+        let blocks = vec![line(0, "甲乙", 10.0, 10.0, 80.0, 20.0), line(1, "丙丁", 10.0, 34.0, 80.0, 20.0)];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn shorter_upper_does_not_merge() {
+        let blocks = vec![
+            line(0, "short", 10.0, 10.0, 60.0, 18.0),
+            line(1, "much longer body", 10.0, 32.0, 160.0, 18.0),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn slightly_longer_upper_still_merges() {
+        // 6% longer than lower — just over WRAP_WIDTH_SLACK.
+        let blocks = vec![
+            line(0, "Hello!", 10.0, 10.0, 106.0, 18.0),
+            line(1, "world", 12.0, 32.0, 100.0, 18.0),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hello! world");
+    }
+
+    #[test]
     fn merges_three_line_paragraph() {
         let h = 20.0;
         let blocks = vec![
-            line(0, "This is a long", 10.0, 10.0, 200.0, h),
+            line(0, "This is a long", 10.0, 10.0, 220.0, h),
             line(1, "paragraph that wraps", 10.0, 10.0 + h + 5.0, 200.0, h),
-            line(2, "across three lines.", 10.0, 10.0 + 2.0 * (h + 5.0), 180.0, h),
+            line(2, "across three lines.", 10.0, 10.0 + 2.0 * (h + 5.0), 160.0, h),
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
@@ -543,7 +552,7 @@ mod tests {
 
     #[test]
     fn does_not_merge_far_vertical_gap() {
-        let blocks = vec![line(0, "A", 10.0, 10.0, 40.0, 18.0), line(1, "B", 10.0, 120.0, 40.0, 18.0)];
+        let blocks = vec![line(0, "A", 10.0, 10.0, 80.0, 18.0), line(1, "B", 10.0, 120.0, 40.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2);
     }
@@ -551,7 +560,7 @@ mod tests {
     #[test]
     fn does_not_merge_paragraph_spacing() {
         let blocks = vec![
-            line(0, "Line one", 10.0, 10.0, 120.0, 18.0),
+            line(0, "Line one", 10.0, 10.0, 140.0, 18.0),
             line(1, "Line two", 10.0, 30.0, 120.0, 18.0),
             line(2, "Next block", 10.0, 80.0, 120.0, 18.0),
         ];
@@ -564,9 +573,9 @@ mod tests {
     #[test]
     fn keeps_two_columns_separate() {
         let blocks = vec![
-            line(0, "L1", 10.0, 10.0, 60.0, 16.0),
+            line(0, "L1", 10.0, 10.0, 80.0, 16.0),
             line(1, "L2", 10.0, 30.0, 60.0, 16.0),
-            line(2, "R1", 200.0, 10.0, 60.0, 16.0),
+            line(2, "R1", 200.0, 10.0, 80.0, 16.0),
             line(3, "R2", 200.0, 30.0, 60.0, 16.0),
         ];
         let merged = merge_line_blocks(blocks);
@@ -579,7 +588,7 @@ mod tests {
     #[test]
     fn does_not_chain_merge_via_growing_bbox() {
         let blocks = vec![
-            line(0, "L1", 10.0, 10.0, 80.0, 16.0),
+            line(0, "L1", 10.0, 10.0, 100.0, 16.0),
             line(1, "L2", 10.0, 28.0, 80.0, 16.0),
             line(2, "P2", 10.0, 70.0, 80.0, 16.0),
             line(3, "P3", 10.0, 112.0, 80.0, 16.0),
@@ -630,7 +639,6 @@ mod tests {
 
     #[test]
     fn dialogue_box_wrap() {
-        // Speaker nameplate + wrapped dialogue (tight vertical gap).
         let blocks = vec![
             line(0, "spkA", 331.0, 801.0, 104.0, 62.0),
             line(1, "「あああああああああああああああああああああああああああ", 324.0, 876.0, 1220.0, 60.0),
@@ -640,13 +648,11 @@ mod tests {
         assert_eq!(merged.len(), 2, "speaker + one wrapped dialogue block: {:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
         assert_eq!(merged[0].text, "spkA");
         assert_eq!(merged[1].text, "「あああああああああああああああああああああああああああいい？」");
-        // One-line-tall overlay anchor (not the union of both dialogue lines).
         assert!(merged[1].bbox.height <= 62.0);
     }
 
     #[test]
     fn single_line_dialogue_stays_separate() {
-        // Nameplate + one dialogue line (must not glue name into speech).
         let blocks = vec![
             line(0, "spkB", 330.0, 798.0, 107.0, 69.0),
             line(1, "「うううううううう」", 322.0, 876.0, 434.0, 60.0),
@@ -672,7 +678,6 @@ mod tests {
 
     #[test]
     fn backlog_wrap_and_name() {
-        // Unique markers (W1A/W1B …) embedded in CJK filler for join/assert only.
         let blocks = vec![
             line(0, "spkB", 596.0, 86.0, 76.0, 44.0),
             line(1, "「ええええええええええええええええええええ」", 586.0, 120.0, 688.0, 40.0),
@@ -709,7 +714,6 @@ mod tests {
 
     #[test]
     fn backlog_wraps_and_keeps_entries() {
-        // Dense backlog: wrapped paragraphs + nameplates + short lines.
         let blocks = vec![
             line(0, "あああああああああああああああああああW1A", 600.0, 148.0, 852.0, 40.0),
             line(1, "W1B。", 599.0, 179.0, 222.0, 44.0),
@@ -735,7 +739,6 @@ mod tests {
         assert!(texts.iter().any(|t| t.contains("W3A") && t.contains("W3B")), "dialogue wrap: {texts:?}");
         assert!(texts.contains(&"spkA"), "{texts:?}");
         assert!(texts.contains(&"spkB"), "{texts:?}");
-        // Speaker / short lines stay separate from their dialogue.
         assert!(!texts.iter().any(|t| t.contains("spkA「") || t.starts_with("spkA「")), "{texts:?}");
         let narr = texts.iter().filter(|t| t.contains("W1A") || t.contains("W2A")).count();
         assert_eq!(narr, 2, "two narrative paragraphs: {texts:?}");
@@ -743,14 +746,11 @@ mod tests {
 
     #[test]
     fn wrap_with_positive_gap_still_merges_on_dense_page() {
-        // Positive wrap gap on a page with many column peers.
         let h = 40.0;
         let mut blocks = Vec::new();
-        // Many list-like peers above (would trip naive peer-count rejection).
         for i in 0..5 {
             blocks.push(line(i, &format!("row{i}"), 600.0, 20.0 + i as f32 * 80.0, 400.0, h));
         }
-        // Long line + short continuation, gap = 14 (> 0.28*h).
         blocks.push(line(5, "あああああああああああああああああああW1A", 600.0, 500.0, 850.0, h));
         blocks.push(line(6, "W1B。", 600.0, 500.0 + h + 14.0, 220.0, h));
 
@@ -760,5 +760,138 @@ mod tests {
             "{:?}",
             merged.iter().map(|b| &b.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn same_pixel_gap_depends_on_frame_height() {
+        let blocks = vec![
+            line(0, "Hello", 10.0, 10.0, 120.0, 18.0),
+            line(1, "world", 12.0, 10.0 + 18.0 + 20.0, 90.0, 18.0),
+        ];
+        let cfg = LineMergeConfig::default();
+        // 20px / 1080 ≈ 0.0185 > 0.015 → no merge; 20px / 2000 = 0.01 < 0.015 → merge.
+        let tall = merge_line_blocks_with(blocks.clone(), &cfg, 1920, 2000, false);
+        let short = merge_line_blocks_with(blocks, &cfg, 1920, 1080, false);
+        assert_eq!(tall.len(), 1, "larger frame makes 20px a small relative gap");
+        assert_eq!(short.len(), 2, "1080p treats 20px as too far");
+    }
+
+    #[test]
+    fn whole_region_merges_side_by_side() {
+        let cfg = LineMergeConfig::default();
+        let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 200.0, 12.0, 40.0, 18.0)];
+        let merged = merge_with(blocks, cfg, true);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Left Right");
+        assert_eq!(merged[0].source_lines, 2);
+    }
+
+    #[test]
+    fn whole_region_without_merge_all_stays_paragraph() {
+        let cfg = LineMergeConfig {
+            merge_whole_region: true,
+            ..Default::default()
+        };
+        let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 200.0, 12.0, 40.0, 18.0)];
+        // Flag on config alone does not merge; engine must pass merge_all for a user region.
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn whole_region_order_top_to_bottom_left_to_right() {
+        let cfg = LineMergeConfig {
+            order: LineMergeOrder::TopToBottomLeftToRight,
+            ..Default::default()
+        };
+        let blocks = vec![
+            line(0, "A", 10.0, 10.0, 20.0, 16.0),
+            line(1, "B", 80.0, 10.0, 20.0, 16.0),
+            line(2, "C", 10.0, 40.0, 20.0, 16.0),
+            line(3, "D", 80.0, 40.0, 20.0, 16.0),
+        ];
+        let merged = merge_with(blocks, cfg, true);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "A B C D");
+    }
+
+    #[test]
+    fn whole_region_order_left_to_right_top_to_bottom() {
+        let cfg = LineMergeConfig {
+            order: LineMergeOrder::LeftToRightTopToBottom,
+            ..Default::default()
+        };
+        let blocks = vec![
+            line(0, "A", 10.0, 10.0, 20.0, 16.0),
+            line(1, "B", 80.0, 10.0, 20.0, 16.0),
+            line(2, "C", 10.0, 40.0, 20.0, 16.0),
+            line(3, "D", 80.0, 40.0, 20.0, 16.0),
+        ];
+        let merged = merge_with(blocks, cfg, true);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "A C B D");
+    }
+
+    #[test]
+    fn paragraph_nameplate_off_joins_speaker() {
+        let cfg = LineMergeConfig {
+            keep_speaker_separate: false,
+            ..Default::default()
+        };
+        let blocks = vec![
+            line(0, "spkA", 331.0, 801.0, 104.0, 62.0),
+            line(1, "「あああああああああああああああああああああああああああ", 324.0, 876.0, 1220.0, 60.0),
+            line(2, "いい？」", 341.0, 937.0, 190.0, 58.0),
+        ];
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 1, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert!(merged[0].text.starts_with("spkA"));
+        assert!(merged[0].text.contains("あああ") && merged[0].text.contains("いい"));
+    }
+
+    #[test]
+    fn paragraph_nameplate_off_does_not_join_wide_short_label() {
+        // Wide short box is not a nameplate; wrap-width rule still applies.
+        let cfg = LineMergeConfig {
+            keep_speaker_separate: false,
+            ..Default::default()
+        };
+        let blocks = vec![
+            line(0, "label", 10.0, 10.0, 300.0, 20.0),
+            line(1, "much longer body line", 10.0, 34.0, 500.0, 20.0),
+        ];
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn whole_region_nameplate_off_joins_all() {
+        let cfg = LineMergeConfig {
+            keep_speaker_separate: false,
+            ..Default::default()
+        };
+        let blocks = vec![
+            line(0, "spkA", 331.0, 801.0, 104.0, 62.0),
+            line(1, "「あああああああああああああああああああああああああああ", 324.0, 876.0, 1220.0, 60.0),
+            line(2, "いい？」", 341.0, 937.0, 190.0, 58.0),
+        ];
+        let merged = merge_with(blocks, cfg, true);
+        assert_eq!(merged.len(), 1, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert!(merged[0].text.contains("spkA"));
+        assert!(merged[0].text.contains("いい"));
+    }
+
+    #[test]
+    fn whole_region_keeps_nameplate() {
+        let cfg = LineMergeConfig::default();
+        let blocks = vec![
+            line(0, "spkA", 331.0, 801.0, 104.0, 62.0),
+            line(1, "「あああああああああああああああああああああああああああ", 324.0, 876.0, 1220.0, 60.0),
+            line(2, "いい？」", 341.0, 937.0, 190.0, 58.0),
+        ];
+        let merged = merge_with(blocks, cfg, true);
+        assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert!(merged.iter().any(|b| b.text == "spkA"));
+        assert!(merged.iter().any(|b| b.text.contains("あああ") && b.text.contains("いい")));
     }
 }

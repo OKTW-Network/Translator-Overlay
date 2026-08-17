@@ -32,6 +32,7 @@ impl std::fmt::Debug for OcrEngine {
             .field("confidence_threshold", &self.confidence_threshold)
             .field("filter_single_char", &self.filter_single_char)
             .field("line_merge_enabled", &self.line_merge.enabled)
+            .field("merge_whole_region", &self.line_merge.merge_whole_region)
             .field("det", &self.model_paths.det)
             .field("rec", &self.model_paths.rec)
             .finish()
@@ -102,7 +103,10 @@ impl OcrEngine {
     }
 
     /// Run OCR on a dynamic image.
-    async fn recognize(&self, image: &DynamicImage) -> Result<Vec<OcrBlock>, OcrError> {
+    ///
+    /// `frame_w` / `frame_h` are the full capture size (merge thresholds).
+    /// `merge_all` is true only for a user-drawn region with whole-region merge on.
+    async fn recognize(&self, image: &DynamicImage, frame_w: u32, frame_h: u32, merge_all: bool) -> Result<Vec<OcrBlock>, OcrError> {
         // oar-ocr predict takes RGB8 ImageBuffer.
         let rgb = image.to_rgb8();
         let inner = Arc::clone(&self.inner);
@@ -141,7 +145,7 @@ impl OcrEngine {
         }
 
         // Reading order + merge multi-line paragraphs into single blocks.
-        let blocks = crate::merge::merge_line_blocks_with(blocks, &self.line_merge);
+        let blocks = crate::merge::merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
 
         // Re-apply after merge in case a merge edge case left a single token.
         let blocks = if self.filter_single_char {
@@ -155,13 +159,15 @@ impl OcrEngine {
 
     /// Run OCR on each crop and offset boxes back into full-frame coordinates.
     ///
-    /// Empty `regions` → whole frame. Line merge stays per-crop so independent
-    /// boxes do not glue together.
+    /// Empty `regions` → whole frame (paragraph rules only). Non-empty regions
+    /// merge per-crop so independent boxes do not glue together. Whole-region
+    /// merge uses the full frame size for thresholds, never the crop size.
     pub async fn recognize_rgba_regions(&self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
         if regions.is_empty() {
-            return self.recognize_rgba(width, height, rgba).await;
+            return self.recognize_rgba(width, height, rgba, width, height, false).await;
         }
 
+        let merge_all = self.line_merge.merge_whole_region;
         let mut all = Vec::new();
         for region in regions {
             let Some(crop) = crate::crop::crop_rgba(width, height, rgba, *region) else {
@@ -169,7 +175,9 @@ impl OcrEngine {
             };
             let ox = crop.x as f32;
             let oy = crop.y as f32;
-            let mut blocks = self.recognize_rgba(crop.width, crop.height, &crop.rgba).await?;
+            let mut blocks = self
+                .recognize_rgba(crop.width, crop.height, &crop.rgba, width, height, merge_all)
+                .await?;
             for block in &mut blocks {
                 block.bbox.x += ox;
                 block.bbox.y += oy;
@@ -180,7 +188,15 @@ impl OcrEngine {
     }
 
     /// Run OCR on RGBA pixel buffer (e.g. capture frame).
-    async fn recognize_rgba(&self, width: u32, height: u32, rgba: &[u8]) -> Result<Vec<OcrBlock>, OcrError> {
+    async fn recognize_rgba(
+        &self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        frame_w: u32,
+        frame_h: u32,
+        merge_all: bool,
+    ) -> Result<Vec<OcrBlock>, OcrError> {
         let expected = (width as usize)
             .checked_mul(height as usize)
             .and_then(|n| n.checked_mul(4))
@@ -192,7 +208,7 @@ impl OcrEngine {
         let rgba_img =
             RgbaImage::from_raw(width, height, rgba[..expected].to_vec()).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))?;
         let dyn_img = DynamicImage::ImageRgba8(rgba_img);
-        self.recognize(&dyn_img).await
+        self.recognize(&dyn_img, frame_w, frame_h, merge_all).await
     }
 
     /// Join block texts for UI display.

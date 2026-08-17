@@ -363,132 +363,59 @@ impl Default for OcrConfig {
     }
 }
 
+/// Reading order when joining lines inside a merged block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineMergeOrder {
+    /// Rows top-to-bottom; left-to-right within each row.
+    #[default]
+    TopToBottomLeftToRight,
+    /// Columns left-to-right; top-to-bottom within each column.
+    LeftToRightTopToBottom,
+}
+
 /// Tunable multi-line OCR merge (paragraph assembly).
 ///
-/// Defaults work for visual-novel / UI text; raise gap ratios for looser pages,
-/// lower them if unrelated blocks keep merging.
-///
-/// All ratios are relative to median line height (`med_h`) or pair widths unless
-/// noted. Tune via `config.toml` `[ocr.line_merge]` or the OCR settings UI.
+/// Distance thresholds are fractions of the **full capture frame** (not line
+/// height). Shape comparisons (height ratio, overlap vs shorter line) stay
+/// box-to-box. Tune via `config.toml` `[ocr.line_merge]` or the OCR settings UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineMergeConfig {
     /// Master switch. `false` keeps every OCR line as its own block.
     pub enabled: bool,
-    /// Min vertical gap as a fraction of median line height (negative = allow overlap).
-    pub min_gap_ratio: f32,
-    /// Upper clamp on adaptive max gap / median line height.
+    /// When hand-drawn OCR regions exist, join every line in each region.
+    /// Ignored for whole-window OCR (rules still apply).
+    pub merge_whole_region: bool,
+    /// Join order inside a merged group.
+    pub order: LineMergeOrder,
+    /// Max vertical gap as a fraction of frame height (paragraph mode).
     pub max_gap_ratio: f32,
-    /// Lower clamp on adaptive max gap / median line height.
-    pub max_gap_ratio_floor: f32,
-    /// Multiply typical page leading by this for adaptive max gap.
-    pub gap_slack: f32,
-    /// When sampling leading, only gaps ≤ this × med_h are considered “tight”.
-    pub leading_sample_max_ratio: f32,
-    /// Fallback max gap × med_h when the page has no tight pairs.
-    pub empty_leading_fallback_ratio: f32,
+    /// Min vertical gap as a fraction of frame height (negative = allow overlap).
+    pub min_gap_ratio: f32,
+    /// Left-edge delta ≤ this × frame width counts as column-aligned.
+    pub left_align_ratio: f32,
     /// Min height(a)/height(b) ratio to treat lines as same font size.
     pub height_ratio_min: f32,
     /// Min horizontal overlap as a fraction of the shorter line width.
     pub overlap_ratio_min: f32,
-    /// Left-edge delta ≤ this × median height counts as column-aligned.
-    pub left_align_ratio: f32,
-    /// width/height (or absolute width) thresholds for “body” lines vs short labels.
-    pub body_aspect_min: f32,
-    pub body_min_width: f32,
-    /// Max gap ratio when both lines are short (names / one-liners).
-    pub short_max_gap_ratio: f32,
-    /// Upper width < this × lower width ⇒ short label above long body.
-    pub label_width_ratio: f32,
-    /// Lower body must be at least this × upper height for the label-above-body rule.
-    pub label_body_min_aspect: f32,
-
-    // --- List vs wrap (geometry / column pitch) ---
-    /// Gaps ≤ this × med_h are never treated as list item spacing.
-    pub list_gap_min_ratio: f32,
-    /// Upper width ≥ this × lower width → treat as wrap remainder (not list).
-    pub wrap_width_ratio: f32,
-    /// Upper width ≥ this × upper height required for the wrap-remainder rule.
-    pub wrap_min_aspect: f32,
-    /// Min column peers before list-pitch detection runs.
-    pub list_min_peers: u32,
-    /// Consecutive gaps ≥ this × med_h feed the item-pitch estimate.
-    pub item_pitch_gap_min_ratio: f32,
-    /// Estimated pitch must be ≥ this × med_h to count as list rhythm.
-    pub list_pitch_min_ratio: f32,
-    /// Gap in \[lo, hi\] × pitch matches list rhythm → do not merge.
-    pub list_pitch_match_lo: f32,
-    pub list_pitch_match_hi: f32,
-    /// Gap < this × pitch → wrap leading (allow merge path).
-    pub wrap_vs_pitch_ratio: f32,
-    /// Fallback: min width similarity (min/max) when pitch is ambiguous.
-    pub list_width_similarity: f32,
-    /// Fallback: need this many column peers when pitch is ambiguous.
-    pub list_fallback_peers: u32,
-
-    // --- Compact control under wide heading ---
-    /// Box width/height below this counts as a compact control (pill/button).
-    pub compact_aspect_max: f32,
-    /// Heading must be wider than control by this factor.
-    pub control_under_heading_width_ratio: f32,
-    /// Only apply control-under-heading when gap > this × med_h.
-    pub control_under_heading_gap_ratio: f32,
-
-    // --- Nameplate above body ---
     /// Keep short nameplate boxes separate from the wider line below.
     pub keep_speaker_separate: bool,
-    /// Soft max nameplate width ≈ this many “em” (× med_h); was char-count scale.
-    pub speaker_max_chars: u32,
-    /// Nameplate width/height must stay below this.
-    pub nameplate_aspect_max: f32,
-    /// Body width must be ≥ this × nameplate width.
-    pub nameplate_body_width_ratio: f32,
-    /// Nameplate only when gap ≤ this × med_h.
-    pub nameplate_max_gap_ratio: f32,
-    /// Multiplier for `speaker_max_chars * med_h` width cap.
-    pub nameplate_char_width_scale: f32,
 }
 
 impl Default for LineMergeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            min_gap_ratio: -0.45,
-            // Keep below typical UI list pitch (~0.45×h) so checklists do not
-            // glue into one block; true dialogue wraps almost touch (gap ≈ 0).
-            max_gap_ratio: 0.42,
-            max_gap_ratio_floor: 0.15,
-            gap_slack: 1.35,
-            leading_sample_max_ratio: 0.40,
-            empty_leading_fallback_ratio: 0.30,
+            merge_whole_region: false,
+            order: LineMergeOrder::default(),
+            // ~16px on 1080p — below typical UI list pitch, above wrap leading.
+            max_gap_ratio: 0.015,
+            min_gap_ratio: -0.015,
+            left_align_ratio: 0.012,
             height_ratio_min: 0.55,
             overlap_ratio_min: 0.35,
-            left_align_ratio: 0.50,
-            body_aspect_min: 5.0,
-            body_min_width: 280.0,
-            short_max_gap_ratio: 0.18,
-            label_width_ratio: 0.55,
-            label_body_min_aspect: 2.8,
-            list_gap_min_ratio: 0.28,
-            wrap_width_ratio: 1.55,
-            wrap_min_aspect: 5.5,
-            list_min_peers: 3,
-            item_pitch_gap_min_ratio: 0.20,
-            list_pitch_min_ratio: 0.30,
-            list_pitch_match_lo: 0.60,
-            list_pitch_match_hi: 1.45,
-            wrap_vs_pitch_ratio: 0.55,
-            list_width_similarity: 0.50,
-            list_fallback_peers: 4,
-            compact_aspect_max: 2.2,
-            control_under_heading_width_ratio: 1.4,
-            control_under_heading_gap_ratio: 0.22,
             keep_speaker_separate: true,
-            speaker_max_chars: 4,
-            nameplate_aspect_max: 4.5,
-            nameplate_body_width_ratio: 1.2,
-            nameplate_max_gap_ratio: 0.55,
-            nameplate_char_width_scale: 0.95,
         }
     }
 }
@@ -732,6 +659,23 @@ model = "my-model"
         assert!((temp - 0.2).abs() < 1e-5);
         assert_eq!(json["reasoning_effort"], "medium");
         assert!(json.get("top_p").is_none());
+    }
+
+    #[test]
+    fn line_merge_legacy_keys_ignored_and_order_parses() {
+        let text = r#"
+[ocr.line_merge]
+enabled = true
+gap_slack = 9.9
+list_min_peers = 99
+order = "left_to_right_top_to_bottom"
+merge_whole_region = true
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
+        assert!(config.ocr.line_merge.enabled);
+        assert!(config.ocr.line_merge.merge_whole_region);
+        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::LeftToRightTopToBottom);
+        assert!((config.ocr.line_merge.max_gap_ratio - 0.015).abs() < 1e-6);
     }
 
     #[test]

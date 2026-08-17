@@ -91,7 +91,6 @@ pub struct UiShared {
     pub form_error: Option<String>,
     /// OCR settings expanders (session UI chrome, not persisted).
     pub expand_line_merge: bool,
-    pub expand_line_merge_adv: bool,
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
@@ -122,7 +121,6 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         confirm: ConfirmAction::None,
         optional_tip_seen: false,
         expand_line_merge: false,
-        expand_line_merge_adv: false,
         form_error: None,
     }))
 }
@@ -363,7 +361,6 @@ pub struct Snapshot {
     pub confirm: ConfirmAction,
     pub optional_tip_seen: bool,
     pub expand_line_merge: bool,
-    pub expand_line_merge_adv: bool,
     pub temp_val: f64,
     pub top_p_val: f64,
     pub max_tokens_val: f64,
@@ -403,19 +400,12 @@ pub struct Snapshot {
     pub persist_ms: f64,
     pub max_miss_ms: f64,
     pub merge_enabled: bool,
-    // Line-merge geometry (mirrors LineMergeConfig; f64 for NumberBox/slider).
-    pub merge_min_gap: f64,
-    pub merge_max_gap: f64,
-    pub merge_gap_slack: f64,
-    pub merge_list_gap_min: f64,
-    pub merge_wrap_width: f64,
-    pub merge_height_ratio: f64,
-    pub merge_left_align: f64,
-    pub merge_short_max_gap: f64,
-    pub merge_list_min_peers: f64,
-    pub merge_compact_aspect: f64,
+    pub merge_whole_region: bool,
+    /// 0 = top-to-bottom then left-to-right; 1 = left-to-right then top-to-bottom.
+    pub merge_order_idx: i32,
+    /// Max gap as % of window height (UI display; stored as frame-height ratio).
+    pub merge_max_gap_pct: f64,
     pub merge_keep_nameplate: bool,
-    pub merge_nameplate_body: f64,
 }
 
 pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
@@ -534,7 +524,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         confirm: ui.confirm,
         optional_tip_seen: ui.optional_tip_seen,
         expand_line_merge: ui.expand_line_merge,
-        expand_line_merge_adv: ui.expand_line_merge_adv,
         temp_val: ui.temp_val,
         top_p_val: ui.top_p_val,
         max_tokens_val: ui.max_tokens_val,
@@ -574,17 +563,12 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         persist_ms: ui.draft.ocr.block_persist_ms as f64,
         max_miss_ms: ui.draft.ocr.block_max_miss_ms as f64,
         merge_enabled: ui.draft.ocr.line_merge.enabled,
-        merge_min_gap: ui.draft.ocr.line_merge.min_gap_ratio as f64,
-        merge_max_gap: ui.draft.ocr.line_merge.max_gap_ratio as f64,
-        merge_gap_slack: ui.draft.ocr.line_merge.gap_slack as f64,
-        merge_list_gap_min: ui.draft.ocr.line_merge.list_gap_min_ratio as f64,
-        merge_wrap_width: ui.draft.ocr.line_merge.wrap_width_ratio as f64,
-        merge_height_ratio: ui.draft.ocr.line_merge.height_ratio_min as f64,
-        merge_left_align: ui.draft.ocr.line_merge.left_align_ratio as f64,
-        merge_short_max_gap: ui.draft.ocr.line_merge.short_max_gap_ratio as f64,
-        merge_list_min_peers: ui.draft.ocr.line_merge.list_min_peers as f64,
-        merge_compact_aspect: ui.draft.ocr.line_merge.compact_aspect_max as f64,
+        merge_whole_region: ui.draft.ocr.line_merge.merge_whole_region,
+        merge_order_idx: match ui.draft.ocr.line_merge.order {
+            translator_core::LineMergeOrder::TopToBottomLeftToRight => 0,
+            translator_core::LineMergeOrder::LeftToRightTopToBottom => 1,
+        },
+        merge_max_gap_pct: (ui.draft.ocr.line_merge.max_gap_ratio as f64) * 100.0,
         merge_keep_nameplate: ui.draft.ocr.line_merge.keep_speaker_separate,
-        merge_nameplate_body: ui.draft.ocr.line_merge.nameplate_body_width_ratio as f64,
     }
 }

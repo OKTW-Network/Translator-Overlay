@@ -119,6 +119,9 @@ block_max_miss_ms = 700
 
 [ocr.line_merge]
 enabled = true
+merge_whole_region = false          # join every line in each hand-drawn OCR region (ignored if no regions)
+order = "top_to_bottom_left_to_right"  # or left_to_right_top_to_bottom
+# max_gap_ratio = 0.015             # × window height, not line height (rule-based merge only)
 
 [capture]
 min_interval_ms = 300
