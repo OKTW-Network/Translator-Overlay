@@ -1,6 +1,6 @@
-//! Pure overlay label placement helpers (no GDI).
+//! Overlay label placement helpers.
 
-use crate::draw::{SurfaceRect, SurfaceSize};
+use crate::gfx::draw::{SurfaceRect, SurfaceSize};
 
 /// Label padding scales with font size so small UI text is not over-padded.
 pub fn label_pad(font_px: i32) -> i32 {

@@ -103,7 +103,8 @@ impl Pipeline {
         let ocr_tier = ocr_cfg.model_tier;
         let client = TranslateClient::new(state.read().config.api.clone());
         let cache_max = state.read().config.translation.cache_max_entries_clamped();
-        let overlay = match OverlayController::spawn(state.read().config.overlay.clone()) {
+        let overlay_cfg = state.read().config.overlay.clone();
+        let overlay = match OverlayController::spawn(overlay_cfg).await {
             Ok(o) => Some(o),
             Err(e) => {
                 error!(error = %e, "failed to start overlay host");
@@ -152,10 +153,9 @@ impl Pipeline {
                 }
             }
 
-            self.poll_overlay_events();
             self.drive_capture().await;
             let wait = self.next_wait();
-            match next_event(&mut rx, self.inflight.as_mut(), wait).await {
+            match next_event(&mut rx, self.inflight.as_mut(), self.overlay.as_mut(), wait).await {
                 PipelineEvent::Command(None) => return,
                 PipelineEvent::Command(Some(cmd)) => {
                     if self.handle_command(cmd).await {
@@ -170,16 +170,22 @@ impl Pipeline {
                     });
                     self.finish_translate(job, job_result);
                 }
+                PipelineEvent::Overlay(None) => {
+                    warn!("overlay host event channel closed");
+                    self.overlay = None;
+                }
+                PipelineEvent::Overlay(Some(ev)) => {
+                    self.apply_overlay_event(ev);
+                    while let Some(ev) = self.overlay.as_mut().and_then(OverlayController::try_recv_event) {
+                        self.apply_overlay_event(ev);
+                    }
+                }
                 PipelineEvent::Tick => {}
             }
         }
     }
 
     fn next_wait(&self) -> Option<Duration> {
-        let selecting = self.state.read().region_select_active;
-        if selecting {
-            return Some(Duration::from_millis(33));
-        }
         if self.session.is_running() && self.inflight.is_none() {
             let ms = self.state.read().config.capture.min_interval_ms.max(50);
             Some(Duration::from_millis(ms))
@@ -196,7 +202,7 @@ impl Pipeline {
                 self.session.stop();
                 if let Some(mut o) = self.overlay.take() {
                     let _ = o.clear();
-                    o.shutdown();
+                    o.shutdown().await;
                 }
                 info!("pipeline shutdown");
                 return true;
@@ -333,30 +339,21 @@ impl Pipeline {
         info!("region picker started");
     }
 
-    fn poll_overlay_events(&mut self) {
-        let Some(overlay) = self.overlay.as_ref() else {
-            return;
-        };
-        let mut events = Vec::new();
-        while let Some(ev) = overlay.try_recv_event() {
-            events.push(ev);
-        }
-        for ev in events {
-            match ev {
-                OverlayEvent::RegionsCommitted(regions) => {
-                    info!(count = regions.len(), "OCR regions committed");
-                    self.apply_ocr_regions(regions);
-                }
-                OverlayEvent::RegionSelectCancelled => {
-                    let mut s = self.state.write();
-                    s.region_select_active = false;
-                    s.region_select_draft.clear();
-                    info!("region picker cancelled");
-                }
-                OverlayEvent::RegionSelectUpdated(regions) => {
-                    let mut s = self.state.write();
-                    s.region_select_draft = regions;
-                }
+    fn apply_overlay_event(&mut self, ev: OverlayEvent) {
+        match ev {
+            OverlayEvent::RegionsCommitted(regions) => {
+                info!(count = regions.len(), "OCR regions committed");
+                self.apply_ocr_regions(regions);
+            }
+            OverlayEvent::RegionSelectCancelled => {
+                let mut s = self.state.write();
+                s.region_select_active = false;
+                s.region_select_draft.clear();
+                info!("region picker cancelled");
+            }
+            OverlayEvent::RegionSelectUpdated(regions) => {
+                let mut s = self.state.write();
+                s.region_select_draft = regions;
             }
         }
     }
@@ -454,21 +451,36 @@ impl Pipeline {
 enum PipelineEvent {
     Command(Option<PipelineCommand>),
     Translate(Result<TranslateJobResult, oneshot::error::RecvError>),
+    Overlay(Option<OverlayEvent>),
     Tick,
 }
 
-async fn next_event(rx: &mut CmdRx, inflight: Option<&mut InflightTranslate>, wait: Option<Duration>) -> PipelineEvent {
+async fn next_event(
+    rx: &mut CmdRx,
+    inflight: Option<&mut InflightTranslate>,
+    overlay: Option<&mut OverlayController>,
+    wait: Option<Duration>,
+) -> PipelineEvent {
+    let overlay_event = async {
+        match overlay {
+            Some(o) => o.recv_event().await,
+            None => std::future::pending().await,
+        }
+    };
+
     if let Some(job) = inflight {
         tokio::select! {
             biased;
             cmd = rx.recv() => PipelineEvent::Command(cmd),
             result = &mut job.rx => PipelineEvent::Translate(result),
+            ev = overlay_event => PipelineEvent::Overlay(ev),
             () = sleep_or_pending(wait) => PipelineEvent::Tick,
         }
     } else {
         tokio::select! {
             biased;
             cmd = rx.recv() => PipelineEvent::Command(cmd),
+            ev = overlay_event => PipelineEvent::Overlay(ev),
             () = sleep_or_pending(wait) => PipelineEvent::Tick,
         }
     }

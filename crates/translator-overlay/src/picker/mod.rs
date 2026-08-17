@@ -1,8 +1,12 @@
-//! On-target OCR region picker (geometry + hit testing, no Win32).
+//! On-target OCR region picker.
+
+mod paint;
+mod session;
 
 use translator_core::{NormRect, Rect};
 
-use crate::draw::SurfaceRect;
+use crate::gfx::draw::SurfaceRect;
+pub(crate) use crate::picker::session::{PickerEnd, is_picker_message};
 
 pub const HANDLE_SIZE: i32 = 8;
 pub const EDGE_HIT: i32 = 6;
