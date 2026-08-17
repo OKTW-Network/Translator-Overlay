@@ -88,6 +88,87 @@ impl AppConfig {
     }
 }
 
+/// How the translator reaches a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProvider {
+    /// OpenAI-compatible HTTP chat completions.
+    #[default]
+    OpenaiCompatible,
+    /// Local Grok Build CLI over ACP stdio (`grok agent stdio`).
+    GrokCli,
+    /// Local Codex CLI over app-server stdio (`codex app-server`).
+    CodexCli,
+}
+
+impl ModelProvider {
+    pub fn is_cli(self) -> bool {
+        matches!(self, Self::GrokCli | Self::CodexCli)
+    }
+
+    /// Default executable name when `cli_path` is empty.
+    pub fn default_bin(self) -> &'static str {
+        match self {
+            Self::OpenaiCompatible => "",
+            Self::GrokCli => "grok",
+            Self::CodexCli => "codex",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenaiCompatible => "OpenAI-compatible",
+            Self::GrokCli => "Grok CLI",
+            Self::CodexCli => "Codex CLI",
+        }
+    }
+}
+
+/// Locate `cli_path` or the provider default on `PATH`.
+pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<std::path::PathBuf> {
+    if !provider.is_cli() {
+        return None;
+    }
+    let trimmed = cli_path.trim();
+    if !trimmed.is_empty() {
+        let path = std::path::PathBuf::from(trimmed);
+        if path.is_file() {
+            return Some(path);
+        }
+        // Bare command names still resolve through PATH; missing absolute paths stay None.
+        if path.components().count() == 1 {
+            return find_on_path(trimmed);
+        }
+        return None;
+    }
+    find_on_path(provider.default_bin())
+}
+
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let path_var = std::env::var_os("PATH")?;
+    let mut names = vec![std::path::PathBuf::from(name)];
+    if cfg!(windows) {
+        let has_ext = std::path::Path::new(name).extension().is_some_and(|e| !e.is_empty());
+        if !has_ext {
+            for ext in [".exe", ".cmd", ".bat"] {
+                names.push(std::path::PathBuf::from(format!("{name}{ext}")));
+            }
+        }
+    }
+    for dir in std::env::split_paths(&path_var) {
+        for file_name in &names {
+            let candidate = dir.join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// OpenAI-compatible API settings.
 ///
 /// Optional sampling parameters use `Option` so they can be omitted from HTTP
@@ -95,6 +176,10 @@ impl AppConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApiConfig {
+    pub provider: ModelProvider,
+    /// Absolute path or bare command. Empty = look up `grok` / `codex` on PATH.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cli_path: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -117,6 +202,8 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
+            provider: ModelProvider::OpenaiCompatible,
+            cli_path: String::new(),
             base_url: "https://localhost/v1".to_string(),
             api_key: String::new(),
             model: "gptoss".to_string(),
@@ -581,6 +668,39 @@ background_color_argb = "0xc8000000"
         assert_eq!(config.translation.target_lang, "zh-TW");
         assert_eq!(config.ocr.model_tier, ModelTier::Small);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn provider_defaults_to_openai_compatible() {
+        let text = r#"
+[api]
+model = "my-model"
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
+        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert!(config.api.cli_path.is_empty());
+        assert!(!config.api.provider.is_cli());
+    }
+
+    #[test]
+    fn provider_cli_roundtrip() {
+        let mut config = AppConfig::default();
+        config.api.provider = ModelProvider::GrokCli;
+        config.api.cli_path = r"C:\tools\grok.exe".into();
+        config.api.model = "grok-4.5".into();
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("provider = \"grok_cli\""), "got:\n{text}");
+        assert!(text.contains("cli_path"), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.api.provider, ModelProvider::GrokCli);
+        assert_eq!(parsed.api.cli_path, r"C:\tools\grok.exe");
+    }
+
+    #[test]
+    fn resolve_cli_missing_path_is_none() {
+        assert!(resolve_cli_binary(ModelProvider::OpenaiCompatible, "").is_none());
+        assert!(resolve_cli_binary(ModelProvider::GrokCli, r"C:\definitely-missing\grok.exe").is_none());
+        assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
     }
 
     #[test]

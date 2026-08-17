@@ -1,8 +1,16 @@
-//! OpenAI-compatible translation client and conversation context management.
+//! Translation client: OpenAI-compatible HTTP or long-lived Grok/Codex CLI sessions.
 
 mod cache;
+mod cli;
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,6 +29,12 @@ pub enum TranslateError {
     Parse(String),
     #[error("API key is empty")]
     MissingApiKey,
+    #[error("CLI not found: {0}")]
+    CliNotFound(String),
+    #[error("CLI exited: {0}")]
+    CliExit(String),
+    #[error("CLI protocol: {0}")]
+    CliProtocol(String),
     #[error("translation cancelled")]
     Cancelled,
     #[error("{0}")]
@@ -37,7 +51,9 @@ impl TranslateError {
         match self {
             Self::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             Self::ApiStatus { status, .. } => *status >= 500 || *status == 429,
-            Self::Cancelled | Self::MissingApiKey | Self::Parse(_) | Self::Other(_) => false,
+            Self::CliExit(_) => true,
+            Self::CliProtocol(msg) => msg.contains("timed out") || msg.contains("closed stdout"),
+            Self::Cancelled | Self::MissingApiKey | Self::CliNotFound(_) | Self::Parse(_) | Self::Other(_) => false,
         }
     }
 }
@@ -426,11 +442,25 @@ fn truncate_for_error(s: &str, max_chars: usize) -> String {
     format!("{kept}…")
 }
 
-/// HTTP client for OpenAI-compatible chat completions.
+struct CliHandle {
+    backend: tokio::sync::Mutex<cli::CliBackend>,
+    epoch: AtomicU64,
+}
+
+impl std::fmt::Debug for CliHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliHandle")
+            .field("epoch", &self.epoch.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+/// HTTP or long-lived CLI translation backend.
 #[derive(Debug, Clone)]
 pub struct TranslateClient {
     http: reqwest::Client,
     api: ApiConfig,
+    cli: Arc<CliHandle>,
 }
 
 impl TranslateClient {
@@ -438,13 +468,32 @@ impl TranslateClient {
         Self {
             http: build_http_client(&api),
             api,
+            cli: Arc::new(CliHandle {
+                backend: tokio::sync::Mutex::new(cli::CliBackend::new()),
+                epoch: AtomicU64::new(0),
+            }),
         }
     }
 
     pub fn update_api(&mut self, api: ApiConfig) {
         // Rebuild client so timeout reflects the latest config.
         self.http = build_http_client(&api);
+        let cli_changed = self.api.provider != api.provider
+            || self.api.cli_path != api.cli_path
+            || self.api.model != api.model
+            || self.api.reasoning_effort != api.reasoning_effort;
         self.api = api;
+        if cli_changed {
+            self.reset_session();
+        }
+    }
+
+    /// Drop the long-lived Grok/Codex session (Reset / new capture target).
+    pub fn reset_session(&self) {
+        self.cli.epoch.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut backend) = self.cli.backend.try_lock() {
+            backend.shutdown();
+        }
     }
 
     pub fn api(&self) -> &ApiConfig {
@@ -460,6 +509,9 @@ impl TranslateClient {
         messages: &[ChatMessage],
         cancel: &CancellationToken,
     ) -> Result<String, TranslateError> {
+        if self.api.provider.is_cli() {
+            return self.cli_complete(messages, cancel).await;
+        }
         if self.api.api_key.trim().is_empty() {
             return Err(TranslateError::MissingApiKey);
         }
@@ -493,6 +545,23 @@ impl TranslateClient {
         }
 
         extract_assistant_content(&text)
+    }
+
+    async fn cli_complete(&self, messages: &[ChatMessage], cancel: &CancellationToken) -> Result<String, TranslateError> {
+        if cancel.is_cancelled() {
+            return Err(TranslateError::Cancelled);
+        }
+        let timeout = if self.api.request_timeout_secs == 0 {
+            Duration::from_secs(3600)
+        } else {
+            Duration::from_secs(self.api.request_timeout_secs)
+        };
+        let epoch = self.cli.epoch.load(Ordering::SeqCst);
+        let mut backend = self.cli.backend.lock().await;
+        if epoch != self.cli.epoch.load(Ordering::SeqCst) {
+            backend.close().await;
+        }
+        backend.complete(&self.api, messages, cancel, timeout, epoch).await
     }
 
     /// Chat completions with automatic retries for transient failures.
@@ -790,5 +859,9 @@ Hope that helps!"#;
             .is_retryable()
         );
         assert!(!TranslateError::MissingApiKey.is_retryable());
+        assert!(!TranslateError::CliNotFound("grok".into()).is_retryable());
+        assert!(TranslateError::CliExit("closed stdout".into()).is_retryable());
+        assert!(TranslateError::CliProtocol("CLI turn timed out".into()).is_retryable());
+        assert!(!TranslateError::CliProtocol("Grok session invoked a tool".into()).is_retryable());
     }
 }

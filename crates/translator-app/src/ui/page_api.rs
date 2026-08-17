@@ -3,10 +3,13 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use windows_reactor::{KeyExt, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, text_block, vstack};
+use translator_core::ModelProvider;
+use windows_reactor::{
+    KeyExt, LayoutExt, RadioButton, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, VerticalAlignment, hstack, text_block, vstack,
+};
 
 use crate::ui::{
-    chrome::{section_header, settings_page_shell},
+    chrome::{section_header, settings_card, settings_page_shell},
     controls::{
         OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_password, card_slider_number, card_text,
         optional_number_row, optional_slider_row, optional_text_row,
@@ -17,59 +20,134 @@ use crate::ui::{
 pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
 
-    let connection = vstack((
-        section_header("Connection"),
-        card_text(
-            "api-base-url",
-            "Base URL",
-            Some("OpenAI-compatible API endpoint."),
-            snap.base_url.clone(),
-            "https://api.openai.com/v1",
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.base_url = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
-        card_password(
-            "api-key",
-            "API key",
-            Some("Stored only on this PC."),
-            snap.api_key.clone(),
-            snap.api_key_revealed,
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.api_key = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        ui.api_key_revealed = !ui.api_key_revealed;
-                    });
-                }
-            },
-        ),
-        card_text("api-model", "Model", Some("Model name, e.g. gpt-4o-mini."), snap.draft_model.clone(), "gpt-4o-mini", {
-            let cx = cx.clone();
-            move |v| {
+    let provider_card = settings_card("api-provider", "Provider", Some("How to reach the translation model."), {
+        let idx = snap.provider_idx;
+        let cx_p = cx.clone();
+        let pick = move |choice: i32| {
+            let cx = cx_p.clone();
+            move || {
                 cx.with_mut(|ui| {
-                    ui.draft.api.model = v;
+                    ui.draft.api.provider = match choice {
+                        1 => ModelProvider::GrokCli,
+                        2 => ModelProvider::CodexCli,
+                        _ => ModelProvider::OpenaiCompatible,
+                    };
                     mark_dirty(ui);
                 });
             }
-        }),
-    ))
-    .spacing(4.0);
+        };
+        let radio = |label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>| {
+            let mut rb = RadioButton::new(label).group("api-provider").checked(checked).on_checked(on);
+            rb.modifiers.min_width = Some(width);
+            rb.modifiers.width = Some(width);
+            rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+            rb
+        };
+        hstack((
+            radio("OpenAI-compatible", 168.0, idx == 0, Box::new(pick(0))),
+            radio("Grok CLI", 96.0, idx == 1, Box::new(pick(1))),
+            radio("Codex CLI", 104.0, idx == 2, Box::new(pick(2))),
+        ))
+        .spacing(12.0)
+        .vertical_alignment(VerticalAlignment::Center)
+    });
+
+    let model_placeholder = match snap.provider {
+        ModelProvider::GrokCli => "grok-4.5",
+        ModelProvider::CodexCli => "gpt-5.6",
+        ModelProvider::OpenaiCompatible => "gpt-4o-mini",
+    };
+    let model_hint = if snap.provider.is_cli() {
+        "Model id passed to the local CLI."
+    } else {
+        "Model name, e.g. gpt-4o-mini."
+    };
+
+    let model_card = card_text("api-model", "Model", Some(model_hint), snap.draft_model.clone(), model_placeholder, {
+        let cx = cx.clone();
+        move |v| {
+            cx.with_mut(|ui| {
+                ui.draft.api.model = v;
+                mark_dirty(ui);
+            });
+        }
+    });
+
+    let connection = if snap.provider.is_cli() {
+        vstack((
+            section_header("Connection"),
+            provider_card,
+            card_text(
+                "api-cli-path",
+                "CLI path",
+                Some("Leave empty to use grok / codex on PATH. Uses your existing CLI login."),
+                snap.cli_path.clone(),
+                snap.provider.default_bin(),
+                {
+                    let cx = cx.clone();
+                    move |v| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.cli_path = v;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+            ),
+            text_block("A local agent session stays open and only the new turn is sent. Tools are denied.")
+                .font_size(12.0)
+                .foreground(ThemeRef::SecondaryText)
+                .wrap(),
+            model_card,
+        ))
+        .spacing(4.0)
+    } else {
+        vstack((
+            section_header("Connection"),
+            provider_card,
+            card_text(
+                "api-base-url",
+                "Base URL",
+                Some("OpenAI-compatible API endpoint."),
+                snap.base_url.clone(),
+                "https://api.openai.com/v1",
+                {
+                    let cx = cx.clone();
+                    move |v| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.base_url = v;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+            ),
+            card_password(
+                "api-key",
+                "API key",
+                Some("Stored only on this PC."),
+                snap.api_key.clone(),
+                snap.api_key_revealed,
+                {
+                    let cx = cx.clone();
+                    move |v| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.api_key = v;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+                {
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            ui.api_key_revealed = !ui.api_key_revealed;
+                        });
+                    }
+                },
+            ),
+            model_card,
+        ))
+        .spacing(4.0)
+    };
 
     // Note: windows-reactor TeachingTip emits CloseButtonText/ActionButtonText,
     // but the WinUI backend only handles CloseButton/ActionButton — using
@@ -90,10 +168,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
 
     let sampling = vstack((
         section_header("Optional parameters"),
-        text_block("Turn On to include in the request. Off = omit.")
-            .font_size(12.0)
-            .foreground(ThemeRef::SecondaryText)
-            .wrap(),
+        text_block(if snap.provider.is_cli() {
+            "Turn On to include. Temperature, Top P, and Max tokens apply to HTTP only. Reasoning effort is sent to the CLI."
+        } else {
+            "Turn On to include in the request. Off = omit."
+        })
+        .font_size(12.0)
+        .foreground(ThemeRef::SecondaryText)
+        .wrap(),
         tip,
         optional_slider_row(
             OptionalSliderParams {
@@ -222,7 +304,11 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             SliderNumberParams {
                 key: "api-timeout",
                 header: "Timeout (seconds)".into(),
-                description: Some("0 = wait forever.".into()),
+                description: Some(if snap.provider.is_cli() {
+                    "Per-turn CLI prompt timeout. 0 = wait up to 1 hour.".into()
+                } else {
+                    "0 = wait forever.".into()
+                }),
                 value: snap.timeout_secs,
                 min: 0.0,
                 max: 600.0,

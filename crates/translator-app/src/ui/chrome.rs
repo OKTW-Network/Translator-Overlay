@@ -196,14 +196,9 @@ pub fn status_infobar(snap: &Snapshot) -> InfoBar {
 /// Compact app status strip (not full runtime dump).
 pub fn app_status_strip(snap: &Snapshot) -> TextBlock {
     let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
-    text_block(format!(
-        "{}  ·  {}  ·  OCR {ocr_time}  ·  API key {}",
-        snap.status,
-        snap.target,
-        if snap.api_ready { "ready" } else { "missing" }
-    ))
-    .font_size(12.0)
-    .foreground(ThemeRef::SecondaryText)
+    text_block(format!("{}  ·  {}  ·  OCR {ocr_time}  ·  {}", snap.status, snap.target, snap.api_status))
+        .font_size(12.0)
+        .foreground(ThemeRef::SecondaryText)
 }
 
 /// Shared Save / Reload / Discard bar for settings pages.
