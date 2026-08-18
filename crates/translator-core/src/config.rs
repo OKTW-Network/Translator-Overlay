@@ -101,9 +101,23 @@ pub enum ModelProvider {
     CodexCli,
 }
 
+/// Preferred processing tier when the selected provider supports one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    #[default]
+    Standard,
+    Priority,
+}
+
 impl ModelProvider {
     pub fn is_cli(self) -> bool {
         matches!(self, Self::GrokCli | Self::CodexCli)
+    }
+
+    /// Whether this provider adapter can request the Priority processing tier.
+    pub fn supports_priority_tier(self) -> bool {
+        matches!(self, Self::CodexCli)
     }
 
     /// Default executable name when `cli_path` is empty.
@@ -180,6 +194,8 @@ pub struct ApiConfig {
     /// Absolute path or bare command. Empty = look up `grok` / `codex` on PATH.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
+    /// Preferred processing tier. Ignored by providers that do not support it.
+    pub service_tier: ServiceTier,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -204,6 +220,7 @@ impl Default for ApiConfig {
         Self {
             provider: ModelProvider::OpenaiCompatible,
             cli_path: String::new(),
+            service_tier: ServiceTier::Standard,
             base_url: "https://localhost/v1".to_string(),
             api_key: String::new(),
             model: "gptoss".to_string(),
@@ -636,6 +653,26 @@ model = "my-model"
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.api.provider, ModelProvider::GrokCli);
         assert_eq!(parsed.api.cli_path, r"C:\tools\grok.exe");
+    }
+
+    #[test]
+    fn priority_service_tier_roundtrip() {
+        let mut config = AppConfig::default();
+        config.api.provider = ModelProvider::CodexCli;
+        config.api.service_tier = ServiceTier::Priority;
+
+        let text = toml::to_string(&config).unwrap();
+        assert!(text.contains("service_tier = \"priority\""), "got:\n{text}");
+
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.api.service_tier, ServiceTier::Priority);
+    }
+
+    #[test]
+    fn only_codex_currently_supports_priority_tier() {
+        assert!(ModelProvider::CodexCli.supports_priority_tier());
+        assert!(!ModelProvider::GrokCli.supports_priority_tier());
+        assert!(!ModelProvider::OpenaiCompatible.supports_priority_tier());
     }
 
     #[test]

@@ -486,7 +486,8 @@ impl TranslateClient {
         let cli_changed = self.api.provider != api.provider
             || self.api.cli_path != api.cli_path
             || self.api.model != api.model
-            || self.api.reasoning_effort != api.reasoning_effort;
+            || self.api.reasoning_effort != api.reasoning_effort
+            || self.api.service_tier != api.service_tier;
         self.api = api;
         if cli_changed {
             self.reset_session();
@@ -731,6 +732,22 @@ mod tests {
         let v = serde_json::to_value(&body).unwrap();
         assert!(v.get("temperature").is_none());
         assert!(v.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn changing_service_tier_resets_cli_session() {
+        let api = ApiConfig {
+            provider: translator_core::ModelProvider::CodexCli,
+            ..ApiConfig::default()
+        };
+        let mut client = TranslateClient::new(api.clone());
+        let initial_epoch = client.cli.epoch.load(Ordering::SeqCst);
+
+        let mut updated = api;
+        updated.service_tier = translator_core::ServiceTier::Priority;
+        client.update_api(updated);
+
+        assert_eq!(client.cli.epoch.load(Ordering::SeqCst), initial_epoch + 1);
     }
 
     #[test]

@@ -3,16 +3,17 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use translator_core::ModelProvider;
+use translator_core::{ModelProvider, ServiceTier};
 use windows_reactor::{
-    KeyExt, LayoutExt, RadioButton, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, VerticalAlignment, hstack, text_block, vstack,
+    Element, KeyExt, LayoutExt, RadioButton, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, VerticalAlignment, hstack,
+    text_block, vstack,
 };
 
 use crate::ui::{
     chrome::{section_header, settings_card, settings_page_shell},
     controls::{
         OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_password, card_slider_number, card_text,
-        optional_number_row, optional_slider_row, optional_text_row,
+        card_toggle, optional_number_row, optional_slider_row, optional_text_row,
     },
     shared::{Snapshot, UiCx, UiShared, mark_dirty},
 };
@@ -73,6 +74,27 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         }
     });
 
+    let priority_tier_card = if snap.provider.supports_priority_tier() {
+        card_toggle(
+            "api-priority-mode",
+            "Priority mode",
+            Some("Request the provider's faster processing tier. May consume more credits."),
+            snap.priority_mode,
+            {
+                let cx = cx.clone();
+                move |on| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.service_tier = if on { ServiceTier::Priority } else { ServiceTier::Standard };
+                        mark_dirty(ui);
+                    });
+                }
+            },
+        )
+        .into()
+    } else {
+        Element::Empty
+    };
+
     let connection = if snap.provider.is_cli() {
         vstack((
             section_header("Connection"),
@@ -93,6 +115,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                     }
                 },
             ),
+            priority_tier_card,
             text_block("A local agent session stays open and only the new turn is sent. Tools are denied.")
                 .font_size(12.0)
                 .foreground(ThemeRef::SecondaryText)
@@ -144,6 +167,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                     }
                 },
             ),
+            priority_tier_card,
             model_card,
         ))
         .spacing(4.0)
