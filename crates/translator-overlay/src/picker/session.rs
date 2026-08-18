@@ -19,7 +19,7 @@ use crate::{
     command::OverlayEvent,
     host::{
         OverlayHost,
-        win32::client_screen_rect,
+        win32::{live_client_screen_rect, set_overlay_owner},
         wnd::{PICKER_HIT_TEST, set_picker_cursor},
     },
     picker::{PickerAction, PickerCursor, RegionPicker},
@@ -46,10 +46,13 @@ impl OverlayHost {
     pub(crate) fn begin_picker(&mut self, regions: Vec<NormRect>) {
         let (cw, ch) = self
             .target
-            .and_then(client_screen_rect)
+            .and_then(live_client_screen_rect)
             .map(|(_, _, w, h)| (w, h))
             .unwrap_or((800, 600));
         self.picker = Some(RegionPicker::new(regions, cw, ch));
+        self.presented_rect = None;
+        // Captions own the target; picker insert-above requires an unowned overlay.
+        set_overlay_owner(self.hwnd, None);
         self.set_click_through(false);
         PICKER_HIT_TEST.store(true, Ordering::Relaxed);
         set_picker_cursor(PickerCursor::Cross);
@@ -65,6 +68,7 @@ impl OverlayHost {
         let Some(picker) = self.picker.take() else {
             return;
         };
+        self.presented_rect = None;
         self.set_click_through(true);
         PICKER_HIT_TEST.store(false, Ordering::Relaxed);
         let _ = unsafe { ReleaseCapture() };
@@ -84,12 +88,11 @@ impl OverlayHost {
 
     fn set_click_through(&self, through: bool) {
         let raw = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32;
-        let mut style = WINDOW_EX_STYLE(raw);
-        if through {
-            style |= WS_EX_TRANSPARENT;
+        let style = if through {
+            WINDOW_EX_STYLE(raw | WS_EX_TRANSPARENT.0)
         } else {
-            style &= !WS_EX_TRANSPARENT;
-        }
+            WINDOW_EX_STYLE(raw & !WS_EX_TRANSPARENT.0)
+        };
         unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style.0 as isize) };
         let _ = unsafe {
             SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
@@ -136,5 +139,20 @@ impl OverlayHost {
                 self.dirty = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+
+    use super::*;
+
+    #[test]
+    fn picker_mouse_messages_are_all_intercepted() {
+        for message in [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP] {
+            assert!(is_picker_message(message));
+        }
+        assert!(!is_picker_message(WM_KEYDOWN));
     }
 }

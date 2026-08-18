@@ -8,7 +8,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::{
     command::OverlayCommand,
-    host::{OverlayHost, follow::FOLLOW_SYNC},
+    host::{OverlayHost, follow::FOLLOW_EVENT_MESSAGE},
     picker,
 };
 
@@ -18,6 +18,7 @@ impl OverlayHost {
 
         loop {
             let mut sync = false;
+            let mut command_wake = false;
             loop {
                 match rx.try_recv() {
                     Ok(OverlayCommand::Shutdown) => {
@@ -36,13 +37,17 @@ impl OverlayHost {
                 }
             }
 
-            if self.drain_thread_messages(&mut sync) {
+            if self.drain_thread_messages(&mut sync, &mut command_wake) {
                 self.teardown();
                 return;
             }
 
-            if FOLLOW_SYNC.swap(false, std::sync::atomic::Ordering::AcqRel) || sync {
+            if sync {
                 self.tick();
+            }
+
+            if command_wake {
+                continue;
             }
 
             if unsafe { WaitMessage() }.is_err() {
@@ -54,14 +59,22 @@ impl OverlayHost {
     }
 
     /// Returns `true` when the thread should exit (`WM_QUIT`).
-    fn drain_thread_messages(&mut self, sync: &mut bool) -> bool {
+    fn drain_thread_messages(&mut self, sync: &mut bool, command_wake: &mut bool) -> bool {
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_QUIT {
                 return true;
             }
-            if msg.hwnd.is_invalid() && msg.message == WM_APP {
-                continue;
+            if msg.hwnd.is_invalid() {
+                if msg.message == WM_APP {
+                    *command_wake = true;
+                    continue;
+                }
+                if msg.message == FOLLOW_EVENT_MESSAGE {
+                    // Tick immediately per geometry event; do not coalesce across WaitMessage.
+                    self.tick();
+                    continue;
+                }
             }
             if self.picker.is_some() && msg.hwnd == self.hwnd && picker::is_picker_message(msg.message) {
                 self.dispatch_picker_msg(&msg);

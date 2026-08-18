@@ -18,8 +18,8 @@ use windows::{
         UI::{
             Accessibility::HWINEVENTHOOK,
             WindowsAndMessaging::{
-                CW_USEDEFAULT, CreateWindowExW, DestroyWindow, LoadCursorW, RegisterClassExW, SW_HIDE, ShowWindow, UnregisterClassW,
-                WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, IsWindow, LoadCursorW, RegisterClassExW, SW_HIDE,
+                ShowWindow, UnregisterClassW, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -32,8 +32,9 @@ use crate::{
     error::OverlayError,
     gfx::{surface::DibSurface, text},
     host::{
-        follow::{FOLLOW_SYNC, FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
-        wnd::{CLASS_NAME, overlay_wnd_proc},
+        follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
+        win32::{ClientRect, set_overlay_owner},
+        wnd::{CLASS_NAME, HOST_TEARING_DOWN, overlay_wnd_proc},
     },
     picker::{PickerEnd, RegionPicker},
     reader::{ReaderWindow, format_reader_text},
@@ -51,16 +52,17 @@ pub(crate) struct OverlayHost {
     pub(crate) surface_w: i32,
     pub(crate) surface_h: i32,
     pub(crate) dirty: bool,
-    /// Last `UpdateLayeredWindow` destination; `None` forces stretch + present.
-    pub(crate) last_present: Option<(i32, i32, i32, i32)>,
     pub(crate) surface: DibSurface,
     pub(crate) present: DibSurface,
     pub(crate) hfont: HFONT,
     pub(crate) font_px: i32,
     pub(crate) reader: Option<Box<ReaderWindow>>,
     pub(crate) picker: Option<RegionPicker>,
+    /// Last successfully presented/moved client rect in screen space.
+    /// Pure target drags reuse this for MoveOnly (`SetWindowPos` without re-ULW).
+    pub(crate) presented_rect: Option<ClientRect>,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
-    pub(crate) follow_hooks: [HWINEVENTHOOK; 3],
+    pub(crate) follow_hooks: [HWINEVENTHOOK; 5],
 }
 
 impl OverlayHost {
@@ -69,8 +71,7 @@ impl OverlayHost {
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            // Layered pixels come from UpdateLayeredWindow only.
-            style: Default::default(),
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(overlay_wnd_proc),
             hInstance: hinstance.into(),
             hCursor: unsafe { LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_ARROW) }
@@ -85,8 +86,6 @@ impl OverlayHost {
             // Continue — CreateWindowEx will still work if registered.
         }
 
-        // Not TOPMOST: only float above the target while it is in the
-        // foreground; otherwise we hide so other apps are not covered.
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -143,17 +142,19 @@ impl OverlayHost {
             surface_w: 0,
             surface_h: 0,
             dirty: true,
-            last_present: None,
             surface,
             present,
             hfont,
             font_px,
             reader: None,
             picker: None,
+            presented_rect: None,
             event_tx,
-            follow_hooks: [HWINEVENTHOOK::default(); 3],
+            follow_hooks: [HWINEVENTHOOK::default(); 5],
         };
 
+        HOST_TEARING_DOWN.store(false, std::sync::atomic::Ordering::Release);
+        FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
         FOLLOW_THREAD.store(unsafe { GetCurrentThreadId() }, std::sync::atomic::Ordering::Release);
 
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
@@ -169,21 +170,26 @@ impl OverlayHost {
     }
 
     pub(crate) fn handle(&mut self, cmd: OverlayCommand) {
+        if !matches!(cmd, OverlayCommand::Shutdown) {
+            let _ = self.ensure_layer_alive();
+        }
         match cmd {
             OverlayCommand::Attach { target_hwnd } => {
+                self.presented_rect = None;
                 let hwnd = HWND(target_hwnd as *mut _);
-                if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool() {
-                    let same = self.target == Some(hwnd);
+                if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
                     FOLLOW_TARGET.store(target_hwnd, std::sync::atomic::Ordering::Release);
-                    if !same {
-                        self.dirty = true;
+                    if !self.hwnd.is_invalid() {
+                        set_overlay_owner(self.hwnd, Some(hwnd));
                     }
+                    self.dirty = true;
                     debug!(?target_hwnd, "overlay attached");
                 } else {
                     warn!(?target_hwnd, "attach ignored — invalid hwnd");
                     self.target = None;
                     FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+                    self.release_target();
                 }
             }
             OverlayCommand::Detach => {
@@ -192,7 +198,8 @@ impl OverlayHost {
                 }
                 self.target = None;
                 FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-                self.hide();
+                self.presented_rect = None;
+                self.release_target();
             }
             OverlayCommand::SetBlocks {
                 blocks,
@@ -255,39 +262,101 @@ impl OverlayHost {
         }
     }
 
-    /// Present at screen `x,y` sized to the live client rect.
-    ///
-    /// Pure moves reuse the last stretch and only reposition via
-    /// `UpdateLayeredWindow` — `SetWindowPos` move/size blanks the layer.
     pub(crate) fn present_to_client(&mut self, x: i32, y: i32, client_w: i32, client_h: i32) -> Result<(), OverlayError> {
-        if self.last_present == Some((x, y, client_w, client_h)) {
-            return Ok(());
-        }
-
         let (bw, bh) = self.surface.size();
-        let size_changed = self.last_present.is_none_or(|(_, _, pw, ph)| pw != client_w || ph != client_h);
-
         if bw == client_w && bh == client_h {
-            self.surface.present(self.hwnd, x, y, client_w, client_h)?;
+            self.surface.present(self.hwnd, x, y, client_w, client_h)
         } else {
-            if size_changed {
-                self.surface.stretch_into(&mut self.present, client_w, client_h)?;
-            }
-            self.present.present(self.hwnd, x, y, client_w, client_h)?;
+            self.surface.stretch_into(&mut self.present, client_w, client_h)?;
+            self.present.present(self.hwnd, x, y, client_w, client_h)
         }
-        self.last_present = Some((x, y, client_w, client_h));
+    }
+
+    pub(crate) fn ensure_layer_alive(&mut self) -> bool {
+        if HOST_TEARING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        if !self.hwnd.is_invalid() && unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
+            return true;
+        }
+        match self.recreate_layer() {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "failed to recreate overlay window");
+                false
+            }
+        }
+    }
+
+    fn recreate_layer(&mut self) -> Result<(), OverlayError> {
+        self.surface.teardown();
+        self.present.teardown();
+        self.presented_rect = None;
+        if !self.hwnd.is_invalid() && unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
+            set_overlay_owner(self.hwnd, None);
+            let _ = unsafe { DestroyWindow(self.hwnd) };
+        }
+        self.hwnd = HWND::default();
+        FOLLOW_OVERLAY.store(0, std::sync::atomic::Ordering::Release);
+
+        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                CLASS_NAME,
+                w!("Translator Overlay"),
+                WS_POPUP,
+                CW_USEDEFAULT,
+                0,
+                100,
+                100,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+        }
+        .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
+
+        let surface = match DibSurface::create(hwnd) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(e);
+            }
+        };
+        let present = match DibSurface::create(hwnd) {
+            Ok(s) => s,
+            Err(e) => {
+                drop(surface);
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(e);
+            }
+        };
+
+        self.hwnd = hwnd;
+        self.surface = surface;
+        self.present = present;
+        FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+        self.dirty = true;
+        let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+        self.surface.ensure(100, 100)?;
         Ok(())
     }
 
     pub(crate) fn teardown(&mut self) {
+        HOST_TEARING_DOWN.store(true, std::sync::atomic::Ordering::Release);
         FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+        FOLLOW_OVERLAY.store(0, std::sync::atomic::Ordering::Release);
         FOLLOW_THREAD.store(0, std::sync::atomic::Ordering::Release);
-        FOLLOW_SYNC.store(false, std::sync::atomic::Ordering::Release);
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();
         }
         if !self.hwnd.is_invalid() {
+            if unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
+                set_overlay_owner(self.hwnd, None);
+            }
             let _ = unsafe { DestroyWindow(self.hwnd) };
             self.hwnd = HWND::default();
         }

@@ -5,11 +5,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-        Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
         UI::WindowsAndMessaging::{
             DefWindowProcW, HTCLIENT, HTTRANSPARENT, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-            LoadCursorW, MA_NOACTIVATE, PostQuitMessage, SetCursor, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT,
-            WM_SETCURSOR,
+            LoadCursorW, MA_NOACTIVATE, PostQuitMessage, SetCursor, WM_DESTROY, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR,
         },
     },
     core::{PCWSTR, w},
@@ -22,6 +20,7 @@ pub(crate) const CLASS_NAME: PCWSTR = w!("TranslatorOverlayLayer.v1");
 /// `wnd_proc` cannot reach `OverlayHost`; picker hit-testing is a process-wide flag
 /// because this crate hosts a single overlay window.
 pub(crate) static PICKER_HIT_TEST: AtomicBool = AtomicBool::new(false);
+pub(crate) static HOST_TEARING_DOWN: AtomicBool = AtomicBool::new(false);
 /// Last picker cursor. `WM_SETCURSOR` is sent (not posted) and hits `wnd_proc`
 /// inside `PeekMessage` / `WaitMessage`, so the Peek-loop swallow cannot win.
 static PICKER_CURSOR: AtomicU8 = AtomicU8::new(0);
@@ -84,9 +83,7 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
-        // Picker is WS_EX_NOACTIVATE, but a TOPMOST layered window can
-        // still be activated on click. Refuse activation so the target
-        // stays foreground while the user draws boxes.
+        // Refuse activation while picking so the target stays foreground.
         WM_MOUSEACTIVATE => {
             if PICKER_HIT_TEST.load(Ordering::Relaxed) {
                 LRESULT(MA_NOACTIVATE as isize)
@@ -94,17 +91,10 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
-        WM_ERASEBKGND => LRESULT(1),
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-            if !hdc.is_invalid() {
-                let _ = unsafe { EndPaint(hwnd, &ps) };
-            }
-            LRESULT(0)
-        }
         WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
+            if HOST_TEARING_DOWN.load(Ordering::Acquire) {
+                unsafe { PostQuitMessage(0) };
+            }
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
