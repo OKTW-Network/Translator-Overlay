@@ -8,9 +8,9 @@ use windows::Win32::{
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         WindowsAndMessaging::{
-            EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW,
-            PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WM_APP,
+            EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW,
+            EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
+            EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW, PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WM_APP,
         },
     },
 };
@@ -49,6 +49,9 @@ fn is_follow_target(hwnd: HWND) -> bool {
 fn classify_follow_event(event: u32, is_target: bool, is_window_object: bool) -> FollowAction {
     match event {
         EVENT_SYSTEM_FOREGROUND => FollowAction::Sync,
+        // A top-level Z-order change is reported on its parent/desktop window,
+        // so the event HWND does not have to be the capture target.
+        EVENT_OBJECT_REORDER if is_window_object => FollowAction::Sync,
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND if is_target => FollowAction::Sync,
         EVENT_SYSTEM_MOVESIZESTART | EVENT_SYSTEM_MOVESIZEEND if is_target && is_window_object => FollowAction::Sync,
         EVENT_OBJECT_LOCATIONCHANGE | EVENT_OBJECT_DESTROY | EVENT_OBJECT_SHOW | EVENT_OBJECT_HIDE if is_target && is_window_object => {
@@ -71,12 +74,12 @@ pub(crate) fn install_follow_hooks() -> [HWINEVENTHOOK; 5] {
     let location = unsafe {
         SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT)
     };
-    let lifecycle =
-        unsafe { SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT) };
-    if foreground.is_invalid() || minimize.is_invalid() || movesize.is_invalid() || location.is_invalid() || lifecycle.is_invalid() {
+    let object_changes =
+        unsafe { SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_REORDER, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT) };
+    if foreground.is_invalid() || minimize.is_invalid() || movesize.is_invalid() || location.is_invalid() || object_changes.is_invalid() {
         warn!("overlay follow WinEvent hooks failed to install");
     }
-    [foreground, minimize, movesize, location, lifecycle]
+    [foreground, minimize, movesize, location, object_changes]
 }
 
 pub(crate) fn uninstall_follow_hooks(hooks: &mut [HWINEVENTHOOK; 5]) {
@@ -121,5 +124,12 @@ mod tests {
         assert_eq!(classify_follow_event(EVENT_OBJECT_LOCATIONCHANGE, true, true), FollowAction::Sync);
         assert_eq!(classify_follow_event(EVENT_OBJECT_LOCATIONCHANGE, false, true), FollowAction::Ignore);
         assert_eq!(classify_follow_event(EVENT_SYSTEM_FOREGROUND, false, false), FollowAction::Sync);
+    }
+
+    #[test]
+    fn window_reorder_syncs_for_the_parent_container() {
+        assert_eq!(classify_follow_event(EVENT_OBJECT_REORDER, false, true), FollowAction::Sync);
+        assert_eq!(classify_follow_event(EVENT_OBJECT_REORDER, true, true), FollowAction::Sync);
+        assert_eq!(classify_follow_event(EVENT_OBJECT_REORDER, false, false), FollowAction::Ignore);
     }
 }
