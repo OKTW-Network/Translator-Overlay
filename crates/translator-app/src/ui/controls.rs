@@ -7,7 +7,7 @@ use windows_reactor::{
 };
 
 use crate::ui::{
-    chrome::{settings_card, settings_card_stack, settings_row},
+    chrome::{settings_card, settings_card_stack},
     shared::{argb_u32_to_parts, parse_hex_u32},
 };
 
@@ -97,18 +97,7 @@ pub fn card_toggle(
     settings_card(key, header, description, compact_toggle(is_on, on_toggled))
 }
 
-/// Label + toggle as a flat expander item (no nested card chrome).
-pub fn row_toggle(
-    key: &str,
-    header: impl Into<String>,
-    description: Option<&str>,
-    is_on: bool,
-    on_toggled: impl Fn(bool) + 'static,
-) -> Border {
-    settings_row(key, header, description, compact_toggle(is_on, on_toggled))
-}
-
-/// Params for [`card_slider_number`] / [`row_slider_number`] (keeps call sites clippy-clean).
+/// Params for [`card_slider_number`] (keeps call sites clippy-clean).
 pub struct SliderNumberParams {
     pub key: &'static str,
     pub header: String,
@@ -121,15 +110,22 @@ pub struct SliderNumberParams {
 
 /// Snap `v` to the nearest step within [min, max].
 ///
-/// Slider/f32 round-trips (e.g. `0.55f32 as f64`) produce noise like
-/// `0.5500000119`. Rounding to the control's step keeps NumberBox clean.
+/// Uses integer micro-units so `min + n×step` is not `1.2000000000000002`
+/// (binary `0.1`). Slider/f32 round-trips stay on the labeled tick.
 pub fn quantize_to_step(v: f64, min: f64, max: f64, step: f64) -> f64 {
+    const SCALE: f64 = 1_000_000.0;
     let v = v.clamp(min, max);
     if !(step.is_finite() && step > 0.0) {
         return v;
     }
-    let steps = ((v - min) / step).round();
-    (min + steps * step).clamp(min, max)
+    let min_i = (min * SCALE).round() as i64;
+    let step_i = (step * SCALE).round() as i64;
+    if step_i == 0 {
+        return v;
+    }
+    let n = ((v - min) / step).round() as i64;
+    let out = (min_i.saturating_add(n.saturating_mul(step_i))) as f64 / SCALE;
+    out.clamp(min, max)
 }
 
 fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> StackPanel {
@@ -161,12 +157,6 @@ fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clo
 pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Border {
     let controls = slider_number_controls(&p, on_changed);
     settings_card(p.key, p.header, p.description.as_deref(), controls)
-}
-
-/// Slider + NumberBox as a flat expander item (no nested card chrome).
-pub fn row_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Border {
-    let controls = slider_number_controls(&p, on_changed);
-    settings_row(p.key, p.header, p.description.as_deref(), controls)
 }
 
 /// Params for optional numeric rows (toggle + slider + NumberBox).

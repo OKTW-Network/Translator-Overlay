@@ -89,8 +89,6 @@ pub struct UiShared {
     pub optional_tip_seen: bool,
     /// Inline form validation message (blocks Save until fixed).
     pub form_error: Option<String>,
-    /// OCR settings expanders (session UI chrome, not persisted).
-    pub expand_line_merge: bool,
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
@@ -120,7 +118,6 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         api_key_revealed: false,
         confirm: ConfirmAction::None,
         optional_tip_seen: false,
-        expand_line_merge: false,
         form_error: None,
     }))
 }
@@ -360,7 +357,6 @@ pub struct Snapshot {
     pub form_error: String,
     pub confirm: ConfirmAction,
     pub optional_tip_seen: bool,
-    pub expand_line_merge: bool,
     pub temp_val: f64,
     pub top_p_val: f64,
     pub max_tokens_val: f64,
@@ -401,11 +397,19 @@ pub struct Snapshot {
     pub max_miss_ms: f64,
     pub merge_enabled: bool,
     pub merge_whole_region: bool,
+    pub merge_join_with_space: bool,
+    pub merge_reject_short_long: bool,
     /// 0 = top-to-bottom then left-to-right; 1 = left-to-right then top-to-bottom.
     pub merge_order_idx: i32,
-    /// Max gap as % of window height (UI display; stored as frame-height ratio).
-    pub merge_max_gap_pct: f64,
-    pub merge_keep_nameplate: bool,
+    /// Ratio fields as percents (UI display; stored as 0–1 in config).
+    pub merge_gap_pct: f64,
+    pub merge_height_delta_pct: f64,
+    pub merge_overlap_pct: f64,
+    pub merge_align_pct: f64,
+    pub merge_align_overlap_pct: f64,
+    pub merge_order_band_pct: f64,
+    pub merge_below_mid_pct: f64,
+    pub merge_width_delta_pct: f64,
 }
 
 pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
@@ -523,7 +527,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         form_error: ui.form_error.clone().unwrap_or_default(),
         confirm: ui.confirm,
         optional_tip_seen: ui.optional_tip_seen,
-        expand_line_merge: ui.expand_line_merge,
         temp_val: ui.temp_val,
         top_p_val: ui.top_p_val,
         max_tokens_val: ui.max_tokens_val,
@@ -564,11 +567,19 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         max_miss_ms: ui.draft.ocr.block_max_miss_ms as f64,
         merge_enabled: ui.draft.ocr.line_merge.enabled,
         merge_whole_region: ui.draft.ocr.line_merge.merge_whole_region,
+        merge_join_with_space: ui.draft.ocr.line_merge.join_with_space,
+        merge_reject_short_long: ui.draft.ocr.line_merge.reject_short_long,
         merge_order_idx: match ui.draft.ocr.line_merge.order {
             translator_core::LineMergeOrder::TopToBottomLeftToRight => 0,
             translator_core::LineMergeOrder::LeftToRightTopToBottom => 1,
         },
-        merge_max_gap_pct: (ui.draft.ocr.line_merge.max_gap_ratio as f64) * 100.0,
-        merge_keep_nameplate: ui.draft.ocr.line_merge.keep_speaker_separate,
+        merge_gap_pct: (ui.draft.ocr.line_merge.gap_ratio as f64) * 100.0,
+        merge_height_delta_pct: (ui.draft.ocr.line_merge.height_delta_ratio as f64) * 100.0,
+        merge_overlap_pct: (ui.draft.ocr.line_merge.overlap_ratio as f64) * 100.0,
+        merge_align_pct: (ui.draft.ocr.line_merge.align_ratio as f64) * 100.0,
+        merge_align_overlap_pct: (ui.draft.ocr.line_merge.align_overlap_ratio as f64) * 100.0,
+        merge_order_band_pct: (ui.draft.ocr.line_merge.order_band_ratio as f64) * 100.0,
+        merge_below_mid_pct: (ui.draft.ocr.line_merge.below_mid_ratio as f64) * 100.0,
+        merge_width_delta_pct: (ui.draft.ocr.line_merge.width_delta_ratio as f64) * 100.0,
     }
 }

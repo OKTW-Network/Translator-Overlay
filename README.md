@@ -8,7 +8,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **多區域 OCR**：在目標視窗上框選多個辨識範圍（本次執行有效，不寫入設定檔）；無框時仍辨識整窗
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
 - **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
-- **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（段落組裝）
+- **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（幾何規則）
 - **LLM 翻譯**：OpenAI 相容 Chat Completions，或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
 - **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
 - **對話上下文**：多輪歷史壓縮，維持用語一致
@@ -120,8 +120,17 @@ block_max_miss_ms = 700
 [ocr.line_merge]
 enabled = true
 merge_whole_region = false          # join every line in each hand-drawn OCR region (ignored if no regions)
-order = "top_to_bottom_left_to_right"  # or left_to_right_top_to_bottom
-# max_gap_ratio = 0.015             # × window height, not line height (rule-based merge only)
+order = "left_to_right_top_to_bottom"  # or top_to_bottom_left_to_right
+join_with_space = true              # false concatenates (typical for CJK)
+reject_short_long = true            # do not glue a short line onto a wider line below
+# gap_ratio = 0.015                 # allowed |vertical gap| × window height
+# height_delta_ratio = 0.45         # allowed |h1 − h2| / larger height
+# width_delta_ratio = 0.40          # allowed (lower − upper) / lower width (when reject_short_long)
+# overlap_ratio = 0.35              # vs shorter line width
+# align_ratio = 0.012               # × window width (left or center)
+# align_overlap_ratio = 0.10        # overlap floor on the align path
+# order_band_ratio = 0.012          # reading-order row/column band
+# below_mid_ratio = 0.25            # stacked-vs-side-by-side slack
 
 [capture]
 min_interval_ms = 300

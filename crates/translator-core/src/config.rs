@@ -368,17 +368,17 @@ impl Default for OcrConfig {
 #[serde(rename_all = "snake_case")]
 pub enum LineMergeOrder {
     /// Rows top-to-bottom; left-to-right within each row.
-    #[default]
     TopToBottomLeftToRight,
     /// Columns left-to-right; top-to-bottom within each column.
+    #[default]
     LeftToRightTopToBottom,
 }
 
-/// Tunable multi-line OCR merge (paragraph assembly).
+/// Tunable multi-line OCR merge (geometry + join style).
 ///
 /// Distance thresholds are fractions of the **full capture frame** (not line
-/// height). Shape comparisons (height ratio, overlap vs shorter line) stay
-/// box-to-box. Tune via `config.toml` `[ocr.line_merge]` or the OCR settings UI.
+/// height). Shape comparisons stay box-to-box (`|delta| / larger`). Tune via
+/// `config.toml` `[ocr.line_merge]` or the OCR settings UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineMergeConfig {
@@ -389,18 +389,29 @@ pub struct LineMergeConfig {
     pub merge_whole_region: bool,
     /// Join order inside a merged group.
     pub order: LineMergeOrder,
-    /// Max vertical gap as a fraction of frame height (paragraph mode).
-    pub max_gap_ratio: f32,
-    /// Min vertical gap as a fraction of frame height (negative = allow overlap).
-    pub min_gap_ratio: f32,
-    /// Left-edge delta ≤ this × frame width counts as column-aligned.
-    pub left_align_ratio: f32,
-    /// Min height(a)/height(b) ratio to treat lines as same font size.
-    pub height_ratio_min: f32,
-    /// Min horizontal overlap as a fraction of the shorter line width.
-    pub overlap_ratio_min: f32,
-    /// Keep short nameplate boxes separate from the wider line below.
-    pub keep_speaker_separate: bool,
+    /// Allowed `|vertical gap|` as a fraction of frame height (paragraph mode).
+    #[serde(alias = "max_gap_ratio")]
+    pub gap_ratio: f32,
+    /// Left- or center-edge delta ≤ this × frame width counts as column-aligned.
+    #[serde(alias = "left_align_ratio")]
+    pub align_ratio: f32,
+    /// Allowed `|h1 − h2| / larger(h)` to treat lines as the same size.
+    pub height_delta_ratio: f32,
+    /// Horizontal overlap as a fraction of the shorter line width.
+    #[serde(alias = "overlap_ratio_min")]
+    pub overlap_ratio: f32,
+    /// Overlap floor (vs shorter width) when using the align path.
+    pub align_overlap_ratio: f32,
+    /// Row / column banding as a fraction of frame height / width.
+    pub order_band_ratio: f32,
+    /// Lower counts as below if `top + height × this ≥` the upper vertical mid.
+    pub below_mid_ratio: f32,
+    /// When true, do not glue a shorter upper line onto a much wider line below.
+    pub reject_short_long: bool,
+    /// Allowed `(w_lower − w_upper) / w_lower` when [`Self::reject_short_long`] is on.
+    pub width_delta_ratio: f32,
+    /// Insert a space between joined lines (`false` concatenates).
+    pub join_with_space: bool,
 }
 
 impl Default for LineMergeConfig {
@@ -410,12 +421,16 @@ impl Default for LineMergeConfig {
             merge_whole_region: false,
             order: LineMergeOrder::default(),
             // ~16px on 1080p — below typical UI list pitch, above wrap leading.
-            max_gap_ratio: 0.015,
-            min_gap_ratio: -0.015,
-            left_align_ratio: 0.012,
-            height_ratio_min: 0.55,
-            overlap_ratio_min: 0.35,
-            keep_speaker_separate: true,
+            gap_ratio: 0.015,
+            align_ratio: 0.012,
+            height_delta_ratio: 0.45,
+            overlap_ratio: 0.35,
+            align_overlap_ratio: 0.10,
+            order_band_ratio: 0.012,
+            below_mid_ratio: 0.25,
+            reject_short_long: true,
+            width_delta_ratio: 0.40,
+            join_with_space: true,
         }
     }
 }
@@ -668,14 +683,74 @@ model = "my-model"
 enabled = true
 gap_slack = 9.9
 list_min_peers = 99
-order = "left_to_right_top_to_bottom"
+keep_speaker_separate = true
+order = "top_to_bottom_left_to_right"
 merge_whole_region = true
+left_align_ratio = 0.05
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert!(config.ocr.line_merge.enabled);
         assert!(config.ocr.line_merge.merge_whole_region);
+        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
+        assert!((config.ocr.line_merge.gap_ratio - 0.015).abs() < 1e-6);
+        assert!((config.ocr.line_merge.align_ratio - 0.05).abs() < 1e-6);
+        assert!(config.ocr.line_merge.join_with_space);
+        assert!(config.ocr.line_merge.reject_short_long);
+    }
+
+    #[test]
+    fn line_merge_max_gap_ratio_alias_fills_gap_ratio() {
+        let text = r#"
+[ocr.line_merge]
+max_gap_ratio = 0.02
+overlap_ratio_min = 0.4
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
+        assert!((config.ocr.line_merge.gap_ratio - 0.02).abs() < 1e-6);
+        assert!((config.ocr.line_merge.overlap_ratio - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_merge_omitted_order_defaults_left_to_right() {
+        let text = r#"
+[ocr.line_merge]
+enabled = true
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::LeftToRightTopToBottom);
-        assert!((config.ocr.line_merge.max_gap_ratio - 0.015).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_merge_defaults_land_on_ocr_slider_ticks() {
+        // Same integer-micro-unit snap as `quantize_to_step` (not `min + n×0.1`).
+        const SCALE: f64 = 1_000_000.0;
+        fn snapped(pct: f64, min: f64, max: f64, step: f64) -> f64 {
+            let v = pct.clamp(min, max);
+            if !(step.is_finite() && step > 0.0) {
+                return v;
+            }
+            let min_i = (min * SCALE).round() as i64;
+            let step_i = (step * SCALE).round() as i64;
+            if step_i == 0 {
+                return v;
+            }
+            let n = ((v - min) / step).round() as i64;
+            let out = (min_i.saturating_add(n.saturating_mul(step_i))) as f64 / SCALE;
+            out.clamp(min, max)
+        }
+        let c = LineMergeConfig::default();
+        let on_tick = |pct: f64, min: f64, max: f64, step: f64, want: f64| {
+            let got = snapped(pct, min, max, step);
+            assert!((got - want).abs() < 1e-9, "got={got} want={want} (pct={pct})");
+        };
+        on_tick(f64::from(c.gap_ratio) * 100.0, 0.0, 8.0, 0.1, 1.5);
+        on_tick(f64::from(c.height_delta_ratio) * 100.0, 0.0, 90.0, 1.0, 45.0);
+        on_tick(f64::from(c.overlap_ratio) * 100.0, 0.0, 100.0, 1.0, 35.0);
+        on_tick(f64::from(c.align_ratio) * 100.0, 0.0, 5.0, 0.1, 1.2);
+        on_tick(f64::from(c.align_overlap_ratio) * 100.0, 0.0, 50.0, 1.0, 10.0);
+        on_tick(f64::from(c.order_band_ratio) * 100.0, 0.1, 5.0, 0.1, 1.2);
+        on_tick(f64::from(c.below_mid_ratio) * 100.0, 0.0, 50.0, 1.0, 25.0);
+        on_tick(f64::from(c.width_delta_ratio) * 100.0, 0.0, 90.0, 1.0, 40.0);
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use windows_reactor::{
-    BackgroundExt, Border, ContentDialog, ContentDialogResult, Element, Expander, Grid, GridChildExt, GridLength, HorizontalAlignment,
-    InfoBar, InfoBarSeverity, KeyExt, LayoutExt, PaddingExt, StackPanel, TextBlock, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
+    BackgroundExt, Border, ContentDialog, ContentDialogResult, Element, Grid, GridChildExt, GridLength, HorizontalAlignment, InfoBar,
+    InfoBarSeverity, KeyExt, LayoutExt, PaddingExt, StackPanel, TextBlock, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
     VerticalAlignment, border, button, grid, hstack, text_block, vstack,
 };
 
@@ -47,39 +47,21 @@ pub fn section_header(title: impl Into<String>) -> TextBlock {
     })
 }
 
-/// Collapsible settings group (WinUI `Expander`, SettingsExpander-style).
-///
-/// Community Toolkit pattern: one outer chrome for the group; put flat
-/// [`settings_row`] items inside — not nested [`settings_card`]s.
-///
-/// `expanded` must come from UI state and be updated in `on_expanding` so the
-/// panel stays open across re-renders.
-pub fn settings_expander(
-    key: &str,
-    header: impl Into<String>,
-    expanded: bool,
-    on_expanding: impl Fn(bool) + 'static,
-    child: impl Into<Element> + LayoutExt,
-) -> Expander {
-    // Content is a list of flat rows; no extra margin that would look like a
-    // nested card inset.
-    let body = child.horizontal_alignment(HorizontalAlignment::Stretch);
-
-    Expander::new(body)
-        .header(header)
-        .expanded(expanded)
-        .on_expanding(on_expanding)
-        .with_key(key)
-        .horizontal_alignment(HorizontalAlignment::Stretch)
+/// Label for a cluster of cards inside a section (not a peer of [`section_header`]).
+pub fn subsection_header(title: impl Into<String>) -> TextBlock {
+    text_block(title)
+        .font_size(12.0)
+        .semibold()
+        .foreground(ThemeRef::SecondaryText)
         .margin(Thickness {
             left: 0.0,
-            top: 4.0,
+            top: 8.0,
             right: 0.0,
-            bottom: 0.0,
+            bottom: 2.0,
         })
 }
 
-/// Shared label + control layout for settings rows (card or flat).
+/// Shared label + control layout for settings cards.
 fn settings_row_body(header: impl Into<String>, description: Option<&str>, control: impl Into<Element> + GridChildExt + LayoutExt) -> Grid {
     let left = labeled_stack(text_block(header).semibold().font_size(14.0), description);
 
@@ -106,43 +88,10 @@ fn settings_row_body(header: impl Into<String>, description: Option<&str>, contr
     .horizontal_alignment(HorizontalAlignment::Stretch)
 }
 
-/// Flat settings row for use **inside** an [`settings_expander`].
-///
-/// Matches Community Toolkit `SettingsCard` hosted in `SettingsExpander.Items`:
-/// same header/control layout as a card, but no `CardBackground` / corner radius
-/// (those belong to the outer expander only). A hairline bottom border separates
-/// items like the toolkit item style.
-pub fn settings_row(
-    key: &str,
-    header: impl Into<String>,
-    description: Option<&str>,
-    control: impl Into<Element> + GridChildExt + LayoutExt,
-) -> Border {
-    let body = settings_row_body(header, description, control);
-    border(body)
-        .border_thickness(Thickness {
-            left: 0.0,
-            top: 0.0,
-            right: 0.0,
-            bottom: 1.0,
-        })
-        .border_brush(ThemeRef::CardStroke)
-        .padding(Thickness {
-            left: 16.0,
-            top: 12.0,
-            right: 16.0,
-            bottom: 12.0,
-        })
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(key)
-}
-
 /// Standalone settings card: Header + Description on the left, control flush-right.
 ///
 /// Uses Grid `Star | Auto` so the control column stays right-aligned regardless
 /// of label/description length (HStack would pack after the text width).
-///
-/// Do **not** nest these inside an Expander — use [`settings_row`] instead.
 pub fn settings_card(
     key: &str,
     header: impl Into<String>,

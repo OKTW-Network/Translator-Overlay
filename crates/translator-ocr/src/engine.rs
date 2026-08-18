@@ -144,7 +144,7 @@ impl OcrEngine {
             });
         }
 
-        // Reading order + merge multi-line paragraphs into single blocks.
+        // Reading order + merge stacked lines that share column / height / gap.
         let blocks = crate::merge::merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
 
         // Re-apply after merge in case a merge edge case left a single token.
@@ -159,7 +159,7 @@ impl OcrEngine {
 
     /// Run OCR on each crop and offset boxes back into full-frame coordinates.
     ///
-    /// Empty `regions` → whole frame (paragraph rules only). Non-empty regions
+    /// Empty `regions` → whole frame (geometry rules only). Non-empty regions
     /// merge per-crop so independent boxes do not glue together. Whole-region
     /// merge uses the full frame size for thresholds, never the crop size.
     pub async fn recognize_rgba_regions(&self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
