@@ -17,6 +17,7 @@ use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, Rect};
 use crate::{OcrError, models::ModelPaths};
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
+#[derive(Clone)]
 pub struct OcrEngine {
     // OAROCR is not exposed as a public type alias in all versions; use the builder output type.
     inner: Arc<oar_ocr::oarocr::OAROCR>,
@@ -40,27 +41,31 @@ impl std::fmt::Debug for OcrEngine {
 }
 
 impl OcrEngine {
-    /// Point oar-ocr auto-download / cache at our app `models_dir` (portable).
-    pub fn configure_model_home(models_dir: &Path) -> Result<(), OcrError> {
+    /// Ensure `models_dir` exists (portable layout next to the exe).
+    pub fn ensure_models_dir(models_dir: &Path) -> Result<(), OcrError> {
         std::fs::create_dir_all(models_dir).map_err(|e| OcrError::Other(format!("create models dir {}: {e}", models_dir.display())))?;
-        // oar-ocr resolves bare registry names under $OAR_HOME.
-        // SAFETY: process-wide env used only for OCR model cache root.
-        unsafe {
-            std::env::set_var("OAR_HOME", models_dir);
-        }
         Ok(())
     }
 
-    /// Load ONNX models via oar-ocr.
+    /// Load ONNX models from local paths under `models_dir`.
     ///
-    /// Uses full paths when files already exist under `models_dir`. Otherwise
-    /// passes bare registry names so oar-ocr can auto-download into `OAR_HOME`.
+    /// Prefer [`Self::start_load`] when files may still need downloading.
+    /// This only opens existing files that already match the expected sizes.
     pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
-        Self::configure_model_home(&models_dir)?;
+        Self::ensure_models_dir(&models_dir)?;
 
         let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
-        let (det, rec, dict) = model_source_args(&paths);
+        if !paths.all_present() {
+            return Err(OcrError::Other(format!(
+                "OCR models missing or wrong size under {} (run ensure_models first)",
+                models_dir.display()
+            )));
+        }
+
+        let det = paths.det.to_string_lossy().into_owned();
+        let rec = paths.rec.to_string_lossy().into_owned();
+        let dict = paths.dict.to_string_lossy().into_owned();
         let ort = OrtSessionConfig::new().with_execution_providers(default_execution_providers());
 
         let inner = tokio::task::spawn_blocking(move || {
@@ -220,38 +225,6 @@ impl OcrEngine {
 fn default_execution_providers() -> Vec<OrtExecutionProvider> {
     // Prefer DirectML GPU on Windows; always fall back to CPU.
     vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]
-}
-
-fn model_source_args(paths: &ModelPaths) -> (String, String, String) {
-    if paths.all_present() {
-        return (
-            paths.det.to_string_lossy().into_owned(),
-            paths.rec.to_string_lossy().into_owned(),
-            paths.dict.to_string_lossy().into_owned(),
-        );
-    }
-
-    // Bare registry names: oar-ocr auto-download into $OAR_HOME (= models_dir).
-    (
-        paths
-            .det
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("pp-ocrv6_small_det.onnx")
-            .to_string(),
-        paths
-            .rec
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("pp-ocrv6_small_rec.onnx")
-            .to_string(),
-        paths
-            .dict
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("ppocrv6_dict.txt")
-            .to_string(),
-    )
 }
 
 fn aabb_to_rect(bb: &BoundingBox) -> Rect {

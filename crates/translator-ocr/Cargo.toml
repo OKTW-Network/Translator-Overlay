@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 image = { workspace = true }
-oar-ocr = { version = "0.9", features = ["auto-download", "directml"] }
+oar-ocr = { version = "0.9", features = ["directml"] }
+reqwest = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

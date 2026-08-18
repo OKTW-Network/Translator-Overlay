@@ -23,7 +23,15 @@ pub enum PipelineStatus {
     WaitingForStable {
         elapsed_ms: u64,
     },
-    /// OCR engine load (may block while oar-ocr fetches models).
+    /// App-owned model download (GitHub → `models_dir`); UI stays operable.
+    DownloadingModels {
+        file: String,
+        /// 1-based index among files being fetched this run.
+        file_index: u32,
+        file_count: u32,
+        percent: u8,
+    },
+    /// Building the ONNX Runtime session after files are on disk.
     LoadingModels,
     Translating,
     /// Auto-retry after a transient translate API / network / CLI error.
@@ -52,6 +60,12 @@ impl PipelineStatus {
             Self::WaitingForStable { elapsed_ms } => {
                 format!("Waiting for stable text ({elapsed_ms} ms)")
             }
+            Self::DownloadingModels {
+                file,
+                file_index,
+                file_count,
+                percent,
+            } => format!("Downloading OCR models ({file_index}/{file_count} · {file} · {percent}%)"),
             Self::LoadingModels => "Loading OCR models".to_string(),
             Self::Translating => "Translating".to_string(),
             Self::RetryingTranslate { attempt, max_retries, .. } => {
@@ -72,10 +86,8 @@ impl PipelineStatus {
     }
 
     pub fn is_busy(&self) -> bool {
-        matches!(
-            self,
-            Self::RunningOcr | Self::Translating | Self::RetryingTranslate { .. } | Self::LoadingModels | Self::WaitingForStable { .. }
-        )
+        // Download / ORT load are informational — do not lock the UI.
+        matches!(self, Self::RunningOcr | Self::Translating | Self::RetryingTranslate { .. } | Self::WaitingForStable { .. })
     }
 }
 
@@ -101,6 +113,19 @@ mod tests {
         assert!(PipelineStatus::Translating.is_translating());
         assert!(PipelineStatus::Translating.is_busy());
         assert!(!PipelineStatus::Capturing.is_translating());
+    }
+
+    #[test]
+    fn download_and_load_are_not_busy() {
+        let downloading = PipelineStatus::DownloadingModels {
+            file: "pp-ocrv6_small_det.onnx".into(),
+            file_index: 1,
+            file_count: 3,
+            percent: 42,
+        };
+        assert_eq!(downloading.label(), "Downloading OCR models (1/3 · pp-ocrv6_small_det.onnx · 42%)");
+        assert!(!downloading.is_busy());
+        assert!(!PipelineStatus::LoadingModels.is_busy());
     }
 }
 

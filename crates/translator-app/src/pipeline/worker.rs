@@ -6,12 +6,12 @@ use std::{
 };
 
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use translator_capture::CaptureSession;
+use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
-use translator_ocr::{BlockPersistenceFilter, OcrEngine, OcrFingerprint, StabilityGate};
+use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{OverlayController, OverlayEvent};
 use translator_translate::{Conversation, TranslateClient, TranslateError, TranslationCache};
 
@@ -55,6 +55,12 @@ pub(crate) struct InflightTranslate {
     pub cached_hits: Vec<Option<String>>,
 }
 
+/// Background OCR model download + ORT session build (`watch` = latest phase only).
+pub(crate) struct InflightModelLoad {
+    pub rx: watch::Receiver<ModelLoadUpdate>,
+    pub tier: ModelTier,
+}
+
 #[derive(Clone)]
 pub(crate) struct PendingPage {
     pub blocks: Vec<OcrBlock>,
@@ -77,6 +83,7 @@ pub(crate) struct Pipeline {
     pub last_translated_fp: Option<OcrFingerprint>,
     pub last_page: Option<PendingPage>,
     pub inflight: Option<InflightTranslate>,
+    pub model_load: Option<InflightModelLoad>,
     pub ocr_tier: ModelTier,
     /// Wall-clock: raw OCR first went empty (may still have hysteresis tracks).
     pub raw_empty_since: Option<Instant>,
@@ -124,6 +131,7 @@ impl Pipeline {
             last_translated_fp: None,
             last_page: None,
             inflight: None,
+            model_load: None,
             ocr_tier,
             raw_empty_since: None,
             raw_content_since: None,
@@ -131,17 +139,8 @@ impl Pipeline {
             overlay,
         };
 
-        // Load OCR engine on start (oar-ocr may auto-download missing models).
-        let cfg = pipeline.state.read().config.ocr.clone();
-        pipeline.state.write().status = PipelineStatus::LoadingModels;
-        match OcrEngine::load(&cfg).await {
-            Ok(e) => pipeline.engine = Some(e),
-            Err(e) => {
-                error!(error = %e, "initial model load failed");
-                pipeline.state.write().set_error(format!("models: {e}"));
-            }
-        }
-
+        // Kick off download + load without blocking the command loop / UI.
+        pipeline.start_model_load();
         pipeline
     }
 
@@ -155,7 +154,7 @@ impl Pipeline {
 
             self.drive_capture().await;
             let wait = self.next_wait();
-            match next_event(&mut rx, self.inflight.as_mut(), self.overlay.as_mut(), wait).await {
+            match next_event(&mut rx, self.inflight.as_mut(), self.model_load.as_mut(), self.overlay.as_mut(), wait).await {
                 PipelineEvent::Command(None) => return,
                 PipelineEvent::Command(Some(cmd)) => {
                     if self.handle_command(cmd).await {
@@ -170,6 +169,7 @@ impl Pipeline {
                     });
                     self.finish_translate(job, job_result);
                 }
+                PipelineEvent::ModelLoad => self.sync_model_load(),
                 PipelineEvent::Overlay(None) => {
                     warn!("overlay host event channel closed");
                     self.overlay = None;
@@ -199,6 +199,7 @@ impl Pipeline {
         match cmd {
             PipelineCommand::Shutdown => {
                 self.cancel_inflight();
+                self.model_load = None;
                 self.session.stop();
                 if let Some(mut o) = self.overlay.take() {
                     let _ = o.clear();
@@ -260,13 +261,20 @@ impl Pipeline {
                 self.apply_ocr_regions(regions);
             }
             PipelineCommand::StartCapture { hwnd, title } => {
-                let interval = self.state.read().config.capture.min_interval_ms;
-                self.cancel_inflight();
-                match self.session.start_window(hwnd, title, interval) {
-                    Ok(()) => self.on_capture_started(),
-                    Err(e) => {
-                        error!(error = %e, "start capture failed");
-                        self.state.write().set_error(e.to_string());
+                if self.model_load.is_some() {
+                    warn!("start capture ignored — OCR models still loading");
+                    self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+                } else if self.engine.is_none() {
+                    self.state.write().set_error("OCR engine is not ready".to_string());
+                } else {
+                    let interval = self.state.read().config.capture.min_interval_ms;
+                    self.cancel_inflight();
+                    match self.session.start_window(hwnd, title, interval) {
+                        Ok(()) => self.on_capture_started(),
+                        Err(e) => {
+                            error!(error = %e, "start capture failed");
+                            self.state.write().set_error(e.to_string());
+                        }
                     }
                 }
             }
@@ -276,14 +284,18 @@ impl Pipeline {
                 self.client.reset_session();
                 self.last_translated_fp = None;
                 info!("LLM conversation reset");
-                self.state.write().restore_operational_status();
+                // Leave Downloading/Loading alone while models are still loading.
+                if self.model_load.is_none() {
+                    self.state.write().restore_operational_status();
+                }
             }
             PipelineCommand::ClearTranslationCache => {
                 self.translation_cache.clear();
-                let mut s = self.state.write();
-                s.translation_cache_len = 0;
+                self.state.write().translation_cache_len = 0;
                 info!("translation cache cleared");
-                s.restore_operational_status();
+                if self.model_load.is_none() {
+                    self.state.write().restore_operational_status();
+                }
             }
         }
         false
@@ -399,12 +411,26 @@ impl Pipeline {
         s.translate_in_flight = false;
     }
 
+    pub(crate) fn update_preview(&self, frame: &CapturedFrame) {
+        let mut s = self.state.write();
+        s.frame_count = frame.sequence;
+        s.preview.width = frame.width;
+        s.preview.height = frame.height;
+        s.preview.sequence = frame.sequence;
+        s.preview.rgba = Some(frame.rgba.clone());
+    }
+
     async fn manual_capture(&mut self) {
         if self.inflight.is_some() {
             warn!("manual capture ignored — translation in flight (cancel first)");
             return;
         }
-        if !self.ensure_engine().await {
+        if self.model_load.is_some() {
+            warn!("manual capture ignored — OCR models still loading");
+            self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+            return;
+        }
+        if !self.ensure_engine() {
             return;
         }
 
@@ -436,10 +462,16 @@ impl Pipeline {
         if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
             if self.engine.is_none() {
+                // Do not auto-retry after a failed load — wait for ApplyConfig / tier change.
+                let load_failed = matches!(self.state.read().status, PipelineStatus::Error { .. });
+                if !load_failed {
+                    let _ = self.ensure_engine();
+                }
                 let mut s = self.state.write();
                 if !matches!(
                     s.status,
                     PipelineStatus::Error { .. }
+                        | PipelineStatus::DownloadingModels { .. }
                         | PipelineStatus::LoadingModels
                         | PipelineStatus::Translating
                         | PipelineStatus::RetryingTranslate { .. }
@@ -460,6 +492,7 @@ impl Pipeline {
 enum PipelineEvent {
     Command(Option<PipelineCommand>),
     Translate(Result<TranslateJobResult, oneshot::error::RecvError>),
+    ModelLoad,
     Overlay(Option<OverlayEvent>),
     Tick,
 }
@@ -467,6 +500,7 @@ enum PipelineEvent {
 async fn next_event(
     rx: &mut CmdRx,
     inflight: Option<&mut InflightTranslate>,
+    model_load: Option<&mut InflightModelLoad>,
     overlay: Option<&mut OverlayController>,
     wait: Option<Duration>,
 ) -> PipelineEvent {
@@ -477,20 +511,42 @@ async fn next_event(
         }
     };
 
-    if let Some(job) = inflight {
-        tokio::select! {
-            biased;
-            cmd = rx.recv() => PipelineEvent::Command(cmd),
-            result = &mut job.rx => PipelineEvent::Translate(result),
-            ev = overlay_event => PipelineEvent::Overlay(ev),
-            () = sleep_or_pending(wait) => PipelineEvent::Tick,
+    match (inflight, model_load) {
+        (Some(job), Some(model)) => {
+            tokio::select! {
+                biased;
+                cmd = rx.recv() => PipelineEvent::Command(cmd),
+                result = &mut job.rx => PipelineEvent::Translate(result),
+                _ = model.rx.changed() => PipelineEvent::ModelLoad,
+                ev = overlay_event => PipelineEvent::Overlay(ev),
+                () = sleep_or_pending(wait) => PipelineEvent::Tick,
+            }
         }
-    } else {
-        tokio::select! {
-            biased;
-            cmd = rx.recv() => PipelineEvent::Command(cmd),
-            ev = overlay_event => PipelineEvent::Overlay(ev),
-            () = sleep_or_pending(wait) => PipelineEvent::Tick,
+        (Some(job), None) => {
+            tokio::select! {
+                biased;
+                cmd = rx.recv() => PipelineEvent::Command(cmd),
+                result = &mut job.rx => PipelineEvent::Translate(result),
+                ev = overlay_event => PipelineEvent::Overlay(ev),
+                () = sleep_or_pending(wait) => PipelineEvent::Tick,
+            }
+        }
+        (None, Some(model)) => {
+            tokio::select! {
+                biased;
+                cmd = rx.recv() => PipelineEvent::Command(cmd),
+                _ = model.rx.changed() => PipelineEvent::ModelLoad,
+                ev = overlay_event => PipelineEvent::Overlay(ev),
+                () = sleep_or_pending(wait) => PipelineEvent::Tick,
+            }
+        }
+        (None, None) => {
+            tokio::select! {
+                biased;
+                cmd = rx.recv() => PipelineEvent::Command(cmd),
+                ev = overlay_event => PipelineEvent::Overlay(ev),
+                () = sleep_or_pending(wait) => PipelineEvent::Tick,
+            }
         }
     }
 }

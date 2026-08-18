@@ -1,17 +1,27 @@
-//! PP-OCRv6 ONNX registry names for `oar-ocr` (GreatV/oar-ocr).
+//! PP-OCRv6 ONNX artifacts (file names + GitHub release sizes/URLs).
 //!
-//! File names match the oar-ocr model registry. Missing files are fetched by
-//! oar-ocr `auto-download` into `$OAR_HOME` (app sets this to `models_dir`).
+//! Missing or wrong-sized files are fetched by the app into `models_dir`
+//! (see [`crate::download`]). `oar-ocr` loads only local absolute paths.
 
 use std::path::{Path, PathBuf};
 
 use translator_core::ModelTier;
+
+const RELEASE_BASE: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0";
 
 /// One file required for a given model tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelArtifact {
     pub role: ModelRole,
     pub file_name: &'static str,
+    /// Exact byte length from the GreatV/oar-ocr v0.7.0 GitHub release.
+    pub expected_bytes: u64,
+}
+
+impl ModelArtifact {
+    pub fn download_url(&self) -> String {
+        format!("{RELEASE_BASE}/{}", self.file_name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,14 +60,17 @@ const TINY: &[ModelArtifact] = &[
     ModelArtifact {
         role: ModelRole::Detection,
         file_name: "pp-ocrv6_tiny_det.onnx",
+        expected_bytes: 1_780_590,
     },
     ModelArtifact {
         role: ModelRole::Recognition,
         file_name: "pp-ocrv6_tiny_rec.onnx",
+        expected_bytes: 4_462_639,
     },
     ModelArtifact {
         role: ModelRole::Dictionary,
         file_name: "ppocrv6_tiny_dict.txt",
+        expected_bytes: 27_156,
     },
 ];
 
@@ -65,14 +78,17 @@ const SMALL: &[ModelArtifact] = &[
     ModelArtifact {
         role: ModelRole::Detection,
         file_name: "pp-ocrv6_small_det.onnx",
+        expected_bytes: 9_880_512,
     },
     ModelArtifact {
         role: ModelRole::Recognition,
         file_name: "pp-ocrv6_small_rec.onnx",
+        expected_bytes: 21_159_378,
     },
     ModelArtifact {
         role: ModelRole::Dictionary,
         file_name: "ppocrv6_dict.txt",
+        expected_bytes: 74_947,
     },
 ];
 
@@ -80,21 +96,25 @@ const MEDIUM: &[ModelArtifact] = &[
     ModelArtifact {
         role: ModelRole::Detection,
         file_name: "pp-ocrv6_medium_det.onnx",
+        expected_bytes: 62_032_837,
     },
     ModelArtifact {
         role: ModelRole::Recognition,
         file_name: "pp-ocrv6_medium_rec.onnx",
+        expected_bytes: 76_554_979,
     },
     ModelArtifact {
         role: ModelRole::Dictionary,
         // Small and medium recognition share the same character dictionary.
         file_name: "ppocrv6_dict.txt",
+        expected_bytes: 74_947,
     },
 ];
 
 /// Resolved local paths for a tier under `models_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPaths {
+    pub tier: ModelTier,
     pub det: PathBuf,
     pub rec: PathBuf,
     pub dict: PathBuf,
@@ -114,11 +134,30 @@ impl ModelPaths {
                 ModelRole::Dictionary => dict = p,
             }
         }
-        Self { det, rec, dict }
+        Self { tier, det, rec, dict }
     }
 
+    /// True when every artifact exists and matches its expected byte length.
     pub fn all_present(&self) -> bool {
-        self.det.is_file() && self.rec.is_file() && self.dict.is_file()
+        for a in artifacts_for_tier(self.tier) {
+            let path = match a.role {
+                ModelRole::Detection => &self.det,
+                ModelRole::Recognition => &self.rec,
+                ModelRole::Dictionary => &self.dict,
+            };
+            if !file_has_expected_size(path, a.expected_bytes) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Whether `path` is a regular file whose length equals `expected_bytes`.
+pub fn file_has_expected_size(path: &Path, expected_bytes: u64) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.len() == expected_bytes,
+        Err(_) => false,
     }
 }
 
@@ -144,16 +183,27 @@ mod tests {
         let small = ModelPaths::from_dir(Path::new("models"), ModelTier::Small);
         let medium = ModelPaths::from_dir(Path::new("models"), ModelTier::Medium);
         assert_eq!(small.dict.file_name(), medium.dict.file_name(), "small/medium share ppocrv6_dict.txt");
+        assert_eq!(artifacts_for_tier(ModelTier::Small)[2].expected_bytes, artifacts_for_tier(ModelTier::Medium)[2].expected_bytes);
     }
 
     #[test]
-    fn all_tiers_have_registry_names() {
+    fn all_tiers_have_registry_names_and_sizes() {
         for tier in [ModelTier::Tiny, ModelTier::Small, ModelTier::Medium] {
             assert_eq!(artifacts_for_tier(tier).len(), 3, "{tier}");
             let (det, rec, dict) = registry_names(tier);
             assert!(det.ends_with(".onnx"), "{tier} det");
             assert!(rec.ends_with(".onnx"), "{tier} rec");
             assert!(dict.ends_with(".txt"), "{tier} dict");
+            for a in artifacts_for_tier(tier) {
+                assert!(a.expected_bytes > 0, "{tier} {}", a.file_name);
+                assert!(a.download_url().starts_with(RELEASE_BASE));
+            }
         }
+    }
+
+    #[test]
+    fn missing_file_is_not_present() {
+        let paths = ModelPaths::from_dir(Path::new("definitely-missing-models-dir"), ModelTier::Tiny);
+        assert!(!paths.all_present());
     }
 }

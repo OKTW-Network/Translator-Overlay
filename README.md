@@ -77,7 +77,7 @@ cargo build --release -p translator-app
    - 翻譯進行中可取消；失敗可 **Retry**
    - 可重置對話歷史
 
-首次載入 OCR 時，若 `models/` 缺少對應 ONNX，會自動下載到 `models_dir`（預設 `models/`）。
+首次載入 OCR 時，若 `models/` 缺少對應 ONNX（或檔案大小不符），程式會在背景從 GitHub Releases 下載到 `models_dir`（預設 `models/`），狀態列會顯示進度；下載／載入完成前無法開始擷取，其餘 UI 仍可操作。
 
 ## 設定（`config.toml`）
 
