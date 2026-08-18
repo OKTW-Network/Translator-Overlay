@@ -8,8 +8,8 @@ use windows::Win32::{
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         WindowsAndMessaging::{
-            EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, OBJID_WINDOW,
-            PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WM_APP,
+            EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, OBJID_WINDOW, PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WM_APP,
         },
     },
 };
@@ -36,7 +36,7 @@ fn is_follow_target(hwnd: HWND) -> bool {
     target != 0 && hwnd.0 as isize == target
 }
 
-pub(crate) fn install_follow_hooks() -> [HWINEVENTHOOK; 3] {
+pub(crate) fn install_follow_hooks() -> [HWINEVENTHOOK; 4] {
     let foreground = unsafe {
         SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT)
     };
@@ -46,13 +46,15 @@ pub(crate) fn install_follow_hooks() -> [HWINEVENTHOOK; 3] {
     let location = unsafe {
         SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT)
     };
-    if foreground.is_invalid() || minimize.is_invalid() || location.is_invalid() {
+    let lifecycle =
+        unsafe { SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, None, Some(on_follow_event), 0, 0, WINEVENT_OUTOFCONTEXT) };
+    if foreground.is_invalid() || minimize.is_invalid() || location.is_invalid() || lifecycle.is_invalid() {
         warn!("overlay follow WinEvent hooks failed to install");
     }
-    [foreground, minimize, location]
+    [foreground, minimize, location, lifecycle]
 }
 
-pub(crate) fn uninstall_follow_hooks(hooks: &mut [HWINEVENTHOOK; 3]) {
+pub(crate) fn uninstall_follow_hooks(hooks: &mut [HWINEVENTHOOK; 4]) {
     for hook in hooks {
         if !hook.is_invalid() {
             let _ = unsafe { UnhookWinEvent(*hook) };
@@ -74,6 +76,9 @@ unsafe extern "system" fn on_follow_event(
         EVENT_SYSTEM_FOREGROUND => request_follow_sync(),
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND if is_follow_target(hwnd) => request_follow_sync(),
         EVENT_OBJECT_LOCATIONCHANGE if id_object == OBJID_WINDOW.0 && is_follow_target(hwnd) => request_follow_sync(),
+        EVENT_OBJECT_DESTROY | EVENT_OBJECT_SHOW | EVENT_OBJECT_HIDE if id_object == OBJID_WINDOW.0 && is_follow_target(hwnd) => {
+            request_follow_sync();
+        }
         _ => {}
     }
 }

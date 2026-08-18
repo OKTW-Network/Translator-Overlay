@@ -73,7 +73,7 @@ fn watch_rasterization_scale(bump: Updater<u32>) -> impl Fn(windows_reactor::Ima
 /// D2D `create_bitmap_with_alpha` expects premultiplied BGRA8.
 fn rgba_to_premul_bgra(rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let r = u16::from(px[0]);
         let g = u16::from(px[1]);
         let b = u16::from(px[2]);

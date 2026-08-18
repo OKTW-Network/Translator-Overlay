@@ -221,13 +221,9 @@ impl RegionPicker {
         self.client_h = h;
     }
 
-    /// Drop an in-progress drag without committing a new box (focus lost / hide).
+    /// Drop an in-progress drag without committing a new box when the target hides.
     pub fn cancel_drag(&mut self) {
         self.drag = None;
-    }
-
-    pub fn is_dragging(&self) -> bool {
-        self.drag.is_some()
     }
 
     pub fn hit_test(&self, px: i32, py: i32) -> Hit {
@@ -512,9 +508,8 @@ mod tests {
         let mut p = picker_with(&[]);
         p.on_left_down(20, 50);
         p.on_move(80, 110);
-        assert!(p.is_dragging());
+        assert!(p.rubber_band().is_some());
         p.cancel_drag();
-        assert!(!p.is_dragging());
         assert!(p.rubber_band().is_none());
         assert!(matches!(p.on_left_up(80, 110), PickerAction::None));
         assert!(p.regions.is_empty());

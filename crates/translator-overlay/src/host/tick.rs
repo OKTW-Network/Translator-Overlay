@@ -1,18 +1,18 @@
-//! Overlay visibility: follow target, hide when unfocused, present.
+//! Overlay visibility: follow the target, mirror its Z-order, and present.
+
+use std::sync::atomic::Ordering;
 
 use tracing::{debug, warn};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::ReleaseCapture,
-    WindowsAndMessaging::{
-        GetForegroundWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_HIDEWINDOW,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
-    },
+    WindowsAndMessaging::{IsIconic, IsWindow, IsWindowVisible, SW_HIDE, ShowWindow},
 };
 
 use crate::{
     host::{
         OverlayHost,
-        win32::{client_screen_rect, is_picker_allowed_foreground, is_target_in_foreground},
+        follow::FOLLOW_TARGET,
+        win32::{client_screen_rect, place_overlay_above_target},
     },
     picker::PickerEnd,
 };
@@ -36,6 +36,7 @@ impl OverlayHost {
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
             debug!("target window gone — detaching overlay");
             self.target = None;
+            FOLLOW_TARGET.store(0, Ordering::Release);
             self.hide();
             return;
         }
@@ -44,16 +45,9 @@ impl OverlayHost {
             return;
         }
 
-        // Only show while the capture target (or one of its children) is
-        // the foreground window.
-        let fg = unsafe { GetForegroundWindow() };
-        if !is_target_in_foreground(target, fg) {
-            self.hide();
-            return;
-        }
-
         // Align to **client area** (matches cropped capture frames).
         let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
+            self.hide();
             return;
         };
 
@@ -81,9 +75,10 @@ impl OverlayHost {
             self.dirty = false;
         }
 
-        // TOPMOST only while target is focused — otherwise other apps get covered.
-        let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
-        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        if let Err(e) = place_overlay_above_target(self.hwnd, target, x, y, client_w, client_h) {
+            warn!(error = %e, "overlay Z-order update failed");
+            return;
+        }
 
         if let Err(e) = self.present_to_client(x, y, client_w, client_h) {
             warn!(error = %e, "UpdateLayeredWindow failed");
@@ -99,6 +94,7 @@ impl OverlayHost {
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
             debug!("target window gone — cancelling region picker");
             self.target = None;
+            FOLLOW_TARGET.store(0, Ordering::Release);
             self.finish_picker(PickerEnd::Cancel);
             return;
         }
@@ -108,21 +104,9 @@ impl OverlayHost {
             return;
         }
 
-        // Same rule as the translation overlay: only cover the target
-        // while it (or a child) is the foreground window. The picker
-        // itself must also count — a clickable TOPMOST layer often
-        // becomes GetForegroundWindow despite WS_EX_NOACTIVATE, and
-        // hiding on that would abort the drag. Keep picker state so
-        // Dashboard Done/Cancel/Clear still apply after hide.
-        let dragging = self.picker.as_ref().is_some_and(crate::picker::RegionPicker::is_dragging);
-        let fg = unsafe { GetForegroundWindow() };
-        if !is_picker_allowed_foreground(target, self.hwnd, fg) && !dragging {
+        let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
             self.abort_picker_drag();
             self.hide();
-            return;
-        }
-
-        let Some((x, y, client_w, client_h)) = client_screen_rect(target) else {
             return;
         };
 
@@ -138,8 +122,10 @@ impl OverlayHost {
             return;
         }
 
-        let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
-        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        if let Err(e) = place_overlay_above_target(self.hwnd, target, x, y, client_w, client_h) {
+            warn!(error = %e, "picker Z-order update failed");
+            return;
+        }
 
         if let Err(e) = self.present_to_client(x, y, client_w, client_h) {
             warn!(error = %e, "UpdateLayeredWindow failed (picker)");
@@ -147,9 +133,6 @@ impl OverlayHost {
     }
 
     pub(crate) fn hide(&mut self) {
-        // Drop topmost so we never stay above unrelated apps after hide.
-        let _ =
-            unsafe { SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW) };
         let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
     }
 

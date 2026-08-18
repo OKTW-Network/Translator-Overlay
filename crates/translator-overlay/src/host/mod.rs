@@ -58,7 +58,7 @@ pub(crate) struct OverlayHost {
     pub(crate) reader: Option<Box<ReaderWindow>>,
     pub(crate) picker: Option<RegionPicker>,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
-    pub(crate) follow_hooks: [HWINEVENTHOOK; 3],
+    pub(crate) follow_hooks: [HWINEVENTHOOK; 4],
 }
 
 impl OverlayHost {
@@ -82,8 +82,9 @@ impl OverlayHost {
             // Continue — CreateWindowEx will still work if registered.
         }
 
-        // Not TOPMOST: only float above the target while it is in the
-        // foreground; otherwise we hide so other apps are not covered.
+        // Start as a normal top-level window. Each presentation places the
+        // overlay immediately above its target and mirrors the target's
+        // topmost band, so unrelated windows cover both together.
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -147,7 +148,7 @@ impl OverlayHost {
             reader: None,
             picker: None,
             event_tx,
-            follow_hooks: [HWINEVENTHOOK::default(); 3],
+            follow_hooks: [HWINEVENTHOOK::default(); 4],
         };
 
         FOLLOW_THREAD.store(unsafe { GetCurrentThreadId() }, std::sync::atomic::Ordering::Release);

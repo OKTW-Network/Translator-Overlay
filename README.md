@@ -12,7 +12,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **LLM 翻譯**：OpenAI 相容 Chat Completions，或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
 - **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
 - **對話上下文**：多輪歷史壓縮，維持用語一致
-- **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
+- **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框，並固定在目標正上方；其他視窗會同時遮住目標與 overlay
 - **譯文懸浮窗**：無邊框半透明置頂視窗顯示最新譯文（拖曳移動、邊緣縮放），樣式與 overlay 相同，不跟隨遊戲焦點
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay 分頁，設定寫入 `config.toml`
 
@@ -72,7 +72,7 @@ cargo build --release -p translator-app
 4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
 5. **Dashboard**：
    - 選視窗後 **Start** 連續擷取（畫面上直接顯示擷取預覽）
-   - **Select regions**：在目標視窗上拖曳畫多個 OCR 框（可改大小／移動；右鍵刪除該框）。選取層與翻譯 overlay 一樣，只在目標視窗前景時顯示。再按同一顆按鈕套用；**Clear** 回到整窗。框只在本次執行有效。
+   - **Select regions**：按下後會將目標視窗帶到前面，再於目標視窗上拖曳畫多個 OCR 框（可改大小／移動；右鍵刪除該框）。選取期間滑鼠由選取層攔截，不會點擊底下的目標；再按同一顆按鈕套用。**Clear** 回到整窗。框只在本次執行有效。
    - **Once** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
    - 翻譯進行中可取消；失敗可 **Retry**
    - 可重置對話歷史

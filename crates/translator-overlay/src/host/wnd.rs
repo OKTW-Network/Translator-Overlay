@@ -65,15 +65,17 @@ pub(crate) fn set_picker_cursor(kind: PickerCursor) {
     apply_picker_cursor(kind);
 }
 
+fn picker_hit_test(active: bool) -> LRESULT {
+    if active {
+        LRESULT(HTCLIENT as isize)
+    } else {
+        LRESULT(HTTRANSPARENT as isize)
+    }
+}
+
 pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_NCHITTEST => {
-            if PICKER_HIT_TEST.load(Ordering::Relaxed) {
-                LRESULT(HTCLIENT as isize)
-            } else {
-                LRESULT(HTTRANSPARENT as isize)
-            }
-        }
+        WM_NCHITTEST => picker_hit_test(PICKER_HIT_TEST.load(Ordering::Relaxed)),
         WM_SETCURSOR => {
             if PICKER_HIT_TEST.load(Ordering::Relaxed) {
                 apply_picker_cursor(picker_cursor_from_code(PICKER_CURSOR.load(Ordering::Relaxed)));
@@ -82,9 +84,9 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
-        // Picker is WS_EX_NOACTIVATE, but a TOPMOST layered window can
-        // still be activated on click. Refuse activation so the target
-        // stays foreground while the user draws boxes.
+        // Picker is WS_EX_NOACTIVATE, but a layered window can still be
+        // activated on click. Refuse activation while keeping the mouse
+        // message so the picker, not the target, handles the selection.
         WM_MOUSEACTIVATE => {
             if PICKER_HIT_TEST.load(Ordering::Relaxed) {
                 LRESULT(MA_NOACTIVATE as isize)
@@ -97,5 +99,16 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picker_hit_test_blocks_target_only_while_selecting() {
+        assert_eq!(picker_hit_test(true).0, HTCLIENT as isize);
+        assert_eq!(picker_hit_test(false).0, HTTRANSPARENT as isize);
     }
 }

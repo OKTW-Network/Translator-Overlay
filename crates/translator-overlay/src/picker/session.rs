@@ -35,6 +35,14 @@ pub(crate) fn is_picker_message(msg: u32) -> bool {
     matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_RBUTTONUP)
 }
 
+fn click_through_style(raw: u32, through: bool) -> u32 {
+    if through {
+        raw | WS_EX_TRANSPARENT.0
+    } else {
+        raw & !WS_EX_TRANSPARENT.0
+    }
+}
+
 fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
     let v = lparam.0 as u32;
     let x = (v & 0xFFFF) as i16 as i32;
@@ -84,12 +92,7 @@ impl OverlayHost {
 
     fn set_click_through(&self, through: bool) {
         let raw = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32;
-        let mut style = WINDOW_EX_STYLE(raw);
-        if through {
-            style |= WS_EX_TRANSPARENT;
-        } else {
-            style &= !WS_EX_TRANSPARENT;
-        }
+        let style = WINDOW_EX_STYLE(click_through_style(raw, through));
         unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style.0 as isize) };
         let _ = unsafe {
             SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)
@@ -136,5 +139,29 @@ impl OverlayHost {
                 self.dirty = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
+
+    use super::*;
+
+    #[test]
+    fn picker_mode_disables_and_restores_click_through() {
+        let base = 0x1000;
+        let normal = click_through_style(base, true);
+        assert_ne!(normal & WS_EX_TRANSPARENT.0, 0);
+        assert_eq!(click_through_style(normal, false) & WS_EX_TRANSPARENT.0, 0);
+        assert_eq!(click_through_style(normal, false) & base, base);
+    }
+
+    #[test]
+    fn picker_mouse_messages_are_all_intercepted() {
+        for message in [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP] {
+            assert!(is_picker_message(message));
+        }
+        assert!(!is_picker_message(WM_KEYDOWN));
     }
 }
