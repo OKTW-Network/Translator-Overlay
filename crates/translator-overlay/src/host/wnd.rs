@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
         UI::WindowsAndMessaging::{
             DefWindowProcW, HTCLIENT, HTTRANSPARENT, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-            LoadCursorW, MA_NOACTIVATE, PostQuitMessage, SetCursor, WM_DESTROY, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR,
+            LoadCursorW, MA_NOACTIVATE, PostQuitMessage, SetCursor, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT,
+            WM_SETCURSOR,
         },
     },
     core::{PCWSTR, w},
@@ -91,6 +93,15 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
             } else {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+            if !hdc.is_invalid() {
+                let _ = unsafe { EndPaint(hwnd, &ps) };
+            }
+            LRESULT(0)
         }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };

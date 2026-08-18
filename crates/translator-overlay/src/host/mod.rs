@@ -18,8 +18,8 @@ use windows::{
         UI::{
             Accessibility::HWINEVENTHOOK,
             WindowsAndMessaging::{
-                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, LoadCursorW, RegisterClassExW, SW_HIDE, ShowWindow,
-                UnregisterClassW, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                CW_USEDEFAULT, CreateWindowExW, DestroyWindow, LoadCursorW, RegisterClassExW, SW_HIDE, ShowWindow, UnregisterClassW,
+                WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -51,6 +51,8 @@ pub(crate) struct OverlayHost {
     pub(crate) surface_w: i32,
     pub(crate) surface_h: i32,
     pub(crate) dirty: bool,
+    /// Last `UpdateLayeredWindow` destination; `None` forces stretch + present.
+    pub(crate) last_present: Option<(i32, i32, i32, i32)>,
     pub(crate) surface: DibSurface,
     pub(crate) present: DibSurface,
     pub(crate) hfont: HFONT,
@@ -67,7 +69,8 @@ impl OverlayHost {
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW,
+            // Layered pixels come from UpdateLayeredWindow only.
+            style: Default::default(),
             lpfnWndProc: Some(overlay_wnd_proc),
             hInstance: hinstance.into(),
             hCursor: unsafe { LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_ARROW) }
@@ -140,6 +143,7 @@ impl OverlayHost {
             surface_w: 0,
             surface_h: 0,
             dirty: true,
+            last_present: None,
             surface,
             present,
             hfont,
@@ -169,9 +173,12 @@ impl OverlayHost {
             OverlayCommand::Attach { target_hwnd } => {
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool() {
+                    let same = self.target == Some(hwnd);
                     self.target = Some(hwnd);
                     FOLLOW_TARGET.store(target_hwnd, std::sync::atomic::Ordering::Release);
-                    self.dirty = true;
+                    if !same {
+                        self.dirty = true;
+                    }
                     debug!(?target_hwnd, "overlay attached");
                 } else {
                     warn!(?target_hwnd, "attach ignored — invalid hwnd");
@@ -248,14 +255,28 @@ impl OverlayHost {
         }
     }
 
+    /// Present at screen `x,y` sized to the live client rect.
+    ///
+    /// Pure moves reuse the last stretch and only reposition via
+    /// `UpdateLayeredWindow` — `SetWindowPos` move/size blanks the layer.
     pub(crate) fn present_to_client(&mut self, x: i32, y: i32, client_w: i32, client_h: i32) -> Result<(), OverlayError> {
-        let (bw, bh) = self.surface.size();
-        if bw == client_w && bh == client_h {
-            self.surface.present(self.hwnd, x, y, client_w, client_h)
-        } else {
-            self.surface.stretch_into(&mut self.present, client_w, client_h)?;
-            self.present.present(self.hwnd, x, y, client_w, client_h)
+        if self.last_present == Some((x, y, client_w, client_h)) {
+            return Ok(());
         }
+
+        let (bw, bh) = self.surface.size();
+        let size_changed = self.last_present.is_none_or(|(_, _, pw, ph)| pw != client_w || ph != client_h);
+
+        if bw == client_w && bh == client_h {
+            self.surface.present(self.hwnd, x, y, client_w, client_h)?;
+        } else {
+            if size_changed {
+                self.surface.stretch_into(&mut self.present, client_w, client_h)?;
+            }
+            self.present.present(self.hwnd, x, y, client_w, client_h)?;
+        }
+        self.last_present = Some((x, y, client_w, client_h));
+        Ok(())
     }
 
     pub(crate) fn teardown(&mut self) {

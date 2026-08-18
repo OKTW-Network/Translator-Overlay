@@ -3363,6 +3363,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "translator-capture",
  "translator-core",
  "windows",
 ]

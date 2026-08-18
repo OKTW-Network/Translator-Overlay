@@ -8,7 +8,7 @@ use bytes::Bytes;
 use thiserror::Error;
 use windows_capture::window::Window;
 
-pub use crate::session::CaptureSession;
+pub use crate::{client_area::client_screen_rect, session::CaptureSession};
 
 #[derive(Debug, Error)]
 pub enum CaptureError {

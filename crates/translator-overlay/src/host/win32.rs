@@ -1,9 +1,9 @@
 //! Target client geometry and foreground tests.
 
+use translator_capture::client_screen_rect as capture_client_rect;
 use windows::Win32::{
-    Foundation::{HWND, POINT, RECT},
-    Graphics::Gdi::ClientToScreen,
-    UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, GetClientRect, IsChild},
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsChild},
 };
 
 /// True when the picker may stay visible: target focused, or the picker
@@ -32,24 +32,6 @@ pub(crate) fn is_target_in_foreground(target: HWND, fg: HWND) -> bool {
     !fg_root.is_invalid() && fg_root == target
 }
 
-/// Client-area rectangle in screen coordinates (left, top, width, height).
 pub(crate) fn client_screen_rect(target: HWND) -> Option<(i32, i32, i32, i32)> {
-    let mut client = RECT::default();
-    if unsafe { GetClientRect(target, &mut client) }.is_err() {
-        return None;
-    }
-    let mut tl = POINT {
-        x: client.left,
-        y: client.top,
-    };
-    let mut br = POINT {
-        x: client.right,
-        y: client.bottom,
-    };
-    if !unsafe { ClientToScreen(target, &mut tl) }.as_bool() || !unsafe { ClientToScreen(target, &mut br) }.as_bool() {
-        return None;
-    }
-    let w = (br.x - tl.x).max(1);
-    let h = (br.y - tl.y).max(1);
-    Some((tl.x, tl.y, w, h))
+    capture_client_rect(target.0 as isize)
 }

@@ -4,8 +4,8 @@ use tracing::{debug, warn};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::ReleaseCapture,
     WindowsAndMessaging::{
-        GetForegroundWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_HIDEWINDOW,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
+        GetForegroundWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
     },
 };
 
@@ -79,11 +79,12 @@ impl OverlayHost {
                 return;
             }
             self.dirty = false;
+            self.last_present = None;
         }
 
-        // TOPMOST only while target is focused — otherwise other apps get covered.
-        let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
-        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        // TOPMOST without move/size — position comes from UpdateLayeredWindow.
+        let _ =
+            unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) };
 
         if let Err(e) = self.present_to_client(x, y, client_w, client_h) {
             warn!(error = %e, "UpdateLayeredWindow failed");
@@ -137,9 +138,10 @@ impl OverlayHost {
             warn!(error = %e, "picker repaint failed");
             return;
         }
+        self.last_present = None;
 
-        let _ = unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, client_w, client_h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
-        let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+        let _ =
+            unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) };
 
         if let Err(e) = self.present_to_client(x, y, client_w, client_h) {
             warn!(error = %e, "UpdateLayeredWindow failed (picker)");
@@ -147,6 +149,7 @@ impl OverlayHost {
     }
 
     pub(crate) fn hide(&mut self) {
+        self.last_present = None;
         // Drop topmost so we never stay above unrelated apps after hide.
         let _ =
             unsafe { SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW) };
