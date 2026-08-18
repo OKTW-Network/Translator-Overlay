@@ -32,7 +32,8 @@ use crate::{
     error::OverlayError,
     gfx::{surface::DibSurface, text},
     host::{
-        follow::{FOLLOW_SYNC, FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
+        follow::{FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
+        win32::ClientRect,
         wnd::{CLASS_NAME, overlay_wnd_proc},
     },
     picker::{PickerEnd, RegionPicker},
@@ -58,7 +59,8 @@ pub(crate) struct OverlayHost {
     pub(crate) reader: Option<Box<ReaderWindow>>,
     pub(crate) picker: Option<RegionPicker>,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
-    pub(crate) follow_hooks: [HWINEVENTHOOK; 4],
+    pub(crate) presented_rect: Option<ClientRect>,
+    pub(crate) follow_hooks: [HWINEVENTHOOK; 5],
 }
 
 impl OverlayHost {
@@ -148,7 +150,8 @@ impl OverlayHost {
             reader: None,
             picker: None,
             event_tx,
-            follow_hooks: [HWINEVENTHOOK::default(); 4],
+            presented_rect: None,
+            follow_hooks: [HWINEVENTHOOK::default(); 5],
         };
 
         FOLLOW_THREAD.store(unsafe { GetCurrentThreadId() }, std::sync::atomic::Ordering::Release);
@@ -168,6 +171,7 @@ impl OverlayHost {
     pub(crate) fn handle(&mut self, cmd: OverlayCommand) {
         match cmd {
             OverlayCommand::Attach { target_hwnd } => {
+                self.presented_rect = None;
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
@@ -178,6 +182,7 @@ impl OverlayHost {
                     warn!(?target_hwnd, "attach ignored — invalid hwnd");
                     self.target = None;
                     FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+                    self.hide();
                 }
             }
             OverlayCommand::Detach => {
@@ -186,6 +191,7 @@ impl OverlayHost {
                 }
                 self.target = None;
                 FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+                self.presented_rect = None;
                 self.hide();
             }
             OverlayCommand::SetBlocks {
@@ -262,7 +268,6 @@ impl OverlayHost {
     pub(crate) fn teardown(&mut self) {
         FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
         FOLLOW_THREAD.store(0, std::sync::atomic::Ordering::Release);
-        FOLLOW_SYNC.store(false, std::sync::atomic::Ordering::Release);
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();

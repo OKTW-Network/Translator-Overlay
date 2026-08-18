@@ -12,10 +12,33 @@ use crate::{
     host::{
         OverlayHost,
         follow::FOLLOW_TARGET,
-        win32::{client_screen_rect, place_overlay_above_target},
+        win32::{
+            ClientRect, PlacementGeometry, client_screen_rect, place_overlay_above_target, position_overlay_preserving_z_order,
+            show_overlay,
+        },
     },
     picker::PickerEnd,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentationAction {
+    FullPresent,
+    MoveOnly,
+    RestackOnly,
+}
+
+fn presentation_action(previous: Option<ClientRect>, current: ClientRect, content_changed: bool) -> PresentationAction {
+    let Some(previous) = previous else {
+        return PresentationAction::FullPresent;
+    };
+    if content_changed || previous.2 != current.2 || previous.3 != current.3 {
+        PresentationAction::FullPresent
+    } else if previous.0 != current.0 || previous.1 != current.1 {
+        PresentationAction::MoveOnly
+    } else {
+        PresentationAction::RestackOnly
+    }
+}
 
 impl OverlayHost {
     pub(crate) fn tick(&mut self) {
@@ -37,6 +60,7 @@ impl OverlayHost {
             debug!("target window gone — detaching overlay");
             self.target = None;
             FOLLOW_TARGET.store(0, Ordering::Release);
+            self.presented_rect = None;
             self.hide();
             return;
         }
@@ -67,27 +91,24 @@ impl OverlayHost {
             self.dirty = true;
         }
 
-        if self.dirty {
+        let content_changed = if self.dirty {
             if let Err(e) = self.repaint() {
                 warn!(error = %e, "overlay repaint failed");
                 return;
             }
             self.dirty = false;
-        }
+            true
+        } else {
+            false
+        };
 
-        if let Err(e) = place_overlay_above_target(self.hwnd, target, x, y, client_w, client_h) {
-            warn!(error = %e, "overlay Z-order update failed");
-            return;
-        }
-
-        if let Err(e) = self.present_to_client(x, y, client_w, client_h) {
-            warn!(error = %e, "UpdateLayeredWindow failed");
-        }
+        self.update_overlay_window(target, (x, y, client_w, client_h), content_changed, "captions");
     }
 
     pub(crate) fn tick_picker(&mut self) {
         let Some(target) = self.target else {
             self.finish_picker(PickerEnd::Cancel);
+            self.hide();
             return;
         };
 
@@ -95,7 +116,9 @@ impl OverlayHost {
             debug!("target window gone — cancelling region picker");
             self.target = None;
             FOLLOW_TARGET.store(0, Ordering::Release);
+            self.presented_rect = None;
             self.finish_picker(PickerEnd::Cancel);
+            self.hide();
             return;
         }
         if unsafe { IsIconic(target) }.as_bool() || !unsafe { IsWindowVisible(target) }.as_bool() {
@@ -114,21 +137,63 @@ impl OverlayHost {
             p.set_client_size(client_w, client_h);
         }
 
-        self.surface_w = client_w;
-        self.surface_h = client_h;
-
-        if let Err(e) = self.repaint_picker() {
-            warn!(error = %e, "picker repaint failed");
-            return;
+        if self.surface_w != client_w || self.surface_h != client_h {
+            self.surface_w = client_w;
+            self.surface_h = client_h;
+            self.dirty = true;
         }
 
-        if let Err(e) = place_overlay_above_target(self.hwnd, target, x, y, client_w, client_h) {
-            warn!(error = %e, "picker Z-order update failed");
-            return;
-        }
+        let content_changed = if self.dirty {
+            if let Err(e) = self.repaint_picker() {
+                warn!(error = %e, "picker repaint failed");
+                return;
+            }
+            self.dirty = false;
+            true
+        } else {
+            false
+        };
 
-        if let Err(e) = self.present_to_client(x, y, client_w, client_h) {
-            warn!(error = %e, "UpdateLayeredWindow failed (picker)");
+        self.update_overlay_window(target, (x, y, client_w, client_h), content_changed, "picker");
+    }
+
+    fn update_overlay_window(
+        &mut self,
+        target: windows::Win32::Foundation::HWND,
+        rect: ClientRect,
+        content_changed: bool,
+        operation: &str,
+    ) {
+        match presentation_action(self.presented_rect, rect, content_changed) {
+            PresentationAction::FullPresent => {
+                if let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
+                    warn!(error = %e, operation, "UpdateLayeredWindow failed");
+                    return;
+                }
+                self.presented_rect = Some(rect);
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, PlacementGeometry::Preserve) {
+                    // The bitmap is already valid. A transient Z-order race
+                    // must not keep captions hidden.
+                    warn!(error = %e, operation, "overlay Z-order update failed; showing with current Z-order");
+                    show_overlay(self.hwnd);
+                }
+            }
+            PresentationAction::MoveOnly => {
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, PlacementGeometry::Set(rect)) {
+                    warn!(error = %e, operation, "overlay Z-order update failed; moving with current Z-order");
+                    if let Err(fallback_error) = position_overlay_preserving_z_order(self.hwnd, rect) {
+                        warn!(error = %fallback_error, operation, "overlay fallback move failed");
+                        return;
+                    }
+                }
+                self.presented_rect = Some(rect);
+            }
+            PresentationAction::RestackOnly => {
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, PlacementGeometry::Preserve) {
+                    warn!(error = %e, operation, "overlay Z-order update failed; showing with current Z-order");
+                    show_overlay(self.hwnd);
+                }
+            }
         }
     }
 
@@ -141,5 +206,33 @@ impl OverlayHost {
             p.cancel_drag();
         }
         let _ = unsafe { ReleaseCapture() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RECT: ClientRect = (10, 20, 800, 600);
+
+    #[test]
+    fn first_frame_and_content_changes_require_a_full_present() {
+        assert_eq!(presentation_action(None, RECT, false), PresentationAction::FullPresent);
+        assert_eq!(presentation_action(Some(RECT), RECT, true), PresentationAction::FullPresent);
+    }
+
+    #[test]
+    fn destination_resize_requires_a_full_present() {
+        assert_eq!(presentation_action(Some(RECT), (10, 20, 900, 600), false), PresentationAction::FullPresent);
+    }
+
+    #[test]
+    fn pure_position_change_moves_without_representing_the_bitmap() {
+        assert_eq!(presentation_action(Some(RECT), (30, 40, 800, 600), false), PresentationAction::MoveOnly);
+    }
+
+    #[test]
+    fn unchanged_geometry_only_needs_restacking() {
+        assert_eq!(presentation_action(Some(RECT), RECT, false), PresentationAction::RestackOnly);
     }
 }

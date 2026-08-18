@@ -4,10 +4,19 @@ use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Gdi::ClientToScreen,
     UI::WindowsAndMessaging::{
-        GW_HWNDPREV, GWL_EXSTYLE, GetClientRect, GetWindow, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos, WS_EX_TOPMOST,
+        GW_HWNDPREV, GWL_EXSTYLE, GetClientRect, GetWindow, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+        SET_WINDOW_POS_FLAGS, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
+        ShowWindow, WS_EX_TOPMOST,
     },
 };
+
+pub(crate) type ClientRect = (i32, i32, i32, i32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacementGeometry {
+    Preserve,
+    Set(ClientRect),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZOrderAnchor {
@@ -31,16 +40,30 @@ fn is_topmost(hwnd: HWND) -> bool {
     style & WS_EX_TOPMOST.0 != 0
 }
 
+fn placement_values(geometry: PlacementGeometry, preserve_z_order: bool) -> (i32, i32, i32, i32, SET_WINDOW_POS_FLAGS) {
+    let (x, y, width, height, mut flags) = match geometry {
+        PlacementGeometry::Preserve => (0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW),
+        PlacementGeometry::Set((x, y, width, height)) => (x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW),
+    };
+    if preserve_z_order {
+        flags |= SWP_NOZORDER;
+    }
+    (x, y, width, height, flags)
+}
+
+fn set_window_pos(
+    overlay: HWND,
+    insert_after: Option<HWND>,
+    geometry: PlacementGeometry,
+    preserve_z_order: bool,
+) -> windows::core::Result<()> {
+    let (x, y, width, height, flags) = placement_values(geometry, preserve_z_order);
+    unsafe { SetWindowPos(overlay, insert_after, x, y, width, height, flags) }
+}
+
 /// Keep `overlay` immediately above `target`, without making a normal target
 /// globally topmost. Windows above the target therefore cover both windows.
-pub(crate) fn place_overlay_above_target(
-    overlay: HWND,
-    target: HWND,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-) -> windows::core::Result<()> {
+pub(crate) fn place_overlay_above_target(overlay: HWND, target: HWND, geometry: PlacementGeometry) -> windows::core::Result<()> {
     let target_topmost = is_topmost(target);
     if is_topmost(overlay) != target_topmost {
         let band = if target_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
@@ -51,17 +74,30 @@ pub(crate) fn place_overlay_above_target(
     // have changed which window is immediately above the target.
     let above_target = unsafe { GetWindow(target, GW_HWNDPREV) }.ok().map(|hwnd| hwnd.0 as isize);
     let anchor = choose_z_order_anchor(overlay.0 as isize, above_target, target_topmost);
-    let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
     match anchor {
-        ZOrderAnchor::Preserve => unsafe { SetWindowPos(overlay, None, x, y, width, height, flags | SWP_NOZORDER) },
-        ZOrderAnchor::After(hwnd) => unsafe { SetWindowPos(overlay, Some(HWND(hwnd as *mut _)), x, y, width, height, flags) },
-        ZOrderAnchor::Top => unsafe { SetWindowPos(overlay, Some(HWND_TOP), x, y, width, height, flags) },
-        ZOrderAnchor::Topmost => unsafe { SetWindowPos(overlay, Some(HWND_TOPMOST), x, y, width, height, flags) },
+        ZOrderAnchor::Preserve if geometry == PlacementGeometry::Preserve => {
+            let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
+            Ok(())
+        }
+        ZOrderAnchor::Preserve => set_window_pos(overlay, None, geometry, true),
+        ZOrderAnchor::After(hwnd) => set_window_pos(overlay, Some(HWND(hwnd as *mut _)), geometry, false),
+        ZOrderAnchor::Top => set_window_pos(overlay, Some(HWND_TOP), geometry, false),
+        ZOrderAnchor::Topmost => set_window_pos(overlay, Some(HWND_TOPMOST), geometry, false),
     }
 }
 
+/// Keep the current Z-order when a relative insertion races a disappearing
+/// window. Visibility and geometry are more important than exact stacking.
+pub(crate) fn position_overlay_preserving_z_order(overlay: HWND, rect: ClientRect) -> windows::core::Result<()> {
+    set_window_pos(overlay, None, PlacementGeometry::Set(rect), true)
+}
+
+pub(crate) fn show_overlay(overlay: HWND) {
+    let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
+}
+
 /// Client-area rectangle in screen coordinates (left, top, width, height).
-pub(crate) fn client_screen_rect(target: HWND) -> Option<(i32, i32, i32, i32)> {
+pub(crate) fn client_screen_rect(target: HWND) -> Option<ClientRect> {
     let mut client = RECT::default();
     if unsafe { GetClientRect(target, &mut client) }.is_err() {
         return None;
@@ -104,5 +140,24 @@ mod tests {
     #[test]
     fn z_order_uses_topmost_only_for_topmost_target_at_front() {
         assert_eq!(choose_z_order_anchor(20, None, true), ZOrderAnchor::Topmost);
+    }
+
+    #[test]
+    fn z_order_only_placement_never_changes_geometry() {
+        let (_, _, _, _, flags) = placement_values(PlacementGeometry::Preserve, false);
+        assert_ne!(flags.0 & SWP_NOMOVE.0, 0);
+        assert_ne!(flags.0 & SWP_NOSIZE.0, 0);
+        assert_eq!(flags.0 & SWP_NOZORDER.0, 0);
+    }
+
+    #[test]
+    fn fallback_moves_once_without_changing_z_order() {
+        let rect = (10, 20, 300, 200);
+        let (x, y, width, height, flags) = placement_values(PlacementGeometry::Set(rect), true);
+        assert_eq!((x, y, width, height), rect);
+        assert_eq!(flags.0 & SWP_NOMOVE.0, 0);
+        assert_eq!(flags.0 & SWP_NOSIZE.0, 0);
+        assert_ne!(flags.0 & SWP_NOZORDER.0, 0);
+        assert_ne!(flags.0 & SWP_SHOWWINDOW.0, 0);
     }
 }

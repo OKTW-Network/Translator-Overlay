@@ -10,6 +10,9 @@ use crate::{
     cli::{rpc::JsonRpcChild, translation_output_schema},
 };
 
+const THREAD_SANDBOX_MODE: &str = "read-only";
+const TURN_SANDBOX_POLICY_TYPE: &str = "readOnly";
+
 pub fn spawn_args() -> Vec<String> {
     vec!["app-server".into()]
 }
@@ -18,7 +21,7 @@ pub fn thread_start_params(model: &str, cwd: &Path, system: &str) -> Value {
     serde_json::json!({
         "model": model,
         "cwd": cwd.to_string_lossy(),
-        "sandbox": "readOnly",
+        "sandbox": THREAD_SANDBOX_MODE,
         "approvalPolicy": "untrusted",
         "ephemeral": true,
         "developerInstructions": system,
@@ -33,7 +36,7 @@ pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> V
         "threadId": thread_id,
         "input": [{ "type": "text", "text": user }],
         "outputSchema": translation_output_schema(),
-        "sandboxPolicy": { "type": "readOnly" },
+        "sandboxPolicy": { "type": TURN_SANDBOX_POLICY_TYPE },
     });
     if let Some(effort) = effort.map(str::trim).filter(|s| !s.is_empty()) {
         params["effort"] = Value::from(effort);
@@ -231,7 +234,7 @@ mod tests {
     #[test]
     fn thread_start_is_read_only_and_ephemeral() {
         let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys");
-        assert_eq!(params["sandbox"], "readOnly");
+        assert_eq!(params["sandbox"], "read-only");
         assert_eq!(params["ephemeral"], true);
         assert_eq!(params["approvalPolicy"], "untrusted");
         assert_eq!(params["developerInstructions"], "sys");
@@ -247,6 +250,7 @@ mod tests {
         assert!(params["outputSchema"].is_object());
         assert_eq!(params["effort"], "low");
         assert_eq!(params["sandboxPolicy"]["type"], "readOnly");
+        assert_ne!(params["sandboxPolicy"]["type"], THREAD_SANDBOX_MODE);
     }
 
     #[test]
