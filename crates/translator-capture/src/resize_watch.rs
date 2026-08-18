@@ -1,9 +1,10 @@
 //! Out-of-process target resize via `SetWinEventHook`.
 //!
-//! Interactive drag uses `EVENT_SYSTEM_MOVESIZESTART` / `END` — restart only
-//! when the user releases. Maximize / snap / `SetWindowPos` do not enter that
-//! loop; those go through `EVENT_OBJECT_LOCATIONCHANGE` and restart as soon as
-//! the size changes.
+//! Interactive drag uses `EVENT_SYSTEM_MOVESIZESTART` / `END` — pause frame
+//! publish for the whole loop, and restart WGC only when the user releases if
+//! the size changed. Maximize / snap / `SetWindowPos` do not enter that loop;
+//! those go through `EVENT_OBJECT_LOCATIONCHANGE` and restart as soon as the
+//! size changes.
 //!
 //! The capture session has no Win32 message pump, so the hooks live on a
 //! dedicated thread. One session / process — the callback reads process-wide
@@ -30,7 +31,7 @@ use windows::Win32::{
 
 static TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 static PENDING: AtomicBool = AtomicBool::new(false);
-static IN_MOVESIZE: AtomicBool = AtomicBool::new(false);
+pub(crate) static IN_MOVESIZE: AtomicBool = AtomicBool::new(false);
 static LAST_W: AtomicU32 = AtomicU32::new(0);
 static LAST_H: AtomicU32 = AtomicU32::new(0);
 
@@ -79,6 +80,10 @@ impl ResizeWatch {
 
     pub(crate) fn take_pending(&self) -> bool {
         PENDING.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn in_movesize(&self) -> bool {
+        IN_MOVESIZE.load(Ordering::Acquire)
     }
 }
 
@@ -168,13 +173,45 @@ unsafe extern "system" fn on_win_event(
     if target == 0 || hwnd.0 as isize != target {
         return;
     }
-    match event {
-        EVENT_SYSTEM_MOVESIZESTART => IN_MOVESIZE.store(true, Ordering::Release),
-        EVENT_SYSTEM_MOVESIZEEND => {
+    match classify_resize_event(event, IN_MOVESIZE.load(Ordering::Relaxed)) {
+        ResizeEventAction::BeginMovesize => IN_MOVESIZE.store(true, Ordering::Release),
+        ResizeEventAction::EndMovesize => {
             IN_MOVESIZE.store(false, Ordering::Release);
             mark_if_resized(target);
         }
-        EVENT_OBJECT_LOCATIONCHANGE if !IN_MOVESIZE.load(Ordering::Relaxed) => mark_if_resized(target),
-        _ => {}
+        ResizeEventAction::NoteLocation => mark_if_resized(target),
+        ResizeEventAction::Ignore => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeEventAction {
+    Ignore,
+    BeginMovesize,
+    EndMovesize,
+    NoteLocation,
+}
+
+fn classify_resize_event(event: u32, in_movesize: bool) -> ResizeEventAction {
+    match event {
+        EVENT_SYSTEM_MOVESIZESTART => ResizeEventAction::BeginMovesize,
+        EVENT_SYSTEM_MOVESIZEEND => ResizeEventAction::EndMovesize,
+        EVENT_OBJECT_LOCATIONCHANGE if !in_movesize => ResizeEventAction::NoteLocation,
+        _ => ResizeEventAction::Ignore,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::{EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART};
+
+    use crate::resize_watch::{ResizeEventAction, classify_resize_event};
+
+    #[test]
+    fn interactive_movesize_pauses_location_restarts() {
+        assert_eq!(classify_resize_event(EVENT_SYSTEM_MOVESIZESTART, false), ResizeEventAction::BeginMovesize);
+        assert_eq!(classify_resize_event(EVENT_OBJECT_LOCATIONCHANGE, true), ResizeEventAction::Ignore);
+        assert_eq!(classify_resize_event(EVENT_SYSTEM_MOVESIZEEND, true), ResizeEventAction::EndMovesize);
+        assert_eq!(classify_resize_event(EVENT_OBJECT_LOCATIONCHANGE, false), ResizeEventAction::NoteLocation);
     }
 }

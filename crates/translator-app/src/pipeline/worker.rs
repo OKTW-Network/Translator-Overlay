@@ -408,6 +408,10 @@ impl Pipeline {
             return;
         }
 
+        if self.session.in_movesize() {
+            warn!("manual capture ignored — target is being moved or resized");
+            return;
+        }
         self.session.sync_stream();
         match self.session.latest_frame() {
             Some(frame) => {
@@ -420,6 +424,11 @@ impl Pipeline {
 
     async fn drive_capture(&mut self) {
         if !self.session.is_running() || self.inflight.is_some() {
+            return;
+        }
+        // Skip OCR / preview / caption expiry while the target is in its
+        // move/size loop. Frames are not published until MOVESIZEEND.
+        if self.session.in_movesize() {
             return;
         }
 

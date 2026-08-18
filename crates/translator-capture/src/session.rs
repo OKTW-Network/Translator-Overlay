@@ -1,6 +1,9 @@
 //! Free-threaded capture session that publishes the latest frame.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
@@ -16,7 +19,10 @@ use windows_capture::{
     window::Window,
 };
 
-use crate::{CaptureError, CapturedFrame, resize_watch::ResizeWatch};
+use crate::{
+    CaptureError, CapturedFrame,
+    resize_watch::{IN_MOVESIZE, ResizeWatch},
+};
 
 /// Latest-wins slot: the capture thread overwrites; the pipeline takes the newest frame.
 struct SharedLatest {
@@ -73,6 +79,12 @@ impl GraphicsCaptureApiHandler for FrameHandler {
     }
 
     fn on_frame_arrived(&mut self, frame: &mut Frame<'_>, _capture_control: InternalCaptureControl) -> Result<(), Self::Error> {
+        // Title-bar / edge drag: do not map or copy the WGC buffer. Overlay
+        // follow keeps the last captions; OCR waits until MOVESIZEEND.
+        if IN_MOVESIZE.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
         let width = frame.width();
         let height = frame.height();
         if width == 0 || height == 0 {
@@ -136,6 +148,11 @@ impl CaptureSession {
 
     pub fn target_title(&self) -> Option<String> {
         self.target.as_ref().map(|t| t.title.clone())
+    }
+
+    /// Interactive title-bar drag or edge resize is in progress.
+    pub fn in_movesize(&self) -> bool {
+        self.resize.in_movesize()
     }
 
     /// Start capturing a window by HWND.
@@ -235,7 +252,13 @@ impl CaptureSession {
     }
 
     /// Latest published frame, cropped to the client area. Does not consume the slot.
+    ///
+    /// Returns `None` during interactive move/size so callers do not crop via
+    /// DWM or feed OCR a frame from before the drag.
     pub fn latest_frame(&self) -> Option<CapturedFrame> {
+        if self.in_movesize() {
+            return None;
+        }
         let frame = self.stream.as_ref()?.latest.latest()?;
         Some(self.crop_to_client(frame))
     }
