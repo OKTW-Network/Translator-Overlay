@@ -7,6 +7,7 @@ use std::{
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use translator_core::ServiceTier;
 
 use crate::{
     TranslateError,
@@ -20,8 +21,8 @@ pub fn spawn_args() -> Vec<String> {
     vec!["app-server".into()]
 }
 
-pub fn thread_start_params(model: &str, cwd: &Path, system: &str) -> Value {
-    serde_json::json!({
+pub fn thread_start_params(model: &str, cwd: &Path, system: &str, service_tier: ServiceTier) -> Value {
+    let mut params = serde_json::json!({
         "model": model,
         "cwd": cwd.to_string_lossy(),
         "sandbox": THREAD_SANDBOX_MODE,
@@ -57,7 +58,12 @@ pub fn thread_start_params(model: &str, cwd: &Path, system: &str) -> Value {
             "include_apps_instructions": false,
             "include_collaboration_mode_instructions": false,
         },
-    })
+    });
+    if service_tier == ServiceTier::Priority {
+        params["config"]["service_tier"] = Value::from("fast");
+        params["config"]["features.fast_mode"] = Value::from(true);
+    }
+    params
 }
 
 pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> Value {
@@ -87,6 +93,7 @@ impl CodexSession {
     pub async fn connect(
         program: &Path,
         model: &str,
+        service_tier: ServiceTier,
         cwd: &Path,
         system: &str,
         cancel: &CancellationToken,
@@ -113,7 +120,7 @@ impl CodexSession {
         rpc.notify("initialized", serde_json::json!({})).await?;
 
         let created = rpc
-            .request("thread/start", thread_start_params(model, cwd, system), cancel, timeout)
+            .request("thread/start", thread_start_params(model, cwd, system, service_tier), cancel, timeout)
             .await?;
         let thread_id = created
             .pointer("/thread/id")
@@ -312,7 +319,7 @@ mod tests {
 
     #[test]
     fn thread_start_is_read_only_and_ephemeral() {
-        let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys");
+        let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys", ServiceTier::Standard);
         assert_eq!(params["sandbox"], THREAD_SANDBOX_MODE);
         assert_eq!(params["ephemeral"], true);
         assert_eq!(params["approvalPolicy"], "never");
@@ -320,7 +327,16 @@ mod tests {
         assert_eq!(params["config"]["web_search"], "disabled");
         assert_eq!(params["config"]["features.shell_tool"], false);
         assert_eq!(params["config"]["features.plugins"], false);
+        assert!(params["config"].get("service_tier").is_none());
+        assert!(params["config"].get("features.fast_mode").is_none());
         assert_ne!(params["sandbox"], "danger-full-access");
+    }
+
+    #[test]
+    fn thread_start_enables_fast_service_tier() {
+        let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys", ServiceTier::Priority);
+        assert_eq!(params["config"]["service_tier"], "fast");
+        assert_eq!(params["config"]["features.fast_mode"], true);
     }
 
     #[test]

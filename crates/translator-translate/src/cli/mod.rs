@@ -291,7 +291,7 @@ impl CliBackend {
                 GrokSession::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?,
             ),
             ModelProvider::CodexCli => {
-                LiveSession::Codex(CodexSession::connect(&program, &api.model, &cwd, &system, cancel, timeout).await?)
+                LiveSession::Codex(CodexSession::connect(&program, &api.model, api.service_tier, &cwd, &system, cancel, timeout).await?)
             }
             ModelProvider::OpenaiCompatible => {
                 return Err(TranslateError::CliProtocol("CLI session used with HTTP provider".into()));

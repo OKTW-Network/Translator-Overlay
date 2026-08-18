@@ -89,6 +89,7 @@ cargo build --release -p translator-app
 [api]
 provider = "openai_compatible"   # openai_compatible | grok_cli | codex_cli
 # cli_path = ""                  # 空 = PATH 上的 grok / codex
+service_tier = "standard"       # standard | priority；目前 Codex CLI 支援 Priority（Fast mode）
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = "gpt-4o-mini"
