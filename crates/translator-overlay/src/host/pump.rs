@@ -8,7 +8,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::{
     command::OverlayCommand,
-    host::{OverlayHost, follow::FOLLOW_EVENT_MESSAGE},
+    host::{
+        OverlayHost,
+        follow::{FOLLOW_EVENT_MESSAGE, FOLLOW_SYNC},
+    },
     picker,
 };
 
@@ -42,6 +45,10 @@ impl OverlayHost {
                 return;
             }
 
+            if FOLLOW_SYNC.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                sync = true;
+            }
+
             if sync {
                 self.tick();
             }
@@ -71,8 +78,7 @@ impl OverlayHost {
                     continue;
                 }
                 if msg.message == FOLLOW_EVENT_MESSAGE {
-                    // Tick immediately per geometry event; do not coalesce across WaitMessage.
-                    self.tick();
+                    *sync = true;
                     continue;
                 }
             }

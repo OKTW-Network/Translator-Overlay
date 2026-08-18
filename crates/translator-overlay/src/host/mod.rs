@@ -32,7 +32,7 @@ use crate::{
     error::OverlayError,
     gfx::{surface::DibSurface, text},
     host::{
-        follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
+        follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, FOLLOW_THREAD, clear_follow_move_state, uninstall_follow_hooks},
         win32::{ClientRect, set_overlay_owner},
         wnd::{CLASS_NAME, HOST_TEARING_DOWN, overlay_wnd_proc},
     },
@@ -176,6 +176,7 @@ impl OverlayHost {
         match cmd {
             OverlayCommand::Attach { target_hwnd } => {
                 self.presented_rect = None;
+                clear_follow_move_state();
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
@@ -198,6 +199,7 @@ impl OverlayHost {
                 }
                 self.target = None;
                 FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+                clear_follow_move_state();
                 self.presented_rect = None;
                 self.release_target();
             }
@@ -349,6 +351,7 @@ impl OverlayHost {
         FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
         FOLLOW_OVERLAY.store(0, std::sync::atomic::Ordering::Release);
         FOLLOW_THREAD.store(0, std::sync::atomic::Ordering::Release);
+        clear_follow_move_state();
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();

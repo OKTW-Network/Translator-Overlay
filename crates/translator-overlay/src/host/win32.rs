@@ -9,18 +9,12 @@ use windows::Win32::{
     Graphics::Gdi::ClientToScreen,
     UI::WindowsAndMessaging::{
         GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWLP_HWNDPARENT, GetClientRect, GetWindow, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOP,
-        HWND_TOPMOST, SET_WINDOW_POS_FLAGS, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
-        SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WS_EX_TOPMOST,
+        HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+        SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WS_EX_TOPMOST,
     },
 };
 
 pub(crate) type ClientRect = (i32, i32, i32, i32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlacementGeometry {
-    Preserve,
-    Set(ClientRect),
-}
 
 /// Whether the overlay should be owned by the capture target.
 ///
@@ -75,42 +69,24 @@ fn choose_z_order_anchor(overlay: isize, above_target: Option<isize>, target_top
     }
 }
 
-fn placement_values(
-    geometry: PlacementGeometry,
-    preserve_z_order: bool,
-    no_owner_zorder: bool,
-) -> (i32, i32, i32, i32, SET_WINDOW_POS_FLAGS) {
-    let (x, y, width, height, mut flags) = match geometry {
-        PlacementGeometry::Preserve => (0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW),
-        PlacementGeometry::Set((x, y, width, height)) => (x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW),
-    };
-    if preserve_z_order {
-        flags |= SWP_NOZORDER;
-    }
+fn set_window_pos(overlay: HWND, insert_after: Option<HWND>, no_owner_zorder: bool) -> windows::core::Result<()> {
+    let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
     if no_owner_zorder {
         flags |= SWP_NOOWNERZORDER;
     }
-    (x, y, width, height, flags)
+    unsafe { SetWindowPos(overlay, insert_after, 0, 0, 0, 0, flags) }
 }
 
-fn set_window_pos(
-    overlay: HWND,
-    insert_after: Option<HWND>,
-    geometry: PlacementGeometry,
-    preserve_z_order: bool,
-    no_owner_zorder: bool,
-) -> windows::core::Result<()> {
-    let (x, y, width, height, flags) = placement_values(geometry, preserve_z_order, no_owner_zorder);
-    unsafe { SetWindowPos(overlay, insert_after, x, y, width, height, flags) }
+/// Move the overlay to a screen position without a Z-order or ULW pass.
+pub(crate) fn move_overlay_position(overlay: HWND, x: i32, y: i32) -> windows::core::Result<()> {
+    if overlay.is_invalid() {
+        return Ok(());
+    }
+    unsafe { SetWindowPos(overlay, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER) }
 }
 
 /// Keep `overlay` immediately above `target` without raising a normal target globally.
-pub(crate) fn place_overlay_above_target(
-    overlay: HWND,
-    target: HWND,
-    geometry: PlacementGeometry,
-    ownership: OverlayOwnership,
-) -> windows::core::Result<()> {
+pub(crate) fn place_overlay_above_target(overlay: HWND, target: HWND, ownership: OverlayOwnership) -> windows::core::Result<()> {
     match ownership {
         OverlayOwnership::OwnedByTarget => set_overlay_owner(overlay, Some(target)),
         OverlayOwnership::Unowned => set_overlay_owner(overlay, None),
@@ -128,14 +104,13 @@ pub(crate) fn place_overlay_above_target(
     let above_target = unsafe { GetWindow(target, GW_HWNDPREV) }.ok().map(|hwnd| hwnd.0 as isize);
     let anchor = choose_z_order_anchor(overlay.0 as isize, above_target, target_topmost);
     match anchor {
-        ZOrderAnchor::Preserve if geometry == PlacementGeometry::Preserve => {
+        ZOrderAnchor::Preserve => {
             let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
             Ok(())
         }
-        ZOrderAnchor::Preserve => set_window_pos(overlay, None, geometry, true, no_owner_zorder),
-        ZOrderAnchor::After(hwnd) => set_window_pos(overlay, Some(HWND(hwnd as *mut _)), geometry, false, no_owner_zorder),
-        ZOrderAnchor::Top => set_window_pos(overlay, Some(HWND_TOP), geometry, false, no_owner_zorder),
-        ZOrderAnchor::Topmost => set_window_pos(overlay, Some(HWND_TOPMOST), geometry, false, no_owner_zorder),
+        ZOrderAnchor::After(hwnd) => set_window_pos(overlay, Some(HWND(hwnd as *mut _)), no_owner_zorder),
+        ZOrderAnchor::Top => set_window_pos(overlay, Some(HWND_TOP), no_owner_zorder),
+        ZOrderAnchor::Topmost => set_window_pos(overlay, Some(HWND_TOPMOST), no_owner_zorder),
     }
 }
 
@@ -189,30 +164,5 @@ mod tests {
     #[test]
     fn z_order_uses_topmost_only_for_topmost_target_at_front() {
         assert_eq!(choose_z_order_anchor(20, None, true), ZOrderAnchor::Topmost);
-    }
-
-    #[test]
-    fn placement_preserve_never_changes_geometry() {
-        let (_, _, _, _, flags) = placement_values(PlacementGeometry::Preserve, false, false);
-        assert_ne!(flags.0 & SWP_NOMOVE.0, 0);
-        assert_ne!(flags.0 & SWP_NOSIZE.0, 0);
-        assert_eq!(flags.0 & SWP_NOZORDER.0, 0);
-    }
-
-    #[test]
-    fn owned_placement_sets_no_owner_zorder() {
-        let (_, _, _, _, flags) = placement_values(PlacementGeometry::Set((1, 2, 3, 4)), false, true);
-        assert_ne!(flags.0 & SWP_NOOWNERZORDER.0, 0);
-    }
-
-    #[test]
-    fn fallback_moves_once_without_changing_z_order() {
-        let rect = (10, 20, 300, 200);
-        let (x, y, width, height, flags) = placement_values(PlacementGeometry::Set(rect), true, false);
-        assert_eq!((x, y, width, height), rect);
-        assert_eq!(flags.0 & SWP_NOMOVE.0, 0);
-        assert_eq!(flags.0 & SWP_NOSIZE.0, 0);
-        assert_ne!(flags.0 & SWP_NOZORDER.0, 0);
-        assert_ne!(flags.0 & SWP_SHOWWINDOW.0, 0);
     }
 }

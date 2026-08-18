@@ -9,19 +9,16 @@ use windows::Win32::{
     Foundation::HWND,
     UI::{
         Input::KeyboardAndMouse::ReleaseCapture,
-        WindowsAndMessaging::{
-            IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowPos,
-            ShowWindow,
-        },
+        WindowsAndMessaging::{IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow},
     },
 };
 
 use crate::{
     host::{
         OverlayHost,
-        follow::FOLLOW_TARGET,
+        follow::{FOLLOW_IN_MOVESIZE, FOLLOW_SETTLE, FOLLOW_TARGET, clear_follow_move_state},
         win32::{
-            ClientRect, OverlayOwnership, PlacementGeometry, live_client_screen_rect, overlay_owner, place_overlay_above_target,
+            ClientRect, OverlayOwnership, live_client_screen_rect, move_overlay_position, overlay_owner, place_overlay_above_target,
             set_overlay_owner,
         },
     },
@@ -54,12 +51,61 @@ impl OverlayHost {
             return;
         }
 
+        if FOLLOW_IN_MOVESIZE.load(std::sync::atomic::Ordering::Acquire) {
+            self.tick_follow_move();
+            return;
+        }
+        if FOLLOW_SETTLE.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            // Force DWM/live realign + restack once the modal move/size loop ends.
+            self.presented_rect = None;
+        }
+
         if self.picker.is_some() {
             self.tick_picker();
             return;
         }
 
         self.tick_captions();
+    }
+
+    /// Interactive title-bar drag / resize: live rect + one `SetWindowPos`.
+    fn tick_follow_move(&mut self) {
+        let Some(target) = self.target else {
+            return;
+        };
+
+        if !unsafe { IsWindow(Some(target)) }.as_bool() {
+            debug!("target window gone — detaching overlay");
+            self.target = None;
+            FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+            clear_follow_move_state();
+            if self.picker.is_some() {
+                self.presented_rect = None;
+                self.finish_picker(PickerEnd::Cancel);
+            } else {
+                self.release_target();
+            }
+            return;
+        }
+        if unsafe { IsIconic(target) }.as_bool() {
+            return;
+        }
+
+        let Some(live) = live_client_screen_rect(target) else {
+            return;
+        };
+        let Some(presented) = self.presented_rect else {
+            return;
+        };
+        let next = (live.0, live.1, presented.2, presented.3);
+        if next.0 == presented.0 && next.1 == presented.1 {
+            return;
+        }
+        if let Err(e) = move_overlay_position(self.hwnd, next.0, next.1) {
+            warn!(error = %e, "overlay follow move failed");
+            return;
+        }
+        self.presented_rect = Some(next);
     }
 
     fn tick_captions(&mut self) {
@@ -76,6 +122,7 @@ impl OverlayHost {
             debug!("target window gone — detaching overlay");
             self.target = None;
             FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+            clear_follow_move_state();
             self.release_target();
             return;
         }
@@ -133,6 +180,7 @@ impl OverlayHost {
             debug!("target window gone — cancelling region picker");
             self.target = None;
             FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+            clear_follow_move_state();
             self.presented_rect = None;
             self.finish_picker(PickerEnd::Cancel);
             return;
@@ -187,26 +235,21 @@ impl OverlayHost {
                     return;
                 }
                 self.presented_rect = Some(rect);
-                if let Err(e) = place_overlay_above_target(self.hwnd, target, PlacementGeometry::Preserve, ownership) {
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
             }
             PresentationAction::MoveOnly => {
-                // Pure drag: SetWindowPos only — never re-ULW or the layer can vanish.
-                if let Err(e) = place_overlay_above_target(self.hwnd, target, PlacementGeometry::Set(rect), ownership) {
-                    warn!(error = %e, ?ownership, "overlay Z-order update failed; moving with current Z-order");
-                    if let Err(fallback_error) = unsafe {
-                        SetWindowPos(self.hwnd, None, rect.0, rect.1, rect.2, rect.3, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
-                    } {
-                        warn!(error = %fallback_error, ?ownership, "overlay fallback move failed");
-                        return;
-                    }
+                // Position only — never re-ULW or restack, or the drag loop hitches.
+                if let Err(e) = move_overlay_position(self.hwnd, rect.0, rect.1) {
+                    warn!(error = %e, ?ownership, "overlay follow move failed");
+                    return;
                 }
                 self.presented_rect = Some(rect);
             }
             PresentationAction::RestackOnly => {
-                if let Err(e) = place_overlay_above_target(self.hwnd, target, PlacementGeometry::Preserve, ownership) {
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
