@@ -12,6 +12,8 @@ use windows_reactor::{App, Backdrop};
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline};
 
+pub(crate) const APP_TITLE: &str = "Translator Overlay";
+
 /// Process-wide handles for the UI render function (set before App::render).
 pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
@@ -59,7 +61,7 @@ async fn main() {
     // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
     // `block_on`s this future on that thread — do not move render off-thread.
     let result = App::new()
-        .title("Translator Overlay")
+        .title(APP_TITLE)
         .inner_size(960.0, 720.0)
         .backdrop(Backdrop::Mica)
         .render(ui::app);

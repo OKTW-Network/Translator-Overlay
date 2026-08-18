@@ -1,5 +1,7 @@
 //! Overlay thread message pump.
 
+use std::sync::atomic::Ordering;
+
 use tokio::sync::mpsc;
 use tracing::warn;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -8,7 +10,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::{
     command::OverlayCommand,
-    host::{OverlayHost, follow::FOLLOW_EVENT_MESSAGE},
+    host::{
+        OverlayHost,
+        follow::{FOLLOW_EVENT_MESSAGE, FOLLOW_SYNC_PENDING},
+    },
     picker,
 };
 
@@ -71,7 +76,8 @@ impl OverlayHost {
                     continue;
                 }
                 if msg.message == FOLLOW_EVENT_MESSAGE {
-                    self.tick();
+                    FOLLOW_SYNC_PENDING.store(false, Ordering::Release);
+                    *sync = true;
                     continue;
                 }
             }

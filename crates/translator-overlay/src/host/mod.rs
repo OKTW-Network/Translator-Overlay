@@ -32,7 +32,7 @@ use crate::{
     error::OverlayError,
     gfx::{surface::DibSurface, text},
     host::{
-        follow::{FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
+        follow::{FOLLOW_SYNC_PENDING, FOLLOW_TARGET, FOLLOW_THREAD, uninstall_follow_hooks},
         win32::ClientRect,
         wnd::{CLASS_NAME, overlay_wnd_proc},
     },
@@ -268,6 +268,7 @@ impl OverlayHost {
     pub(crate) fn teardown(&mut self) {
         FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
         FOLLOW_THREAD.store(0, std::sync::atomic::Ordering::Release);
+        FOLLOW_SYNC_PENDING.store(false, std::sync::atomic::Ordering::Release);
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();

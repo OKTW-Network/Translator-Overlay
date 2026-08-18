@@ -9,6 +9,7 @@ mod page_overlay;
 mod page_translation;
 mod preview;
 mod shared;
+mod windowing;
 
 use std::time::Duration;
 
@@ -33,6 +34,9 @@ pub fn app(cx: &mut RenderCx) -> Element {
     cx.use_effect((), || {
         set_requested_theme(RequestedTheme::Default);
         set_backdrop(Some(Backdrop::Mica));
+        if let Err(error) = windowing::install_taskbar_z_order_guard() {
+            tracing::warn!(%error, "failed to install Taskbar z-order guard");
+        }
     });
     let _scheme = cx.use_color_scheme();
 

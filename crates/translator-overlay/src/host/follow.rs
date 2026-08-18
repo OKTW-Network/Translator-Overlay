@@ -1,6 +1,6 @@
 //! Target follow via out-of-context `SetWinEventHook`.
 
-use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use tracing::warn;
 use windows::Win32::{
@@ -17,6 +17,7 @@ use windows::Win32::{
 
 pub(crate) static FOLLOW_TARGET: AtomicIsize = AtomicIsize::new(0);
 pub(crate) static FOLLOW_THREAD: AtomicU32 = AtomicU32::new(0);
+pub(crate) static FOLLOW_SYNC_PENDING: AtomicBool = AtomicBool::new(false);
 pub(crate) const FOLLOW_EVENT_MESSAGE: u32 = WM_APP + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,11 +35,21 @@ pub(crate) fn wake_overlay_thread() {
 
 pub(crate) fn request_follow_sync() {
     let thread_id = FOLLOW_THREAD.load(Ordering::Relaxed);
-    if thread_id != 0 {
-        // Do not coalesce location events: each one gets a chance to move the
-        // overlay before the next target-window position is delivered.
-        let _ = unsafe { PostThreadMessageW(thread_id, FOLLOW_EVENT_MESSAGE, WPARAM(0), LPARAM(0)) };
+    if thread_id == 0 || !claim_follow_wake(&FOLLOW_SYNC_PENDING) {
+        return;
     }
+
+    // The pending bit is cleared only when this exact wake is consumed. That
+    // keeps the no-lost-wake guarantee while coalescing location-event bursts:
+    // one tick reads the target's latest position instead of replaying stale
+    // work and visibly trailing the window.
+    if unsafe { PostThreadMessageW(thread_id, FOLLOW_EVENT_MESSAGE, WPARAM(0), LPARAM(0)) }.is_err() {
+        FOLLOW_SYNC_PENDING.store(false, Ordering::Release);
+    }
+}
+
+fn claim_follow_wake(pending: &AtomicBool) -> bool {
+    !pending.swap(true, Ordering::AcqRel)
 }
 
 fn is_follow_target(hwnd: HWND) -> bool {
@@ -131,5 +142,16 @@ mod tests {
         assert_eq!(classify_follow_event(EVENT_OBJECT_REORDER, false, true), FollowAction::Sync);
         assert_eq!(classify_follow_event(EVENT_OBJECT_REORDER, true, true), FollowAction::Sync);
         assert_eq!(classify_follow_event(EVENT_OBJECT_REORDER, false, false), FollowAction::Ignore);
+    }
+
+    #[test]
+    fn follow_wakes_coalesce_until_the_pending_wake_is_consumed() {
+        let pending = AtomicBool::new(false);
+
+        assert!(claim_follow_wake(&pending));
+        assert!(!claim_follow_wake(&pending));
+
+        pending.store(false, Ordering::Release);
+        assert!(claim_follow_wake(&pending));
     }
 }
