@@ -43,9 +43,14 @@ impl OcrFingerprint {
 /// Waits until OCR content is stable enough to translate.
 ///
 /// Design notes:
-/// - **Hits OR time**: Ready when the same fingerprint is seen `min_hits` times
-///   in a row, or held for `stable_duration` (whichever first). Slow OCR still
-///   advances on the second identical result instead of waiting forever.
+/// - **Cold start**: when nothing has been emitted yet (`last_emitted` is `None`,
+///   including after [`StabilityGate::reset_all`]), Ready requires holding the
+///   fingerprint for `stable_duration` (not `min_hits` alone). First OCR and
+///   post-empty reappearance honor the Stable wait setting.
+/// - **Hits OR time** (after an emit): Ready when the same fingerprint is seen
+///   `min_hits` times in a row, or held for `stable_duration` (whichever first).
+///   Slow OCR still advances on the second identical result instead of waiting
+///   forever. `stable_duration == 0` disables the duration requirement entirely.
 /// - **Sticky switch**: a new fingerprint must appear `switch_hits` times in a
 ///   row before it replaces the active one (ignores single-frame OCR thrash).
 /// - **Max unstable**: if content keeps changing and never settles, force Ready
@@ -214,9 +219,14 @@ impl StabilityGate {
     }
 
     fn is_stable(&self, elapsed: Duration) -> bool {
-        // Prefer hit-count so slow OCR (1 frame / second) still progresses.
-        // Duration is a fallback when min_hits is raised.
-        self.active_hits >= self.min_hits || (!self.stable_duration.is_zero() && elapsed >= self.stable_duration)
+        let duration_ok = !self.stable_duration.is_zero() && elapsed >= self.stable_duration;
+        // Cold start / after reset_all: honor Stable wait; do not Ready on first hit.
+        if self.last_emitted.is_none() && !self.stable_duration.is_zero() {
+            return duration_ok;
+        }
+        // After an emit: prefer hit-count so slow OCR still progresses; duration
+        // remains a fallback when min_hits is raised.
+        self.active_hits >= self.min_hits || duration_ok
     }
 
     fn commit_active(&mut self, fp: OcrFingerprint, now: Instant) {
@@ -312,12 +322,38 @@ mod tests {
     }
 
     #[test]
-    fn first_accepted_fingerprint_ready_immediately() {
-        let mut gate = StabilityGate::with_max_unstable(10_000, 0);
+    fn cold_start_waits_stable_duration() {
+        let mut gate = StabilityGate::with_max_unstable(40, 0);
         let fp = OcrFingerprint::from_text("hello");
-        // min_hits=1: no need to wait for a second OCR pass or wall clock.
+        // Cold start ignores min_hits=1 until Stable wait elapses.
+        assert!(matches!(gate.observe(fp), StabilityOutcome::Changed));
+        std::thread::sleep(Duration::from_millis(50));
         assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
         assert!(matches!(gate.observe(fp), StabilityOutcome::AlreadyEmitted { .. }));
+    }
+
+    #[test]
+    fn stable_duration_zero_ready_on_first_hit() {
+        let mut gate = StabilityGate::with_max_unstable(0, 0);
+        let fp = OcrFingerprint::from_text("hello");
+        // Duration disabled: min_hits=1 may Ready on the first accept.
+        assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
+        assert!(matches!(gate.observe(fp), StabilityOutcome::AlreadyEmitted { .. }));
+    }
+
+    #[test]
+    fn cold_start_after_reset_all_waits_duration() {
+        // Models post-empty: clear_stale_overlay → reset_all → wait again.
+        let mut gate = StabilityGate::with_max_unstable(40, 0);
+        let fp = OcrFingerprint::from_text("page");
+        assert!(matches!(gate.observe(fp), StabilityOutcome::Changed));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
+
+        gate.reset_all();
+        assert!(matches!(gate.observe(fp), StabilityOutcome::Changed));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
     }
 
     #[test]
@@ -333,7 +369,8 @@ mod tests {
 
     #[test]
     fn single_frame_blip_does_not_reset_active() {
-        let mut gate = StabilityGate::with_max_unstable(10_000, 0);
+        // stable_duration=0 so priming emit is immediate; test sticky hold.
+        let mut gate = StabilityGate::with_max_unstable(0, 0);
         let a = OcrFingerprint::from_text("menu");
         let b = OcrFingerprint::from_text("noise");
         assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
@@ -344,13 +381,13 @@ mod tests {
 
     #[test]
     fn sustained_change_switches_fingerprint() {
-        let mut gate = StabilityGate::with_max_unstable(10_000, 0);
+        let mut gate = StabilityGate::with_max_unstable(0, 0);
         let a = OcrFingerprint::from_text("old");
         let b = OcrFingerprint::from_text("new");
         assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
         // First b is a blip — still old emitted.
         assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
-        // Second b confirms switch → Ready for new page.
+        // Second b confirms switch → Ready for new page (post-emit min_hits path).
         assert!(matches!(gate.observe(b), StabilityOutcome::Ready { .. }));
     }
 
@@ -381,7 +418,7 @@ mod tests {
     fn post_emit_thrash_force_ready_without_two_identical_hits() {
         // After first translate, alternating A/B never hits switch_hits=2 for B
         // alone, but max_unstable must still force re-translate with latest B.
-        let mut gate = StabilityGate::with_max_unstable(10_000, 90);
+        let mut gate = StabilityGate::with_max_unstable(0, 90);
         let a = OcrFingerprint::from_text("line-a");
         let b = OcrFingerprint::from_text("line-b");
 
