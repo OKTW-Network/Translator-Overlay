@@ -25,7 +25,3 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1.44"
 windows = { version = "0.62" }
-
-[profile.release]
-lto = "fat"
-strip = "symbols"
