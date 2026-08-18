@@ -384,9 +384,9 @@ impl Default for OcrConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LineMergeOrder {
-    /// Rows top-to-bottom; left-to-right within each row.
+    /// Down each column, then the next column to the right (column-major).
     TopToBottomLeftToRight,
-    /// Columns left-to-right; top-to-bottom within each column.
+    /// Across each row left-to-right, then the next row down (row-major).
     #[default]
     LeftToRightTopToBottom,
 }
@@ -409,16 +409,14 @@ pub struct LineMergeConfig {
     /// Allowed `|vertical gap|` as a fraction of frame height (paragraph mode).
     #[serde(alias = "max_gap_ratio")]
     pub gap_ratio: f32,
+    /// Allowed `|horizontal gap|` as a fraction of frame width (paragraph mode).
+    pub horizontal_gap_ratio: f32,
     /// Left- or center-edge delta ≤ this × frame width counts as column-aligned.
+    /// Top- or center-edge delta ≤ this × frame height counts as row-aligned.
     #[serde(alias = "left_align_ratio")]
     pub align_ratio: f32,
     /// Allowed `|h1 − h2| / larger(h)` to treat lines as the same size.
     pub height_delta_ratio: f32,
-    /// Horizontal overlap as a fraction of the shorter line width.
-    #[serde(alias = "overlap_ratio_min")]
-    pub overlap_ratio: f32,
-    /// Overlap floor (vs shorter width) when using the align path.
-    pub align_overlap_ratio: f32,
     /// Row / column banding as a fraction of frame height / width.
     pub order_band_ratio: f32,
     /// Lower counts as below if `top + height × this ≥` the upper vertical mid.
@@ -439,10 +437,10 @@ impl Default for LineMergeConfig {
             order: LineMergeOrder::default(),
             // ~16px on 1080p — below typical UI list pitch, above wrap leading.
             gap_ratio: 0.015,
+            // ~29px on 1080p/1920 — side-by-side neighbors in the same row.
+            horizontal_gap_ratio: 0.015,
             align_ratio: 0.012,
             height_delta_ratio: 0.45,
-            overlap_ratio: 0.35,
-            align_overlap_ratio: 0.10,
             order_band_ratio: 0.012,
             below_mid_ratio: 0.25,
             reject_short_long: true,
@@ -740,11 +738,21 @@ left_align_ratio = 0.05
         let text = r#"
 [ocr.line_merge]
 max_gap_ratio = 0.02
-overlap_ratio_min = 0.4
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert!((config.ocr.line_merge.gap_ratio - 0.02).abs() < 1e-6);
-        assert!((config.ocr.line_merge.overlap_ratio - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_merge_legacy_overlap_keys_ignored() {
+        let text = r#"
+[ocr.line_merge]
+overlap_ratio = 0.9
+overlap_ratio_min = 0.9
+align_overlap_ratio = 0.9
+"#;
+        let config: AppConfig = toml::from_str(text).unwrap();
+        assert!(config.ocr.line_merge.enabled);
     }
 
     #[test]
@@ -781,10 +789,9 @@ enabled = true
             assert!((got - want).abs() < 1e-9, "got={got} want={want} (pct={pct})");
         };
         on_tick(f64::from(c.gap_ratio) * 100.0, 0.0, 8.0, 0.1, 1.5);
+        on_tick(f64::from(c.horizontal_gap_ratio) * 100.0, 0.0, 8.0, 0.1, 1.5);
         on_tick(f64::from(c.height_delta_ratio) * 100.0, 0.0, 90.0, 1.0, 45.0);
-        on_tick(f64::from(c.overlap_ratio) * 100.0, 0.0, 100.0, 1.0, 35.0);
         on_tick(f64::from(c.align_ratio) * 100.0, 0.0, 5.0, 0.1, 1.2);
-        on_tick(f64::from(c.align_overlap_ratio) * 100.0, 0.0, 50.0, 1.0, 10.0);
         on_tick(f64::from(c.order_band_ratio) * 100.0, 0.1, 5.0, 0.1, 1.2);
         on_tick(f64::from(c.below_mid_ratio) * 100.0, 0.0, 50.0, 1.0, 25.0);
         on_tick(f64::from(c.width_delta_ratio) * 100.0, 0.0, 90.0, 1.0, 40.0);

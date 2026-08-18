@@ -246,7 +246,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         card_toggle(
             "ocr-line-merge",
             "Merge lines",
-            Some("Join stacked OCR lines that share a column, similar height, and a small vertical gap."),
+            Some("Join nearby OCR lines that share a column or row, similar height, and a small gap."),
             snap.merge_enabled,
             {
                 let cx = cx.clone();
@@ -321,7 +321,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     .spacing(4.0);
 
     let merge_stacking = vstack((
-        subsection_header("Stacking"),
+        subsection_header("Vertical"),
         card_merge_pct(
             &cx,
             SliderNumberParams {
@@ -340,7 +340,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             SliderNumberParams {
                 key: "merge-below-mid",
                 header: "Below-mid slack (% of line height)".into(),
-                description: Some("How far a lower line may sit above the upper mid and still count as below. Default 25.".into()),
+                description: Some("How far a lower/right line may cross the mid and still count as below/right. Default 25.".into()),
                 value: snap.merge_below_mid_pct,
                 min: 0.0,
                 max: 50.0,
@@ -365,45 +365,38 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     .spacing(4.0);
 
     let merge_column = vstack((
-        subsection_header("Column"),
+        subsection_header("Horizontal"),
         card_merge_pct(
             &cx,
             SliderNumberParams {
-                key: "merge-overlap",
-                header: "Overlap (% of shorter line)".into(),
-                description: Some("Horizontal overlap vs the shorter line. Default 35.".into()),
-                value: snap.merge_overlap_pct,
+                key: "merge-horizontal-gap",
+                header: "Gap (% of window width)".into(),
+                description: Some(
+                    "Allowed |horizontal gap| for side-by-side lines. Overlap and a small space count the same. Default 1.5. Set 0 to disable."
+                        .into(),
+                ),
+                value: snap.merge_horizontal_gap_pct,
                 min: 0.0,
-                max: 100.0,
-                step: 1.0,
+                max: 8.0,
+                step: 0.1,
             },
-            |m, x| m.overlap_ratio = x,
+            |m, x| m.horizontal_gap_ratio = x,
         ),
         card_merge_pct(
             &cx,
             SliderNumberParams {
                 key: "merge-align",
                 header: "Align tolerance (% of window width)".into(),
-                description: Some("Left- or center-edge delta that still counts as one column. Default 1.2.".into()),
+                description: Some(
+                    "Left-/center-edge delta for one column (× width), or top-/center for one row (× height). Default 1.2."
+                        .into(),
+                ),
                 value: snap.merge_align_pct,
                 min: 0.0,
                 max: 5.0,
                 step: 0.1,
             },
             |m, x| m.align_ratio = x,
-        ),
-        card_merge_pct(
-            &cx,
-            SliderNumberParams {
-                key: "merge-align-overlap",
-                header: "Align overlap (% of shorter line)".into(),
-                description: Some("Overlap floor when using the column-align path. Default 10.".into()),
-                value: snap.merge_align_overlap_pct,
-                min: 0.0,
-                max: 50.0,
-                step: 1.0,
-            },
-            |m, x| m.align_overlap_ratio = x,
         ),
     ))
     .spacing(4.0);

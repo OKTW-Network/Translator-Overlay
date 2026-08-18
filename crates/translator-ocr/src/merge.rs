@@ -1,8 +1,8 @@
 //! Merge OCR line boxes into paragraph blocks.
 //!
 //! Strategy (tunable via [`LineMergeConfig`]):
-//! 1. **Frame-relative `|gap|`** — one threshold vs capture height, not a min/max range.
-//! 2. **Paragraph** — nearest-below link when height, overlap, and gap match.
+//! 1. **Frame-relative `|gap|`** — vertical vs height, horizontal vs width.
+//! 2. **Paragraph** — nearest-below / nearest-right links when gap + align match.
 //! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
 //! 4. **Reading order** — row-major or column-major join / emit order.
 
@@ -46,6 +46,7 @@ fn merge_whole_region(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32
 
 fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) -> Vec<OcrBlock> {
     let n = blocks.len();
+    let frame_w_f = frame_w as f32;
     let frame_h_f = frame_h as f32;
 
     let mut parent: Vec<usize> = (0..n).collect();
@@ -63,7 +64,7 @@ fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, f
             if !approx_le(gap.abs() / frame_h_f, cfg.gap_ratio) {
                 continue;
             }
-            if !can_link_lines(&blocks[i], &blocks[j], frame_w, cfg) {
+            if !can_link_stacked(&blocks[i], &blocks[j], frame_w, cfg) {
                 continue;
             }
             if best.map(|(_, g)| approx_lt(gap.abs(), g.abs())).unwrap_or(true) {
@@ -71,7 +72,33 @@ fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, f
             }
         }
         if let Some((j, _)) = best
-            && !has_intervening_line(&blocks, i, j, frame_w, frame_h, cfg)
+            && !has_intervening_below(&blocks, i, j, frame_w, frame_h, cfg)
+        {
+            union(&mut parent, &mut rank, i, j);
+        }
+    }
+
+    for i in 0..n {
+        let mut best: Option<(usize, f32)> = None;
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let Some(gap) = horizontal_gap_if_right(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_w_f) else {
+                continue;
+            };
+            if !approx_le(gap.abs() / frame_w_f, cfg.horizontal_gap_ratio) {
+                continue;
+            }
+            if !can_link_side_by_side(&blocks[i], &blocks[j], frame_h, cfg) {
+                continue;
+            }
+            if best.map(|(_, g)| approx_lt(gap.abs(), g.abs())).unwrap_or(true) {
+                best = Some((j, gap));
+            }
+        }
+        if let Some((j, _)) = best
+            && !has_intervening_right(&blocks, i, j, frame_w, frame_h, cfg)
         {
             union(&mut parent, &mut rank, i, j);
         }
@@ -171,7 +198,8 @@ fn sort_blocks(blocks: &mut Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, 
 
 fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) {
     match cfg.order {
-        LineMergeOrder::TopToBottomLeftToRight => {
+        // Across each row, then the next row down (row-major).
+        LineMergeOrder::LeftToRightTopToBottom => {
             let rows = assign_bands(blocks, members, Axis::Y, cfg.order_band_ratio, frame_h as f32);
             members.sort_by(|&a, &b| {
                 rows[a]
@@ -180,7 +208,8 @@ fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfi
                     .then_with(|| (blocks[a].bbox.y as i32).cmp(&(blocks[b].bbox.y as i32)))
             });
         }
-        LineMergeOrder::LeftToRightTopToBottom => {
+        // Down each column, then the next column (column-major).
+        LineMergeOrder::TopToBottomLeftToRight => {
             let cols = assign_bands(blocks, members, Axis::X, cfg.order_band_ratio, frame_w as f32);
             members.sort_by(|&a, &b| {
                 cols[a]
@@ -243,7 +272,19 @@ fn vertical_gap_if_below(upper: &OcrBlock, lower: &OcrBlock, below_mid_ratio: f3
     Some(lower_top - upper_bottom)
 }
 
-fn can_link_lines(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, cfg: &LineMergeConfig) -> bool {
+fn horizontal_gap_if_right(left: &OcrBlock, right: &OcrBlock, beside_mid_ratio: f32, frame_w: f32) -> Option<f32> {
+    let left_right = left.bbox.x + left.bbox.width;
+    let right_left = right.bbox.x;
+    let left_mid = left.bbox.x + left.bbox.width * 0.5;
+    let slack = right.bbox.width * beside_mid_ratio;
+    // right_left + slack >= left_mid  (ratio-space ε)
+    if !approx_ge((right_left + slack - left_mid) / frame_w.max(1.0), 0.0) {
+        return None;
+    }
+    Some(right_left - left_right)
+}
+
+fn can_link_stacked(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, cfg: &LineMergeConfig) -> bool {
     if !height_compatible(upper, lower, cfg) {
         return false;
     }
@@ -251,6 +292,19 @@ fn can_link_lines(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, cfg: &LineMe
         return false;
     }
     if cfg.reject_short_long && short_into_long(upper, lower, cfg) {
+        return false;
+    }
+    true
+}
+
+fn can_link_side_by_side(left: &OcrBlock, right: &OcrBlock, frame_h: u32, cfg: &LineMergeConfig) -> bool {
+    if !height_compatible(left, right, cfg) {
+        return false;
+    }
+    if !vert_compatible(left, right, frame_h, cfg) {
+        return false;
+    }
+    if cfg.reject_short_long && short_into_long(left, right, cfg) {
         return false;
     }
     true
@@ -273,28 +327,24 @@ fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool 
 }
 
 fn horiz_compatible(a: &OcrBlock, b: &OcrBlock, frame_w: u32, cfg: &LineMergeConfig) -> bool {
-    let a_left = a.bbox.x;
-    let a_right = a.bbox.x + a.bbox.width;
-    let b_left = b.bbox.x;
-    let b_right = b.bbox.x + b.bbox.width;
-
-    let overlap = (a_right.min(b_right) - a_left.max(b_left)).max(0.0);
-    let shorter = a.bbox.width.min(b.bbox.width).max(1.0);
-    let overlap_frac = overlap / shorter;
-
-    if approx_ge(overlap_frac, cfg.overlap_ratio) {
-        return true;
-    }
-
     let span = (frame_w as f32).max(1.0);
-    let left_frac = (a_left - b_left).abs() / span;
-    let a_cx = a_left + a.bbox.width * 0.5;
-    let b_cx = b_left + b.bbox.width * 0.5;
+    let left_frac = (a.bbox.x - b.bbox.x).abs() / span;
+    let a_cx = a.bbox.x + a.bbox.width * 0.5;
+    let b_cx = b.bbox.x + b.bbox.width * 0.5;
     let center_frac = (a_cx - b_cx).abs() / span;
-    (approx_le(left_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)) && approx_ge(overlap_frac, cfg.align_overlap_ratio)
+    approx_le(left_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)
 }
 
-fn has_intervening_line(blocks: &[OcrBlock], upper: usize, lower: usize, frame_w: u32, frame_h: u32, cfg: &LineMergeConfig) -> bool {
+fn vert_compatible(a: &OcrBlock, b: &OcrBlock, frame_h: u32, cfg: &LineMergeConfig) -> bool {
+    let span = (frame_h as f32).max(1.0);
+    let top_frac = (a.bbox.y - b.bbox.y).abs() / span;
+    let a_cy = a.bbox.y + a.bbox.height * 0.5;
+    let b_cy = b.bbox.y + b.bbox.height * 0.5;
+    let center_frac = (a_cy - b_cy).abs() / span;
+    approx_le(top_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)
+}
+
+fn has_intervening_below(blocks: &[OcrBlock], upper: usize, lower: usize, frame_w: u32, frame_h: u32, cfg: &LineMergeConfig) -> bool {
     let u = &blocks[upper];
     let l = &blocks[lower];
     let y0 = u.bbox.y + u.bbox.height;
@@ -313,6 +363,31 @@ fn has_intervening_line(blocks: &[OcrBlock], upper: usize, lower: usize, frame_w
             continue;
         }
         if horiz_compatible(u, b, frame_w, cfg) && horiz_compatible(b, l, frame_w, cfg) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_intervening_right(blocks: &[OcrBlock], left: usize, right: usize, frame_w: u32, frame_h: u32, cfg: &LineMergeConfig) -> bool {
+    let l = &blocks[left];
+    let r = &blocks[right];
+    let x0 = l.bbox.x + l.bbox.width;
+    let x1 = r.bbox.x;
+    let span = (frame_w as f32).max(1.0);
+    if approx_le((x1 - x0) / span, 0.0) {
+        return false;
+    }
+
+    for (k, b) in blocks.iter().enumerate() {
+        if k == left || k == right {
+            continue;
+        }
+        let cx = b.bbox.x + b.bbox.width * 0.5;
+        if approx_le((cx - x0) / span, 0.0) || approx_ge((cx - x1) / span, 0.0) {
+            continue;
+        }
+        if vert_compatible(l, b, frame_h, cfg) && vert_compatible(b, r, frame_h, cfg) {
             return true;
         }
     }
@@ -469,9 +544,51 @@ mod tests {
     }
 
     #[test]
-    fn does_not_merge_side_by_side() {
+    fn does_not_merge_side_by_side_far_apart() {
         let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 200.0, 12.0, 40.0, 18.0)];
         let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn merges_side_by_side_when_gap_small() {
+        let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 55.0, 12.0, 40.0, 18.0)];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Left Right");
+    }
+
+    #[test]
+    fn horizontal_gap_at_threshold_still_merges() {
+        let cfg = LineMergeConfig::default();
+        let w = 40.0;
+        let h = 18.0;
+        let gap = cfg.horizontal_gap_ratio * DEFAULT_FRAME_W as f32;
+        let blocks = vec![line(0, "Left", 10.0, 10.0, w, h), line(1, "Right", 10.0 + w + gap, 10.0, w, h)];
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Left Right");
+    }
+
+    #[test]
+    fn horizontal_gap_beyond_threshold_stays_separate() {
+        let cfg = LineMergeConfig::default();
+        let w = 40.0;
+        let h = 18.0;
+        let gap = cfg.horizontal_gap_ratio * DEFAULT_FRAME_W as f32 + 2.0;
+        let blocks = vec![line(0, "Left", 10.0, 10.0, w, h), line(1, "Right", 10.0 + w + gap, 10.0, w, h)];
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn horizontal_gap_disabled_keeps_neighbors_separate() {
+        let cfg = LineMergeConfig {
+            horizontal_gap_ratio: 0.0,
+            ..Default::default()
+        };
+        let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 55.0, 12.0, 40.0, 18.0)];
+        let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 2);
     }
 
@@ -569,16 +686,15 @@ mod tests {
     }
 
     #[test]
-    fn low_overlap_unaligned_does_not_merge() {
+    fn unaligned_column_does_not_merge() {
         let blocks = vec![line(0, "A", 10.0, 10.0, 80.0, 18.0), line(1, "B", 120.0, 32.0, 80.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2);
     }
 
     #[test]
-    fn align_path_merges_weak_overlap() {
-        // overlap/shorter ≈ 0.33 < 0.35, left edges within align_ratio.
-        // Guard off: this pair is short-over-long, which the align path must still see.
+    fn aligned_short_over_long_merges_when_guard_off() {
+        // Left edges within align_ratio; gap covers stacked proximity (including overlap).
         let cfg = LineMergeConfig {
             reject_short_long: false,
             ..Default::default()
@@ -678,7 +794,7 @@ mod tests {
         ];
         let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A B C D");
+        assert_eq!(merged[0].text, "A C B D");
     }
 
     #[test]
@@ -695,7 +811,7 @@ mod tests {
         ];
         let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A C B D");
+        assert_eq!(merged[0].text, "A B C D");
     }
 
     #[test]
@@ -708,6 +824,6 @@ mod tests {
             line(3, "D", 80.0, 40.0, 20.0, 16.0),
         ];
         let merged = merge_with(blocks, cfg, true);
-        assert_eq!(merged[0].text, "A C B D");
+        assert_eq!(merged[0].text, "A B C D");
     }
 }
