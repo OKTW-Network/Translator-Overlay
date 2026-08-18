@@ -33,6 +33,8 @@ pub fn app(cx: &mut RenderCx) -> Element {
     cx.use_effect((), || {
         set_requested_theme(RequestedTheme::Default);
         set_backdrop(Some(Backdrop::Mica));
+        // WinUI 3 Activate can knock the taskbar out of the topmost stack (#11091).
+        crate::taskbar_guard::restore_taskbar_zorder();
     });
     let _scheme = cx.use_color_scheme();
 
