@@ -21,8 +21,8 @@ use crate::{
         OverlayHost,
         follow::FOLLOW_TARGET,
         win32::{
-            ClientRect, OverlayOwnership, live_client_screen_rect, move_overlay_position, overlay_owner, place_overlay_above_target,
-            set_overlay_owner,
+            ClientRect, OverlayOwnership, live_client_screen_rect, move_overlay_position, overlay_needs_restack, overlay_owner,
+            place_overlay_above_target, set_overlay_owner,
         },
     },
     picker::PickerEnd,
@@ -305,6 +305,14 @@ impl OverlayHost {
                 self.presented_rect = Some(rect);
             }
             PresentationAction::RestackOnly => {
+                // SetWindowPos on a layered window without ULW can blank it.
+                if overlay_needs_restack(self.hwnd, target, ownership) {
+                    if let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
+                        warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
+                        return;
+                    }
+                    self.presented_rect = Some(rect);
+                }
                 if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };

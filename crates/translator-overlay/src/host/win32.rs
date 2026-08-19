@@ -2,15 +2,17 @@
 //!
 //! Captions own the capture target and use capture/DWM client metrics so boxes
 //! stay aligned with OCR frames. The region picker stays unowned and inserts
-//! above the target; pure moves update geometry with `SetWindowPos` only.
+//! above the target (topmost while the target is foreground); pure moves update
+//! geometry with `SetWindowPos` only.
 
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Gdi::ClientToScreen,
     UI::WindowsAndMessaging::{
-        GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWLP_HWNDPARENT, GetClientRect, GetWindow, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOP,
-        HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-        SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WS_EX_TOPMOST,
+        GA_ROOT, GA_ROOTOWNER, GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWLP_HWNDPARENT, GetAncestor, GetClientRect, GetForegroundWindow,
+        GetWindow, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        WINDOW_EX_STYLE, WS_EX_TOPMOST,
     },
 };
 
@@ -19,7 +21,9 @@ pub(crate) type ClientRect = (i32, i32, i32, i32);
 /// Whether the overlay should be owned by the capture target.
 ///
 /// Owned captions ride the target's Z-order group (`SWP_NOOWNERZORDER`).
-/// The picker must stay unowned so insert-above + hit-testing work.
+/// The picker must stay unowned so insert-above + hit-testing work. While the
+/// target is foreground, an unowned picker sits in the topmost band so the
+/// newly activated target cannot cover it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OverlayOwnership {
     OwnedByTarget,
@@ -60,6 +64,29 @@ pub(crate) fn set_overlay_owner(overlay: HWND, owner: Option<HWND>) {
     let _ = unsafe { SetWindowPos(overlay, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
 }
 
+fn target_is_foreground(target: HWND) -> bool {
+    if target.is_invalid() {
+        return false;
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_invalid() {
+        return false;
+    }
+    if fg == target {
+        return true;
+    }
+    let root = unsafe { GetAncestor(fg, GA_ROOT) };
+    if !root.is_invalid() && root == target {
+        return true;
+    }
+    let owner_root = unsafe { GetAncestor(fg, GA_ROOTOWNER) };
+    !owner_root.is_invalid() && owner_root == target
+}
+
+fn overlay_wants_topmost(ownership: OverlayOwnership, target_topmost: bool, target_foreground: bool) -> bool {
+    target_topmost || (ownership == OverlayOwnership::Unowned && target_foreground)
+}
+
 fn choose_z_order_anchor(overlay: isize, above_target: Option<isize>, target_topmost: bool) -> ZOrderAnchor {
     match above_target {
         Some(hwnd) if hwnd == overlay => ZOrderAnchor::Preserve,
@@ -85,6 +112,20 @@ pub(crate) fn move_overlay_position(overlay: HWND, x: i32, y: i32) -> windows::c
     unsafe { SetWindowPos(overlay, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER) }
 }
 
+/// Whether `place_overlay_above_target` will `SetWindowPos` (needs a prior ULW).
+pub(crate) fn overlay_needs_restack(overlay: HWND, target: HWND, ownership: OverlayOwnership) -> bool {
+    let target_topmost = window_is_topmost(target);
+    let want_topmost = overlay_wants_topmost(ownership, target_topmost, target_is_foreground(target));
+    if window_is_topmost(overlay) != want_topmost {
+        return true;
+    }
+    if want_topmost && !target_topmost {
+        return false;
+    }
+    let above_target = unsafe { GetWindow(target, GW_HWNDPREV) }.ok().map(|hwnd| hwnd.0 as isize);
+    !matches!(choose_z_order_anchor(overlay.0 as isize, above_target, target_topmost), ZOrderAnchor::Preserve)
+}
+
 /// Keep `overlay` immediately above `target` without raising a normal target globally.
 pub(crate) fn place_overlay_above_target(overlay: HWND, target: HWND, ownership: OverlayOwnership) -> windows::core::Result<()> {
     match ownership {
@@ -94,9 +135,17 @@ pub(crate) fn place_overlay_above_target(overlay: HWND, target: HWND, ownership:
     let no_owner_zorder = ownership == OverlayOwnership::OwnedByTarget;
 
     let target_topmost = window_is_topmost(target);
-    if window_is_topmost(overlay) != target_topmost {
-        let band = if target_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    let want_topmost = overlay_wants_topmost(ownership, target_topmost, target_is_foreground(target));
+    if window_is_topmost(overlay) != want_topmost {
+        let band = if want_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
         unsafe { SetWindowPos(overlay, Some(band), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) }?;
+    }
+
+    // A topmost picker above a normal target must not insert-after a non-topmost
+    // predecessor — that `SetWindowPos` drops it out of the topmost band.
+    if want_topmost && !target_topmost {
+        let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
+        return Ok(());
     }
 
     // Re-read after synchronizing the topmost band: that operation itself may
@@ -164,5 +213,18 @@ mod tests {
     #[test]
     fn z_order_uses_topmost_only_for_topmost_target_at_front() {
         assert_eq!(choose_z_order_anchor(20, None, true), ZOrderAnchor::Topmost);
+    }
+
+    #[test]
+    fn unowned_picker_is_topmost_only_while_the_target_is_foreground() {
+        assert!(overlay_wants_topmost(OverlayOwnership::Unowned, false, true));
+        assert!(!overlay_wants_topmost(OverlayOwnership::Unowned, false, false));
+        assert!(overlay_wants_topmost(OverlayOwnership::Unowned, true, false));
+    }
+
+    #[test]
+    fn owned_captions_follow_the_target_topmost_band_only() {
+        assert!(!overlay_wants_topmost(OverlayOwnership::OwnedByTarget, false, true));
+        assert!(overlay_wants_topmost(OverlayOwnership::OwnedByTarget, true, false));
     }
 }
