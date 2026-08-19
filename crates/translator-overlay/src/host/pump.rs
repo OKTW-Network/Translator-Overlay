@@ -2,16 +2,14 @@
 
 use tokio::sync::mpsc;
 use tracing::warn;
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_APP, WM_QUIT, WaitMessage,
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_APP, WM_QUIT, WaitMessage},
 };
 
 use crate::{
     command::OverlayCommand,
-    host::{
-        OverlayHost,
-        follow::{FOLLOW_EVENT_MESSAGE, FOLLOW_SYNC},
-    },
+    host::{OverlayHost, follow::FOLLOW_EVENT_MESSAGE},
     picker,
 };
 
@@ -20,7 +18,7 @@ impl OverlayHost {
         self.follow_hooks = crate::host::follow::install_follow_hooks();
 
         loop {
-            let mut sync = false;
+            let mut apply = false;
             let mut command_wake = false;
             loop {
                 match rx.try_recv() {
@@ -30,7 +28,7 @@ impl OverlayHost {
                     }
                     Ok(cmd) => {
                         self.handle(cmd);
-                        sync = true;
+                        apply = true;
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -40,17 +38,13 @@ impl OverlayHost {
                 }
             }
 
-            if self.drain_thread_messages(&mut sync, &mut command_wake) {
+            if self.drain_thread_messages(&mut apply, &mut command_wake) {
                 self.teardown();
                 return;
             }
 
-            if FOLLOW_SYNC.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                sync = true;
-            }
-
-            if sync {
-                self.tick();
+            if apply {
+                self.apply_overlay();
             }
 
             if command_wake {
@@ -66,7 +60,7 @@ impl OverlayHost {
     }
 
     /// Returns `true` when the thread should exit (`WM_QUIT`).
-    fn drain_thread_messages(&mut self, sync: &mut bool, command_wake: &mut bool) -> bool {
+    fn drain_thread_messages(&mut self, apply: &mut bool, command_wake: &mut bool) -> bool {
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_QUIT {
@@ -78,13 +72,15 @@ impl OverlayHost {
                     continue;
                 }
                 if msg.message == FOLLOW_EVENT_MESSAGE {
-                    *sync = true;
+                    if self.on_follow_event(msg.wParam.0 as u32, HWND(msg.lParam.0 as *mut _)) {
+                        *apply = true;
+                    }
                     continue;
                 }
             }
             if self.picker.is_some() && msg.hwnd == self.hwnd && picker::is_picker_message(msg.message) {
                 self.dispatch_picker_msg(&msg);
-                *sync = true;
+                *apply = true;
                 continue;
             }
             let _ = unsafe { TranslateMessage(&msg) };

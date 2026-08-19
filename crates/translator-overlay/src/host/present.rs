@@ -9,14 +9,17 @@ use windows::Win32::{
     Foundation::HWND,
     UI::{
         Input::KeyboardAndMouse::ReleaseCapture,
-        WindowsAndMessaging::{IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow},
+        WindowsAndMessaging::{
+            EVENT_OBJECT_DESTROY, EVENT_OBJECT_REORDER, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, IsIconic, IsWindow,
+            IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+        },
     },
 };
 
 use crate::{
     host::{
         OverlayHost,
-        follow::{FOLLOW_IN_MOVESIZE, FOLLOW_SETTLE, FOLLOW_TARGET, clear_follow_move_state},
+        follow::FOLLOW_TARGET,
         win32::{
             ClientRect, OverlayOwnership, live_client_screen_rect, move_overlay_position, overlay_owner, place_overlay_above_target,
             set_overlay_owner,
@@ -30,6 +33,23 @@ enum PresentationAction {
     FullPresent,
     MoveOnly,
     RestackOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowNotice {
+    BeginMoveSize,
+    EndMoveSize,
+    Drop,
+    Apply,
+}
+
+fn classify_follow_notice(event: u32, in_movesize: bool) -> FollowNotice {
+    match event {
+        EVENT_SYSTEM_MOVESIZESTART => FollowNotice::BeginMoveSize,
+        EVENT_SYSTEM_MOVESIZEEND => FollowNotice::EndMoveSize,
+        EVENT_OBJECT_REORDER if in_movesize => FollowNotice::Drop,
+        _ => FollowNotice::Apply,
+    }
 }
 
 fn presentation_action(previous: Option<ClientRect>, current: ClientRect, content_changed: bool) -> PresentationAction {
@@ -46,39 +66,79 @@ fn presentation_action(previous: Option<ClientRect>, current: ClientRect, conten
 }
 
 impl OverlayHost {
-    pub(crate) fn tick(&mut self) {
+    pub(crate) fn apply_overlay(&mut self) {
         if !self.ensure_layer_alive() {
             return;
         }
 
-        if FOLLOW_IN_MOVESIZE.load(std::sync::atomic::Ordering::Acquire) {
-            self.tick_follow_move();
+        if self.in_movesize {
+            self.follow_move();
             return;
-        }
-        if FOLLOW_SETTLE.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            // Force DWM/live realign + restack once the modal move/size loop ends.
-            self.presented_rect = None;
         }
 
         if self.picker.is_some() {
-            self.tick_picker();
+            self.apply_picker();
             return;
         }
 
-        self.tick_captions();
+        self.apply_captions();
+    }
+
+    /// Returns whether the pump should `apply_overlay` after this notice.
+    pub(crate) fn on_follow_event(&mut self, event: u32, hwnd: HWND) -> bool {
+        match classify_follow_notice(event, self.in_movesize) {
+            FollowNotice::BeginMoveSize => {
+                self.in_movesize = true;
+                true
+            }
+            FollowNotice::EndMoveSize => {
+                self.in_movesize = false;
+                self.presented_rect = None;
+                true
+            }
+            FollowNotice::Drop => false,
+            FollowNotice::Apply => {
+                if event == EVENT_OBJECT_DESTROY {
+                    self.on_follow_destroy(hwnd);
+                }
+                true
+            }
+        }
+    }
+
+    fn on_follow_destroy(&mut self, hwnd: HWND) {
+        if self.target != Some(hwnd) {
+            return;
+        }
+        debug!("target window gone — detaching overlay");
+        self.forget_target();
+        if self.picker.is_some() {
+            self.presented_rect = None;
+            self.finish_picker(PickerEnd::Cancel);
+        } else {
+            self.release_target();
+        }
+    }
+
+    pub(crate) fn clear_follow_move_state(&mut self) {
+        self.in_movesize = false;
+    }
+
+    fn forget_target(&mut self) {
+        self.target = None;
+        FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+        self.in_movesize = false;
     }
 
     /// Interactive title-bar drag / resize: live rect + one `SetWindowPos`.
-    fn tick_follow_move(&mut self) {
+    fn follow_move(&mut self) {
         let Some(target) = self.target else {
             return;
         };
 
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
             debug!("target window gone — detaching overlay");
-            self.target = None;
-            FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-            clear_follow_move_state();
+            self.forget_target();
             if self.picker.is_some() {
                 self.presented_rect = None;
                 self.finish_picker(PickerEnd::Cancel);
@@ -108,7 +168,7 @@ impl OverlayHost {
         self.presented_rect = Some(next);
     }
 
-    fn tick_captions(&mut self) {
+    fn apply_captions(&mut self) {
         if !self.config.enabled {
             self.hide();
             return;
@@ -120,9 +180,7 @@ impl OverlayHost {
 
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
             debug!("target window gone — detaching overlay");
-            self.target = None;
-            FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-            clear_follow_move_state();
+            self.forget_target();
             self.release_target();
             return;
         }
@@ -170,7 +228,7 @@ impl OverlayHost {
         self.update_overlay_window(target, rect, content_changed, OverlayOwnership::OwnedByTarget);
     }
 
-    pub(crate) fn tick_picker(&mut self) {
+    fn apply_picker(&mut self) {
         let Some(target) = self.target else {
             self.finish_picker(PickerEnd::Cancel);
             return;
@@ -178,9 +236,7 @@ impl OverlayHost {
 
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
             debug!("target window gone — cancelling region picker");
-            self.target = None;
-            FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-            clear_follow_move_state();
+            self.forget_target();
             self.presented_rect = None;
             self.finish_picker(PickerEnd::Cancel);
             return;
@@ -305,5 +361,18 @@ mod tests {
     #[test]
     fn unchanged_geometry_only_needs_restacking() {
         assert_eq!(presentation_action(Some(RECT), RECT, false), PresentationAction::RestackOnly);
+    }
+
+    #[test]
+    fn movesize_notices_bookend_interactive_follow() {
+        assert_eq!(classify_follow_notice(EVENT_SYSTEM_MOVESIZESTART, false), FollowNotice::BeginMoveSize);
+        assert_eq!(classify_follow_notice(EVENT_SYSTEM_MOVESIZEEND, true), FollowNotice::EndMoveSize);
+    }
+
+    #[test]
+    fn reorder_is_dropped_only_during_movesize() {
+        assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, true), FollowNotice::Drop);
+        assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, false), FollowNotice::Apply);
+        assert_eq!(classify_follow_notice(EVENT_OBJECT_DESTROY, true), FollowNotice::Apply);
     }
 }

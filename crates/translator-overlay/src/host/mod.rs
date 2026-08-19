@@ -2,8 +2,8 @@
 
 mod captions;
 mod follow;
+mod present;
 mod pump;
-mod tick;
 pub(crate) mod win32;
 pub(crate) mod wnd;
 
@@ -14,7 +14,7 @@ use windows::{
     Win32::{
         Foundation::HWND,
         Graphics::Gdi::{DeleteObject, HFONT},
-        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        System::LibraryLoader::GetModuleHandleW,
         UI::{
             Accessibility::HWINEVENTHOOK,
             WindowsAndMessaging::{
@@ -32,7 +32,7 @@ use crate::{
     error::OverlayError,
     gfx::{surface::DibSurface, text},
     host::{
-        follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, FOLLOW_THREAD, clear_follow_move_state, uninstall_follow_hooks},
+        follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, uninstall_follow_hooks},
         win32::{ClientRect, set_overlay_owner},
         wnd::{CLASS_NAME, HOST_TEARING_DOWN, overlay_wnd_proc},
     },
@@ -61,6 +61,8 @@ pub(crate) struct OverlayHost {
     /// Last successfully presented/moved client rect in screen space.
     /// Pure target drags reuse this for MoveOnly (`SetWindowPos` without re-ULW).
     pub(crate) presented_rect: Option<ClientRect>,
+    /// Interactive title-bar drag / resize (`EVENT_SYSTEM_MOVESIZE*`).
+    pub(crate) in_movesize: bool,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
     pub(crate) follow_hooks: [HWINEVENTHOOK; 5],
 }
@@ -149,13 +151,13 @@ impl OverlayHost {
             reader: None,
             picker: None,
             presented_rect: None,
+            in_movesize: false,
             event_tx,
             follow_hooks: [HWINEVENTHOOK::default(); 5],
         };
 
         HOST_TEARING_DOWN.store(false, std::sync::atomic::Ordering::Release);
         FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
-        FOLLOW_THREAD.store(unsafe { GetCurrentThreadId() }, std::sync::atomic::Ordering::Release);
 
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
         host.surface.ensure(100, 100)?;
@@ -176,7 +178,7 @@ impl OverlayHost {
         match cmd {
             OverlayCommand::Attach { target_hwnd } => {
                 self.presented_rect = None;
-                clear_follow_move_state();
+                self.clear_follow_move_state();
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
@@ -199,7 +201,7 @@ impl OverlayHost {
                 }
                 self.target = None;
                 FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-                clear_follow_move_state();
+                self.clear_follow_move_state();
                 self.presented_rect = None;
                 self.release_target();
             }
@@ -350,8 +352,7 @@ impl OverlayHost {
         HOST_TEARING_DOWN.store(true, std::sync::atomic::Ordering::Release);
         FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
         FOLLOW_OVERLAY.store(0, std::sync::atomic::Ordering::Release);
-        FOLLOW_THREAD.store(0, std::sync::atomic::Ordering::Release);
-        clear_follow_move_state();
+        self.in_movesize = false;
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();
