@@ -63,6 +63,8 @@ pub(crate) struct OverlayHost {
     pub(crate) presented_rect: Option<ClientRect>,
     /// Interactive title-bar drag / resize (`EVENT_SYSTEM_MOVESIZE*`).
     pub(crate) in_movesize: bool,
+    /// Precise insert-after was denied (UIPI); stay topmost while the target is focused.
+    pub(crate) z_order_force_topmost: bool,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
     pub(crate) follow_hooks: [HWINEVENTHOOK; 5],
 }
@@ -152,6 +154,7 @@ impl OverlayHost {
             picker: None,
             presented_rect: None,
             in_movesize: false,
+            z_order_force_topmost: false,
             event_tx,
             follow_hooks: [HWINEVENTHOOK::default(); 5],
         };
@@ -179,6 +182,7 @@ impl OverlayHost {
             OverlayCommand::Attach { target_hwnd } => {
                 self.presented_rect = None;
                 self.clear_follow_move_state();
+                self.z_order_force_topmost = false;
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
@@ -203,6 +207,7 @@ impl OverlayHost {
                 FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
                 self.clear_follow_move_state();
                 self.presented_rect = None;
+                self.z_order_force_topmost = false;
                 self.release_target();
             }
             OverlayCommand::SetBlocks {

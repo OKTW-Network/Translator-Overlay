@@ -3,8 +3,10 @@
 //! Captions own the capture target and use capture/DWM client metrics so boxes
 //! stay aligned with OCR frames. The region picker stays unowned and inserts
 //! above the target (topmost while the target is foreground); pure moves update
-//! geometry with `SetWindowPos` only.
+//! geometry with `SetWindowPos` only. If UIPI denies insert-after, the overlay
+//! falls back to `HWND_TOPMOST` while the target is foreground.
 
+use tracing::warn;
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Gdi::ClientToScreen,
@@ -104,6 +106,22 @@ fn set_window_pos(overlay: HWND, insert_after: Option<HWND>, no_owner_zorder: bo
     unsafe { SetWindowPos(overlay, insert_after, 0, 0, 0, 0, flags) }
 }
 
+fn set_topmost_band(overlay: HWND, want_topmost: bool) -> windows::core::Result<()> {
+    if window_is_topmost(overlay) == want_topmost {
+        let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
+        return Ok(());
+    }
+    let band = if want_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe { SetWindowPos(overlay, Some(band), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) }
+}
+
+fn fallback_to_topmost(overlay: HWND, force_topmost: &mut bool, error: windows::core::Error) -> windows::core::Result<()> {
+    warn!(error = %error, "overlay Z-order update failed; falling back to HWND_TOPMOST");
+    *force_topmost = true;
+    set_overlay_owner(overlay, None);
+    set_topmost_band(overlay, true)
+}
+
 /// Move the overlay to a screen position without a Z-order or ULW pass.
 pub(crate) fn move_overlay_position(overlay: HWND, x: i32, y: i32) -> windows::core::Result<()> {
     if overlay.is_invalid() {
@@ -113,13 +131,14 @@ pub(crate) fn move_overlay_position(overlay: HWND, x: i32, y: i32) -> windows::c
 }
 
 /// Whether `place_overlay_above_target` will `SetWindowPos` (needs a prior ULW).
-pub(crate) fn overlay_needs_restack(overlay: HWND, target: HWND, ownership: OverlayOwnership) -> bool {
+pub(crate) fn overlay_needs_restack(overlay: HWND, target: HWND, ownership: OverlayOwnership, force_topmost: bool) -> bool {
     let target_topmost = window_is_topmost(target);
+    let ownership = if force_topmost { OverlayOwnership::Unowned } else { ownership };
     let want_topmost = overlay_wants_topmost(ownership, target_topmost, target_is_foreground(target));
     if window_is_topmost(overlay) != want_topmost {
         return true;
     }
-    if want_topmost && !target_topmost {
+    if force_topmost || (want_topmost && !target_topmost) {
         return false;
     }
     let above_target = unsafe { GetWindow(target, GW_HWNDPREV) }.ok().map(|hwnd| hwnd.0 as isize);
@@ -127,32 +146,43 @@ pub(crate) fn overlay_needs_restack(overlay: HWND, target: HWND, ownership: Over
 }
 
 /// Keep `overlay` immediately above `target` without raising a normal target globally.
-pub(crate) fn place_overlay_above_target(overlay: HWND, target: HWND, ownership: OverlayOwnership) -> windows::core::Result<()> {
+///
+/// If insert-after / band sync is denied (UIPI), latch `force_topmost` and sit in
+/// the topmost band while the target is foreground.
+pub(crate) fn place_overlay_above_target(
+    overlay: HWND,
+    target: HWND,
+    ownership: OverlayOwnership,
+    force_topmost: &mut bool,
+) -> windows::core::Result<()> {
+    if *force_topmost {
+        set_overlay_owner(overlay, None);
+        let topmost = overlay_wants_topmost(OverlayOwnership::Unowned, window_is_topmost(target), target_is_foreground(target));
+        return set_topmost_band(overlay, topmost);
+    }
+
     match ownership {
         OverlayOwnership::OwnedByTarget => set_overlay_owner(overlay, Some(target)),
         OverlayOwnership::Unowned => set_overlay_owner(overlay, None),
     }
     let no_owner_zorder = ownership == OverlayOwnership::OwnedByTarget;
-
     let target_topmost = window_is_topmost(target);
     let want_topmost = overlay_wants_topmost(ownership, target_topmost, target_is_foreground(target));
-    if window_is_topmost(overlay) != want_topmost {
-        let band = if want_topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
-        unsafe { SetWindowPos(overlay, Some(band), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) }?;
+
+    if let Err(e) = set_topmost_band(overlay, want_topmost) {
+        return fallback_to_topmost(overlay, force_topmost, e);
     }
 
     // A topmost picker above a normal target must not insert-after a non-topmost
     // predecessor — that `SetWindowPos` drops it out of the topmost band.
     if want_topmost && !target_topmost {
-        let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
         return Ok(());
     }
 
     // Re-read after synchronizing the topmost band: that operation itself may
     // have changed which window is immediately above the target.
     let above_target = unsafe { GetWindow(target, GW_HWNDPREV) }.ok().map(|hwnd| hwnd.0 as isize);
-    let anchor = choose_z_order_anchor(overlay.0 as isize, above_target, target_topmost);
-    match anchor {
+    match choose_z_order_anchor(overlay.0 as isize, above_target, target_topmost) {
         ZOrderAnchor::Preserve => {
             let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
             Ok(())
@@ -161,6 +191,7 @@ pub(crate) fn place_overlay_above_target(overlay: HWND, target: HWND, ownership:
         ZOrderAnchor::Top => set_window_pos(overlay, Some(HWND_TOP), no_owner_zorder),
         ZOrderAnchor::Topmost => set_window_pos(overlay, Some(HWND_TOPMOST), no_owner_zorder),
     }
+    .or_else(|e| fallback_to_topmost(overlay, force_topmost, e))
 }
 
 /// Live Win32 client rect for the region picker.

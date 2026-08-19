@@ -35,6 +35,7 @@ cargo test
 
 - Same-crate imports use `crate::…` paths (not `super::`, `self::`, or bare child-module paths).
 - Exception: unit tests may keep `use super::*;` to pull the parent module under test.
+- Do not extract a helper that has a single call site or that exists only so a one-liner can be unit-tested. Inline it. Extract only when there is a second call site or non-trivial shared logic.
 
 ## Build
 

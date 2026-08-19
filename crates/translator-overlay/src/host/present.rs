@@ -128,6 +128,7 @@ impl OverlayHost {
         self.target = None;
         FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
         self.in_movesize = false;
+        self.z_order_force_topmost = false;
     }
 
     /// Interactive title-bar drag / resize: live rect + one `SetWindowPos`.
@@ -291,7 +292,7 @@ impl OverlayHost {
                     return;
                 }
                 self.presented_rect = Some(rect);
-                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership) {
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
@@ -306,14 +307,14 @@ impl OverlayHost {
             }
             PresentationAction::RestackOnly => {
                 // SetWindowPos on a layered window without ULW can blank it.
-                if overlay_needs_restack(self.hwnd, target, ownership) {
+                if overlay_needs_restack(self.hwnd, target, ownership, self.z_order_force_topmost) {
                     if let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
                         warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
                         return;
                     }
                     self.presented_rect = Some(rect);
                 }
-                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership) {
+                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
