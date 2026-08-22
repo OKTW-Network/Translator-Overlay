@@ -18,8 +18,9 @@ use windows::{
         UI::{
             Accessibility::HWINEVENTHOOK,
             WindowsAndMessaging::{
-                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, IsWindow, LoadCursorW, RegisterClassExW, SW_HIDE,
-                ShowWindow, UnregisterClassW, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsWindow, LoadCursorW,
+                RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, UnregisterClassW, WNDCLASSEXW,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
             },
         },
     },
@@ -65,6 +66,8 @@ pub(crate) struct OverlayHost {
     pub(crate) in_movesize: bool,
     /// Precise insert-after was denied (UIPI); stay topmost while the target is focused.
     pub(crate) z_order_force_topmost: bool,
+    /// Next present must FullPresent: first Show of a layered HWND can leave DWM blank.
+    pub(crate) replay_present: bool,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
     pub(crate) follow_hooks: [HWINEVENTHOOK; 5],
 }
@@ -108,14 +111,14 @@ impl OverlayHost {
         }
         .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
 
-        let surface = match DibSurface::create(hwnd) {
+        let surface = match DibSurface::create() {
             Ok(s) => s,
             Err(e) => {
                 let _ = unsafe { DestroyWindow(hwnd) };
                 return Err(e);
             }
         };
-        let present = match DibSurface::create(hwnd) {
+        let present = match DibSurface::create() {
             Ok(s) => s,
             Err(e) => {
                 drop(surface);
@@ -155,6 +158,7 @@ impl OverlayHost {
             presented_rect: None,
             in_movesize: false,
             z_order_force_topmost: false,
+            replay_present: false,
             event_tx,
             follow_hooks: [HWINEVENTHOOK::default(); 5],
         };
@@ -163,7 +167,7 @@ impl OverlayHost {
         FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
 
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
-        host.surface.ensure(100, 100)?;
+        host.warmup_overlay_layer();
         match ReaderWindow::create(&host.config) {
             Ok(reader) => host.reader = Some(reader),
             Err(e) => {
@@ -327,14 +331,14 @@ impl OverlayHost {
         }
         .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
 
-        let surface = match DibSurface::create(hwnd) {
+        let surface = match DibSurface::create() {
             Ok(s) => s,
             Err(e) => {
                 let _ = unsafe { DestroyWindow(hwnd) };
                 return Err(e);
             }
         };
-        let present = match DibSurface::create(hwnd) {
+        let present = match DibSurface::create() {
             Ok(s) => s,
             Err(e) => {
                 drop(surface);
@@ -348,9 +352,38 @@ impl OverlayHost {
         self.present = present;
         FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
         self.dirty = true;
+        self.replay_present = false;
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
-        self.surface.ensure(100, 100)?;
+        self.warmup_overlay_layer();
         Ok(())
+    }
+
+    /// Hidden ULW, then an off-screen Show + topmost-band round-trip, so the first
+    /// picker is not DWM's first compositor surface for this HWND.
+    fn warmup_overlay_layer(&mut self) {
+        const OFFSCREEN: i32 = -32_000;
+        let hwnd = self.hwnd;
+        if hwnd.is_invalid() {
+            return;
+        }
+        if let Err(e) = self.surface.ensure(100, 100) {
+            warn!(error = %e, "overlay layer warmup bitmap failed");
+            return;
+        }
+        if let Some(bits) = self.surface.pixels() {
+            bits.fill(0);
+        }
+        if let Err(e) = self.surface.present(hwnd, 0, 0, 100, 100) {
+            warn!(error = %e, "overlay layer warmup UpdateLayeredWindow failed");
+        }
+        if let Err(e) = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), OFFSCREEN, OFFSCREEN, 100, 100, SWP_NOACTIVATE | SWP_SHOWWINDOW) } {
+            warn!(error = %e, "overlay layer warmup SetWindowPos failed");
+        }
+        if let Err(e) = self.surface.present(hwnd, OFFSCREEN, OFFSCREEN, 100, 100) {
+            warn!(error = %e, "overlay layer warmup UpdateLayeredWindow failed");
+        }
+        let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+        let _ = unsafe { SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 100, 100, SWP_NOACTIVATE) };
     }
 
     pub(crate) fn teardown(&mut self) {

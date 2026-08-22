@@ -58,7 +58,7 @@ impl OverlayHost {
         set_picker_cursor(PickerCursor::Cross);
         self.dirty = true;
         // Dashboard just received the click, so this process may set foreground.
-        // Bring the target up so the picker is visible without an extra click.
+        // Raise the target before apply so unowned-topmost-while-focused is true.
         if let Some(target) = self.target {
             let _ = unsafe { SetForegroundWindow(target) };
         }

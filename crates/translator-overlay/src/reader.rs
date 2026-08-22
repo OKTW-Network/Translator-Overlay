@@ -95,7 +95,7 @@ impl ReaderWindow {
         unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as isize) };
         let _ = unsafe { SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
 
-        let surface = match DibSurface::create(hwnd) {
+        let surface = match DibSurface::create() {
             Ok(s) => s,
             Err(e) => {
                 let _ = unsafe { DestroyWindow(hwnd) };

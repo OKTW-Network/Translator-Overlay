@@ -27,14 +27,17 @@ pub(crate) struct DibSurface {
 }
 
 impl DibSurface {
-    pub(crate) fn create(hwnd: HWND) -> Result<Self, OverlayError> {
-        let hdc_screen = unsafe { GetDC(Some(hwnd)) };
+    pub(crate) fn create() -> Result<Self, OverlayError> {
+        // MSDN: UpdateLayeredWindow's hdcDst is a *screen* DC (`GetDC(NULL)`), not a
+        // window DC from a still-hidden layered popup. Teardown must ReleaseDC the
+        // same HWND used here (`None` / NULL).
+        let hdc_screen = unsafe { GetDC(None) };
         if hdc_screen.is_invalid() {
             return Err(OverlayError::Other("GetDC failed".into()));
         }
         let hdc_mem = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
         if hdc_mem.is_invalid() {
-            unsafe { ReleaseDC(Some(hwnd), hdc_screen) };
+            unsafe { ReleaseDC(None, hdc_screen) };
             return Err(OverlayError::Other("CreateCompatibleDC failed".into()));
         }
         Ok(Self {

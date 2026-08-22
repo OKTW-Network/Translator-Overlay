@@ -45,6 +45,9 @@ impl OverlayHost {
 
             if apply {
                 self.apply_overlay();
+                if self.replay_present {
+                    self.apply_overlay();
+                }
             }
 
             if command_wake {

@@ -2,9 +2,9 @@
 //!
 //! Captions own the capture target and use capture/DWM client metrics so boxes
 //! stay aligned with OCR frames. The region picker stays unowned and inserts
-//! above the target (topmost while the target is foreground); pure moves update
-//! geometry with `SetWindowPos` only. If UIPI denies insert-after, the overlay
-//! falls back to `HWND_TOPMOST` while the target is foreground.
+//! above the target (topmost only while the target is foreground); pure moves
+//! update geometry with `SetWindowPos` only. If UIPI denies insert-after, the
+//! overlay falls back to `HWND_TOPMOST` while the target is foreground.
 
 use tracing::warn;
 use windows::Win32::{
@@ -40,7 +40,7 @@ enum ZOrderAnchor {
     Topmost,
 }
 
-fn window_is_topmost(hwnd: HWND) -> bool {
+pub(crate) fn window_is_topmost(hwnd: HWND) -> bool {
     if hwnd.is_invalid() {
         return false;
     }
@@ -66,7 +66,7 @@ pub(crate) fn set_overlay_owner(overlay: HWND, owner: Option<HWND>) {
     let _ = unsafe { SetWindowPos(overlay, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
 }
 
-fn target_is_foreground(target: HWND) -> bool {
+pub(crate) fn target_is_foreground(target: HWND) -> bool {
     if target.is_invalid() {
         return false;
     }
@@ -85,7 +85,7 @@ fn target_is_foreground(target: HWND) -> bool {
     !owner_root.is_invalid() && owner_root == target
 }
 
-fn overlay_wants_topmost(ownership: OverlayOwnership, target_topmost: bool, target_foreground: bool) -> bool {
+pub(crate) fn overlay_wants_topmost(ownership: OverlayOwnership, target_topmost: bool, target_foreground: bool) -> bool {
     target_topmost || (ownership == OverlayOwnership::Unowned && target_foreground)
 }
 

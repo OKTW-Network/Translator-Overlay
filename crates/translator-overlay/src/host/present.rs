@@ -22,7 +22,7 @@ use crate::{
         follow::FOLLOW_TARGET,
         win32::{
             ClientRect, OverlayOwnership, live_client_screen_rect, move_overlay_position, overlay_needs_restack, overlay_owner,
-            place_overlay_above_target, set_overlay_owner,
+            overlay_wants_topmost, place_overlay_above_target, set_overlay_owner, target_is_foreground, window_is_topmost,
         },
     },
     picker::PickerEnd,
@@ -283,10 +283,24 @@ impl OverlayHost {
     }
 
     fn update_overlay_window(&mut self, target: HWND, rect: ClientRect, content_changed: bool, ownership: OverlayOwnership) {
+        let effective = if self.z_order_force_topmost {
+            OverlayOwnership::Unowned
+        } else {
+            ownership
+        };
+        let overlay_topmost = window_is_topmost(self.hwnd);
+        let overlay_visible = unsafe { IsWindowVisible(self.hwnd) }.as_bool();
+        let target_fg = target_is_foreground(target);
+        if self.replay_present {
+            self.replay_present = false;
+            self.presented_rect = None;
+        }
+        let want_topmost = overlay_wants_topmost(effective, window_is_topmost(target), target_fg);
+        let needs_restack = overlay_needs_restack(self.hwnd, target, ownership, self.z_order_force_topmost);
+        let present_after_restack = !overlay_visible || overlay_topmost != want_topmost || needs_restack;
+
         match presentation_action(self.presented_rect, rect, content_changed) {
             PresentationAction::FullPresent => {
-                // ULW first, then restack with Preserve so a Z-order race cannot
-                // leave a blank/hidden layered window after present.
                 if let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
                     warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
                     return;
@@ -295,6 +309,15 @@ impl OverlayHost {
                 if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+                }
+                // Band change / first-show `SetWindowPos` can drop the ULW above.
+                if present_after_restack && let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
+                    warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
+                }
+                // First Show can leave DWM blank; replay a FullPresent on the next apply.
+                if !overlay_visible && self.picker.is_some() {
+                    self.replay_present = true;
+                    self.dirty = true;
                 }
             }
             PresentationAction::MoveOnly => {
@@ -306,17 +329,20 @@ impl OverlayHost {
                 self.presented_rect = Some(rect);
             }
             PresentationAction::RestackOnly => {
-                // SetWindowPos on a layered window without ULW can blank it.
-                if overlay_needs_restack(self.hwnd, target, ownership, self.z_order_force_topmost) {
+                // Skip a no-op restack: ShowWindow on an already-visible layered
+                // window without ULW can drop DWM's bitmap.
+                if (needs_restack || !overlay_visible)
+                    && let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost)
+                {
+                    warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
+                    let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
+                }
+                if present_after_restack {
                     if let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
                         warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
                         return;
                     }
                     self.presented_rect = Some(rect);
-                }
-                if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost) {
-                    warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
-                    let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
             }
         }
@@ -327,6 +353,7 @@ impl OverlayHost {
             return;
         }
         self.presented_rect = None;
+        self.replay_present = false;
         let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
     }
 
@@ -383,5 +410,100 @@ mod tests {
         assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, true), FollowNotice::Drop);
         assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, false), FollowNotice::Apply);
         assert_eq!(classify_follow_notice(EVENT_OBJECT_DESTROY, true), FollowNotice::Apply);
+    }
+
+    #[test]
+    fn first_picker_session_shows_a_visible_hit_testable_layer() {
+        if let Err(e) = first_picker_hwnd_smoke() {
+            panic!("{e}");
+        }
+    }
+
+    fn first_picker_hwnd_smoke() -> Result<(), String> {
+        use tokio::sync::mpsc;
+        use translator_core::OverlayConfig;
+        use windows::{
+            Win32::{
+                System::LibraryLoader::GetModuleHandleW,
+                UI::WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, SW_SHOW, SetForegroundWindow, ShowWindow,
+                    WINDOW_EX_STYLE, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW,
+                },
+            },
+            core::w,
+        };
+
+        use crate::{command::OverlayCommand, host::OverlayHost};
+
+        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
+        let target = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("picker-target"),
+                WS_OVERLAPPEDWINDOW,
+                80,
+                80,
+                480,
+                360,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+        }
+        .map_err(|e| format!("CreateWindowExW(target): {e}"))?;
+        let _ = unsafe { ShowWindow(target, SW_SHOW) };
+        let _ = unsafe { SetForegroundWindow(target) };
+
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut host = OverlayHost::create(
+            OverlayConfig {
+                reader_enabled: false,
+                ..OverlayConfig::default()
+            },
+            event_tx,
+        )
+        .map_err(|e| format!("OverlayHost::create: {e}"))?;
+
+        // Two-wake cold start: attach (empty captions → hide) then first picker apply.
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        host.apply_overlay();
+        host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
+        host.apply_overlay();
+        if !host.replay_present {
+            return Err("first picker show did not schedule a replay present".into());
+        }
+        host.apply_overlay();
+
+        let visible = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
+        let ex = WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(host.hwnd, GWL_EXSTYLE) } as u32);
+        let click_through = ex.contains(WS_EX_TRANSPARENT);
+        let topmost = ex.contains(WS_EX_TOPMOST);
+        let presented = host.presented_rect.is_some();
+        let veil = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
+        let target_fg = target_is_foreground(target);
+
+        host.teardown();
+        let _ = unsafe { DestroyWindow(target) };
+
+        if !visible {
+            return Err("overlay HWND is not visible after first picker apply".into());
+        }
+        if click_through {
+            return Err("picker is still WS_EX_TRANSPARENT (click-through)".into());
+        }
+        if target_fg && !topmost {
+            return Err("picker is not WS_EX_TOPMOST while the target is foreground".into());
+        }
+        if !presented {
+            return Err("presented_rect is None after first picker apply".into());
+        }
+        if !veil {
+            return Err("picker DIB has no non-zero alpha (blank veil)".into());
+        }
+        Ok(())
     }
 }
