@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionProfile, RegionProfileFile};
+use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionPreset, RegionPresetFile};
 use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
@@ -58,12 +58,12 @@ pub enum ConfirmAction {
     Discard,
 }
 
-/// Dashboard-only region profile dialogs.
+/// Dashboard-only region preset dialogs.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ProfileDialog {
+pub enum PresetDialog {
     #[default]
     None,
-    /// Compact inline name row under the Profiles controls.
+    /// Compact inline name row under the preset controls.
     SaveName,
     Overwrite {
         name: String,
@@ -104,13 +104,13 @@ pub struct UiShared {
     pub optional_tip_seen: bool,
     /// Inline form validation message (blocks Save until fixed).
     pub form_error: Option<String>,
-    /// Named OCR region profiles (`region-profiles.toml`).
-    pub region_profiles: Vec<RegionProfile>,
-    /// Selected profile in the Dashboard combo (`-1` = none).
-    pub profile_selected_idx: i32,
-    pub profile_name_draft: String,
+    /// Named OCR region presets (`region-presets.toml`).
+    pub region_presets: Vec<RegionPreset>,
+    /// Selected preset in the Dashboard combo (`-1` = none).
+    pub preset_selected_idx: i32,
+    pub preset_name_draft: String,
     pub pending_save_regions: Vec<NormRect>,
-    pub profile_dialog: ProfileDialog,
+    pub preset_dialog: PresetDialog,
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
@@ -118,9 +118,9 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
     let draft = state.read().config.clone();
     let optional = optional_api_state(&draft);
     let (text_argb_str, bg_argb_str) = overlay_color_strings(&draft);
-    let (region_profiles, profile_load_error) = match RegionProfileFile::load_or_empty() {
-        Ok(file) => (file.profiles, None),
-        Err(e) => (Vec::new(), Some(format!("Could not load region profiles: {e}"))),
+    let (region_presets, preset_load_error) = match RegionPresetFile::load_or_empty() {
+        Ok(file) => (file.presets, None),
+        Err(e) => (Vec::new(), Some(format!("Could not load region presets: {e}"))),
     };
     let shared = Arc::new(Mutex::new(UiShared {
         state,
@@ -145,55 +145,52 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         confirm: ConfirmAction::None,
         optional_tip_seen: false,
         form_error: None,
-        region_profiles,
-        profile_selected_idx: -1,
-        profile_name_draft: String::new(),
+        region_presets,
+        preset_selected_idx: -1,
+        preset_name_draft: String::new(),
         pending_save_regions: Vec::new(),
-        profile_dialog: ProfileDialog::None,
+        preset_dialog: PresetDialog::None,
     }));
-    if let Some(msg) = profile_load_error {
+    if let Some(msg) = preset_load_error {
         shared.lock().state.write().set_error(msg);
     }
     shared
 }
 
-/// Selected Dashboard profile, if the combo index is in range.
-pub fn selected_profile(ui: &UiShared) -> Option<&RegionProfile> {
-    ui.profile_selected_idx
-        .try_into()
-        .ok()
-        .and_then(|i: usize| ui.region_profiles.get(i))
+/// Selected Dashboard preset, if the combo index is in range.
+pub fn selected_preset(ui: &UiShared) -> Option<&RegionPreset> {
+    ui.preset_selected_idx.try_into().ok().and_then(|i: usize| ui.region_presets.get(i))
 }
 
-/// Persist current in-memory profiles to `region-profiles.toml`.
-pub fn save_region_profiles(ui: &mut UiShared) -> Result<(), String> {
-    let file = RegionProfileFile {
-        profiles: ui.region_profiles.clone(),
+/// Persist current in-memory presets to `region-presets.toml`.
+pub fn save_region_presets(ui: &mut UiShared) -> Result<(), String> {
+    let file = RegionPresetFile {
+        presets: ui.region_presets.clone(),
     };
-    file.save_default().map_err(|e| format!("Could not save region profiles: {e}"))
+    file.save_default().map_err(|e| format!("Could not save region presets: {e}"))
 }
 
 /// Write `pending_save_regions` under `name` (exact match overwrite).
-pub fn commit_pending_profile(ui: &mut UiShared, name: String) -> Result<(), String> {
-    let (name, regions) = translator_core::validate_profile(&name, &ui.pending_save_regions).map_err(|e| e.to_string())?;
-    if let Some(p) = ui.region_profiles.iter_mut().find(|p| p.name == name) {
+pub fn commit_pending_preset(ui: &mut UiShared, name: String) -> Result<(), String> {
+    let (name, regions) = translator_core::validate_preset(&name, &ui.pending_save_regions).map_err(|e| e.to_string())?;
+    if let Some(p) = ui.region_presets.iter_mut().find(|p| p.name == name) {
         p.regions = regions;
     } else {
-        ui.region_profiles.push(RegionProfile {
+        ui.region_presets.push(RegionPreset {
             name: name.clone(),
             regions,
         });
     }
-    save_region_profiles(ui)?;
-    ui.profile_name_draft = name.clone();
-    ui.profile_selected_idx = ui
-        .region_profiles
+    save_region_presets(ui)?;
+    ui.preset_name_draft = name.clone();
+    ui.preset_selected_idx = ui
+        .region_presets
         .iter()
         .position(|p| p.name == name)
         .map(|i| i as i32)
         .unwrap_or(-1);
     ui.pending_save_regions.clear();
-    ui.profile_dialog = ProfileDialog::None;
+    ui.preset_dialog = PresetDialog::None;
     Ok(())
 }
 
@@ -477,10 +474,10 @@ pub struct Snapshot {
     pub merge_order_band_pct: f64,
     pub merge_below_mid_pct: f64,
     pub merge_width_delta_pct: f64,
-    pub profile_names: Vec<String>,
-    pub profile_selected_idx: i32,
-    pub profile_name_draft: String,
-    pub profile_dialog: ProfileDialog,
+    pub preset_names: Vec<String>,
+    pub preset_selected_idx: i32,
+    pub preset_name_draft: String,
+    pub preset_dialog: PresetDialog,
 }
 
 pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
@@ -629,9 +626,9 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         merge_order_band_pct: (ui.draft.ocr.line_merge.order_band_ratio as f64) * 100.0,
         merge_below_mid_pct: (ui.draft.ocr.line_merge.below_mid_ratio as f64) * 100.0,
         merge_width_delta_pct: (ui.draft.ocr.line_merge.width_delta_ratio as f64) * 100.0,
-        profile_names: ui.region_profiles.iter().map(|p| p.name.clone()).collect(),
-        profile_selected_idx: ui.profile_selected_idx,
-        profile_name_draft: ui.profile_name_draft.clone(),
-        profile_dialog: ui.profile_dialog.clone(),
+        preset_names: ui.region_presets.iter().map(|p| p.name.clone()).collect(),
+        preset_selected_idx: ui.preset_selected_idx,
+        preset_name_draft: ui.preset_name_draft.clone(),
+        preset_dialog: ui.preset_dialog.clone(),
     }
 }

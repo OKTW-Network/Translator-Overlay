@@ -95,7 +95,7 @@ impl Rect {
 /// Axis-aligned region as fractions of the capture client area (`0..=1`).
 ///
 /// Session `ocr_regions` are runtime-only (not in `config.toml`). Named sets may
-/// also be stored in `region-profiles.toml`. Empty list means “whole window”.
+/// also be stored in `region-presets.toml`. Empty list means “whole window”.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NormRect {
     pub x: f32,

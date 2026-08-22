@@ -32,9 +32,9 @@ pub fn config_path() -> Result<PathBuf, PathError> {
     Ok(exe_dir()?.join("config.toml"))
 }
 
-/// Path to `region-profiles.toml` next to the executable.
-pub fn region_profiles_path() -> Result<PathBuf, PathError> {
-    Ok(exe_dir()?.join("region-profiles.toml"))
+/// Path to `region-presets.toml` next to the executable.
+pub fn region_presets_path() -> Result<PathBuf, PathError> {
+    Ok(exe_dir()?.join("region-presets.toml"))
 }
 
 /// Resolve a path that may be relative to the executable directory.
