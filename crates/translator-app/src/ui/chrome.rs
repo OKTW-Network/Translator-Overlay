@@ -1,10 +1,10 @@
-//! Settings page chrome: headers, cards, InfoBar, command footer.
+//! Shared chrome: settings cards, InfoBar, title-bar status, nav-footer capture control.
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use windows_reactor::{
-    BackgroundExt, Border, ContentDialog, ContentDialogResult, Element, Grid, GridChildExt, GridLength, HorizontalAlignment, InfoBar,
+    BackgroundExt, Border, ContentDialog, ContentDialogResult, Element, Grid, GridChildExt, GridLength, HorizontalAlignment, Icon, InfoBar,
     InfoBarSeverity, KeyExt, LayoutExt, PaddingExt, StackPanel, TextBlock, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
     VerticalAlignment, border, button, grid, hstack, text_block, vstack,
 };
@@ -122,36 +122,143 @@ pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Op
     .with_key(key)
 }
 
-/// Pipeline error InfoBar for the Dashboard only.
+/// Pipeline InfoBar for the Dashboard only. Always open (Informational when idle).
 ///
 /// Settings save success lives on the settings chrome (next to Save), not here.
 /// Always mounts the same `InfoBar` (stable key) so open/close does not remount
 /// the rest of the page tree.
 pub fn status_infobar(snap: &Snapshot) -> InfoBar {
     let retry_msg;
-    let (title, message, open, severity) = if snap.retrying && !snap.last_error.is_empty() {
+    let (title, message, severity) = if snap.retrying && !snap.last_error.is_empty() {
         retry_msg = format!("Retrying {} of {}", snap.retry_attempt, snap.retry_max);
-        (snap.last_error.as_str(), retry_msg.as_str(), true, InfoBarSeverity::Warning)
+        (snap.last_error.as_str(), retry_msg.as_str(), InfoBarSeverity::Warning)
     } else if !snap.last_error.is_empty() {
-        (snap.last_error.as_str(), "", true, InfoBarSeverity::Error)
+        (snap.last_error.as_str(), "", InfoBarSeverity::Error)
     } else {
-        ("", "", false, InfoBarSeverity::Error)
+        (snap.status.as_str(), snap.target.as_str(), InfoBarSeverity::Informational)
     };
 
     InfoBar::new(title)
         .message(message)
         .severity(severity)
-        .is_open(open)
+        .is_open(true)
         .is_closable(false)
         .with_key("status-infobar")
 }
 
-/// Compact app status strip (not full runtime dump).
+/// Compact title-bar status: pipeline label and target window only.
 pub fn app_status_strip(snap: &Snapshot) -> TextBlock {
-    let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
-    text_block(format!("{}  ·  {}  ·  OCR {ocr_time}  ·  {}", snap.status, snap.target, snap.api_status))
+    text_block(format!("{}  ·  {}", snap.status, snap.target))
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)
+        .vertical_alignment(VerticalAlignment::Center)
+}
+
+/// Start/Stop for the NavigationView pane footer.
+///
+/// Start: Default + Play. Stop: Accent + Stop. Color uses built-in button
+/// styles (not a raw Background).
+///
+/// `pane_footer` is a single slot — `with_key` on the footer root does not
+/// remount. Wrap in a Grid so the button is a keyed child and Start/Stop or
+/// compact/wide actually recreate the control (`Button::accent()` Unset is a
+/// no-op; compact MinWidth/Padding would otherwise leak after expand).
+///
+/// Compact pane is 48px; nav items use a 40px icon box. Collapsed mode is a
+/// 40px chromeless control centered in a 48px footer so the glyph lines up
+/// with the menu icons (a Default-styled 32px button sat left and looked huge).
+pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>, pane_open: bool) -> Grid {
+    let cx = UiCx::new(shared, bump);
+    let has_window = snap.selected_window_idx >= 0;
+    let running = snap.auto_running;
+    let label = if running { "Stop" } else { "Start" };
+    // Segoe Fluent filled media glyphs (`Symbol::Play` / `Stop` are outlines).
+    let icon = if running {
+        Icon::font("\u{EE95}") // StopSolid
+    } else {
+        Icon::font("\u{F5B0}") // PlaySolid
+    };
+    let tip = if running {
+        "Stop continuous capture"
+    } else if has_window {
+        "Start continuous capture of the selected window"
+    } else {
+        "Select a window first"
+    };
+    let enabled = running || has_window;
+    let key = match (running, pane_open) {
+        (true, true) => "btn-stop-wide",
+        (true, false) => "btn-stop-compact",
+        (false, true) => "btn-start-wide",
+        (false, false) => "btn-start-compact",
+    };
+    // Empty content → reactor mounts icon-only (needed in the ~48px compact pane).
+    let content = if pane_open { label } else { "" };
+
+    let mut start = button(content)
+        .icon(icon)
+        .tooltip(tip)
+        .enabled(enabled)
+        .vertical_alignment(VerticalAlignment::Center)
+        .with_key(key);
+    if running {
+        start = start.accent();
+    } else if !pane_open {
+        // Same visual weight as unselected nav items (no Default fill blob).
+        start = start.subtle();
+    }
+    start = if pane_open {
+        start.horizontal_alignment(HorizontalAlignment::Stretch).margin(Thickness {
+            left: 8.0,
+            top: 4.0,
+            right: 8.0,
+            bottom: 8.0,
+        })
+    } else {
+        start
+            .min_width(40.0)
+            .max_width(40.0)
+            .width(40.0)
+            .min_height(40.0)
+            .height(40.0)
+            .padding(Thickness::default())
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .margin(Thickness {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 4.0,
+            })
+    };
+    let start = start.on_click({
+        let cx = cx.clone();
+        move || {
+            {
+                let ui = cx.shared.lock();
+                if ui.state.read().auto_running {
+                    let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+                } else if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
+                    let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
+                        hwnd: w.hwnd,
+                        title: w.title,
+                    });
+                }
+            }
+            cx.refresh();
+        }
+    });
+
+    let mut footer = grid((start,))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .with_key("nav-capture-footer");
+    if !pane_open {
+        // CompactPaneLength is 48; lock width so HorizontalAlignment::Center
+        // on the button actually centers in the pane (footer otherwise sizes
+        // to the button and left-aligns).
+        footer = footer.width(48.0);
+    }
+    footer
 }
 
 /// Shared Save / Reload / Discard bar for settings pages.

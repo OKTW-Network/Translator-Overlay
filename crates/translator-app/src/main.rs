@@ -61,7 +61,9 @@ async fn main() {
     // `block_on`s this future on that thread — do not move render off-thread.
     let result = App::new()
         .title("Translator Overlay")
-        .inner_size(960.0, 720.0)
+        // Nav (168) + padding + Regions pane (480) + preview column.
+        // WinUI multi-pane range is ~1100–1300 × 720–840.
+        .inner_size(1280.0, 800.0)
         .backdrop(Backdrop::Mica)
         .render(ui::app);
 

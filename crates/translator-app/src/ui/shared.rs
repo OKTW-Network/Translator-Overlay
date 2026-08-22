@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{
-    AppConfig, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionProfile, RegionProfileFile, resolve_cli_binary,
-};
+use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionProfile, RegionProfileFile};
 use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
@@ -400,24 +398,17 @@ pub struct Snapshot {
     pub preview_rgba: Option<bytes::Bytes>,
     pub ocr_text: String,
     pub translation: String,
-    pub model: String,
-    pub target_lang: String,
-    pub source_lang: String,
-    pub api_status: String,
     pub provider: ModelProvider,
     pub provider_idx: i32,
     pub cli_path: String,
     pub priority_mode: bool,
-    pub tier: String,
     pub auto_running: bool,
-    pub frame_count: u64,
     /// Last OCR inference time in ms (`None` → show "—").
     pub last_ocr_ms: Option<u64>,
     pub last_ocr_block_count: u32,
     pub region_select_active: bool,
     pub ocr_region_count: usize,
     pub preview_regions: Vec<NormRect>,
-    pub history_len: usize,
     pub history_preview: String,
     pub selected_window_idx: i32,
     pub selected_hwnd: Option<isize>,
@@ -425,7 +416,6 @@ pub struct Snapshot {
     pub window_count: usize,
     pub window_labels: Vec<String>,
     pub translate_in_flight: bool,
-    pub can_retry: bool,
     pub last_error: String,
     pub retrying: bool,
     pub retry_attempt: u32,
@@ -536,25 +526,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         } else {
             s.latest_translated_text.clone()
         },
-        model: s.config.api.model.clone(),
-        target_lang: s.config.translation.target_lang.clone(),
-        source_lang: s.config.translation.source_lang.clone(),
-        api_status: match s.config.api.provider {
-            ModelProvider::OpenaiCompatible => {
-                if s.config.api.api_key.trim().is_empty() {
-                    "API key missing".into()
-                } else {
-                    "API ready".into()
-                }
-            }
-            ModelProvider::GrokCli | ModelProvider::CodexCli => {
-                if resolve_cli_binary(s.config.api.provider, &s.config.api.cli_path).is_some() {
-                    "CLI ready".into()
-                } else {
-                    "CLI missing".into()
-                }
-            }
-        },
         provider: ui.draft.api.provider,
         provider_idx: match ui.draft.api.provider {
             ModelProvider::OpenaiCompatible => 0,
@@ -563,9 +534,7 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         },
         cli_path: ui.draft.api.cli_path.clone(),
         priority_mode: ui.draft.api.service_tier == translator_core::ServiceTier::Priority,
-        tier: s.config.ocr.model_tier.to_string(),
         auto_running: s.auto_running,
-        frame_count: s.frame_count,
         last_ocr_ms: s.last_ocr_ms,
         last_ocr_block_count: s.last_ocr_block_count,
         region_select_active: s.region_select_active,
@@ -579,7 +548,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         } else {
             s.ocr_regions.clone()
         },
-        history_len: s.history.len(),
         history_preview,
         selected_window_idx: match ui.selected_idx {
             Some(i) if i < ui.windows.len() => i as i32,
@@ -590,7 +558,6 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
         window_count: ui.windows.len(),
         window_labels: ui.windows.iter().map(|w| truncate(&w.title, 72)).collect(),
         translate_in_flight: s.translate_in_flight,
-        can_retry: s.can_retry_translate,
         last_error: s.last_error.clone().unwrap_or_default(),
         retrying: matches!(s.status, PipelineStatus::RetryingTranslate { .. }),
         retry_attempt: match &s.status {

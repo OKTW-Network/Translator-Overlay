@@ -3,6 +3,7 @@
 mod chrome;
 mod controls;
 mod dashboard;
+mod nav_header;
 mod page_api;
 mod page_ocr;
 mod page_overlay;
@@ -15,11 +16,11 @@ use std::time::Duration;
 use windows_reactor::{
     Backdrop, BackgroundExt, Color, DispatcherTimer, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt,
     NavViewItem, NavigationView, NavigationViewPaneDisplayMode, PaddingExt, RenderCx, RequestedTheme, ResourceExt, Symbol, Thickness,
-    VerticalAlignment, grid, scroll_viewer, set_backdrop, set_requested_theme,
+    TitleBar, VerticalAlignment, border, grid, scroll_viewer, set_backdrop, set_requested_theme,
 };
 
 use crate::ui::{
-    chrome::settings_sticky_chrome,
+    chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
     dashboard::dashboard_page,
     page_api::api_page,
     page_ocr::ocr_page,
@@ -42,11 +43,13 @@ pub fn app(cx: &mut RenderCx) -> Element {
     let (tick, bump_tick) = cx.use_reducer(0_u32);
     let _ = tick;
     let (page_tag, set_page) = cx.use_state(String::from("dashboard"));
+    let (is_pane_open, set_pane_open) = cx.use_state(true);
 
     cx.use_effect_with_cleanup((), {
         let bump_tick = bump_tick.clone();
         move || {
             let timer = DispatcherTimer::new(Duration::from_millis(250), move || {
+                crate::ui::nav_header::retarget();
                 bump_tick.call(|n| n.wrapping_add(1));
             })
             .ok();
@@ -59,11 +62,11 @@ pub fn app(cx: &mut RenderCx) -> Element {
 
     // Critical: every page needs a distinct key so the reconciler does not
     // positionally reuse StackPanel children across tab switches.
-    let page = match page_tag.as_str() {
-        "api" => api_page(&shared_arc, &snap, &bump_tick).with_key("page-api"),
-        "translation" => translation_page(&shared_arc, &snap, &bump_tick).with_key("page-translation"),
-        "ocr" => ocr_page(&shared_arc, &snap, &bump_tick).with_key("page-ocr"),
-        "overlay" => overlay_page(&shared_arc, &snap, &bump_tick).with_key("page-overlay"),
+    let page: Element = match page_tag.as_str() {
+        "api" => api_page(&shared_arc, &snap, &bump_tick).with_key("page-api").into(),
+        "translation" => translation_page(&shared_arc, &snap, &bump_tick).with_key("page-translation").into(),
+        "ocr" => ocr_page(&shared_arc, &snap, &bump_tick).with_key("page-ocr").into(),
+        "overlay" => overlay_page(&shared_arc, &snap, &bump_tick).with_key("page-overlay").into(),
         _ => dashboard_page(&shared_arc, &snap, &bump_tick).with_key("page-dashboard"),
     };
 
@@ -76,25 +79,27 @@ pub fn app(cx: &mut RenderCx) -> Element {
         _ => None,
     };
 
-    // Stretch page width so settings-card Star columns get the full viewport
-    // (otherwise controls pack left of a content-sized panel inside ScrollViewer).
-    let scrolled = scroll_viewer(
-        page.padding(Thickness {
-            left: 24.0,
-            top: if settings_meta.is_some() { 8.0 } else { 16.0 },
-            right: 24.0,
-            bottom: 24.0,
-        })
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(format!("body-{}", page_tag.as_str())),
-    )
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Stretch)
-    .with_key(format!("scroll-{}", page_tag.as_str()));
+    let page_padding = Thickness {
+        left: 24.0,
+        top: if settings_meta.is_some() { 8.0 } else { 16.0 },
+        right: 24.0,
+        bottom: 24.0,
+    };
 
     // Settings: Grid Auto+* so ScrollViewer gets a bounded height.
     // A VStack measures children with infinite height → ScrollViewer never scrolls.
+    // Dashboard: same Auto+* fill (page is already a Grid); do not wrap it in an
+    // unbounded ScrollViewer or the workspace Star row collapses.
     let content: Element = if let Some((title, description)) = settings_meta {
+        let scrolled = scroll_viewer(
+            border(page)
+                .padding(page_padding)
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .with_key(format!("body-{}", page_tag.as_str())),
+        )
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .vertical_alignment(VerticalAlignment::Stretch)
+        .with_key(format!("scroll-{}", page_tag.as_str()));
         grid((
             settings_sticky_chrome(title, description, &shared_arc, &snap, &bump_tick)
                 .grid_row(0)
@@ -109,11 +114,17 @@ pub fn app(cx: &mut RenderCx) -> Element {
         .with_key(format!("settings-frame-{}", page_tag.as_str()))
         .into()
     } else {
-        scrolled.into()
+        border(page)
+            .padding(page_padding)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .vertical_alignment(VerticalAlignment::Stretch)
+            .with_key(format!("body-{}", page_tag.as_str()))
+            .into()
     };
 
     let nav_items = [
         NavViewItem::new("Dashboard").tag("dashboard").icon(Symbol::Home),
+        NavViewItem::header("Settings"),
         NavViewItem::new("API").tag("api").icon(Symbol::Link),
         NavViewItem::new("Translation").tag("translation").icon(Symbol::Globe),
         NavViewItem::new("OCR").tag("ocr").icon(Symbol::Camera),
@@ -124,23 +135,55 @@ pub fn app(cx: &mut RenderCx) -> Element {
     // Fluent card pattern on Mica: clear NavigationView content-layer fill + border
     // so Mica shows between settings cards (cards keep CardBackground).
     // Brush overrides only — Thickness/CornerRadius resource boxing can crash.
-    NavigationView::new(nav_items, content)
+    // Pane hamburger lives on TitleBar (WinUI Gallery shell).
+    let nav = NavigationView::new(nav_items, content)
         .pane_display_mode(NavigationViewPaneDisplayMode::Left)
         .open_pane_length(168.0)
+        .pane_open(is_pane_open)
+        .on_pane_open_changed({
+            let set_pane_open = set_pane_open.clone();
+            move |open| set_pane_open.call(open)
+        })
         .selected_tag(page_tag.as_str())
-        .on_selection_changed(move |tag: String| {
-            if !tag.is_empty() && tag != current_tag {
-                set_page.call(tag);
+        .on_selection_changed({
+            move |tag: String| {
+                if !tag.is_empty() && tag != current_tag {
+                    set_page.call(tag);
+                }
             }
         })
+        .pane_footer(capture_start_stop_button(&shared_arc, &snap, &bump_tick, is_pane_open))
         .settings_visible(false)
         .back_button_visible(false)
-        .pane_toggle_button_visible(true)
+        .pane_toggle_button_visible(false)
         .background(Color::transparent())
         .resource_overrides(|r| {
             r.set("NavigationViewContentBackground", Color::transparent())
                 .set("NavigationViewContentGridBorderBrush", Color::transparent())
         })
-        .with_key("main-nav")
-        .into()
+        .with_key("main-nav");
+
+    let title_bar = TitleBar::new("Translator Overlay")
+        .pane_toggle_button_visible(true)
+        .back_button_visible(false)
+        .on_pane_toggle_requested(move || set_pane_open.call(!is_pane_open))
+        .content(app_status_strip(&snap))
+        .tall(true)
+        .with_key("app-title-bar");
+
+    grid((
+        title_bar
+            .grid_row(0)
+            .grid_column(0)
+            .horizontal_alignment(HorizontalAlignment::Stretch),
+        nav.grid_row(1)
+            .grid_column(0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .vertical_alignment(VerticalAlignment::Stretch),
+    ))
+    .rows([GridLength::Auto, GridLength::Star(1.0)])
+    .columns([GridLength::Star(1.0)])
+    .horizontal_alignment(HorizontalAlignment::Stretch)
+    .vertical_alignment(VerticalAlignment::Stretch)
+    .into()
 }

@@ -2881,8 +2881,10 @@ dependencies = [
  "translator-translate",
  "windows",
  "windows-canvas",
+ "windows-core 0.100.0",
  "windows-reactor",
  "windows-reactor-setup",
+ "windows-reference",
 ]
 
 [[package]]
@@ -3332,8 +3334,8 @@ version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement",
- "windows-interface",
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
  "windows-link 0.2.1",
  "windows-result 0.4.1",
  "windows-strings 0.5.1",
@@ -3344,6 +3346,8 @@ name = "windows-core"
 version = "0.100.0"
 source = "git+https://github.com/microsoft/windows-rs?rev=5f8e1504#5f8e1504dea507f1d86af7bf5a824eb49ff8b5a5"
 dependencies = [
+ "windows-implement 0.100.0",
+ "windows-interface 0.100.0",
  "windows-link 0.100.0",
  "windows-result 0.100.0",
  "windows-strings 0.100.0",
@@ -3382,10 +3386,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-implement"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=5f8e1504#5f8e1504dea507f1d86af7bf5a824eb49ff8b5a5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "windows-interface"
 version = "0.59.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.100.0"
+source = "git+https://github.com/microsoft/windows-rs?rev=5f8e1504#5f8e1504dea507f1d86af7bf5a824eb49ff8b5a5"
 dependencies = [
  "proc-macro2",
  "quote",

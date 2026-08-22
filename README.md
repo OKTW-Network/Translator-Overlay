@@ -31,7 +31,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 1. 解壓 `TranslatorOverlay-*-win-x64.zip`（保持 DLL 與 exe 同目錄）
 2. 雙擊 `translator-app.exe`
 3. 在 **API** 頁選 Provider：HTTP 填 `api_key`，或改用本機 Grok / Codex CLI；然後 **Save**
-4. 回 **Dashboard**：重新整理視窗清單 → 選取目標 → **Start**
+4. 回 **Dashboard**：重新整理視窗清單 → 選取目標 → 左側導覽底部 **Start**
 
 `config.toml`、`region-profiles.toml` 與 `models/` 會放在可執行檔同目錄。
 
@@ -67,15 +67,14 @@ cargo build --release -p translator-app
 ## 使用方式
 
 1. **API**：選 Provider（OpenAI-compatible / Grok CLI / Codex CLI）。HTTP 填 `base_url`、`api_key`、`model`；CLI 用本機已登入的 `grok` / `codex`，可選 `cli_path`
-2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選提示詞。可開關翻譯記憶、設定記住多少句，以及清空已記住的譯文。譯文不滿意時按 **Retry** 會重翻這一頁並更新記憶
+2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選提示詞。可開關翻譯記憶、設定記住多少句，以及清空已記住的譯文。譯文不滿意時在 Dashboard 按 **Retry** 會立刻重擷取並跑完整 OCR + 翻譯
 3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
 4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
 5. **Dashboard**：
-   - 選視窗後 **Start** 連續擷取（畫面上直接顯示擷取預覽）
-   - **Select regions**：在目標視窗上拖曳畫多個 OCR 框（可改大小／移動；右鍵刪除該框）。選取層與翻譯 overlay 一樣，只在目標視窗前景時顯示。再按同一顆按鈕（**Done**）套用；**Clear** 回到整窗。框預設只在本次執行有效；可用 **Profiles** ComboBox 選擇後 Load / Delete，或在 Done 後按 Save 輸入名稱寫入 `{exe 目錄}/region-profiles.toml`。
-   - **Once** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
-   - 翻譯進行中可取消；失敗可 **Retry**
-   - 可重置對話歷史
+   - 左側導覽底部 **Start** / **Stop** 連續擷取；標題列狀態為 `status · target`。選視窗後 **Select regions** 與 **Profiles** 同一列：在目標視窗上拖曳畫 OCR 框（可改大小／移動；右鍵刪除該框）；選取層與翻譯 overlay 一樣，只在目標視窗前景時顯示。再按同一顆按鈕（**Done**）套用；**Clear** 回到整窗。**Save** / **Load** / **Delete** 寫入 `{exe 目錄}/region-profiles.toml`。
+   - 分隔線下左欄：擷取預覽與 **Cancel** / **Retry** / **Clear chat**。**Retry** 立刻擷取一幀並跑完整 OCR + 翻譯（略過穩定等待；需已 Start）
+   - 右欄：OCR 結果、譯文、最近歷史
+   - Overlay / 譯文窗開關在 **Overlay** 頁
 
 首次載入 OCR 時，若 `models/` 缺少對應 ONNX（或檔案大小不符），程式會在背景從 GitHub Releases 下載到 `models_dir`（預設 `models/`），狀態列會顯示進度；下載／載入完成前無法開始擷取，其餘 UI 仍可操作。
 
