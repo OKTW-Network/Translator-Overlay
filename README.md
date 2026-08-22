@@ -5,7 +5,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 ## 功能
 
 - **視窗擷取**：Windows Graphics Capture，可選清單視窗或前景視窗
-- **多區域 OCR**：在目標視窗上框選多個辨識範圍（本次執行有效，不寫入設定檔）；無框時仍辨識整窗
+- **多區域 OCR**：在目標視窗上框選多個辨識範圍；可存成可命名的 region profile（`region-profiles.toml`）；無框時仍辨識整窗
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
 - **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
 - **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（幾何規則）
@@ -33,7 +33,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 3. 在 **API** 頁選 Provider：HTTP 填 `api_key`，或改用本機 Grok / Codex CLI；然後 **Save**
 4. 回 **Dashboard**：重新整理視窗清單 → 選取目標 → **Start**
 
-`config.toml` 與 `models/` 會放在可執行檔同目錄。
+`config.toml`、`region-profiles.toml` 與 `models/` 會放在可執行檔同目錄。
 
 可攜包內建議包含：
 
@@ -72,7 +72,7 @@ cargo build --release -p translator-app
 4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
 5. **Dashboard**：
    - 選視窗後 **Start** 連續擷取（畫面上直接顯示擷取預覽）
-   - **Select regions**：在目標視窗上拖曳畫多個 OCR 框（可改大小／移動；右鍵刪除該框）。選取層與翻譯 overlay 一樣，只在目標視窗前景時顯示。再按同一顆按鈕套用；**Clear** 回到整窗。框只在本次執行有效。
+   - **Select regions**：在目標視窗上拖曳畫多個 OCR 框（可改大小／移動；右鍵刪除該框）。選取層與翻譯 overlay 一樣，只在目標視窗前景時顯示。再按同一顆按鈕（**Done**）套用；**Clear** 回到整窗。框預設只在本次執行有效；可用 **Profiles** ComboBox 選擇後 Load / Delete，或在 Done 後按 Save 輸入名稱寫入 `{exe 目錄}/region-profiles.toml`。
    - **Once** 立刻拍一幀並 OCR + 翻譯（略過穩定等待）
    - 翻譯進行中可取消；失敗可 **Retry**
    - 可重置對話歷史
@@ -82,6 +82,8 @@ cargo build --release -p translator-app
 ## 設定（`config.toml`）
 
 設定檔預設路徑：`{exe 目錄}/config.toml`。不存在時會自動建立預設值。
+
+OCR 區域 profile 存在獨立檔 `{exe 目錄}/region-profiles.toml`（與 `config.toml` 分開；首次 Save 才會建立）。
 
 精簡範例：
 

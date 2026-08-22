@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::list_windows;
+use translator_core::sanitize_regions;
 use windows_reactor::{
-    ComboBox, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, StackPanel, TextStyleExt, ThemeRef, Thickness, ToggleSwitch, TooltipExt,
-    Updater, VerticalAlignment, button, hstack, text_block, vstack,
+    BackgroundExt, ComboBox, ContentDialog, ContentDialogResult, Element, HorizontalAlignment, KeyExt, LayoutExt, PaddingExt, StackPanel,
+    TextStyleExt, ThemeRef, Thickness, ToggleSwitch, TooltipExt, Updater, VerticalAlignment, border, button, hstack, text_block, text_box,
+    vstack,
 };
 
 use crate::{
@@ -14,7 +16,7 @@ use crate::{
     ui::{
         chrome::{app_status_strip, page_header, status_infobar},
         preview::capture_preview,
-        shared::{Snapshot, UiCx, UiShared, send_overlay_display},
+        shared::{ProfileDialog, Snapshot, UiCx, UiShared, commit_pending_profile, selected_profile, send_overlay_display},
     },
 };
 
@@ -178,6 +180,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
             .spacing(8.0)
             .with_key("region-select-row")
         },
+        region_profiles_section(&cx, snap),
         hstack((
             {
                 // Distinct keys remount so Accent style does not stick after Stop
@@ -304,6 +307,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
         ))
         .spacing(4.0)
         .horizontal_alignment(HorizontalAlignment::Stretch),
+        profile_confirm_dialog(&cx, snap),
     ))
     .spacing(12.0)
     .horizontal_alignment(HorizontalAlignment::Stretch)
@@ -316,4 +320,205 @@ fn dashboard_toggle(is_on: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleS
     sw.modifiers.max_width = Some(44.0);
     sw.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
     sw
+}
+
+fn region_profiles_section(cx: &UiCx, snap: &Snapshot) -> StackPanel {
+    let has_profiles = !snap.profile_names.is_empty();
+    let profile_selected = has_profiles && snap.profile_selected_idx >= 0;
+    let can_save = !snap.region_select_active && snap.ocr_region_count > 0;
+
+    let mut profile_combo = ComboBox::new(snap.profile_names.clone())
+        .selected_index(if has_profiles { snap.profile_selected_idx } else { -1 })
+        .placeholder_text("Select profile…")
+        .enabled(has_profiles)
+        .on_selection_changed({
+            let cx = cx.clone();
+            move |idx: i32| {
+                cx.with_mut(|ui| {
+                    ui.profile_selected_idx = if idx >= 0 && (idx as usize) < ui.region_profiles.len() {
+                        idx
+                    } else {
+                        -1
+                    };
+                });
+            }
+        })
+        .with_key("profile-combo");
+    profile_combo.modifiers.min_width = Some(180.0);
+    profile_combo.modifiers.horizontal_alignment = Some(HorizontalAlignment::Stretch);
+    profile_combo.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+
+    let row = hstack((
+        text_block("Profiles").semibold().vertical_alignment(VerticalAlignment::Center),
+        profile_combo,
+        button("Save")
+            .tooltip(if snap.region_select_active {
+                "Finish region select (Done) before saving a profile"
+            } else if snap.ocr_region_count == 0 {
+                "Select OCR regions first"
+            } else {
+                "Save current OCR regions as a named profile"
+            })
+            .enabled(can_save)
+            .on_click({
+                let cx = cx.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        let regions = sanitize_regions(&ui.state.read().ocr_regions);
+                        if regions.is_empty() {
+                            ui.state.write().set_error("Nothing to save: select at least one OCR region.");
+                            return;
+                        }
+                        ui.pending_save_regions = regions;
+                        ui.profile_name_draft = selected_profile(ui).map(|p| p.name.clone()).unwrap_or_default();
+                        ui.profile_dialog = ProfileDialog::SaveName;
+                    });
+                }
+            }),
+        button("Load")
+            .tooltip("Apply the selected profile to the current window")
+            .enabled(profile_selected)
+            .on_click({
+                let cx = cx.clone();
+                move || {
+                    let regions = selected_profile(&cx.shared.lock()).map(|p| p.regions.clone());
+                    if let Some(regions) = regions {
+                        cx.send_cmd(PipelineCommand::SetCaptureRegions { regions });
+                    }
+                }
+            }),
+        button("Delete")
+            .tooltip("Delete the selected profile")
+            .enabled(profile_selected)
+            .on_click({
+                let cx = cx.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        let Some(name) = selected_profile(ui).map(|p| p.name.clone()) else {
+                            return;
+                        };
+                        ui.profile_dialog = ProfileDialog::Delete { name };
+                    });
+                }
+            }),
+    ))
+    .spacing(8.0)
+    .with_key("region-profiles-row");
+
+    vstack((row, profile_name_row(cx, snap)))
+        .spacing(8.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .with_key("region-profiles-section")
+}
+
+fn profile_name_row(cx: &UiCx, snap: &Snapshot) -> Element {
+    if !matches!(snap.profile_dialog, ProfileDialog::SaveName) {
+        return text_block("").with_key("profile-name-row-hidden").into();
+    }
+
+    let mut name_tb = text_box(snap.profile_name_draft.clone()).on_text_changed({
+        let cx = cx.clone();
+        move |text: String| {
+            cx.with_mut(|ui| ui.profile_name_draft = text);
+        }
+    });
+    name_tb.modifiers.width = Some(220.0);
+    name_tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+
+    border(
+        hstack((
+            text_block("Name").semibold().vertical_alignment(VerticalAlignment::Center),
+            name_tb,
+            button("Save").accent().on_click({
+                let cx = cx.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        let name = ui.profile_name_draft.trim().to_string();
+                        if name.is_empty() {
+                            ui.state.write().set_error("Profile name is required.");
+                            return;
+                        }
+                        if ui.region_profiles.iter().any(|p| p.name == name) {
+                            ui.profile_dialog = ProfileDialog::Overwrite { name };
+                            return;
+                        }
+                        if let Err(e) = commit_pending_profile(ui, name) {
+                            ui.state.write().set_error(e);
+                        }
+                    });
+                }
+            }),
+            button("Cancel").on_click({
+                let cx = cx.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        ui.profile_dialog = ProfileDialog::None;
+                        ui.pending_save_regions.clear();
+                        ui.profile_name_draft.clear();
+                    });
+                }
+            }),
+        ))
+        .spacing(8.0),
+    )
+    .background(ThemeRef::CardBackground)
+    .border_brush(ThemeRef::CardStroke)
+    .border_thickness(Thickness::uniform(1.0))
+    .corner_radius(8.0)
+    .padding(Thickness {
+        left: 10.0,
+        top: 6.0,
+        right: 10.0,
+        bottom: 6.0,
+    })
+    .horizontal_alignment(HorizontalAlignment::Left)
+    .with_key("profile-name-row")
+    .into()
+}
+
+fn profile_confirm_dialog(cx: &UiCx, snap: &Snapshot) -> ContentDialog {
+    let (open, title, body, primary) = match &snap.profile_dialog {
+        ProfileDialog::Overwrite { name } => (true, "Overwrite profile?", format!("Replace the regions saved in \"{name}\"?"), "Overwrite"),
+        ProfileDialog::Delete { name } => (true, "Delete profile?", format!("Delete profile \"{name}\"? This cannot be undone."), "Delete"),
+        ProfileDialog::None | ProfileDialog::SaveName => (false, "", String::new(), "OK"),
+    };
+
+    ContentDialog::new(title)
+        .content(body)
+        .primary_button_text(primary)
+        .close_button_text("Cancel")
+        .is_open(open)
+        .on_closed({
+            let cx = cx.clone();
+            move |result: ContentDialogResult| {
+                cx.with_mut(|ui| {
+                    let action = ui.profile_dialog.clone();
+                    ui.profile_dialog = ProfileDialog::None;
+                    if result != ContentDialogResult::Primary {
+                        if matches!(action, ProfileDialog::Overwrite { .. }) {
+                            // Keep the inline name row open with pending regions.
+                            ui.profile_dialog = ProfileDialog::SaveName;
+                        }
+                        return;
+                    }
+                    match action {
+                        ProfileDialog::Overwrite { name } => {
+                            if let Err(e) = commit_pending_profile(ui, name) {
+                                ui.state.write().set_error(e);
+                            }
+                        }
+                        ProfileDialog::Delete { name } => {
+                            ui.region_profiles.retain(|p| p.name != name);
+                            ui.profile_selected_idx = -1;
+                            ui.profile_name_draft.clear();
+                            if let Err(e) = crate::ui::shared::save_region_profiles(ui) {
+                                ui.state.write().set_error(e);
+                            }
+                        }
+                        ProfileDialog::None | ProfileDialog::SaveName => {}
+                    }
+                });
+            }
+        })
+        .with_key("profile-confirm-dialog")
 }

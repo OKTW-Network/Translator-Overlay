@@ -32,6 +32,11 @@ pub fn config_path() -> Result<PathBuf, PathError> {
     Ok(exe_dir()?.join("config.toml"))
 }
 
+/// Path to `region-profiles.toml` next to the executable.
+pub fn region_profiles_path() -> Result<PathBuf, PathError> {
+    Ok(exe_dir()?.join("region-profiles.toml"))
+}
+
 /// Resolve a path that may be relative to the executable directory.
 pub fn resolve_under_exe(path: impl AsRef<Path>) -> Result<PathBuf, PathError> {
     let path = path.as_ref();

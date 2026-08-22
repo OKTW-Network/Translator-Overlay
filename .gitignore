@@ -10,6 +10,7 @@ models/
 Thumbs.db
 config.toml
 !crates/**/config.toml
+region-profiles.toml
 .idea/
 .vscode/
 *.pdb
