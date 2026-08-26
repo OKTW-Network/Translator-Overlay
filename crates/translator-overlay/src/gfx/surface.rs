@@ -111,11 +111,21 @@ impl DibSurface {
     }
 
     pub(crate) fn present(&self, hwnd: HWND, x: i32, y: i32, dest_w: i32, dest_h: i32) -> Result<(), OverlayError> {
-        if self.bits.is_null() || self.w <= 0 || self.h <= 0 {
-            return Err(OverlayError::Other("paint bitmap missing".into()));
-        }
         if dest_w <= 0 || dest_h <= 0 {
             return Err(OverlayError::Other("invalid client size".into()));
+        }
+        self.update_layered(hwnd, Some((POINT { x, y }, SIZE { cx: dest_w, cy: dest_h })))
+    }
+
+    /// Restore the layered bitmap without moving or resizing. Passing `ppt_dst` /
+    /// `psize` restacks some DWM surfaces and can drop `WS_EX_TOPMOST`.
+    pub(crate) fn present_bits(&self, hwnd: HWND) -> Result<(), OverlayError> {
+        self.update_layered(hwnd, None)
+    }
+
+    fn update_layered(&self, hwnd: HWND, dest: Option<(POINT, SIZE)>) -> Result<(), OverlayError> {
+        if self.bits.is_null() || self.w <= 0 || self.h <= 0 {
+            return Err(OverlayError::Other("paint bitmap missing".into()));
         }
 
         let blend = BLENDFUNCTION {
@@ -124,16 +134,18 @@ impl DibSurface {
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        let ppt_dst = POINT { x, y };
-        let psize = SIZE { cx: dest_w, cy: dest_h };
         let ppt_src = POINT { x: 0, y: 0 };
+        let (ppt_dst, psize) = match &dest {
+            Some((pt, sz)) => (Some(pt as *const POINT), Some(sz as *const SIZE)),
+            None => (None, None),
+        };
 
         unsafe {
             UpdateLayeredWindow(
                 hwnd,
                 Some(self.hdc_screen),
-                Some(&ppt_dst),
-                Some(&psize),
+                ppt_dst,
+                psize,
                 Some(self.hdc_mem),
                 Some(&ppt_src),
                 COLORREF(0),

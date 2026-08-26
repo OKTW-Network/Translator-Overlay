@@ -311,8 +311,12 @@ impl OverlayHost {
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
                 // Band change / first-show `SetWindowPos` can drop the ULW above.
-                if present_after_restack && let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
-                    warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
+                // Bits-only: no ppt_dst/psize — those restack and can drop HWND_TOPMOST.
+                if present_after_restack {
+                    if let Err(e) = self.refresh_layered_bits(rect.2, rect.3) {
+                        warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
+                    }
+                    self.reassert_z_order_after_bits(target, ownership, want_topmost);
                 }
                 // First Show can leave DWM blank; replay a FullPresent on the next apply.
                 if !overlay_visible && self.picker.is_some() {
@@ -338,13 +342,25 @@ impl OverlayHost {
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
                 if present_after_restack {
-                    if let Err(e) = self.present_to_client(rect.0, rect.1, rect.2, rect.3) {
+                    if let Err(e) = self.refresh_layered_bits(rect.2, rect.3) {
                         warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
                         return;
                     }
                     self.presented_rect = Some(rect);
+                    self.reassert_z_order_after_bits(target, ownership, want_topmost);
                 }
             }
+        }
+    }
+
+    fn reassert_z_order_after_bits(&mut self, target: HWND, ownership: OverlayOwnership, want_topmost: bool) {
+        if window_is_topmost(self.hwnd) == want_topmost && !overlay_needs_restack(self.hwnd, target, ownership, self.z_order_force_topmost)
+        {
+            return;
+        }
+        if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost) {
+            warn!(error = %e, ?ownership, "overlay Z-order reassert failed; showing with current Z-order");
+            let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         }
     }
 

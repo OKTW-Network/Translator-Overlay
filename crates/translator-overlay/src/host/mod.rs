@@ -285,6 +285,15 @@ impl OverlayHost {
         }
     }
 
+    pub(crate) fn refresh_layered_bits(&mut self, client_w: i32, client_h: i32) -> Result<(), OverlayError> {
+        let (bw, bh) = self.surface.size();
+        if bw == client_w && bh == client_h {
+            self.surface.present_bits(self.hwnd)
+        } else {
+            self.present.present_bits(self.hwnd)
+        }
+    }
+
     pub(crate) fn ensure_layer_alive(&mut self) -> bool {
         if HOST_TEARING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
             return false;
