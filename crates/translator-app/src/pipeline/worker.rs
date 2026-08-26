@@ -13,7 +13,7 @@ use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{OverlayController, OverlayEvent};
-use translator_translate::{Conversation, TranslateClient, TranslateError, TranslationCache};
+use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
 use crate::pipeline::PipelineCommand;
 
@@ -32,23 +32,14 @@ impl CmdTx {
     }
 }
 
-/// Result of a background translate HTTP job.
-pub(crate) struct TranslateJobResult {
-    pub result: Result<String, TranslateError>,
-    /// Conversation messages length after pushing the user turn (for rollback).
-    pub messages_len_after_user: usize,
-}
-
 pub(crate) struct InflightTranslate {
     pub cancel: CancellationToken,
-    pub rx: oneshot::Receiver<TranslateJobResult>,
+    pub rx: oneshot::Receiver<Result<Completion, TranslateError>>,
     pub fingerprint: OcrFingerprint,
     pub blocks: Vec<OcrBlock>,
     pub source_text: String,
     pub content_width: u32,
     pub content_height: u32,
-    /// Conversation length after the user turn was pushed (rollback on cancel/drop).
-    pub messages_len_after_user: usize,
     /// Unique miss blocks actually sent to the model (ids preserved).
     pub miss_blocks: Vec<OcrBlock>,
     /// Per-source-block cache hits (`None` = wait for the model / fallback).
@@ -125,7 +116,7 @@ impl Pipeline {
             gate: StabilityGate::from_config(&ocr_cfg),
             persist: BlockPersistenceFilter::from_config(&ocr_cfg),
             engine: None,
-            conversation: Conversation::new(),
+            conversation: Conversation::empty(),
             translation_cache: TranslationCache::new(cache_max),
             client,
             last_translated_fp: None,
@@ -163,11 +154,8 @@ impl Pipeline {
                 }
                 PipelineEvent::Translate(result) => {
                     let job = self.inflight.take().expect("inflight present");
-                    let job_result = result.unwrap_or_else(|_| TranslateJobResult {
-                        result: Err(TranslateError::Other("translate task dropped".into())),
-                        messages_len_after_user: job.messages_len_after_user,
-                    });
-                    self.finish_translate(job, job_result);
+                    let result = result.unwrap_or_else(|_| Err(TranslateError::Other("translate task dropped".into())));
+                    self.finish_translate(job, result);
                 }
                 PipelineEvent::ModelLoad => self.sync_model_load(),
                 PipelineEvent::Overlay(None) => {
@@ -306,7 +294,7 @@ impl Pipeline {
             job.cancel.cancel();
             // Drop the pending user turn so stop/shutdown mid-request does not
             // leave a dangling multi-user conversation for the next translate.
-            self.conversation.rollback_user_turn(job.messages_len_after_user);
+            self.conversation.rollback_user_turn();
         }
     }
 
@@ -491,7 +479,7 @@ impl Pipeline {
 
 enum PipelineEvent {
     Command(Option<PipelineCommand>),
-    Translate(Result<TranslateJobResult, oneshot::error::RecvError>),
+    Translate(Result<Result<Completion, TranslateError>, oneshot::error::RecvError>),
     ModelLoad,
     Overlay(Option<OverlayEvent>),
     Tick,

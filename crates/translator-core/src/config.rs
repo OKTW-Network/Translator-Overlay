@@ -92,13 +92,22 @@ impl AppConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvider {
-    /// OpenAI-compatible HTTP chat completions.
+    /// OpenAI-compatible HTTP chat completions or Responses API.
     #[default]
     OpenaiCompatible,
     /// Local Grok Build CLI over ACP stdio (`grok agent stdio`).
     GrokCli,
     /// Local Codex CLI over app-server stdio (`codex app-server`).
     CodexCli,
+}
+
+/// HTTP wire format when [`ModelProvider::OpenaiCompatible`] is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpApi {
+    #[default]
+    ChatCompletions,
+    Responses,
 }
 
 /// Preferred processing tier when the selected provider supports one.
@@ -191,6 +200,8 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
 #[serde(default)]
 pub struct ApiConfig {
     pub provider: ModelProvider,
+    /// HTTP endpoint style. Ignored for CLI providers.
+    pub http_api: HttpApi,
     /// Absolute path or bare command. Empty = look up `grok` / `codex` on PATH.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
@@ -219,6 +230,7 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             provider: ModelProvider::OpenaiCompatible,
+            http_api: HttpApi::ChatCompletions,
             cli_path: String::new(),
             service_tier: ServiceTier::Standard,
             base_url: "https://localhost/v1".to_string(),
@@ -251,6 +263,27 @@ pub struct ChatCompletionRequestBody<'a> {
     pub reasoning_effort: Option<&'a str>,
 }
 
+const RESPONSES_INCLUDE: &[&str] = &["reasoning.encrypted_content"];
+
+/// Body fragment used when calling the Responses API (`store: false` + encrypted reasoning).
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponsesRequestBody<'a> {
+    pub model: &'a str,
+    pub input: Vec<serde_json::Value>,
+    pub store: bool,
+    pub include: &'a [&'a str],
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub prompt_cache_key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
+}
+
 impl ApiConfig {
     pub fn request_body<'a>(&'a self, messages: &'a [ChatMessage]) -> ChatCompletionRequestBody<'a> {
         ChatCompletionRequestBody {
@@ -260,6 +293,58 @@ impl ApiConfig {
             top_p: self.top_p,
             max_tokens: self.max_tokens,
             reasoning_effort: self.reasoning_effort.as_deref(),
+        }
+    }
+
+    pub fn responses_request_body<'a>(&'a self, items: &[ResponseItem], session_id: &'a str) -> ResponsesRequestBody<'a> {
+        ResponsesRequestBody {
+            model: &self.model,
+            input: items.iter().map(ResponseItem::to_input_value).collect(),
+            store: false,
+            include: RESPONSES_INCLUDE,
+            prompt_cache_key: session_id,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            max_output_tokens: self.max_tokens,
+            reasoning: self
+                .reasoning_effort
+                .as_deref()
+                .map(|effort| serde_json::json!({ "effort": effort })),
+        }
+    }
+}
+
+/// One item in a stateless Responses `input` list (authored message or API output).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseItem {
+    Message {
+        role: String,
+        content: String,
+    },
+    /// Pass-through `/responses` output item (reasoning or assistant message).
+    Output(serde_json::Value),
+}
+
+impl ResponseItem {
+    pub fn message(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::Message {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
+    pub fn to_input_value(&self) -> serde_json::Value {
+        match self {
+            Self::Message { role, content } if role == "assistant" => serde_json::json!({
+                "type": "message",
+                "role": role,
+                "content": [{ "type": "output_text", "text": content }],
+            }),
+            Self::Message { role, content } => serde_json::json!({
+                "role": role,
+                "content": content,
+            }),
+            Self::Output(v) => v.clone(),
         }
     }
 }
@@ -635,8 +720,19 @@ model = "my-model"
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert_eq!(config.api.http_api, HttpApi::ChatCompletions);
         assert!(config.api.cli_path.is_empty());
         assert!(!config.api.provider.is_cli());
+    }
+
+    #[test]
+    fn http_api_responses_roundtrip() {
+        let mut config = AppConfig::default();
+        config.api.http_api = HttpApi::Responses;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("http_api = \"responses\""), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.api.http_api, HttpApi::Responses);
     }
 
     #[test]
@@ -709,6 +805,66 @@ model = "my-model"
         assert!((temp - 0.2).abs() < 1e-5);
         assert_eq!(json["reasoning_effort"], "medium");
         assert!(json.get("top_p").is_none());
+    }
+
+    #[test]
+    fn responses_body_is_stateless_and_omits_unset_params() {
+        let api = ApiConfig {
+            model: "grok-4.6".into(),
+            ..ApiConfig::default()
+        };
+        let items = [ResponseItem::message("user", "hi")];
+        let body = api.responses_request_body(&items, "sess-1");
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["model"], "grok-4.6");
+        assert_eq!(json["store"], false);
+        assert_eq!(json["include"], serde_json::json!(["reasoning.encrypted_content"]));
+        assert_eq!(json["prompt_cache_key"], "sess-1");
+        assert_eq!(json["input"][0]["role"], "user");
+        assert_eq!(json["input"][0]["content"], "hi");
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("top_p").is_none());
+        assert!(json.get("max_output_tokens").is_none());
+        assert!(json.get("reasoning").is_none());
+        assert!(json.get("previous_response_id").is_none());
+        assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn responses_body_maps_tokens_and_effort() {
+        let api = ApiConfig {
+            max_tokens: Some(256),
+            reasoning_effort: Some("high".into()),
+            temperature: Some(0.2),
+            ..ApiConfig::default()
+        };
+        let items = [
+            ResponseItem::message("system", "sys"),
+            ResponseItem::message("user", "u"),
+            ResponseItem::Output(serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "encrypted_content": "enc",
+            })),
+            ResponseItem::Output(serde_json::json!({
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "output_text", "text": "a" }],
+            })),
+        ];
+        let json = serde_json::to_value(api.responses_request_body(&items, "sess-2")).unwrap();
+        assert_eq!(json["max_output_tokens"], 256);
+        assert_eq!(json["reasoning"]["effort"], "high");
+        assert!((json["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-5);
+        assert!(json.get("reasoning_effort").is_none());
+        assert_eq!(json["input"][2]["type"], "reasoning");
+        assert_eq!(json["input"][2]["encrypted_content"], "enc");
+        assert_eq!(json["input"][2]["id"], "rs_1");
+        assert_eq!(json["input"][3]["type"], "message");
+        assert_eq!(json["input"][3]["id"], "msg_1");
+        assert_eq!(json["input"][3]["content"][0]["text"], "a");
     }
 
     #[test]

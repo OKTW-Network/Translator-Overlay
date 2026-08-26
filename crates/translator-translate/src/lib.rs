@@ -9,13 +9,13 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, ChatMessage, OcrBlock, TranslatedBlock, TranslationConfig};
+use translator_core::{ApiConfig, ChatMessage, HttpApi, OcrBlock, ResponseItem, TranslatedBlock, TranslationConfig};
 
 pub use crate::cache::{CacheResolve, TranslationCache};
 
@@ -63,81 +63,145 @@ pub fn should_retry(error: &TranslateError, attempt: u32, max_retries: u32) -> b
     !error.is_cancelled() && error.is_retryable() && attempt < max_retries
 }
 
+fn new_session_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}-{n:x}-{}", std::process::id())
+}
+
+/// Model output: assistant text plus Responses items to replay on the next turn.
+#[derive(Debug, Clone)]
+pub struct Completion {
+    pub text: String,
+    pub replay_items: Vec<ResponseItem>,
+}
+
 /// In-memory multi-turn conversation reused across translations.
-#[derive(Debug, Clone, Default)]
+///
+/// `items` is the source of truth (authored messages + Responses output). Chat Completions / CLI
+/// use [`Self::messages`], which drops pass-through output items.
+#[derive(Debug, Clone)]
 pub struct Conversation {
-    pub messages: Vec<ChatMessage>,
-    /// Number of completed user/assistant turn pairs.
-    pub turn_count: usize,
+    pub items: Vec<ResponseItem>,
+    /// Client-generated id sent as `x-grok-session-id` / `prompt_cache_key`. Rotates on history rewrite.
+    pub session_id: String,
 }
 
 impl Conversation {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn empty() -> Self {
+        Self {
+            items: Vec::new(),
+            session_id: new_session_id(),
+        }
+    }
+
+    fn rotate_session_id(&mut self) {
+        self.session_id = new_session_id();
+    }
+
+    pub fn messages(&self) -> Vec<ChatMessage> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ResponseItem::Message { role, content } => Some(ChatMessage {
+                    role: role.clone(),
+                    content: content.clone(),
+                }),
+                ResponseItem::Output(_) => None,
+            })
+            .collect()
+    }
+
+    pub fn turn_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| match item {
+                ResponseItem::Message { role, .. } if role == "assistant" => true,
+                ResponseItem::Output(v) => {
+                    v.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                        && v.get("role").and_then(serde_json::Value::as_str).unwrap_or("assistant") == "assistant"
+                }
+                _ => false,
+            })
+            .count()
     }
 
     pub fn ensure_system(&mut self, system: impl Into<String>) {
-        if self.messages.first().map(|m| m.role.as_str()) != Some("system") {
-            self.messages.insert(0, ChatMessage::system(system));
-        } else {
-            self.messages[0] = ChatMessage::system(system);
+        let system = system.into();
+        match self.items.first_mut() {
+            Some(ResponseItem::Message { role, content }) if role == "system" => {
+                if *content != system {
+                    *content = system;
+                    self.rotate_session_id();
+                }
+            }
+            _ => self.items.insert(0, ResponseItem::message("system", system)),
         }
     }
 
     pub fn push_user(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage::user(content));
+        self.items.push(ResponseItem::message("user", content));
     }
 
     pub fn push_assistant(&mut self, content: impl Into<String>) {
-        self.messages.push(ChatMessage::assistant(content));
-        self.turn_count += 1;
+        self.items.push(ResponseItem::message("assistant", content));
     }
 
-    /// Drop all messages (e.g. new capture target).
+    /// Append a successful model turn. `replay_items` (Responses) replace a plain assistant message on the tape.
+    pub fn commit_completion(&mut self, completion: &Completion) {
+        if completion.replay_items.is_empty() {
+            self.items.push(ResponseItem::message("assistant", &completion.text));
+        } else {
+            self.items.extend(completion.replay_items.iter().cloned());
+        }
+    }
+
+    /// Drop all messages (e.g. new capture target) and mint a new session id.
     pub fn clear(&mut self) {
-        self.messages.clear();
-        self.turn_count = 0;
+        self.items.clear();
+        self.rotate_session_id();
     }
 
-    /// When `turn_count` reaches `max_turns`, keep only the system message plus
-    /// the last `history_max_items` user/assistant pairs and reset the counter.
+    /// When turn count reaches `max_turns`, keep only the system message plus
+    /// the last `history_max_items` user turns (with their reasoning/assistant items).
+    /// Rotates `session_id` when turns are actually dropped.
     pub fn compress_if_needed(&mut self, max_turns: usize, history_max_items: usize) {
-        if self.turn_count < max_turns {
+        if self.turn_count() < max_turns {
             return;
         }
-        let system = self.messages.iter().find(|m| m.role == "system").cloned();
-
-        // Collect trailing non-system messages (user/assistant pairs).
-        let non_system: Vec<_> = self.messages.iter().filter(|m| m.role != "system").cloned().collect();
-
-        let keep_msgs = history_max_items.saturating_mul(2);
-        let start = non_system.len().saturating_sub(keep_msgs);
-        let kept = non_system[start..].to_vec();
-
-        self.messages.clear();
-        if let Some(sys) = system {
-            self.messages.push(sys);
+        let users: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| matches!(it, ResponseItem::Message { role, .. } if role == "user").then_some(i))
+            .collect();
+        let keep = users
+            .get(users.len().saturating_sub(history_max_items))
+            .copied()
+            .unwrap_or(self.items.len());
+        let sys = matches!(self.items.first(), Some(ResponseItem::Message { role, .. }) if role == "system");
+        let from = if sys { keep.max(1) } else { keep };
+        if from <= usize::from(sys) {
+            return;
         }
-        self.messages.extend(kept);
-        self.turn_count = self.messages.iter().filter(|m| m.role == "assistant").count();
+        self.items.drain(usize::from(sys)..from);
+        self.rotate_session_id();
     }
 
     /// Compress + system prompt + user payload for a new translate request.
-    ///
-    /// Returns a clone of `messages` for the HTTP call and the length after the
-    /// user turn (for [`Self::rollback_user_turn`] on failure / cancel).
-    pub fn begin_translate_request(&mut self, translation_cfg: &TranslationConfig, blocks: &[OcrBlock]) -> (Vec<ChatMessage>, usize) {
+    /// Returns a snapshot used by the HTTP/CLI job; the live conversation stays on the caller.
+    pub fn begin_translate_request(&mut self, translation_cfg: &TranslationConfig, blocks: &[OcrBlock]) -> Self {
         self.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
         self.ensure_system(default_system_prompt(translation_cfg));
         self.push_user(user_payload_from_blocks(blocks));
-        let messages_len_after_user = self.messages.len();
-        (self.messages.clone(), messages_len_after_user)
+        self.clone()
     }
 
-    /// Pop the pending user turn when its length still matches a failed request.
-    pub fn rollback_user_turn(&mut self, messages_len_after_user: usize) {
-        if self.messages.len() == messages_len_after_user && self.messages.last().map(|m| m.role == "user").unwrap_or(false) {
-            self.messages.pop();
+    /// Pop a pending user turn after a failed or cancelled request.
+    pub fn rollback_user_turn(&mut self) {
+        if matches!(self.items.last(), Some(ResponseItem::Message { role, .. }) if role == "user") {
+            self.items.pop();
         }
     }
 }
@@ -483,13 +547,14 @@ impl TranslateClient {
     pub fn update_api(&mut self, api: ApiConfig) {
         // Rebuild client so timeout reflects the latest config.
         self.http = build_http_client(&api);
-        let cli_changed = self.api.provider != api.provider
+        let session_changed = self.api.provider != api.provider
             || self.api.cli_path != api.cli_path
             || self.api.model != api.model
             || self.api.reasoning_effort != api.reasoning_effort
-            || self.api.service_tier != api.service_tier;
+            || self.api.service_tier != api.service_tier
+            || self.api.http_api != api.http_api;
         self.api = api;
-        if cli_changed {
+        if session_changed {
             self.reset_session();
         }
     }
@@ -506,18 +571,47 @@ impl TranslateClient {
         &self.api
     }
 
-    pub async fn chat_completions(&self, messages: &[ChatMessage]) -> Result<String, TranslateError> {
-        self.chat_completions_cancellable(messages, &CancellationToken::new()).await
+    pub async fn complete_cancellable(&self, conv: &Conversation, cancel: &CancellationToken) -> Result<Completion, TranslateError> {
+        if !self.api.provider.is_cli() && self.api.http_api == HttpApi::Responses {
+            let body = self.api.responses_request_body(&conv.items, &conv.session_id);
+            let text = self
+                .http_post_json(
+                    &format!("{}/responses", self.api.base_url.trim_end_matches('/')),
+                    &body,
+                    Some(conv.session_id.as_str()),
+                    cancel,
+                )
+                .await?;
+            return extract_responses_completion(&text);
+        }
+        let messages = conv.messages();
+        let text = if self.api.provider.is_cli() {
+            self.cli_complete(&messages, cancel).await?
+        } else {
+            extract_assistant_content(
+                &self
+                    .http_post_json(
+                        &format!("{}/chat/completions", self.api.base_url.trim_end_matches('/')),
+                        &self.api.request_body(&messages),
+                        None,
+                        cancel,
+                    )
+                    .await?,
+            )?
+        };
+        Ok(Completion {
+            text,
+            replay_items: Vec::new(),
+        })
     }
 
-    pub async fn chat_completions_cancellable(
+    async fn http_post_json<T: Serialize>(
         &self,
-        messages: &[ChatMessage],
+        url: &str,
+        body: &T,
+        session_id: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<String, TranslateError> {
-        if self.api.provider.is_cli() {
-            return self.cli_complete(messages, cancel).await;
-        }
         if self.api.api_key.trim().is_empty() {
             return Err(TranslateError::MissingApiKey);
         }
@@ -525,10 +619,11 @@ impl TranslateClient {
             return Err(TranslateError::Cancelled);
         }
 
-        let url = format!("{}/chat/completions", self.api.base_url.trim_end_matches('/'));
-        let body = self.api.request_body(messages);
-
-        let send = self.http.post(&url).bearer_auth(&self.api.api_key).json(&body).send();
+        let mut req = self.http.post(url).bearer_auth(&self.api.api_key);
+        if let Some(session_id) = session_id.filter(|s| !s.is_empty()) {
+            req = req.header("x-grok-session-id", session_id);
+        }
+        let send = req.json(body).send();
 
         let response = tokio::select! {
             biased;
@@ -549,8 +644,7 @@ impl TranslateClient {
                 body: text,
             });
         }
-
-        extract_assistant_content(&text)
+        Ok(text)
     }
 
     async fn cli_complete(&self, messages: &[ChatMessage], cancel: &CancellationToken) -> Result<String, TranslateError> {
@@ -570,30 +664,18 @@ impl TranslateClient {
         backend.complete(&self.api, messages, cancel, timeout, epoch).await
     }
 
-    /// Chat completions with automatic retries for transient failures.
-    pub async fn chat_completions_with_retry(
+    pub async fn complete_with_retry_on(
         &self,
-        messages: &[ChatMessage],
-        cancel: &CancellationToken,
-    ) -> Result<String, TranslateError> {
-        self.chat_completions_with_retry_on(messages, cancel, |_, _, _, _| {}).await
-    }
-
-    /// Same as [`Self::chat_completions_with_retry`], calling `on_retry` before each backoff.
-    ///
-    /// `on_retry(attempt, max_retries, error, backoff_ms)` — `attempt` is 1-based.
-    pub async fn chat_completions_with_retry_on(
-        &self,
-        messages: &[ChatMessage],
+        conv: &Conversation,
         cancel: &CancellationToken,
         mut on_retry: impl FnMut(u32, u32, &TranslateError, u64),
-    ) -> Result<String, TranslateError> {
+    ) -> Result<Completion, TranslateError> {
         let max_retries = self.api.max_retries;
         let mut backoff_ms = self.api.retry_backoff_ms.max(50);
         let mut attempt = 0u32;
 
         loop {
-            match self.chat_completions_cancellable(messages, cancel).await {
+            match self.complete_cancellable(conv, cancel).await {
                 Ok(content) => return Ok(content),
                 Err(e) if should_retry(&e, attempt, max_retries) => {
                     attempt += 1;
@@ -648,6 +730,65 @@ fn extract_assistant_content(response_json: &str) -> Result<String, TranslateErr
         .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))
 }
 
+fn extract_responses_completion(response_json: &str) -> Result<Completion, TranslateError> {
+    let root: serde_json::Value = serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
+    let output = root
+        .get("output")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| TranslateError::Parse("no output in responses body".into()))?;
+
+    let mut text = String::new();
+    let mut replay_items = Vec::new();
+
+    for item in output {
+        let ty = item.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+        match ty {
+            "reasoning" => {
+                if item
+                    .get("encrypted_content")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    replay_items.push(ResponseItem::Output(item.clone()));
+                }
+            }
+            "message" => {
+                let role = item.get("role").and_then(serde_json::Value::as_str).unwrap_or("assistant");
+                let mut content_text = String::new();
+                match item.get("content") {
+                    Some(serde_json::Value::String(s)) => content_text = s.clone(),
+                    Some(serde_json::Value::Array(parts)) => {
+                        for part in parts {
+                            let Some(piece) = part.get("text").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) else {
+                                continue;
+                            };
+                            if !content_text.is_empty() {
+                                content_text.push('\n');
+                            }
+                            content_text.push_str(piece);
+                        }
+                    }
+                    _ => {}
+                }
+                if role != "assistant" || content_text.is_empty() {
+                    continue;
+                }
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&content_text);
+                replay_items.push(ResponseItem::Output(item.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    if text.trim().is_empty() {
+        return Err(TranslateError::Parse("no message/content in responses output".into()));
+    }
+    Ok(Completion { text, replay_items })
+}
+
 /// Join translated block texts for UI / history.
 pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
     blocks.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>().join("\n")
@@ -689,19 +830,19 @@ pub async fn translate_blocks_cancellable(
     }
 
     let to_send: &[OcrBlock] = resolved.as_ref().map(|r| r.misses.as_slice()).unwrap_or(blocks);
-    let (messages, messages_len_after_user) = conversation.begin_translate_request(translation_cfg, to_send);
+    let prepared = conversation.begin_translate_request(translation_cfg, to_send);
 
-    let content = match client.chat_completions_with_retry(&messages, cancel).await {
+    let completion = match client.complete_with_retry_on(&prepared, cancel, |_, _, _, _| {}).await {
         Ok(c) => c,
         Err(e) => {
-            conversation.rollback_user_turn(messages_len_after_user);
+            conversation.rollback_user_turn();
             return Err(e);
         }
     };
 
-    match merge_translations_detailed(to_send, &content) {
+    match merge_translations_detailed(to_send, &completion.text) {
         Ok(outcome) => {
-            conversation.push_assistant(&content);
+            conversation.commit_completion(&completion);
             if let (Some(cache), Some(resolved)) = (cache.as_mut(), resolved.as_ref()) {
                 cache.store_model_pairs(&resolved.misses, &outcome.blocks, &outcome.model_ids, translation_cfg);
             }
@@ -712,7 +853,7 @@ pub async fn translate_blocks_cancellable(
             Ok(translated)
         }
         Err(e) => {
-            conversation.rollback_user_turn(messages_len_after_user);
+            conversation.rollback_user_turn();
             Err(e)
         }
     }
@@ -751,19 +892,33 @@ mod tests {
     }
 
     #[test]
+    fn changing_http_api_resets_session() {
+        let api = ApiConfig::default();
+        let mut client = TranslateClient::new(api.clone());
+        let initial_epoch = client.cli.epoch.load(Ordering::SeqCst);
+
+        let mut updated = api;
+        updated.http_api = HttpApi::Responses;
+        client.update_api(updated);
+
+        assert_eq!(client.cli.epoch.load(Ordering::SeqCst), initial_epoch + 1);
+    }
+
+    #[test]
     fn compress_keeps_recent_pairs() {
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::empty();
         conv.ensure_system("sys");
         for i in 0..5 {
             conv.push_user(format!("u{i}"));
             conv.push_assistant(format!("a{i}"));
         }
-        assert_eq!(conv.turn_count, 5);
+        assert_eq!(conv.turn_count(), 5);
         conv.compress_if_needed(5, 2);
         // system + 2 pairs (4 messages) = 5
-        assert_eq!(conv.messages.len(), 5);
-        assert_eq!(conv.messages[0].role, "system");
-        assert_eq!(conv.turn_count, 2);
+        let messages = conv.messages();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(conv.turn_count(), 2);
     }
 
     #[test]
@@ -782,13 +937,182 @@ mod tests {
 
     #[test]
     fn clear_resets_conversation() {
-        let mut conv = Conversation::new();
+        let mut conv = Conversation::empty();
         conv.ensure_system("sys");
         conv.push_user("u");
         conv.push_assistant("a");
+        let old_session = conv.session_id.clone();
         conv.clear();
-        assert!(conv.messages.is_empty());
-        assert_eq!(conv.turn_count, 0);
+        assert!(conv.messages().is_empty());
+        assert!(conv.items.is_empty());
+        assert_eq!(conv.turn_count(), 0);
+        assert!(!conv.session_id.is_empty());
+        assert_ne!(conv.session_id, old_session);
+    }
+
+    #[test]
+    fn new_conversation_has_session_id() {
+        let conv = Conversation::empty();
+        assert!(!conv.session_id.is_empty());
+        assert_ne!(Conversation::empty().session_id, conv.session_id);
+    }
+
+    #[test]
+    fn append_keeps_session_id() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        let id = conv.session_id.clone();
+        conv.push_user("u");
+        conv.push_assistant("a");
+        assert_eq!(conv.session_id, id);
+    }
+
+    #[test]
+    fn rollback_keeps_session_id() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        conv.push_user("u");
+        let id = conv.session_id.clone();
+        conv.rollback_user_turn();
+        assert_eq!(conv.session_id, id);
+        assert_eq!(conv.messages().len(), 1);
+        assert_eq!(conv.items.len(), 1);
+    }
+
+    #[test]
+    fn compress_without_drop_keeps_session_id() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        for i in 0..2 {
+            conv.push_user(format!("u{i}"));
+            conv.push_assistant(format!("a{i}"));
+        }
+        let id = conv.session_id.clone();
+        conv.compress_if_needed(2, 8);
+        assert_eq!(conv.session_id, id);
+        assert_eq!(conv.turn_count(), 2);
+    }
+
+    #[test]
+    fn compress_drop_rotates_session_and_keeps_reasoning() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        for i in 0..5 {
+            conv.push_user(format!("u{i}"));
+            conv.items.push(ResponseItem::Output(serde_json::json!({
+                "type": "reasoning",
+                "encrypted_content": format!("enc{i}"),
+            })));
+            conv.push_assistant(format!("a{i}"));
+        }
+        let old_session = conv.session_id.clone();
+        conv.compress_if_needed(5, 2);
+        assert_ne!(conv.session_id, old_session);
+        assert_eq!(conv.turn_count(), 2);
+        assert_eq!(conv.messages().len(), 5);
+        let reasoning: Vec<_> = conv
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ResponseItem::Output(v) => v.get("encrypted_content").and_then(serde_json::Value::as_str),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, ["enc3", "enc4"]);
+        assert!(!conv.items.iter().any(
+            |i| matches!(i, ResponseItem::Output(v) if v.get("encrypted_content").and_then(serde_json::Value::as_str) == Some("enc0"))
+        ));
+    }
+
+    #[test]
+    fn ensure_system_change_rotates_session_id() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys-a");
+        let id = conv.session_id.clone();
+        conv.ensure_system("sys-a");
+        assert_eq!(conv.session_id, id);
+        conv.ensure_system("sys-b");
+        assert_ne!(conv.session_id, id);
+    }
+
+    #[test]
+    fn extract_responses_output_with_reasoning() {
+        let json = r#"{
+          "id": "resp_1",
+          "output": [
+            {
+              "type": "reasoning",
+              "id": "rs_1",
+              "status": "completed",
+              "encrypted_content": "encblob",
+              "summary": []
+            },
+            {
+              "type": "message",
+              "id": "msg_1",
+              "role": "assistant",
+              "status": "completed",
+              "content": [{"type": "output_text", "text": "{\"blocks\":[]}"}]
+            }
+          ]
+        }"#;
+        let completion = extract_responses_completion(json).unwrap();
+        assert_eq!(completion.text, "{\"blocks\":[]}");
+        assert_eq!(completion.replay_items.len(), 2);
+        assert!(matches!(
+            &completion.replay_items[0],
+            ResponseItem::Output(v) if v.get("encrypted_content").and_then(serde_json::Value::as_str) == Some("encblob")
+        ));
+        assert!(matches!(
+            &completion.replay_items[1],
+            ResponseItem::Output(v)
+                if v.get("id").and_then(serde_json::Value::as_str) == Some("msg_1")
+                    && v.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+        ));
+    }
+
+    #[test]
+    fn extract_responses_output_without_reasoning() {
+        let json = r#"{
+          "output": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "content": [{"type": "output_text", "text": "hello"}]
+            }
+          ]
+        }"#;
+        let completion = extract_responses_completion(json).unwrap();
+        assert_eq!(completion.text, "hello");
+        assert_eq!(completion.replay_items.len(), 1);
+        assert!(matches!(&completion.replay_items[0], ResponseItem::Output(_)));
+    }
+
+    #[test]
+    fn turn_count_includes_output_assistant() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        conv.push_user("u");
+        conv.items.push(ResponseItem::Output(serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "a" }],
+        })));
+        assert_eq!(conv.turn_count(), 1);
+    }
+
+    #[test]
+    fn extract_skips_empty_and_non_assistant_messages() {
+        let json = r#"{
+          "output": [
+            {"type": "message", "role": "assistant", "content": []},
+            {"type": "message", "role": "user", "content": [{"type": "output_text", "text": "nope"}]},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}
+          ]
+        }"#;
+        let completion = extract_responses_completion(json).unwrap();
+        assert_eq!(completion.text, "hello");
+        assert_eq!(completion.replay_items.len(), 1);
     }
 
     #[test]

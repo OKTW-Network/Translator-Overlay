@@ -9,7 +9,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
 - **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
 - **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（幾何規則）
-- **LLM 翻譯**：OpenAI 相容 Chat Completions，或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
+- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API，或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
 - **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
 - **對話上下文**：多輪歷史壓縮，維持用語一致
 - **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
@@ -66,7 +66,7 @@ cargo build --release -p translator-app
 
 ## 使用方式
 
-1. **API**：選 Provider（OpenAI-compatible / Grok CLI / Codex CLI）。HTTP 填 `base_url`、`api_key`、`model`；CLI 用本機已登入的 `grok` / `codex`，可選 `cli_path`
+1. **API**：選 Provider（OpenAI-compatible / Grok CLI / Codex CLI）。HTTP 填 `base_url`、`api_key`、`model`，並可選 Chat Completions 或 Responses；CLI 用本機已登入的 `grok` / `codex`，可選 `cli_path`
 2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選提示詞。可開關翻譯記憶、設定記住多少句，以及清空已記住的譯文。譯文不滿意時在 Dashboard 按 **Retry** 會立刻重擷取並跑完整 OCR + 翻譯
 3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
 4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）

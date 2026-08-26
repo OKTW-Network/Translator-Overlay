@@ -7,9 +7,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
 use translator_overlay::OverlayController;
-use translator_translate::{TranslationCache, blocks_to_translated_text, merge_translations_detailed};
+use translator_translate::{Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed};
 
-use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobResult};
+use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState};
 
 impl Pipeline {
     pub(crate) fn start_translate(&mut self, page: PendingPage, force: bool) {
@@ -94,7 +94,7 @@ impl Pipeline {
         }
 
         // Canonical conversation prepare (shared with translate_blocks_*).
-        let (messages, messages_len_after_user) = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
+        let prepared = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
 
         let cancel = CancellationToken::new();
         let cancel_job = cancel.clone();
@@ -112,7 +112,7 @@ impl Pipeline {
 
         tokio::spawn(async move {
             let result = client_clone
-                .chat_completions_with_retry_on(&messages, &cancel_job, move |attempt, max_retries, error, _backoff_ms| {
+                .complete_with_retry_on(&prepared, &cancel_job, move |attempt, max_retries, error, _backoff_ms| {
                     let message = error.to_string();
                     let mut s = state_cb.write();
                     s.last_error = Some(message.clone());
@@ -123,10 +123,7 @@ impl Pipeline {
                     };
                 })
                 .await;
-            let _ = tx.send(TranslateJobResult {
-                result,
-                messages_len_after_user,
-            });
+            let _ = tx.send(result);
         });
 
         self.inflight = Some(InflightTranslate {
@@ -137,17 +134,16 @@ impl Pipeline {
             source_text: page.source_text,
             content_width: page.content_width,
             content_height: page.content_height,
-            messages_len_after_user,
             miss_blocks: resolved.misses,
             cached_hits: resolved.hits,
         });
     }
 
-    pub(crate) fn finish_translate(&mut self, job: InflightTranslate, job_result: TranslateJobResult) {
-        match job_result.result {
-            Ok(content) => match merge_translations_detailed(&job.miss_blocks, &content) {
+    pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: Result<Completion, TranslateError>) {
+        match result {
+            Ok(completion) => match merge_translations_detailed(&job.miss_blocks, &completion.text) {
                 Ok(outcome) => {
-                    self.conversation.push_assistant(&content);
+                    self.conversation.commit_completion(&completion);
                     let tcfg = self.state.read().config.translation.clone();
                     self.translation_cache
                         .store_model_pairs(&job.miss_blocks, &outcome.blocks, &outcome.model_ids, &tcfg);
@@ -156,7 +152,7 @@ impl Pipeline {
                     info!(
                         blocks = translated.len(),
                         cached = job.cached_hits.iter().filter(|h| h.is_some()).count(),
-                        turns = self.conversation.turn_count,
+                        turns = self.conversation.turn_count(),
                         "translation complete"
                     );
                     self.last_translated_fp = Some(job.fingerprint);
@@ -175,7 +171,7 @@ impl Pipeline {
                     error!(error = %e, "failed to merge translation");
                     // Drop the pending user turn so Retry re-sends a clean request
                     // (do not store invalid model JSON as assistant context).
-                    self.conversation.rollback_user_turn(job_result.messages_len_after_user);
+                    self.conversation.rollback_user_turn();
                     let mut s = self.state.write();
                     s.translate_in_flight = false;
                     s.can_retry_translate = true;
@@ -184,7 +180,7 @@ impl Pipeline {
             },
             Err(e) if e.is_cancelled() => {
                 info!("translation cancelled");
-                self.conversation.rollback_user_turn(job_result.messages_len_after_user);
+                self.conversation.rollback_user_turn();
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
                 s.can_retry_translate = true;
@@ -196,7 +192,7 @@ impl Pipeline {
             }
             Err(e) => {
                 error!(error = %e, "translation failed");
-                self.conversation.rollback_user_turn(job_result.messages_len_after_user);
+                self.conversation.rollback_user_turn();
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
                 s.can_retry_translate = true;

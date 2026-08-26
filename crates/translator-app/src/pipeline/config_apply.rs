@@ -31,6 +31,14 @@ impl Pipeline {
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier;
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
+        let identity_changed = {
+            let prev = self.client.api();
+            prev.model != cfg.api.model || prev.http_api != cfg.api.http_api || prev.provider != cfg.api.provider
+        };
+        if identity_changed {
+            self.cancel_inflight();
+            self.conversation.clear();
+        }
         self.client.update_api(cfg.api.clone());
         self.translation_cache.set_max(cfg.translation.cache_max_entries_clamped());
 

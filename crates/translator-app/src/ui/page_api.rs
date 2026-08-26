@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use translator_core::{ModelProvider, ServiceTier};
+use translator_core::{HttpApi, ModelProvider, ServiceTier};
 use windows_reactor::{
     Element, KeyExt, LayoutExt, RadioButton, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, VerticalAlignment, hstack,
     text_block, vstack,
@@ -37,21 +37,39 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 });
             }
         };
-        let radio = |label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>| {
-            let mut rb = RadioButton::new(label).group("api-provider").checked(checked).on_checked(on);
-            rb.modifiers.min_width = Some(width);
-            rb.modifiers.width = Some(width);
-            rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-            rb
-        };
         hstack((
-            radio("OpenAI-compatible", 168.0, idx == 0, Box::new(pick(0))),
-            radio("Grok CLI", 96.0, idx == 1, Box::new(pick(1))),
-            radio("Codex CLI", 104.0, idx == 2, Box::new(pick(2))),
+            api_radio("api-provider", "OpenAI-compatible", 168.0, idx == 0, Box::new(pick(0))),
+            api_radio("api-provider", "Grok CLI", 96.0, idx == 1, Box::new(pick(1))),
+            api_radio("api-provider", "Codex CLI", 104.0, idx == 2, Box::new(pick(2))),
         ))
         .spacing(12.0)
         .vertical_alignment(VerticalAlignment::Center)
     });
+
+    let http_api_card =
+        settings_card("api-http-api", "API type", Some("Select standard /chat/completions or newer /responses endpoint."), {
+            let idx = snap.http_api_idx;
+            let cx_h = cx.clone();
+            let pick = move |choice: i32| {
+                let cx = cx_h.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.http_api = if choice == 1 {
+                            HttpApi::Responses
+                        } else {
+                            HttpApi::ChatCompletions
+                        };
+                        mark_dirty(ui);
+                    });
+                }
+            };
+            hstack((
+                api_radio("api-http-api", "Chat Completions", 168.0, idx == 0, Box::new(pick(0))),
+                api_radio("api-http-api", "Responses", 120.0, idx == 1, Box::new(pick(1))),
+            ))
+            .spacing(12.0)
+            .vertical_alignment(VerticalAlignment::Center)
+        });
 
     let model_placeholder = match snap.provider {
         ModelProvider::GrokCli => "grok-4.5",
@@ -127,6 +145,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         vstack((
             section_header("Connection"),
             provider_card,
+            http_api_card,
             card_text(
                 "api-base-url",
                 "Base URL",
@@ -392,4 +411,12 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     .spacing(4.0);
 
     settings_page_shell(shared, snap, bump, vstack((connection, sampling, reliability)).spacing(8.0))
+}
+
+fn api_radio(group: &'static str, label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>) -> RadioButton {
+    let mut rb = RadioButton::new(label).group(group).checked(checked).on_checked(on);
+    rb.modifiers.min_width = Some(width);
+    rb.modifiers.width = Some(width);
+    rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+    rb
 }

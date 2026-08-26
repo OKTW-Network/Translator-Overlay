@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionPreset, RegionPresetFile};
+use translator_core::{AppConfig, HttpApi, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionPreset, RegionPresetFile};
 use windows_reactor::Updater;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
@@ -397,6 +397,7 @@ pub struct Snapshot {
     pub translation: String,
     pub provider: ModelProvider,
     pub provider_idx: i32,
+    pub http_api_idx: i32,
     pub cli_path: String,
     pub priority_mode: bool,
     pub auto_running: bool,
@@ -528,6 +529,10 @@ pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
             ModelProvider::OpenaiCompatible => 0,
             ModelProvider::GrokCli => 1,
             ModelProvider::CodexCli => 2,
+        },
+        http_api_idx: match ui.draft.api.http_api {
+            HttpApi::ChatCompletions => 0,
+            HttpApi::Responses => 1,
         },
         cli_path: ui.draft.api.cli_path.clone(),
         priority_mode: ui.draft.api.service_tier == translator_core::ServiceTier::Priority,
