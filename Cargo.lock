@@ -2933,6 +2933,7 @@ name = "translator-overlay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "parking_lot",
  "thiserror",
  "tokio",
  "tracing",

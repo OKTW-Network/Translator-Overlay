@@ -66,7 +66,7 @@ fn presentation_action(previous: Option<ClientRect>, current: ClientRect, conten
 }
 
 impl OverlayHost {
-    pub(crate) fn apply_overlay(&mut self) {
+    pub(crate) fn apply_overlay(&mut self, allow_restack: bool) {
         if !self.ensure_layer_alive() {
             return;
         }
@@ -77,11 +77,11 @@ impl OverlayHost {
         }
 
         if self.picker.is_some() {
-            self.apply_picker();
+            self.apply_picker(allow_restack);
             return;
         }
 
-        self.apply_captions();
+        self.apply_captions(allow_restack);
     }
 
     /// Returns whether the pump should `apply_overlay` after this notice.
@@ -169,7 +169,7 @@ impl OverlayHost {
         self.presented_rect = Some(next);
     }
 
-    fn apply_captions(&mut self) {
+    fn apply_captions(&mut self, allow_restack: bool) {
         if !self.config.enabled {
             self.hide();
             return;
@@ -226,10 +226,10 @@ impl OverlayHost {
             false
         };
 
-        self.update_overlay_window(target, rect, content_changed, OverlayOwnership::OwnedByTarget);
+        self.update_overlay_window(target, rect, content_changed, OverlayOwnership::OwnedByTarget, allow_restack);
     }
 
-    fn apply_picker(&mut self) {
+    fn apply_picker(&mut self, allow_restack: bool) {
         let Some(target) = self.target else {
             self.finish_picker(PickerEnd::Cancel);
             return;
@@ -279,10 +279,17 @@ impl OverlayHost {
             false
         };
 
-        self.update_overlay_window(target, rect, content_changed, OverlayOwnership::Unowned);
+        self.update_overlay_window(target, rect, content_changed, OverlayOwnership::Unowned, allow_restack);
     }
 
-    fn update_overlay_window(&mut self, target: HWND, rect: ClientRect, content_changed: bool, ownership: OverlayOwnership) {
+    fn update_overlay_window(
+        &mut self,
+        target: HWND,
+        rect: ClientRect,
+        content_changed: bool,
+        ownership: OverlayOwnership,
+        allow_restack: bool,
+    ) {
         let effective = if self.z_order_force_topmost {
             OverlayOwnership::Unowned
         } else {
@@ -306,6 +313,9 @@ impl OverlayHost {
                     return;
                 }
                 self.presented_rect = Some(rect);
+                if !allow_restack {
+                    return;
+                }
                 if let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost) {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
@@ -333,6 +343,9 @@ impl OverlayHost {
                 self.presented_rect = Some(rect);
             }
             PresentationAction::RestackOnly => {
+                if !allow_restack {
+                    return;
+                }
                 // Skip a no-op restack: ShowWindow on an already-visible layered
                 // window without ULW can drop DWM's bitmap.
                 if (needs_restack || !overlay_visible)
@@ -429,6 +442,14 @@ mod tests {
     }
 
     #[test]
+    fn location_change_applies_even_during_movesize() {
+        use windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_LOCATIONCHANGE;
+
+        assert_eq!(classify_follow_notice(EVENT_OBJECT_LOCATIONCHANGE, false), FollowNotice::Apply);
+        assert_eq!(classify_follow_notice(EVENT_OBJECT_LOCATIONCHANGE, true), FollowNotice::Apply);
+    }
+
+    #[test]
     fn first_picker_session_shows_a_visible_hit_testable_layer() {
         if let Err(e) = first_picker_hwnd_smoke() {
             panic!("{e}");
@@ -451,6 +472,7 @@ mod tests {
 
         use crate::{command::OverlayCommand, host::OverlayHost};
 
+        let _lock = crate::host::win32::lock_hwnd_tests();
         let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let target = unsafe {
             CreateWindowExW(
@@ -486,13 +508,13 @@ mod tests {
         host.handle(OverlayCommand::Attach {
             target_hwnd: target.0 as isize,
         });
-        host.apply_overlay();
+        host.apply_overlay(true);
         host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
-        host.apply_overlay();
+        host.apply_overlay(true);
         if !host.replay_present {
             return Err("first picker show did not schedule a replay present".into());
         }
-        host.apply_overlay();
+        host.apply_overlay(true);
 
         let visible = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
         let ex = WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(host.hwnd, GWL_EXSTYLE) } as u32);

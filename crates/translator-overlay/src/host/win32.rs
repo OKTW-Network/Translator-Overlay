@@ -385,6 +385,13 @@ pub(crate) fn live_client_screen_rect(target: HWND) -> Option<ClientRect> {
     Some((tl.x, tl.y, w, h))
 }
 
+/// cargo test is multi-threaded; USER32 window state is process-global.
+#[cfg(test)]
+pub(crate) fn lock_hwnd_tests() -> parking_lot::MutexGuard<'static, ()> {
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    LOCK.lock()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +467,7 @@ mod tests {
         target: HWND,
         overlay: HWND,
         other: HWND,
+        _lock: parking_lot::MutexGuard<'static, ()>,
     }
 
     impl Drop for ZOrderWindows {
@@ -480,6 +488,7 @@ mod tests {
             core::w,
         };
 
+        let lock = lock_hwnd_tests();
         let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let create = |title, x, y| unsafe {
             CreateWindowExW(
@@ -503,7 +512,12 @@ mod tests {
         let _ = unsafe { ShowWindow(target, SW_SHOW) };
         let _ = unsafe { ShowWindow(overlay, SW_SHOW) };
         let _ = unsafe { ShowWindow(other, SW_SHOW) };
-        Ok(ZOrderWindows { target, overlay, other })
+        Ok(ZOrderWindows {
+            target,
+            overlay,
+            other,
+            _lock: lock,
+        })
     }
 
     fn assert_visible_topmost(overlay: HWND, target: HWND, why: &str) -> Result<(), String> {

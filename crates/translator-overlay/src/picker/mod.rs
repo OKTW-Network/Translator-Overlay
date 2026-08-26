@@ -406,6 +406,7 @@ mod tests {
         let mut p = picker_with(&[]);
         p.on_left_down(20, 50);
         p.on_move(80, 110);
+        assert_eq!(p.rubber_band(), Some(PixelRect::from_points((20, 50), (80, 110))));
         assert!(matches!(p.on_left_up(80, 110), PickerAction::RegionsChanged));
         assert_eq!(p.regions.len(), 1);
         let r = p.regions[0];
