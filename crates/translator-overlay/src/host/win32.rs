@@ -12,11 +12,12 @@ use tracing::{debug, warn};
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Gdi::ClientToScreen,
+    System::Threading::{AttachThreadInput, GetCurrentThreadId},
     UI::WindowsAndMessaging::{
-        GA_ROOT, GA_ROOTOWNER, GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWLP_HWNDPARENT, GetAncestor, GetClientRect,
-        GetForegroundWindow, GetWindow, GetWindowLongPtrW, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsWindowVisible,
-        SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WS_EX_TOPMOST,
+        BringWindowToTop, GA_ROOT, GA_ROOTOWNER, GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWLP_HWNDPARENT, GetAncestor,
+        GetClientRect, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
+        HWND_TOPMOST, IsWindowVisible, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+        SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WS_EX_TOPMOST,
     },
 };
 
@@ -89,6 +90,24 @@ pub(crate) fn target_is_foreground(target: HWND) -> bool {
     }
     let owner_root = unsafe { GetAncestor(fg, GA_ROOTOWNER) };
     !owner_root.is_invalid() && owner_root == target
+}
+
+/// Focus and raise `target`. Overlay restack stays in `place_overlay_above_target`.
+///
+/// Attaches to the current foreground thread so `SetForegroundWindow` can succeed
+/// from the `WS_EX_NOACTIVATE` overlay thread.
+pub(crate) fn raise_target_window(target: HWND) {
+    if target.is_invalid() || target_is_foreground(target) {
+        return;
+    }
+    let this_tid = unsafe { GetCurrentThreadId() };
+    let fg_tid = unsafe { GetWindowThreadProcessId(GetForegroundWindow(), None) };
+    let attached = fg_tid != 0 && fg_tid != this_tid && unsafe { AttachThreadInput(this_tid, fg_tid, true) }.as_bool();
+    let _ = unsafe { SetForegroundWindow(target) };
+    let _ = unsafe { BringWindowToTop(target) };
+    if attached {
+        let _ = unsafe { AttachThreadInput(this_tid, fg_tid, false) };
+    }
 }
 
 pub(crate) fn overlay_wants_topmost(ownership: OverlayOwnership, target_topmost: bool, target_foreground: bool) -> bool {
@@ -430,6 +449,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn raise_target_window_steals_foreground_from_another_window() {
+        if let Err(e) = raise_target_hwnd_smoke() {
+            panic!("{e}");
+        }
+    }
+
     struct ZOrderWindows {
         target: HWND,
         overlay: HWND,
@@ -612,5 +638,23 @@ mod tests {
         place_unowned(w.overlay, w.target, &mut force_topmost, "park with FG as predecessor")?;
         assert_parked_beside_target(w.overlay, w.target, w.other)?;
         refocus_target_restores_topmost(&w, &mut force_topmost)
+    }
+
+    fn raise_target_hwnd_smoke() -> Result<(), String> {
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+        let w = create_z_order_windows()?;
+        let _ = unsafe { SetForegroundWindow(w.other) };
+        let other_was_fg = target_is_foreground(w.other);
+        raise_target_window(w.target);
+        if other_was_fg && !target_is_foreground(w.target) {
+            return Err("raise_target_window left the other window in the foreground".into());
+        }
+        let was_fg = target_is_foreground(w.target);
+        raise_target_window(w.target);
+        if was_fg && !target_is_foreground(w.target) {
+            return Err("raise_target_window dropped focus from the already-foreground target".into());
+        }
+        Ok(())
     }
 }

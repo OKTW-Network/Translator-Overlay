@@ -8,9 +8,8 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
         WindowsAndMessaging::{
-            GWL_EXSTYLE, GetWindowLongPtrW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-            WM_RBUTTONUP, WS_EX_TRANSPARENT,
+            GWL_EXSTYLE, GetWindowLongPtrW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+            SetWindowPos, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WS_EX_TRANSPARENT,
         },
     },
 };
@@ -19,7 +18,7 @@ use crate::{
     command::OverlayEvent,
     host::{
         OverlayHost,
-        win32::{live_client_screen_rect, set_overlay_owner},
+        win32::{live_client_screen_rect, raise_target_window, set_overlay_owner},
         wnd::{PICKER_HIT_TEST, set_picker_cursor},
     },
     picker::{PickerAction, PickerCursor, RegionPicker},
@@ -60,7 +59,7 @@ impl OverlayHost {
         // Dashboard just received the click, so this process may set foreground.
         // Raise the target before apply so unowned-topmost-while-focused is true.
         if let Some(target) = self.target {
-            let _ = unsafe { SetForegroundWindow(target) };
+            raise_target_window(target);
         }
     }
 

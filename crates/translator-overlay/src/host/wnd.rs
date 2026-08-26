@@ -13,7 +13,10 @@ use windows::{
     core::{PCWSTR, w},
 };
 
-use crate::picker::PickerCursor;
+use crate::{
+    host::{follow::FOLLOW_TARGET, win32::raise_target_window},
+    picker::PickerCursor,
+};
 
 pub(crate) const CLASS_NAME: PCWSTR = w!("TranslatorOverlayLayer.v1");
 
@@ -83,9 +86,13 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
-        // Refuse activation while picking so the target stays foreground.
+        // Raise the capture target; refuse overlay activation so it stays foreground.
         WM_MOUSEACTIVATE => {
             if PICKER_HIT_TEST.load(Ordering::Relaxed) {
+                let target = FOLLOW_TARGET.load(Ordering::Relaxed);
+                if target != 0 {
+                    raise_target_window(HWND(target as *mut _));
+                }
                 LRESULT(MA_NOACTIVATE as isize)
             } else {
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
