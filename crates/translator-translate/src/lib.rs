@@ -720,13 +720,20 @@ fn extract_assistant_content(response_json: &str) -> Result<String, TranslateErr
     #[derive(Deserialize)]
     struct Msg {
         content: Option<String>,
+        refusal: Option<String>,
     }
 
     let root: Root = serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
-    root.choices
+    let msg = root
+        .choices
         .into_iter()
         .next()
-        .and_then(|c| c.message.content)
+        .map(|c| c.message)
+        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))?;
+    if let Some(refusal) = msg.refusal.filter(|s| !s.is_empty()) {
+        return Err(TranslateError::Parse(format!("model refused: {refusal}")));
+    }
+    msg.content
         .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))
 }
 
@@ -759,6 +766,10 @@ fn extract_responses_completion(response_json: &str) -> Result<Completion, Trans
                     Some(serde_json::Value::String(s)) => content_text = s.clone(),
                     Some(serde_json::Value::Array(parts)) => {
                         for part in parts {
+                            if part.get("type").and_then(serde_json::Value::as_str) == Some("refusal") {
+                                let refusal = part.get("refusal").and_then(serde_json::Value::as_str).unwrap_or("model refused");
+                                return Err(TranslateError::Parse(format!("model refused: {refusal}")));
+                            }
                             let Some(piece) = part.get("text").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) else {
                                 continue;
                             };
@@ -1113,6 +1124,40 @@ mod tests {
         let completion = extract_responses_completion(json).unwrap();
         assert_eq!(completion.text, "hello");
         assert_eq!(completion.replay_items.len(), 1);
+    }
+
+    #[test]
+    fn extract_assistant_content_reports_refusal() {
+        let json = r#"{
+          "choices": [
+            {
+              "message": {
+                "role": "assistant",
+                "content": null,
+                "refusal": "I can't help with that."
+              }
+            }
+          ]
+        }"#;
+        let err = extract_assistant_content(json).unwrap_err();
+        assert!(err.to_string().contains("I can't help with that."), "{err}");
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn extract_responses_reports_refusal_part() {
+        let json = r#"{
+          "output": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "content": [{"type": "refusal", "refusal": "I can't help with that."}]
+            }
+          ]
+        }"#;
+        let err = extract_responses_completion(json).unwrap_err();
+        assert!(err.to_string().contains("I can't help with that."), "{err}");
+        assert!(!err.is_retryable());
     }
 
     #[test]

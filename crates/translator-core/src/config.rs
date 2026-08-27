@@ -218,6 +218,9 @@ pub struct ApiConfig {
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Request JSON Schema Structured Outputs on HTTP OpenAI-compatible APIs.
+    /// Ignored for CLI providers. Turn off if the endpoint rejects `json_schema`.
+    pub structured_outputs: bool,
     /// HTTP request timeout for chat completions (seconds). 0 = no limit.
     pub request_timeout_secs: u64,
     /// Extra attempts after the first failure (0 = try once only).
@@ -240,11 +243,35 @@ impl Default for ApiConfig {
             top_p: None,
             max_tokens: None,
             reasoning_effort: None,
+            structured_outputs: true,
             request_timeout_secs: 60,
             max_retries: 2,
             retry_backoff_ms: 500,
         }
     }
+}
+
+/// OpenAI `strict` requires every property in `required` and `additionalProperties: false`.
+pub fn translation_json_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "blocks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "translation": { "type": "string" }
+                    },
+                    "required": ["id", "translation"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["blocks"],
+        "additionalProperties": false
+    })
 }
 
 /// Body fragment used when calling chat completions.
@@ -261,6 +288,8 @@ pub struct ChatCompletionRequestBody<'a> {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
 }
 
 const RESPONSES_INCLUDE: &[&str] = &["reasoning.encrypted_content"];
@@ -282,6 +311,8 @@ pub struct ResponsesRequestBody<'a> {
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<serde_json::Value>,
 }
 
 impl ApiConfig {
@@ -293,6 +324,16 @@ impl ApiConfig {
             top_p: self.top_p,
             max_tokens: self.max_tokens,
             reasoning_effort: self.reasoning_effort.as_deref(),
+            response_format: self.structured_outputs.then(|| {
+                serde_json::json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "translation_blocks",
+                        "strict": true,
+                        "schema": translation_json_schema()
+                    }
+                })
+            }),
         }
     }
 
@@ -310,6 +351,16 @@ impl ApiConfig {
                 .reasoning_effort
                 .as_deref()
                 .map(|effort| serde_json::json!({ "effort": effort })),
+            text: self.structured_outputs.then(|| {
+                serde_json::json!({
+                    "format": {
+                        "type": "json_schema",
+                        "name": "translation_blocks",
+                        "strict": true,
+                        "schema": translation_json_schema()
+                    }
+                })
+            }),
         }
     }
 }
@@ -865,6 +916,69 @@ model = "my-model"
         assert_eq!(json["input"][3]["type"], "message");
         assert_eq!(json["input"][3]["id"], "msg_1");
         assert_eq!(json["input"][3]["content"][0]["text"], "a");
+    }
+
+    #[test]
+    fn structured_outputs_defaults_true_including_missing_toml() {
+        assert!(ApiConfig::default().structured_outputs);
+
+        let config: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
+        assert!(config.api.structured_outputs);
+
+        let mut config = AppConfig::default();
+        config.api.structured_outputs = false;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("structured_outputs = false"), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert!(!parsed.api.structured_outputs);
+    }
+
+    #[test]
+    fn chat_body_includes_json_schema_when_structured_outputs_on() {
+        let api = ApiConfig::default();
+        let messages = [ChatMessage::user("hi")];
+        let json = serde_json::to_value(api.request_body(&messages)).unwrap();
+        assert_eq!(json["response_format"]["type"], "json_schema");
+        assert_eq!(json["response_format"]["json_schema"]["name"], "translation_blocks");
+        assert_eq!(json["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(json["response_format"]["json_schema"]["schema"]["required"], serde_json::json!(["blocks"]));
+        assert_eq!(
+            json["response_format"]["json_schema"]["schema"]["properties"]["blocks"]["items"]["required"],
+            serde_json::json!(["id", "translation"])
+        );
+    }
+
+    #[test]
+    fn chat_body_omits_response_format_when_structured_outputs_off() {
+        let api = ApiConfig {
+            structured_outputs: false,
+            ..ApiConfig::default()
+        };
+        let messages = [ChatMessage::user("hi")];
+        let json = serde_json::to_value(api.request_body(&messages)).unwrap();
+        assert!(json.get("response_format").is_none());
+    }
+
+    #[test]
+    fn responses_body_includes_text_format_when_structured_outputs_on() {
+        let api = ApiConfig::default();
+        let items = [ResponseItem::message("user", "hi")];
+        let json = serde_json::to_value(api.responses_request_body(&items, "sess-1")).unwrap();
+        assert_eq!(json["text"]["format"]["type"], "json_schema");
+        assert_eq!(json["text"]["format"]["name"], "translation_blocks");
+        assert_eq!(json["text"]["format"]["strict"], true);
+        assert_eq!(json["text"]["format"]["schema"]["required"], serde_json::json!(["blocks"]));
+    }
+
+    #[test]
+    fn responses_body_omits_text_when_structured_outputs_off() {
+        let api = ApiConfig {
+            structured_outputs: false,
+            ..ApiConfig::default()
+        };
+        let items = [ResponseItem::message("user", "hi")];
+        let json = serde_json::to_value(api.responses_request_body(&items, "sess-1")).unwrap();
+        assert!(json.get("text").is_none());
     }
 
     #[test]

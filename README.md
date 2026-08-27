@@ -9,7 +9,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
 - **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
 - **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（幾何規則）
-- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API，或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
+- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs），或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）
 - **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
 - **對話上下文**：多輪歷史壓縮，維持用語一致
 - **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
@@ -94,6 +94,7 @@ service_tier = "standard"       # standard | priority；目前 Codex CLI 支援 
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = "gpt-4o-mini"
+structured_outputs = true         # HTTP only; turn off if the endpoint rejects json_schema
 request_timeout_secs = 60
 max_retries = 2
 retry_backoff_ms = 500

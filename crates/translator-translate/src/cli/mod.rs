@@ -9,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use translator_core::{ApiConfig, ChatMessage, ModelProvider, resolve_cli_binary};
 
@@ -37,28 +36,6 @@ pub fn cli_system_prompt(base: &str) -> String {
 
 pub fn fence_user_payload(payload: &str) -> String {
     format!("{UNTRUSTED_BEGIN}\n{}\n{UNTRUSTED_END}", payload.trim())
-}
-
-pub fn translation_output_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["blocks"],
-        "properties": {
-            "blocks": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["id", "translation"],
-                    "properties": {
-                        "id": { "type": "integer" },
-                        "translation": { "type": "string" }
-                    }
-                }
-            }
-        }
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

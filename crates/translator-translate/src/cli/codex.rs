@@ -7,12 +7,9 @@ use std::{
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use translator_core::ServiceTier;
+use translator_core::{ServiceTier, translation_json_schema};
 
-use crate::{
-    TranslateError,
-    cli::{rpc::JsonRpcChild, translation_output_schema},
-};
+use crate::{TranslateError, cli::rpc::JsonRpcChild};
 
 const THREAD_SANDBOX_MODE: &str = "read-only";
 const TURN_SANDBOX_POLICY_TYPE: &str = "readOnly";
@@ -70,7 +67,7 @@ pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> V
     let mut params = serde_json::json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": user }],
-        "outputSchema": translation_output_schema(),
+        "outputSchema": translation_json_schema(),
         "sandboxPolicy": {
             "type": TURN_SANDBOX_POLICY_TYPE,
             "networkAccess": false,

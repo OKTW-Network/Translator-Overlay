@@ -188,6 +188,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             ),
             priority_tier_card,
             model_card,
+            card_toggle(
+                "api-structured-outputs",
+                "Structured outputs",
+                Some("Ask the model to return JSON matching the translation schema. Turn off if the endpoint rejects json_schema."),
+                snap.structured_outputs,
+                {
+                    let cx = cx.clone();
+                    move |on| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.structured_outputs = on;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+            ),
         ))
         .spacing(4.0)
     };
