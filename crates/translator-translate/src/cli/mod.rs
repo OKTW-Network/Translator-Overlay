@@ -337,6 +337,7 @@ mod tests {
             .map(|(role, content)| ChatMessage {
                 role: (*role).into(),
                 content: (*content).into(),
+                reasoning_content: None,
             })
             .collect()
     }

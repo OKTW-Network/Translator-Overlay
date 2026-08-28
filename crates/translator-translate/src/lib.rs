@@ -106,9 +106,14 @@ impl Conversation {
         self.items
             .iter()
             .filter_map(|item| match item {
-                ResponseItem::Message { role, content } => Some(ChatMessage {
+                ResponseItem::Message {
+                    role,
+                    content,
+                    reasoning_content,
+                } => Some(ChatMessage {
                     role: role.clone(),
                     content: content.clone(),
+                    reasoning_content: reasoning_content.clone(),
                 }),
                 ResponseItem::Output(_) => None,
             })
@@ -132,7 +137,7 @@ impl Conversation {
     pub fn ensure_system(&mut self, system: impl Into<String>) {
         let system = system.into();
         match self.items.first_mut() {
-            Some(ResponseItem::Message { role, content }) if role == "system" => *content = system,
+            Some(ResponseItem::Message { role, content, .. }) if role == "system" => *content = system,
             _ => self.items.insert(0, ResponseItem::message("system", system)),
         }
     }
@@ -777,7 +782,7 @@ mod tests {
     use translator_core::{ApiConfig, Rect};
 
     use super::*;
-    use crate::http::{extract_assistant_content, extract_responses_completion};
+    use crate::http::extract_responses_completion;
 
     #[test]
     fn request_omits_unset_params() {
@@ -953,6 +958,38 @@ mod tests {
     }
 
     #[test]
+    fn conversation_reasoning_roundtrip_and_compress() {
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        conv.push_user("u0");
+        conv.commit_completion(&Completion {
+            text: "{\"blocks\":[]}".into(),
+            replay_items: vec![ResponseItem::Message {
+                role: "assistant".into(),
+                content: "{\"blocks\":[]}".into(),
+                reasoning_content: Some("thought".into()),
+            }],
+        });
+        assert_eq!(conv.messages()[2].reasoning_content.as_deref(), Some("thought"));
+        assert_eq!(
+            serde_json::to_value(chat_completion_body(&ApiConfig::default(), &conv.messages(), &conv.session_id)).unwrap()["messages"][2]["reasoning_content"],
+            "thought"
+        );
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        for i in 0..5 {
+            conv.push_user(format!("u{i}"));
+            conv.items.push(ResponseItem::Message {
+                role: "assistant".into(),
+                content: format!("a{i}"),
+                reasoning_content: Some(format!("think{i}")),
+            });
+        }
+        conv.compress_if_needed(5, 2);
+        assert_eq!(conv.messages().into_iter().filter_map(|m| m.reasoning_content).collect::<Vec<_>>(), ["think3", "think4"]);
+    }
+
+    #[test]
     fn extract_responses_output_with_reasoning() {
         let json = r#"{
           "id": "resp_1",
@@ -1033,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_assistant_content_reports_refusal() {
+    fn chat_completion_reports_refusal() {
         let json = r#"{
           "choices": [
             {
@@ -1045,7 +1082,7 @@ mod tests {
             }
           ]
         }"#;
-        let err = extract_assistant_content(json).unwrap_err();
+        let err = completion_from_http_body(HttpApi::ChatCompletions, json).unwrap_err();
         assert!(err.to_string().contains("I can't help with that."), "{err}");
         assert!(!err.is_retryable());
     }

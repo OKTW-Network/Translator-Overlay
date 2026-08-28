@@ -36,7 +36,7 @@ fn is_false(v: &bool) -> bool {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatCompletionRequestBody<'a> {
     pub model: &'a str,
-    pub messages: &'a [ChatMessage],
+    pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "is_false")]
     pub stream: bool,
     #[serde(skip_serializing_if = "str::is_empty")]
@@ -79,6 +79,17 @@ pub struct ResponsesRequestBody<'a> {
 }
 
 pub fn chat_completion_body<'a>(api: &'a ApiConfig, messages: &'a [ChatMessage], session_id: &'a str) -> ChatCompletionRequestBody<'a> {
+    let messages = if api.send_reasoning_content {
+        messages.to_vec()
+    } else {
+        messages
+            .iter()
+            .map(|m| ChatMessage {
+                reasoning_content: None,
+                ..m.clone()
+            })
+            .collect()
+    };
     ChatCompletionRequestBody {
         model: &api.model,
         messages,
@@ -137,6 +148,7 @@ pub enum ResponseItem {
     Message {
         role: String,
         content: String,
+        reasoning_content: Option<String>,
     },
     /// Pass-through `/responses` output item (reasoning or assistant message).
     Output(serde_json::Value),
@@ -147,17 +159,18 @@ impl ResponseItem {
         Self::Message {
             role: role.into(),
             content: content.into(),
+            reasoning_content: None,
         }
     }
 
     pub fn to_input_value(&self) -> serde_json::Value {
         match self {
-            Self::Message { role, content } if role == "assistant" => serde_json::json!({
+            Self::Message { role, content, .. } if role == "assistant" => serde_json::json!({
                 "type": "message",
                 "role": role,
                 "content": [{ "type": "output_text", "text": content }],
             }),
-            Self::Message { role, content } => serde_json::json!({
+            Self::Message { role, content, .. } => serde_json::json!({
                 "role": role,
                 "content": content,
             }),
@@ -170,6 +183,8 @@ impl ResponseItem {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -177,6 +192,7 @@ impl ChatMessage {
         Self {
             role: "system".to_string(),
             content: content.into(),
+            reasoning_content: None,
         }
     }
 
@@ -184,6 +200,7 @@ impl ChatMessage {
         Self {
             role: "user".to_string(),
             content: content.into(),
+            reasoning_content: None,
         }
     }
 
@@ -191,6 +208,7 @@ impl ChatMessage {
         Self {
             role: "assistant".to_string(),
             content: content.into(),
+            reasoning_content: None,
         }
     }
 }
@@ -201,15 +219,12 @@ pub fn completion_from_http_body(http_api: HttpApi, body: &str) -> Result<Comple
     match http_api {
         HttpApi::ChatCompletions if sse => completion_from_chat_sse(trimmed),
         HttpApi::Responses if sse => completion_from_responses_sse(trimmed),
-        HttpApi::ChatCompletions => Ok(Completion {
-            text: extract_assistant_content(trimmed)?,
-            replay_items: Vec::new(),
-        }),
+        HttpApi::ChatCompletions => extract_chat_completion(trimmed),
         HttpApi::Responses => extract_responses_completion(trimmed),
     }
 }
 
-pub(crate) fn extract_assistant_content(response_json: &str) -> Result<String, TranslateError> {
+fn extract_chat_completion(response_json: &str) -> Result<Completion, TranslateError> {
     #[derive(Deserialize)]
     struct Root {
         choices: Vec<Choice>,
@@ -222,6 +237,8 @@ pub(crate) fn extract_assistant_content(response_json: &str) -> Result<String, T
     struct Msg {
         content: Option<String>,
         refusal: Option<String>,
+        reasoning_content: Option<String>,
+        reasoning: Option<serde_json::Value>,
     }
 
     let root: Root = serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
@@ -234,8 +251,36 @@ pub(crate) fn extract_assistant_content(response_json: &str) -> Result<String, T
     if let Some(refusal) = msg.refusal.filter(|s| !s.is_empty()) {
         return Err(TranslateError::Parse(format!("model refused: {refusal}")));
     }
-    msg.content
-        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))
+    let text = msg
+        .content
+        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))?;
+    if text.trim().is_empty() {
+        return Err(TranslateError::Parse("no choices/content in response".into()));
+    }
+    Ok(chat_completion_result(text, chat_reasoning_text(msg.reasoning_content.as_deref(), msg.reasoning.as_ref())))
+}
+
+fn chat_reasoning_text(reasoning_content: Option<&str>, reasoning: Option<&serde_json::Value>) -> Option<String> {
+    if let Some(s) = reasoning_content.filter(|s| !s.is_empty()) {
+        return Some(s.to_string());
+    }
+    match reasoning {
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn chat_completion_result(text: String, reasoning_content: Option<String>) -> Completion {
+    // Clone is intentional: history needs its own owned copy.
+    let content = text.clone();
+    Completion {
+        replay_items: vec![ResponseItem::Message {
+            role: "assistant".to_string(),
+            content,
+            reasoning_content,
+        }],
+        text,
+    }
 }
 
 pub(crate) fn extract_responses_completion(response_json: &str) -> Result<Completion, TranslateError> {
@@ -256,11 +301,14 @@ fn extract_responses_value(root: &serde_json::Value) -> Result<Completion, Trans
         let ty = item.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
         match ty {
             "reasoning" => {
-                if item
+                let non_empty_array = |key: &str| item.get(key).is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+                let has_content = item
                     .get("encrypted_content")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|s| !s.is_empty())
-                {
+                    || non_empty_array("summary")
+                    || non_empty_array("content");
+                if has_content {
                     replay_items.push(ResponseItem::Output(item.clone()));
                 }
             }
@@ -307,6 +355,7 @@ fn extract_responses_value(root: &serde_json::Value) -> Result<Completion, Trans
 
 fn completion_from_chat_sse(body: &str) -> Result<Completion, TranslateError> {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut refusal = None;
     for ev in sse_events(body) {
         if ev.data.trim() == "[DONE]" {
@@ -318,7 +367,7 @@ fn completion_from_chat_sse(body: &str) -> Result<Completion, TranslateError> {
         if let Some(err) = stream_event_error(ev.event.as_deref(), &v) {
             return Err(err);
         }
-        apply_chat_delta(&v, &mut text, &mut refusal);
+        apply_chat_delta(&v, &mut text, &mut refusal, &mut reasoning);
     }
     if let Some(refusal) = refusal.filter(|s| !s.is_empty()) {
         return Err(TranslateError::Parse(format!("model refused: {refusal}")));
@@ -326,13 +375,10 @@ fn completion_from_chat_sse(body: &str) -> Result<Completion, TranslateError> {
     if text.trim().is_empty() {
         return Err(TranslateError::Parse("no choices/content in response".into()));
     }
-    Ok(Completion {
-        text,
-        replay_items: Vec::new(),
-    })
+    Ok(chat_completion_result(text, (!reasoning.is_empty()).then_some(reasoning)))
 }
 
-fn apply_chat_delta(v: &serde_json::Value, text: &mut String, refusal: &mut Option<String>) {
+fn apply_chat_delta(v: &serde_json::Value, text: &mut String, refusal: &mut Option<String>, reasoning: &mut String) {
     let Some(choices) = v.get("choices").and_then(|c| c.as_array()) else {
         return;
     };
@@ -354,6 +400,10 @@ fn apply_chat_delta(v: &serde_json::Value, text: &mut String, refusal: &mut Opti
                 }
             }
             _ => {}
+        }
+        if let Some(piece) = chat_reasoning_text(delta.get("reasoning_content").and_then(serde_json::Value::as_str), delta.get("reasoning"))
+        {
+            reasoning.push_str(&piece);
         }
     }
 }
@@ -611,7 +661,11 @@ mod tests {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#;
         let completion = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
         assert_eq!(completion.text, "hello");
-        assert!(completion.replay_items.is_empty());
+        assert_eq!(completion.replay_items.len(), 1);
+        assert!(matches!(
+            &completion.replay_items[0],
+            ResponseItem::Message { role, content, reasoning_content } if role == "assistant" && content == "hello" && reasoning_content.is_none()
+        ));
     }
 
     #[test]
@@ -629,7 +683,11 @@ mod tests {
                     data: [DONE]\n\n";
         let completion = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
         assert_eq!(completion.text, "hello");
-        assert!(completion.replay_items.is_empty());
+        assert_eq!(completion.replay_items.len(), 1);
+        assert!(matches!(
+            &completion.replay_items[0],
+            ResponseItem::Message { content, reasoning_content, .. } if content == "hello" && reasoning_content.is_none()
+        ));
     }
 
     #[test]
@@ -648,6 +706,7 @@ mod tests {
                     data: [DONE]\n\n";
         let completion = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
         assert_eq!(completion.text, "hello");
+        assert_eq!(completion.replay_items.len(), 1);
     }
 
     #[test]
@@ -701,5 +760,136 @@ mod tests {
         let err = completion_from_http_body(HttpApi::Responses, body).unwrap_err();
         assert!(err.to_string().contains("max_output_tokens"), "{err}");
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn chat_reasoning_json_variants() {
+        let cases = [
+            (r#"{"choices":[{"message":{"role":"assistant","content":"hi","reasoning_content":"think step"}}]}"#, Some("think step")),
+            (r#"{"choices":[{"message":{"role":"assistant","content":"hi","reasoning":"alt think"}}]}"#, Some("alt think")),
+            (
+                r#"{"choices":[{"message":{"role":"assistant","content":"hi","reasoning_content":"primary","reasoning":"secondary"}}]}"#,
+                Some("primary"),
+            ),
+            (r#"{"choices":[{"message":{"role":"assistant","content":"hi"}}]}"#, None),
+        ];
+        for (body, expected) in cases {
+            let c = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
+            assert_eq!(c.text, "hi");
+            assert!(
+                matches!(&c.replay_items[0], ResponseItem::Message { reasoning_content, .. } if reasoning_content.as_deref() == expected),
+                "body={body}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_sse_reasoning_variants() {
+        for (body, expected) in [
+            (
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think \"}}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"step\"}}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                  data: [DONE]\n\n",
+                "think step",
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{\"reasoning\":\"r1\"}}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{\"reasoning\":\" r2\"}}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                  data: [DONE]\n\n",
+                "r1 r2",
+            ),
+        ] {
+            let c = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
+            assert_eq!(c.text, "hi");
+            assert!(
+                matches!(&c.replay_items[0], ResponseItem::Message { reasoning_content: Some(s), .. } if s == expected),
+                "expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn responses_reasoning_keep_or_drop() {
+        let cases = [
+            (
+                r#"{"output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}"#,
+                2,
+                true,
+            ),
+            (
+                r#"{"output":[{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"step by step"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}"#,
+                2,
+                true,
+            ),
+            (
+                r#"{"output":[{"type":"reasoning","id":"rs_1","encrypted_content":"","summary":[{"type":"summary_text","text":"x"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}"#,
+                2,
+                true,
+            ),
+            (
+                r#"{"output":[{"type":"reasoning","id":"rs_1"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}"#,
+                1,
+                false,
+            ),
+            (
+                r#"{"output":[{"type":"reasoning","id":"rs_1","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}"#,
+                1,
+                false,
+            ),
+            (
+                r#"{"output":[{"type":"reasoning","id":"rs_1","content":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}"#,
+                1,
+                false,
+            ),
+        ];
+        for (body, len, has_reasoning) in cases {
+            let c = completion_from_http_body(HttpApi::Responses, body).unwrap();
+            assert_eq!(c.replay_items.len(), len, "body={body}");
+            if has_reasoning {
+                assert!(
+                    matches!(&c.replay_items[0], ResponseItem::Output(v) if v.get("type").and_then(|x| x.as_str()) == Some("reasoning")),
+                    "body={body}"
+                );
+            } else {
+                assert!(
+                    matches!(&c.replay_items[0], ResponseItem::Output(v) if v.get("type").and_then(|x| x.as_str()) == Some("message")),
+                    "body={body}"
+                );
+            }
+        }
+        let body = "event: response.output_item.done\n\
+                    data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"think\"}]}}\n\n\
+                    event: response.output_item.done\n\
+                    data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
+        let c = completion_from_http_body(HttpApi::Responses, body).unwrap();
+        assert_eq!(c.text, "ok");
+        assert_eq!(c.replay_items.len(), 2);
+    }
+
+    #[test]
+    fn chat_history_serializes_reasoning_for_next_turn() {
+        let msgs = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "sys".into(),
+                reasoning_content: None,
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "hello".into(),
+                reasoning_content: Some("prior think".into()),
+            },
+        ];
+        let api = ApiConfig {
+            send_reasoning_content: false,
+            ..ApiConfig::default()
+        };
+        let json = serde_json::to_value(chat_completion_body(&api, &msgs, "sess-1")).unwrap();
+        assert!(json["messages"][1].get("reasoning_content").is_none());
+        let json = serde_json::to_value(chat_completion_body(&ApiConfig::default(), &msgs, "sess-1")).unwrap();
+        assert_eq!(json["messages"][1]["reasoning_content"], "prior think");
+        assert!(json["messages"][0].get("reasoning_content").is_none());
     }
 }

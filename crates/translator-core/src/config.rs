@@ -224,6 +224,9 @@ pub struct ApiConfig {
     /// Request SSE streaming on HTTP OpenAI-compatible APIs.
     /// Ignored for CLI providers. Turn off if the endpoint rejects `stream`.
     pub stream: bool,
+    /// Replay assistant `reasoning_content` on follow-up Chat Completions turns.
+    /// Ignored for Responses APIs and CLI providers. Turn off if the endpoint rejects `reasoning_content`.
+    pub send_reasoning_content: bool,
     /// Idle timeout for HTTP reads / CLI prompts (seconds). 0 = no limit.
     pub request_timeout_secs: u64,
     /// Extra attempts after the first failure (0 = try once only).
@@ -248,6 +251,7 @@ impl Default for ApiConfig {
             reasoning_effort: None,
             structured_outputs: true,
             stream: true,
+            send_reasoning_content: true,
             request_timeout_secs: 60,
             max_retries: 2,
             retry_backoff_ms: 500,
@@ -681,6 +685,21 @@ model = "my-model"
         assert!(text.contains("stream = false"), "got:\n{text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert!(!parsed.api.stream);
+    }
+
+    #[test]
+    fn send_reasoning_content_defaults_true_including_missing_toml() {
+        assert!(ApiConfig::default().send_reasoning_content);
+
+        let config: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
+        assert!(config.api.send_reasoning_content);
+
+        let mut config = AppConfig::default();
+        config.api.send_reasoning_content = false;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("send_reasoning_content = false"), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert!(!parsed.api.send_reasoning_content);
     }
 
     #[test]

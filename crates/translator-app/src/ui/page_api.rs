@@ -218,6 +218,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                     }
                 },
             ),
+            card_toggle(
+                "api-send-reasoning-content",
+                "Send reasoning",
+                Some("Replay the model's reasoning with assistant messages on follow-up turns. Turn off if the endpoint rejects reasoning_content."),
+                snap.send_reasoning_content,
+                {
+                    let cx = cx.clone();
+                    move |on| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.send_reasoning_content = on;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+            ),
         ))
         .spacing(4.0)
     };
