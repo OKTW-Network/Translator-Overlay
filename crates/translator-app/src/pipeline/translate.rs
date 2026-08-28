@@ -63,7 +63,7 @@ impl Pipeline {
             let s = self.state.read();
             (s.config.api.clone(), s.config.translation.clone())
         };
-        self.client.update_api(api);
+        self.client.update_config(api);
 
         let resolved = self.translation_cache.resolve(&page.blocks, &tcfg, force);
         let hit_count = resolved.hits.iter().filter(|h| h.is_some()).count();

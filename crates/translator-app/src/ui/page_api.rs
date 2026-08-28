@@ -203,6 +203,21 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                     }
                 },
             ),
+            card_toggle(
+                "api-stream",
+                "Stream",
+                Some("Receive the response as it is generated. Turn off if the endpoint rejects stream."),
+                snap.stream,
+                {
+                    let cx = cx.clone();
+                    move |on| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.stream = on;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+            ),
         ))
         .spacing(4.0)
     };
@@ -363,9 +378,11 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 key: "api-timeout",
                 header: "Timeout (seconds)".into(),
                 description: Some(if snap.provider.is_cli() {
-                    "Per-turn CLI prompt timeout. 0 = wait up to 1 hour.".into()
+                    "Idle timeout between CLI events. 0 = wait up to 1 hour.".into()
+                } else if snap.stream {
+                    "Idle timeout between stream chunks. 0 = wait forever.".into()
                 } else {
-                    "0 = wait forever.".into()
+                    "Max wait for the HTTP response. 0 = wait forever.".into()
                 }),
                 value: snap.timeout_secs,
                 min: 0.0,

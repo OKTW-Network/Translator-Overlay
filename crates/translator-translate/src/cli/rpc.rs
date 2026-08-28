@@ -1,10 +1,6 @@
 //! Newline-delimited JSON-RPC over a child process stdio.
 
-use std::{
-    path::Path,
-    process::Stdio,
-    time::{Duration, Instant},
-};
+use std::{path::Path, process::Stdio, time::Duration};
 
 use serde_json::{Map, Value};
 use tokio::{
@@ -176,9 +172,8 @@ impl JsonRpcChild {
         self.next_id += 1;
         self.write_message(rpc_request(self.include_jsonrpc, id.clone(), method, params))
             .await?;
-        let deadline = Instant::now() + timeout;
         loop {
-            match self.next_incoming(cancel, deadline).await? {
+            match self.next_incoming(cancel, timeout).await? {
                 Incoming::Response { id: rid, result } if rid == id => {
                     return result.map_err(TranslateError::CliProtocol);
                 }
@@ -199,9 +194,8 @@ impl JsonRpcChild {
         mut pred: impl FnMut(&str, &Value) -> bool,
         mut on_note: impl FnMut(&str, &Value),
     ) -> Result<Value, TranslateError> {
-        let deadline = Instant::now() + timeout;
         loop {
-            match self.next_incoming(cancel, deadline).await? {
+            match self.next_incoming(cancel, timeout).await? {
                 Incoming::Notification { method, params } => {
                     let done = pred(&method, &params);
                     on_note(&method, &params);
@@ -214,15 +208,11 @@ impl JsonRpcChild {
         }
     }
 
-    async fn next_incoming(&mut self, cancel: &CancellationToken, deadline: Instant) -> Result<Incoming, TranslateError> {
-        let remain = deadline.saturating_duration_since(Instant::now());
-        if remain.is_zero() {
-            return Err(TranslateError::CliProtocol("CLI turn timed out".into()));
-        }
+    async fn next_incoming(&mut self, cancel: &CancellationToken, idle: Duration) -> Result<Incoming, TranslateError> {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Err(TranslateError::Cancelled),
-            () = tokio::time::sleep(remain) => Err(TranslateError::CliProtocol("CLI turn timed out".into())),
+            () = tokio::time::sleep(idle) => Err(TranslateError::CliProtocol("CLI turn timed out".into())),
             msg = self.rx.recv() => msg.ok_or_else(|| TranslateError::CliExit("CLI closed stdout".into())),
         }
     }

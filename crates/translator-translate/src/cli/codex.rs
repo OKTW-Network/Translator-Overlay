@@ -7,9 +7,9 @@ use std::{
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ServiceTier, translation_json_schema};
+use translator_core::ServiceTier;
 
-use crate::{TranslateError, cli::rpc::JsonRpcChild};
+use crate::{TranslateError, cli::rpc::JsonRpcChild, http::translation_json_schema};
 
 const THREAD_SANDBOX_MODE: &str = "read-only";
 const TURN_SANDBOX_POLICY_TYPE: &str = "readOnly";

@@ -32,14 +32,14 @@ impl Pipeline {
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         let identity_changed = {
-            let prev = self.client.api();
+            let prev = self.client.config();
             prev.model != cfg.api.model || prev.http_api != cfg.api.http_api || prev.provider != cfg.api.provider
         };
         if identity_changed {
             self.cancel_inflight();
             self.conversation.clear();
         }
-        self.client.update_api(cfg.api.clone());
+        self.client.update_config(cfg.api.clone());
         self.translation_cache.set_max(cfg.translation.cache_max_entries_clamped());
 
         if let Some(o) = self.overlay.as_ref() {

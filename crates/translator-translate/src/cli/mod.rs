@@ -10,10 +10,10 @@ use std::{
 };
 
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, ChatMessage, ModelProvider, resolve_cli_binary};
+use translator_core::{ApiConfig, ModelProvider, resolve_cli_binary};
 
 use crate::{
-    TranslateError,
+    ChatMessage, TranslateError,
     cli::{codex::CodexSession, grok::GrokSession},
 };
 
@@ -329,8 +329,6 @@ pub fn isolated_cwd_is_safe(cwd: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use translator_core::ChatMessage;
-
     use super::*;
 
     fn msgs(pairs: &[(&str, &str)]) -> Vec<ChatMessage> {

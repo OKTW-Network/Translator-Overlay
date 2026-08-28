@@ -221,7 +221,10 @@ pub struct ApiConfig {
     /// Request JSON Schema Structured Outputs on HTTP OpenAI-compatible APIs.
     /// Ignored for CLI providers. Turn off if the endpoint rejects `json_schema`.
     pub structured_outputs: bool,
-    /// HTTP request timeout for chat completions (seconds). 0 = no limit.
+    /// Request SSE streaming on HTTP OpenAI-compatible APIs.
+    /// Ignored for CLI providers. Turn off if the endpoint rejects `stream`.
+    pub stream: bool,
+    /// Idle timeout for HTTP reads / CLI prompts (seconds). 0 = no limit.
     pub request_timeout_secs: u64,
     /// Extra attempts after the first failure (0 = try once only).
     pub max_retries: u32,
@@ -244,187 +247,10 @@ impl Default for ApiConfig {
             max_tokens: None,
             reasoning_effort: None,
             structured_outputs: true,
+            stream: true,
             request_timeout_secs: 60,
             max_retries: 2,
             retry_backoff_ms: 500,
-        }
-    }
-}
-
-/// OpenAI `strict` requires every property in `required` and `additionalProperties: false`.
-pub fn translation_json_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "blocks": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" },
-                        "translation": { "type": "string" }
-                    },
-                    "required": ["id", "translation"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["blocks"],
-        "additionalProperties": false
-    })
-}
-
-/// Body fragment used when calling chat completions.
-/// Only fields that are `Some` are included in the JSON payload.
-#[derive(Debug, Clone, Serialize)]
-pub struct ChatCompletionRequestBody<'a> {
-    pub model: &'a str,
-    pub messages: &'a [ChatMessage],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<serde_json::Value>,
-}
-
-const RESPONSES_INCLUDE: &[&str] = &["reasoning.encrypted_content"];
-
-/// Body fragment used when calling the Responses API (`store: false` + encrypted reasoning).
-#[derive(Debug, Clone, Serialize)]
-pub struct ResponsesRequestBody<'a> {
-    pub model: &'a str,
-    pub input: Vec<serde_json::Value>,
-    pub store: bool,
-    pub include: &'a [&'a str],
-    #[serde(skip_serializing_if = "str::is_empty")]
-    pub prompt_cache_key: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<serde_json::Value>,
-}
-
-impl ApiConfig {
-    pub fn request_body<'a>(&'a self, messages: &'a [ChatMessage]) -> ChatCompletionRequestBody<'a> {
-        ChatCompletionRequestBody {
-            model: &self.model,
-            messages,
-            temperature: self.temperature,
-            top_p: self.top_p,
-            max_tokens: self.max_tokens,
-            reasoning_effort: self.reasoning_effort.as_deref(),
-            response_format: self.structured_outputs.then(|| {
-                serde_json::json!({
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "translation_blocks",
-                        "strict": true,
-                        "schema": translation_json_schema()
-                    }
-                })
-            }),
-        }
-    }
-
-    pub fn responses_request_body<'a>(&'a self, items: &[ResponseItem], session_id: &'a str) -> ResponsesRequestBody<'a> {
-        ResponsesRequestBody {
-            model: &self.model,
-            input: items.iter().map(ResponseItem::to_input_value).collect(),
-            store: false,
-            include: RESPONSES_INCLUDE,
-            prompt_cache_key: session_id,
-            temperature: self.temperature,
-            top_p: self.top_p,
-            max_output_tokens: self.max_tokens,
-            reasoning: self
-                .reasoning_effort
-                .as_deref()
-                .map(|effort| serde_json::json!({ "effort": effort })),
-            text: self.structured_outputs.then(|| {
-                serde_json::json!({
-                    "format": {
-                        "type": "json_schema",
-                        "name": "translation_blocks",
-                        "strict": true,
-                        "schema": translation_json_schema()
-                    }
-                })
-            }),
-        }
-    }
-}
-
-/// One item in a stateless Responses `input` list (authored message or API output).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResponseItem {
-    Message {
-        role: String,
-        content: String,
-    },
-    /// Pass-through `/responses` output item (reasoning or assistant message).
-    Output(serde_json::Value),
-}
-
-impl ResponseItem {
-    pub fn message(role: impl Into<String>, content: impl Into<String>) -> Self {
-        Self::Message {
-            role: role.into(),
-            content: content.into(),
-        }
-    }
-
-    pub fn to_input_value(&self) -> serde_json::Value {
-        match self {
-            Self::Message { role, content } if role == "assistant" => serde_json::json!({
-                "type": "message",
-                "role": role,
-                "content": [{ "type": "output_text", "text": content }],
-            }),
-            Self::Message { role, content } => serde_json::json!({
-                "role": role,
-                "content": content,
-            }),
-            Self::Output(v) => v.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl ChatMessage {
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: "system".to_string(),
-            content: content.into(),
-        }
-    }
-
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: content.into(),
-        }
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: "assistant".to_string(),
-            content: content.into(),
         }
     }
 }
@@ -828,97 +654,6 @@ model = "my-model"
     }
 
     #[test]
-    fn optional_api_params_omitted_from_request_json() {
-        let api = ApiConfig::default();
-        let messages = [ChatMessage::user("hi")];
-        let body = api.request_body(&messages);
-        let json = serde_json::to_value(&body).unwrap();
-        let obj = json.as_object().unwrap();
-        assert!(obj.contains_key("model"));
-        assert!(obj.contains_key("messages"));
-        assert!(!obj.contains_key("temperature"));
-        assert!(!obj.contains_key("top_p"));
-        assert!(!obj.contains_key("max_tokens"));
-        assert!(!obj.contains_key("reasoning_effort"));
-    }
-
-    #[test]
-    fn optional_api_params_included_when_set() {
-        let api = ApiConfig {
-            temperature: Some(0.2),
-            reasoning_effort: Some("medium".to_string()),
-            ..ApiConfig::default()
-        };
-        let messages = [ChatMessage::user("hi")];
-        let body = api.request_body(&messages);
-        let json = serde_json::to_value(&body).unwrap();
-        let temp = json["temperature"].as_f64().unwrap();
-        assert!((temp - 0.2).abs() < 1e-5);
-        assert_eq!(json["reasoning_effort"], "medium");
-        assert!(json.get("top_p").is_none());
-    }
-
-    #[test]
-    fn responses_body_is_stateless_and_omits_unset_params() {
-        let api = ApiConfig {
-            model: "grok-4.6".into(),
-            ..ApiConfig::default()
-        };
-        let items = [ResponseItem::message("user", "hi")];
-        let body = api.responses_request_body(&items, "sess-1");
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["model"], "grok-4.6");
-        assert_eq!(json["store"], false);
-        assert_eq!(json["include"], serde_json::json!(["reasoning.encrypted_content"]));
-        assert_eq!(json["prompt_cache_key"], "sess-1");
-        assert_eq!(json["input"][0]["role"], "user");
-        assert_eq!(json["input"][0]["content"], "hi");
-        assert!(json.get("temperature").is_none());
-        assert!(json.get("top_p").is_none());
-        assert!(json.get("max_output_tokens").is_none());
-        assert!(json.get("reasoning").is_none());
-        assert!(json.get("previous_response_id").is_none());
-        assert!(json.get("max_tokens").is_none());
-    }
-
-    #[test]
-    fn responses_body_maps_tokens_and_effort() {
-        let api = ApiConfig {
-            max_tokens: Some(256),
-            reasoning_effort: Some("high".into()),
-            temperature: Some(0.2),
-            ..ApiConfig::default()
-        };
-        let items = [
-            ResponseItem::message("system", "sys"),
-            ResponseItem::message("user", "u"),
-            ResponseItem::Output(serde_json::json!({
-                "type": "reasoning",
-                "id": "rs_1",
-                "encrypted_content": "enc",
-            })),
-            ResponseItem::Output(serde_json::json!({
-                "type": "message",
-                "id": "msg_1",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{ "type": "output_text", "text": "a" }],
-            })),
-        ];
-        let json = serde_json::to_value(api.responses_request_body(&items, "sess-2")).unwrap();
-        assert_eq!(json["max_output_tokens"], 256);
-        assert_eq!(json["reasoning"]["effort"], "high");
-        assert!((json["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-5);
-        assert!(json.get("reasoning_effort").is_none());
-        assert_eq!(json["input"][2]["type"], "reasoning");
-        assert_eq!(json["input"][2]["encrypted_content"], "enc");
-        assert_eq!(json["input"][2]["id"], "rs_1");
-        assert_eq!(json["input"][3]["type"], "message");
-        assert_eq!(json["input"][3]["id"], "msg_1");
-        assert_eq!(json["input"][3]["content"][0]["text"], "a");
-    }
-
-    #[test]
     fn structured_outputs_defaults_true_including_missing_toml() {
         assert!(ApiConfig::default().structured_outputs);
 
@@ -934,51 +669,18 @@ model = "my-model"
     }
 
     #[test]
-    fn chat_body_includes_json_schema_when_structured_outputs_on() {
-        let api = ApiConfig::default();
-        let messages = [ChatMessage::user("hi")];
-        let json = serde_json::to_value(api.request_body(&messages)).unwrap();
-        assert_eq!(json["response_format"]["type"], "json_schema");
-        assert_eq!(json["response_format"]["json_schema"]["name"], "translation_blocks");
-        assert_eq!(json["response_format"]["json_schema"]["strict"], true);
-        assert_eq!(json["response_format"]["json_schema"]["schema"]["required"], serde_json::json!(["blocks"]));
-        assert_eq!(
-            json["response_format"]["json_schema"]["schema"]["properties"]["blocks"]["items"]["required"],
-            serde_json::json!(["id", "translation"])
-        );
-    }
+    fn stream_defaults_true_including_missing_toml() {
+        assert!(ApiConfig::default().stream);
 
-    #[test]
-    fn chat_body_omits_response_format_when_structured_outputs_off() {
-        let api = ApiConfig {
-            structured_outputs: false,
-            ..ApiConfig::default()
-        };
-        let messages = [ChatMessage::user("hi")];
-        let json = serde_json::to_value(api.request_body(&messages)).unwrap();
-        assert!(json.get("response_format").is_none());
-    }
+        let config: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
+        assert!(config.api.stream);
 
-    #[test]
-    fn responses_body_includes_text_format_when_structured_outputs_on() {
-        let api = ApiConfig::default();
-        let items = [ResponseItem::message("user", "hi")];
-        let json = serde_json::to_value(api.responses_request_body(&items, "sess-1")).unwrap();
-        assert_eq!(json["text"]["format"]["type"], "json_schema");
-        assert_eq!(json["text"]["format"]["name"], "translation_blocks");
-        assert_eq!(json["text"]["format"]["strict"], true);
-        assert_eq!(json["text"]["format"]["schema"]["required"], serde_json::json!(["blocks"]));
-    }
-
-    #[test]
-    fn responses_body_omits_text_when_structured_outputs_off() {
-        let api = ApiConfig {
-            structured_outputs: false,
-            ..ApiConfig::default()
-        };
-        let items = [ResponseItem::message("user", "hi")];
-        let json = serde_json::to_value(api.responses_request_body(&items, "sess-1")).unwrap();
-        assert!(json.get("text").is_none());
+        let mut config = AppConfig::default();
+        config.api.stream = false;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("stream = false"), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert!(!parsed.api.stream);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 mod cache;
 mod cli;
+mod http;
 
 use std::{
     collections::HashSet,
@@ -15,9 +16,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, ChatMessage, HttpApi, OcrBlock, ResponseItem, TranslatedBlock, TranslationConfig};
+use translator_core::{ApiConfig, HttpApi, OcrBlock, TranslatedBlock, TranslationConfig};
 
-pub use crate::cache::{CacheResolve, TranslationCache};
+use crate::http::{chat_completion_body, completion_from_http_body, responses_request_body};
+pub use crate::{
+    cache::{CacheResolve, TranslationCache},
+    http::{ChatMessage, ResponseItem},
+};
 
 #[derive(Debug, Error)]
 pub enum TranslateError {
@@ -84,7 +89,8 @@ pub struct Completion {
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub items: Vec<ResponseItem>,
-    /// Client-generated id sent as `x-grok-session-id` / `prompt_cache_key`. Rotates on history rewrite.
+    /// Client-generated id sent as `x-grok-conv-id` / `prompt_cache_key`.
+    /// Stable for the conversation lifetime; new id only on [`Self::clear`].
     pub session_id: String,
 }
 
@@ -94,10 +100,6 @@ impl Conversation {
             items: Vec::new(),
             session_id: new_session_id(),
         }
-    }
-
-    fn rotate_session_id(&mut self) {
-        self.session_id = new_session_id();
     }
 
     pub fn messages(&self) -> Vec<ChatMessage> {
@@ -130,12 +132,7 @@ impl Conversation {
     pub fn ensure_system(&mut self, system: impl Into<String>) {
         let system = system.into();
         match self.items.first_mut() {
-            Some(ResponseItem::Message { role, content }) if role == "system" => {
-                if *content != system {
-                    *content = system;
-                    self.rotate_session_id();
-                }
-            }
+            Some(ResponseItem::Message { role, content }) if role == "system" => *content = system,
             _ => self.items.insert(0, ResponseItem::message("system", system)),
         }
     }
@@ -160,12 +157,11 @@ impl Conversation {
     /// Drop all messages (e.g. new capture target) and mint a new session id.
     pub fn clear(&mut self) {
         self.items.clear();
-        self.rotate_session_id();
+        self.session_id = new_session_id();
     }
 
     /// When turn count reaches `max_turns`, keep only the system message plus
     /// the last `history_max_items` user turns (with their reasoning/assistant items).
-    /// Rotates `session_id` when turns are actually dropped.
     pub fn compress_if_needed(&mut self, max_turns: usize, history_max_items: usize) {
         if self.turn_count() < max_turns {
             return;
@@ -186,7 +182,6 @@ impl Conversation {
             return;
         }
         self.items.drain(usize::from(sys)..from);
-        self.rotate_session_id();
     }
 
     /// Compress + system prompt + user payload for a new translate request.
@@ -528,15 +523,15 @@ impl std::fmt::Debug for CliHandle {
 #[derive(Debug, Clone)]
 pub struct TranslateClient {
     http: reqwest::Client,
-    api: ApiConfig,
+    config: ApiConfig,
     cli: Arc<CliHandle>,
 }
 
 impl TranslateClient {
-    pub fn new(api: ApiConfig) -> Self {
+    pub fn new(config: ApiConfig) -> Self {
         Self {
-            http: build_http_client(&api),
-            api,
+            http: build_http_client(&config),
+            config,
             cli: Arc::new(CliHandle {
                 backend: tokio::sync::Mutex::new(cli::CliBackend::new()),
                 epoch: AtomicU64::new(0),
@@ -544,16 +539,16 @@ impl TranslateClient {
         }
     }
 
-    pub fn update_api(&mut self, api: ApiConfig) {
-        // Rebuild client so timeout reflects the latest config.
-        self.http = build_http_client(&api);
-        let session_changed = self.api.provider != api.provider
-            || self.api.cli_path != api.cli_path
-            || self.api.model != api.model
-            || self.api.reasoning_effort != api.reasoning_effort
-            || self.api.service_tier != api.service_tier
-            || self.api.http_api != api.http_api;
-        self.api = api;
+    pub fn update_config(&mut self, config: ApiConfig) {
+        // Rebuild client so idle timeout reflects the latest config.
+        self.http = build_http_client(&config);
+        let session_changed = self.config.provider != config.provider
+            || self.config.cli_path != config.cli_path
+            || self.config.model != config.model
+            || self.config.reasoning_effort != config.reasoning_effort
+            || self.config.service_tier != config.service_tier
+            || self.config.http_api != config.http_api;
+        self.config = config;
         if session_changed {
             self.reset_session();
         }
@@ -567,42 +562,40 @@ impl TranslateClient {
         }
     }
 
-    pub fn api(&self) -> &ApiConfig {
-        &self.api
+    pub fn config(&self) -> &ApiConfig {
+        &self.config
     }
 
     pub async fn complete_cancellable(&self, conv: &Conversation, cancel: &CancellationToken) -> Result<Completion, TranslateError> {
-        if !self.api.provider.is_cli() && self.api.http_api == HttpApi::Responses {
-            let body = self.api.responses_request_body(&conv.items, &conv.session_id);
+        if !self.config.provider.is_cli() && self.config.http_api == HttpApi::Responses {
+            let body = responses_request_body(&self.config, &conv.items, &conv.session_id);
             let text = self
                 .http_post_json(
-                    &format!("{}/responses", self.api.base_url.trim_end_matches('/')),
+                    &format!("{}/responses", self.config.base_url.trim_end_matches('/')),
                     &body,
                     Some(conv.session_id.as_str()),
                     cancel,
                 )
                 .await?;
-            return extract_responses_completion(&text);
+            return completion_from_http_body(HttpApi::Responses, &text);
         }
         let messages = conv.messages();
-        let text = if self.api.provider.is_cli() {
-            self.cli_complete(&messages, cancel).await?
-        } else {
-            extract_assistant_content(
-                &self
-                    .http_post_json(
-                        &format!("{}/chat/completions", self.api.base_url.trim_end_matches('/')),
-                        &self.api.request_body(&messages),
-                        None,
-                        cancel,
-                    )
-                    .await?,
-            )?
-        };
-        Ok(Completion {
-            text,
-            replay_items: Vec::new(),
-        })
+        if self.config.provider.is_cli() {
+            let text = self.cli_complete(&messages, cancel).await?;
+            return Ok(Completion {
+                text,
+                replay_items: Vec::new(),
+            });
+        }
+        let text = self
+            .http_post_json(
+                &format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')),
+                &chat_completion_body(&self.config, &messages, &conv.session_id),
+                Some(conv.session_id.as_str()),
+                cancel,
+            )
+            .await?;
+        completion_from_http_body(HttpApi::ChatCompletions, &text)
     }
 
     async fn http_post_json<T: Serialize>(
@@ -612,16 +605,16 @@ impl TranslateClient {
         session_id: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<String, TranslateError> {
-        if self.api.api_key.trim().is_empty() {
+        if self.config.api_key.trim().is_empty() {
             return Err(TranslateError::MissingApiKey);
         }
         if cancel.is_cancelled() {
             return Err(TranslateError::Cancelled);
         }
 
-        let mut req = self.http.post(url).bearer_auth(&self.api.api_key);
+        let mut req = self.http.post(url).bearer_auth(&self.config.api_key);
         if let Some(session_id) = session_id.filter(|s| !s.is_empty()) {
-            req = req.header("x-grok-session-id", session_id);
+            req = req.header("x-grok-conv-id", session_id);
         }
         let send = req.json(body).send();
 
@@ -651,17 +644,17 @@ impl TranslateClient {
         if cancel.is_cancelled() {
             return Err(TranslateError::Cancelled);
         }
-        let timeout = if self.api.request_timeout_secs == 0 {
+        let timeout = if self.config.request_timeout_secs == 0 {
             Duration::from_secs(3600)
         } else {
-            Duration::from_secs(self.api.request_timeout_secs)
+            Duration::from_secs(self.config.request_timeout_secs)
         };
         let epoch = self.cli.epoch.load(Ordering::SeqCst);
         let mut backend = self.cli.backend.lock().await;
         if epoch != self.cli.epoch.load(Ordering::SeqCst) {
             backend.close().await;
         }
-        backend.complete(&self.api, messages, cancel, timeout, epoch).await
+        backend.complete(&self.config, messages, cancel, timeout, epoch).await
     }
 
     pub async fn complete_with_retry_on(
@@ -670,8 +663,8 @@ impl TranslateClient {
         cancel: &CancellationToken,
         mut on_retry: impl FnMut(u32, u32, &TranslateError, u64),
     ) -> Result<Completion, TranslateError> {
-        let max_retries = self.api.max_retries;
-        let mut backoff_ms = self.api.retry_backoff_ms.max(50);
+        let max_retries = self.config.max_retries;
+        let mut backoff_ms = self.config.retry_backoff_ms.max(50);
         let mut attempt = 0u32;
 
         loop {
@@ -700,104 +693,13 @@ impl TranslateClient {
     }
 }
 
-fn build_http_client(api: &ApiConfig) -> reqwest::Client {
+fn build_http_client(config: &ApiConfig) -> reqwest::Client {
     let mut builder = reqwest::Client::builder();
-    if api.request_timeout_secs > 0 {
-        builder = builder.timeout(Duration::from_secs(api.request_timeout_secs));
+    if config.request_timeout_secs > 0 {
+        let idle = Duration::from_secs(config.request_timeout_secs);
+        builder = builder.connect_timeout(idle).read_timeout(idle);
     }
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
-}
-
-fn extract_assistant_content(response_json: &str) -> Result<String, TranslateError> {
-    #[derive(Deserialize)]
-    struct Root {
-        choices: Vec<Choice>,
-    }
-    #[derive(Deserialize)]
-    struct Choice {
-        message: Msg,
-    }
-    #[derive(Deserialize)]
-    struct Msg {
-        content: Option<String>,
-        refusal: Option<String>,
-    }
-
-    let root: Root = serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
-    let msg = root
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message)
-        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))?;
-    if let Some(refusal) = msg.refusal.filter(|s| !s.is_empty()) {
-        return Err(TranslateError::Parse(format!("model refused: {refusal}")));
-    }
-    msg.content
-        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))
-}
-
-fn extract_responses_completion(response_json: &str) -> Result<Completion, TranslateError> {
-    let root: serde_json::Value = serde_json::from_str(response_json).map_err(|e| TranslateError::Parse(e.to_string()))?;
-    let output = root
-        .get("output")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| TranslateError::Parse("no output in responses body".into()))?;
-
-    let mut text = String::new();
-    let mut replay_items = Vec::new();
-
-    for item in output {
-        let ty = item.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
-        match ty {
-            "reasoning" => {
-                if item
-                    .get("encrypted_content")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| !s.is_empty())
-                {
-                    replay_items.push(ResponseItem::Output(item.clone()));
-                }
-            }
-            "message" => {
-                let role = item.get("role").and_then(serde_json::Value::as_str).unwrap_or("assistant");
-                let mut content_text = String::new();
-                match item.get("content") {
-                    Some(serde_json::Value::String(s)) => content_text = s.clone(),
-                    Some(serde_json::Value::Array(parts)) => {
-                        for part in parts {
-                            if part.get("type").and_then(serde_json::Value::as_str) == Some("refusal") {
-                                let refusal = part.get("refusal").and_then(serde_json::Value::as_str).unwrap_or("model refused");
-                                return Err(TranslateError::Parse(format!("model refused: {refusal}")));
-                            }
-                            let Some(piece) = part.get("text").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) else {
-                                continue;
-                            };
-                            if !content_text.is_empty() {
-                                content_text.push('\n');
-                            }
-                            content_text.push_str(piece);
-                        }
-                    }
-                    _ => {}
-                }
-                if role != "assistant" || content_text.is_empty() {
-                    continue;
-                }
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(&content_text);
-                replay_items.push(ResponseItem::Output(item.clone()));
-            }
-            _ => {}
-        }
-    }
-
-    if text.trim().is_empty() {
-        return Err(TranslateError::Parse("no message/content in responses output".into()));
-    }
-    Ok(Completion { text, replay_items })
 }
 
 /// Join translated block texts for UI / history.
@@ -875,15 +777,19 @@ mod tests {
     use translator_core::{ApiConfig, Rect};
 
     use super::*;
+    use crate::http::{extract_assistant_content, extract_responses_completion};
 
     #[test]
     fn request_omits_unset_params() {
         let api = ApiConfig::default();
         let msgs = [ChatMessage::user("x")];
-        let body = api.request_body(&msgs);
+        let body = chat_completion_body(&api, &msgs, "");
         let v = serde_json::to_value(&body).unwrap();
         assert!(v.get("temperature").is_none());
         assert!(v.get("reasoning_effort").is_none());
+        assert!(v.get("prompt_cache_key").is_none());
+        assert_eq!(v["prompt_cache_retention"], "24h");
+        assert_eq!(v["stream"], true);
     }
 
     #[test]
@@ -897,7 +803,7 @@ mod tests {
 
         let mut updated = api;
         updated.service_tier = translator_core::ServiceTier::Priority;
-        client.update_api(updated);
+        client.update_config(updated);
 
         assert_eq!(client.cli.epoch.load(Ordering::SeqCst), initial_epoch + 1);
     }
@@ -910,7 +816,7 @@ mod tests {
 
         let mut updated = api;
         updated.http_api = HttpApi::Responses;
-        client.update_api(updated);
+        client.update_config(updated);
 
         assert_eq!(client.cli.epoch.load(Ordering::SeqCst), initial_epoch + 1);
     }
@@ -1005,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn compress_drop_rotates_session_and_keeps_reasoning() {
+    fn compress_drop_keeps_session_and_reasoning() {
         let mut conv = Conversation::empty();
         conv.ensure_system("sys");
         for i in 0..5 {
@@ -1018,7 +924,7 @@ mod tests {
         }
         let old_session = conv.session_id.clone();
         conv.compress_if_needed(5, 2);
-        assert_ne!(conv.session_id, old_session);
+        assert_eq!(conv.session_id, old_session);
         assert_eq!(conv.turn_count(), 2);
         assert_eq!(conv.messages().len(), 5);
         let reasoning: Vec<_> = conv
@@ -1036,14 +942,14 @@ mod tests {
     }
 
     #[test]
-    fn ensure_system_change_rotates_session_id() {
+    fn ensure_system_change_keeps_session_id() {
         let mut conv = Conversation::empty();
         conv.ensure_system("sys-a");
         let id = conv.session_id.clone();
         conv.ensure_system("sys-a");
         assert_eq!(conv.session_id, id);
         conv.ensure_system("sys-b");
-        assert_ne!(conv.session_id, id);
+        assert_eq!(conv.session_id, id);
     }
 
     #[test]
