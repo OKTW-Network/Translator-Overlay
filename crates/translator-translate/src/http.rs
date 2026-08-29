@@ -116,7 +116,7 @@ pub fn chat_completion_body<'a>(api: &'a ApiConfig, messages: &'a [ChatMessage],
 pub fn responses_request_body<'a>(api: &'a ApiConfig, items: &[ResponseItem], session_id: &'a str) -> ResponsesRequestBody<'a> {
     ResponsesRequestBody {
         model: &api.model,
-        input: items.iter().map(ResponseItem::to_input_value).collect(),
+        input: responses_input(items),
         stream: api.stream,
         store: false,
         include: &["reasoning.encrypted_content"],
@@ -177,6 +177,28 @@ impl ResponseItem {
             Self::Output(v) => v.clone(),
         }
     }
+}
+
+fn responses_input(items: &[ResponseItem]) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let mut v = item.to_input_value();
+        let is_reasoning = v.get("type").and_then(serde_json::Value::as_str) == Some("reasoning");
+        if is_reasoning && let Some(obj) = v.as_object_mut() {
+            obj.entry("summary").or_insert(serde_json::json!([]));
+        }
+        // Meta HTTP 400 if `reasoning` sits immediately before `user`.
+        let next_user = matches!(items.get(i + 1), Some(ResponseItem::Message { role, .. }) if role == "user");
+        let prev_asst = matches!(out.last(), Some(p) if p.get("role").and_then(serde_json::Value::as_str) == Some("assistant"));
+        if is_reasoning && next_user && prev_asst {
+            let n = out.len();
+            out.push(v);
+            out.swap(n - 1, n);
+        } else {
+            out.push(v);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,6 +657,7 @@ mod tests {
         assert_eq!(json["input"][2]["type"], "reasoning");
         assert_eq!(json["input"][2]["encrypted_content"], "enc");
         assert_eq!(json["input"][2]["id"], "rs_1");
+        assert_eq!(json["input"][2]["summary"], serde_json::json!([]));
         assert_eq!(json["input"][3]["type"], "message");
         assert_eq!(json["input"][3]["id"], "msg_1");
         assert_eq!(json["input"][3]["content"][0]["text"], "a");
@@ -891,5 +914,62 @@ mod tests {
         let json = serde_json::to_value(chat_completion_body(&ApiConfig::default(), &msgs, "sess-1")).unwrap();
         assert_eq!(json["messages"][1]["reasoning_content"], "prior think");
         assert!(json["messages"][0].get("reasoning_content").is_none());
+    }
+
+    fn assistant_output(id: &str, text: &str) -> ResponseItem {
+        ResponseItem::Output(serde_json::json!({
+            "type": "message",
+            "id": id,
+            "role": "assistant",
+            "status": "completed",
+            "content": [{ "type": "output_text", "text": text }],
+        }))
+    }
+
+    #[test]
+    fn responses_input_moves_reasoning_before_assistant() {
+        let items = [
+            ResponseItem::message("system", "sys"),
+            ResponseItem::message("user", "q1"),
+            assistant_output("msg_1", "a1"),
+            ResponseItem::Output(serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "encrypted_content": "enc",
+            })),
+            ResponseItem::message("user", "q2"),
+        ];
+        let json = serde_json::to_value(responses_request_body(&ApiConfig::default(), &items, "s")).unwrap();
+        let input = json["input"].as_array().unwrap();
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[2]["type"], "reasoning");
+        assert_eq!(input[2]["id"], "rs_1");
+        assert_eq!(input[2]["summary"], serde_json::json!([]));
+        assert_eq!(input[3]["type"], "message");
+        assert_eq!(input[3]["id"], "msg_1");
+        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input[4]["content"], "q2");
+    }
+
+    #[test]
+    fn responses_input_keeps_reasoning_then_message() {
+        let items = [
+            ResponseItem::message("user", "q1"),
+            ResponseItem::Output(serde_json::json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "encrypted_content": "enc",
+                "summary": [{ "type": "summary_text", "text": "t" }],
+            })),
+            assistant_output("msg_1", "a1"),
+            ResponseItem::message("user", "q2"),
+        ];
+        let json = serde_json::to_value(responses_request_body(&ApiConfig::default(), &items, "s")).unwrap();
+        let input = json["input"].as_array().unwrap();
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["summary"][0]["text"], "t");
+        assert_eq!(input[2]["id"], "msg_1");
+        assert_eq!(input[3]["role"], "user");
     }
 }

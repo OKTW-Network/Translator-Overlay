@@ -94,14 +94,14 @@ service_tier = "standard"       # standard | priority；目前 Codex CLI 支援 
 base_url = "https://api.openai.com/v1"
 api_key = ""
 model = "gpt-4o-mini"
-structured_outputs = true         # HTTP only; turn off if the endpoint rejects json_schema
+structured_outputs = true         # HTTP only; DeepSeek Chat Completions: set false
 request_timeout_secs = 60
 max_retries = 2
 retry_backoff_ms = 500
 # temperature = 0.3
 # top_p = 0.9
 # max_tokens = 2048
-# reasoning_effort = "medium"
+# reasoning_effort = "medium"     # Meta rejects "none"
 
 [translation]
 source_lang = "auto"
