@@ -9,36 +9,34 @@ use windows_reactor::{StackPanel, TextStyleExt, ThemeRef, Updater, text_block, v
 use crate::ui::{
     chrome::{section_header, settings_page_shell},
     controls::{ColorPopupParams, SliderNumberParams, card_color_popup, card_slider_number, card_toggle},
-    shared::{Snapshot, UiCx, UiShared, mark_dirty, parts_to_argb_u32, send_overlay_display},
+    shared::{ChromeSnap, UiCx, UiShared, mark_dirty, parts_to_argb_u32, send_overlay_display},
 };
 
-pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
+pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
+    let (overlay, text_argb_str, bg_argb_str, text_color_picker_open, bg_color_picker_open) = {
+        let ui = shared.lock();
+        (ui.draft.overlay.clone(), ui.text_argb_str.clone(), ui.bg_argb_str.clone(), ui.text_color_picker_open, ui.bg_color_picker_open)
+    };
 
     let display = vstack((
         section_header("Display"),
-        card_toggle(
-            "ov-enabled",
-            "In-place overlay",
-            Some("Draw translations on the target window (click-through)."),
-            snap.overlay_enabled,
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        if ui.draft.overlay.enabled != on {
-                            let reader = ui.draft.overlay.reader_enabled;
-                            send_overlay_display(ui, on, reader);
-                        }
-                    });
-                }
-            },
-        ),
+        card_toggle("ov-enabled", "In-place overlay", Some("Draw translations on the target window (click-through)."), overlay.enabled, {
+            let cx = cx.clone();
+            move |on| {
+                cx.with_mut(|ui| {
+                    if ui.draft.overlay.enabled != on {
+                        let reader = ui.draft.overlay.reader_enabled;
+                        send_overlay_display(ui, on, reader);
+                    }
+                });
+            }
+        }),
         card_toggle(
             "ov-reader",
             "Translation window",
             Some("Borderless always-on-top window. Drag to move, resize from the edges. Hide with this switch."),
-            snap.reader_enabled,
+            overlay.reader_enabled,
             {
                 let cx = cx.clone();
                 move |on| {
@@ -61,8 +59,8 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updat
                 key: "ov-text-color",
                 header: "Text color".into(),
                 description: Some("Click the swatch to pick colour and opacity, or type ARGB hex.".into()),
-                hex: snap.text_argb_str.clone(),
-                open: snap.text_color_picker_open,
+                hex: text_argb_str.clone(),
+                open: text_color_picker_open,
                 alpha_enabled: true,
                 placeholder: "FFFFFFFF".into(),
             },
@@ -107,8 +105,8 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updat
                 key: "ov-bg-color",
                 header: "Background color".into(),
                 description: Some("Click the swatch to pick colour and opacity, or type ARGB hex.".into()),
-                hex: snap.bg_argb_str.clone(),
-                open: snap.bg_color_picker_open,
+                hex: bg_argb_str.clone(),
+                open: bg_color_picker_open,
                 alpha_enabled: true,
                 placeholder: "C8000000".into(),
             },
@@ -153,7 +151,7 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updat
                 key: "ov-reader-font",
                 header: "Font size".into(),
                 description: Some("Segoe UI size for the translation window. Overlay captions still fit the source text.".into()),
-                value: snap.reader_font_px,
+                value: f64::from(overlay.reader_font_px),
                 min: f64::from(READER_FONT_PX_MIN),
                 max: f64::from(READER_FONT_PX_MAX),
                 step: 1.0,
@@ -183,5 +181,5 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updat
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((display, colors, notes)).spacing(8.0))
+    settings_page_shell(shared, chrome, bump, vstack((display, colors, notes)).spacing(8.0))
 }

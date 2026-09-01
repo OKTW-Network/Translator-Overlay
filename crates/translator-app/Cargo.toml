@@ -4,7 +4,6 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-anyhow = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }

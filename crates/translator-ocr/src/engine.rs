@@ -14,7 +14,13 @@ use oar_ocr::{
 use tracing::info;
 use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, Rect};
 
-use crate::{OcrError, models::ModelPaths};
+use crate::{
+    OcrError,
+    crop::crop_rgba,
+    filter::{filter_single_char_blocks, is_single_latin_or_digit},
+    merge::merge_line_blocks_with,
+    models::ModelPaths,
+};
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
 #[derive(Clone)]
@@ -103,10 +109,6 @@ impl OcrEngine {
         self.line_merge = config.line_merge.clone();
     }
 
-    pub fn model_paths(&self) -> &ModelPaths {
-        &self.model_paths
-    }
-
     /// Run OCR on a dynamic image.
     ///
     /// `frame_w` / `frame_h` are the full capture size (merge thresholds).
@@ -136,7 +138,7 @@ impl OcrEngine {
                 continue;
             }
             // Drop single Latin letter/digit noise before merge (icons → "V"/"0").
-            if self.filter_single_char && crate::filter::is_single_latin_or_digit(&text) {
+            if self.filter_single_char && is_single_latin_or_digit(&text) {
                 continue;
             }
             let bbox = aabb_to_rect(&region.bounding_box);
@@ -150,11 +152,11 @@ impl OcrEngine {
         }
 
         // Reading order + merge stacked lines that share column / height / gap.
-        let blocks = crate::merge::merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
+        let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
 
         // Re-apply after merge in case a merge edge case left a single token.
         let blocks = if self.filter_single_char {
-            crate::filter::filter_single_char_blocks(blocks)
+            filter_single_char_blocks(blocks)
         } else {
             reindex_ids(blocks)
         };
@@ -175,7 +177,7 @@ impl OcrEngine {
         let merge_all = self.line_merge.merge_whole_region;
         let mut all = Vec::new();
         for region in regions {
-            let Some(crop) = crate::crop::crop_rgba(width, height, rgba, *region) else {
+            let Some(crop) = crop_rgba(width, height, rgba, *region) else {
                 continue;
             };
             let ox = crop.x as f32;

@@ -5,6 +5,7 @@
 //! `SetWindowPos` only (no per-drag `UpdateLayeredWindow`).
 
 use tracing::{debug, warn};
+use translator_capture::client_screen_rect;
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -197,7 +198,7 @@ impl OverlayHost {
             return;
         }
 
-        let Some(rect) = translator_capture::client_screen_rect(target.0 as isize) else {
+        let Some(rect) = client_screen_rect(target.0 as isize) else {
             return;
         };
 
@@ -470,9 +471,12 @@ mod tests {
             core::w,
         };
 
-        use crate::{command::OverlayCommand, host::OverlayHost};
+        use crate::{
+            command::OverlayCommand,
+            host::{OverlayHost, win32::lock_hwnd_tests},
+        };
 
-        let _lock = crate::host::win32::lock_hwnd_tests();
+        let _lock = lock_hwnd_tests();
         let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let target = unsafe {
             CreateWindowExW(

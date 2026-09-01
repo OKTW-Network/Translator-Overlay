@@ -280,12 +280,6 @@ impl CliBackend {
     }
 }
 
-impl Default for CliBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn try_remove_isolated_cwd(dir: &Path) -> bool {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => true,

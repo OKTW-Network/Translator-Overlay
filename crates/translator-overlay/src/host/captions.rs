@@ -11,8 +11,7 @@ use windows::Win32::{
 use crate::{
     error::OverlayError,
     gfx::{
-        draw::{self, SurfaceRect},
-        layout::{label_pad, place_label},
+        draw::{self, SurfaceRect, label_pad, place_label},
         text::{self, LabelStyle},
     },
     host::OverlayHost,
@@ -218,6 +217,6 @@ impl OverlayHost {
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
-        crate::gfx::text::draw_text_label(hdc, hfont, buf, surface, rect, text, style)
+        text::draw_text_label(hdc, hfont, buf, surface, rect, text, style)
     }
 }

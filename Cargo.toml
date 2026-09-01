@@ -13,10 +13,8 @@ members = [
 version = "0.1.0"
 
 [workspace.dependencies]
-anyhow = "1.0.104"
 arc-swap = "1.9"
 bytes = "1.12.1"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
 image = { version = "0.25.10", default-features = false }
 parking_lot = "0.12.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "native-tls", "stream"] }

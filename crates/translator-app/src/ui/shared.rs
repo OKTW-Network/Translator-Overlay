@@ -1,13 +1,16 @@
-//! Shared UI state, snapshot, and config draft helpers.
+//! Shared UI state, ChromeSnap, and config draft helpers.
 
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, HttpApi, ModelProvider, ModelTier, NormRect, PipelineStatus, RegionPreset, RegionPresetFile};
+use translator_core::{AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, parse_argb_hex, validate_preset};
 use windows_reactor::Updater;
 
-use crate::pipeline::{CmdTx, PipelineCommand, SharedState};
+use crate::{
+    APP_HANDLES,
+    pipeline::{CmdTx, PipelineCommand, SharedState},
+};
 
 /// Apply overlay / reader visibility immediately (live config + disk), and keep the draft in sync.
 pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bool) {
@@ -81,16 +84,8 @@ pub struct UiShared {
     pub selected_idx: Option<usize>,
     /// Editable draft of settings (committed on Save).
     pub draft: AppConfig,
-    pub settings_dirty: bool,
     /// Optional API numbers (kept while toggle is off so re-enable restores).
-    pub temp_val: f64,
-    pub top_p_val: f64,
-    pub max_tokens_val: f64,
-    pub reasoning_str: String,
-    pub temp_enabled: bool,
-    pub top_p_enabled: bool,
-    pub max_tokens_enabled: bool,
-    pub reasoning_enabled: bool,
+    pub optional: OptionalApiState,
     pub text_argb_str: String,
     pub bg_argb_str: String,
     /// ColorPicker popup open (text / background). Only one should be true.
@@ -100,8 +95,6 @@ pub struct UiShared {
     pub api_key_revealed: bool,
     /// Pending Reload / Discard confirmation dialog.
     pub confirm: ConfirmAction,
-    /// Teaching tip for optional API params (shown once per session).
-    pub optional_tip_seen: bool,
     /// Inline form validation message (blocks Save until fixed).
     pub form_error: Option<String>,
     /// Named OCR region presets (`region-presets.toml`).
@@ -114,7 +107,7 @@ pub struct UiShared {
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
-    let (state, cmd_tx) = crate::APP_HANDLES.get().expect("APP_HANDLES must be set before UI starts").clone();
+    let (state, cmd_tx) = APP_HANDLES.get().expect("APP_HANDLES must be set before UI starts").clone();
     let draft = state.read().config.clone();
     let optional = optional_api_state(&draft);
     let (text_argb_str, bg_argb_str) = overlay_color_strings(&draft);
@@ -128,22 +121,13 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         windows: list_windows().unwrap_or_default(),
         selected_idx: None,
         draft,
-        settings_dirty: false,
-        temp_val: optional.temp_val,
-        top_p_val: optional.top_p_val,
-        max_tokens_val: optional.max_tokens_val,
-        reasoning_str: optional.reasoning_str,
-        temp_enabled: optional.temp_enabled,
-        top_p_enabled: optional.top_p_enabled,
-        max_tokens_enabled: optional.max_tokens_enabled,
-        reasoning_enabled: optional.reasoning_enabled,
+        optional,
         text_argb_str,
         bg_argb_str,
         text_color_picker_open: false,
         bg_color_picker_open: false,
         api_key_revealed: false,
         confirm: ConfirmAction::None,
-        optional_tip_seen: false,
         form_error: None,
         region_presets,
         preset_selected_idx: -1,
@@ -172,7 +156,7 @@ pub fn save_region_presets(ui: &mut UiShared) -> Result<(), String> {
 
 /// Write `pending_save_regions` under `name` (exact match overwrite).
 pub fn commit_pending_preset(ui: &mut UiShared, name: String) -> Result<(), String> {
-    let (name, regions) = translator_core::validate_preset(&name, &ui.pending_save_regions).map_err(|e| e.to_string())?;
+    let (name, regions) = validate_preset(&name, &ui.pending_save_regions).map_err(|e| e.to_string())?;
     if let Some(p) = ui.region_presets.iter_mut().find(|p| p.name == name) {
         p.regions = regions;
     } else {
@@ -194,15 +178,16 @@ pub fn commit_pending_preset(ui: &mut UiShared, name: String) -> Result<(), Stri
     Ok(())
 }
 
-struct OptionalApiState {
-    temp_val: f64,
-    top_p_val: f64,
-    max_tokens_val: f64,
-    reasoning_str: String,
-    temp_enabled: bool,
-    top_p_enabled: bool,
-    max_tokens_enabled: bool,
-    reasoning_enabled: bool,
+#[derive(Clone)]
+pub struct OptionalApiState {
+    pub temp_val: f64,
+    pub top_p_val: f64,
+    pub max_tokens_val: f64,
+    pub reasoning_str: String,
+    pub temp_enabled: bool,
+    pub top_p_enabled: bool,
+    pub max_tokens_enabled: bool,
+    pub reasoning_enabled: bool,
 }
 
 fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
@@ -229,54 +214,41 @@ pub fn reload_draft_from_state(ui: &mut UiShared) {
     let (ta, ba) = overlay_color_strings(&ui.draft);
     ui.text_argb_str = ta;
     ui.bg_argb_str = ba;
-    ui.settings_dirty = false;
 }
 
 pub fn apply_optional_from_config(ui: &mut UiShared) {
-    let o = optional_api_state(&ui.draft);
-    ui.temp_val = o.temp_val;
-    ui.top_p_val = o.top_p_val;
-    ui.max_tokens_val = o.max_tokens_val;
-    ui.reasoning_str = o.reasoning_str;
-    ui.temp_enabled = o.temp_enabled;
-    ui.top_p_enabled = o.top_p_enabled;
-    ui.max_tokens_enabled = o.max_tokens_enabled;
-    ui.reasoning_enabled = o.reasoning_enabled;
-}
-
-/// Parse ARGB hex for settings fields (delegates to core).
-pub fn parse_hex_u32(s: &str) -> Option<u32> {
-    translator_core::parse_argb_hex(s)
+    ui.optional = optional_api_state(&ui.draft);
 }
 
 /// Merge optional / overlay free-form fields into a config snapshot (pure).
 pub fn effective_draft(ui: &UiShared) -> AppConfig {
     let mut cfg = ui.draft.clone();
-    cfg.api.temperature = if ui.temp_enabled {
-        Some(ui.temp_val.clamp(0.0, 2.0) as f32)
+    let o = &ui.optional;
+    cfg.api.temperature = if o.temp_enabled {
+        Some(o.temp_val.clamp(0.0, 2.0) as f32)
     } else {
         None
     };
-    cfg.api.top_p = if ui.top_p_enabled {
-        Some(ui.top_p_val.clamp(0.0, 1.0) as f32)
+    cfg.api.top_p = if o.top_p_enabled {
+        Some(o.top_p_val.clamp(0.0, 1.0) as f32)
     } else {
         None
     };
-    cfg.api.max_tokens = if ui.max_tokens_enabled {
-        Some(ui.max_tokens_val.round().clamp(1.0, 1_000_000.0) as u32)
+    cfg.api.max_tokens = if o.max_tokens_enabled {
+        Some(o.max_tokens_val.round().clamp(1.0, 1_000_000.0) as u32)
     } else {
         None
     };
-    cfg.api.reasoning_effort = if ui.reasoning_enabled {
-        let r = ui.reasoning_str.trim();
+    cfg.api.reasoning_effort = if o.reasoning_enabled {
+        let r = o.reasoning_str.trim();
         if r.is_empty() { None } else { Some(r.to_string()) }
     } else {
         None
     };
-    if let Some(v) = parse_hex_u32(&ui.text_argb_str) {
+    if let Some(v) = parse_argb_hex(&ui.text_argb_str) {
         cfg.overlay.text_color_argb = v;
     }
-    if let Some(v) = parse_hex_u32(&ui.bg_argb_str) {
+    if let Some(v) = parse_argb_hex(&ui.bg_argb_str) {
         cfg.overlay.background_color_argb = v;
     }
     cfg
@@ -310,7 +282,6 @@ pub fn is_settings_dirty(ui: &UiShared) -> bool {
 
 /// Call after a real user edit. Clears the success banner so it does not stack.
 pub fn mark_dirty(ui: &mut UiShared) {
-    ui.settings_dirty = true;
     ui.form_error = None;
     ui.state.write().settings_message = None;
 }
@@ -324,15 +295,15 @@ pub fn form_validation_error(ui: &UiShared) -> Option<String> {
         return Some("Base URL is required.".into());
     }
     // Optional numbers always have a value; toggle off = omit. No empty checks.
-    if ui.reasoning_enabled && ui.reasoning_str.trim().is_empty() {
+    if ui.optional.reasoning_enabled && ui.optional.reasoning_str.trim().is_empty() {
         return Some("Reasoning effort is on but empty.".into());
     }
     let text = ui.text_argb_str.trim();
-    if !text.is_empty() && parse_hex_u32(text).is_none() {
+    if !text.is_empty() && parse_argb_hex(text).is_none() {
         return Some("Text color must be 8-digit ARGB hex (e.g. FFFFFFFF).".into());
     }
     let bg = ui.bg_argb_str.trim();
-    if !bg.is_empty() && parse_hex_u32(bg).is_none() {
+    if !bg.is_empty() && parse_argb_hex(bg).is_none() {
         return Some("Background color must be 8-digit ARGB hex (e.g. C8000000).".into());
     }
     None
@@ -341,14 +312,13 @@ pub fn form_validation_error(ui: &UiShared) -> Option<String> {
 pub fn do_reload_from_disk(ui: &mut UiShared) {
     match AppConfig::load_or_create_default() {
         Ok(cfg) => {
-            let _ = ui.cmd_tx.send(crate::pipeline::PipelineCommand::ApplyConfig(Box::new(cfg)));
+            let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
             if let Ok(c) = AppConfig::load_or_create_default() {
                 ui.draft = c;
                 apply_optional_from_config(ui);
                 let (ta, ba) = overlay_color_strings(&ui.draft);
                 ui.text_argb_str = ta;
                 ui.bg_argb_str = ba;
-                ui.settings_dirty = false;
                 ui.form_error = None;
                 ui.confirm = ConfirmAction::None;
             }
@@ -366,11 +336,6 @@ pub fn do_discard(ui: &mut UiShared) {
     ui.confirm = ConfirmAction::None;
 }
 
-pub fn argb_u32_to_parts(v: u32) -> (u8, u8, u8, u8) {
-    let (a, r, g, b) = translator_overlay::argb_channels(v);
-    (a, r, g, b)
-}
-
 pub fn parts_to_argb_u32(a: u8, r: u8, g: u8, b: u8) -> u32 {
     (u32::from(a) << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
@@ -385,261 +350,32 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub struct Snapshot {
-    pub status: String,
-    pub target: String,
-    pub preview_sequence: u64,
-    pub preview_width: u32,
-    pub preview_height: u32,
-    /// Tightly packed RGBA8 (`preview_width * preview_height * 4`).
-    pub preview_rgba: Option<bytes::Bytes>,
-    pub ocr_text: String,
-    pub translation: String,
-    pub provider: ModelProvider,
-    pub provider_idx: i32,
-    pub http_api_idx: i32,
-    pub structured_outputs: bool,
-    pub stream: bool,
-    pub send_reasoning_content: bool,
-    pub cli_path: String,
-    pub priority_mode: bool,
+/// Title bar, nav Start/Stop, settings Save bar, dashboard InfoBar.
+pub struct ChromeSnap {
+    pub status: PipelineStatus,
+    pub target: Option<String>,
+    pub last_error: Option<String>,
     pub auto_running: bool,
-    /// Last OCR inference time in ms (`None` → show "—").
-    pub last_ocr_ms: Option<u64>,
-    pub last_ocr_block_count: u32,
-    pub region_select_active: bool,
-    pub ocr_region_count: usize,
-    pub preview_regions: Vec<NormRect>,
-    pub history_preview: String,
-    pub selected_window_idx: i32,
     pub selected_hwnd: Option<isize>,
-    pub target_hwnd: Option<isize>,
-    pub window_count: usize,
-    pub window_labels: Vec<String>,
-    pub translate_in_flight: bool,
-    pub last_error: String,
-    pub retrying: bool,
-    pub retry_attempt: u32,
-    pub retry_max: u32,
-    pub settings_message: String,
     pub settings_dirty: bool,
-    pub form_error: String,
+    pub form_error: Option<String>,
+    pub settings_message: Option<String>,
     pub confirm: ConfirmAction,
-    pub optional_tip_seen: bool,
-    pub temp_val: f64,
-    pub top_p_val: f64,
-    pub max_tokens_val: f64,
-    pub reasoning_str: String,
-    pub temp_enabled: bool,
-    pub top_p_enabled: bool,
-    pub max_tokens_enabled: bool,
-    pub reasoning_enabled: bool,
-    pub overlay_enabled: bool,
-    pub reader_enabled: bool,
-    pub reader_font_px: f64,
-    pub text_argb_str: String,
-    pub bg_argb_str: String,
-    pub text_color_picker_open: bool,
-    pub bg_color_picker_open: bool,
-    pub api_key_revealed: bool,
-    pub base_url: String,
-    pub api_key: String,
-    pub draft_model: String,
-    pub timeout_secs: f64,
-    pub max_retries: f64,
-    pub retry_backoff: f64,
-    pub source_lang_draft: String,
-    pub target_lang_draft: String,
-    pub history_max: f64,
-    pub conv_max: f64,
-    pub cache_enabled: bool,
-    pub cache_max: f64,
-    pub cache_len: usize,
-    pub system_prompt: String,
-    pub model_tier_idx: i32,
-    pub confidence: f64,
-    pub stable_ms: f64,
-    pub max_unstable_ms: f64,
-    pub interval_ms: f64,
-    pub filter_single: bool,
-    pub persist_ms: f64,
-    pub max_miss_ms: f64,
-    pub merge_enabled: bool,
-    pub merge_whole_region: bool,
-    pub merge_join_with_space: bool,
-    pub merge_reject_short_long: bool,
-    /// 0 = top-to-bottom then left-to-right; 1 = left-to-right then top-to-bottom.
-    pub merge_order_idx: i32,
-    /// Ratio fields as percents (UI display; stored as 0–1 in config).
-    pub merge_gap_pct: f64,
-    pub merge_horizontal_gap_pct: f64,
-    pub merge_height_delta_pct: f64,
-    pub merge_align_pct: f64,
-    pub merge_order_band_pct: f64,
-    pub merge_below_mid_pct: f64,
-    pub merge_width_delta_pct: f64,
-    pub preset_names: Vec<String>,
-    pub preset_selected_idx: i32,
-    pub preset_name_draft: String,
-    pub preset_dialog: PresetDialog,
 }
 
-pub fn take_snapshot(shared: &Arc<Mutex<UiShared>>) -> Snapshot {
+pub fn take_chrome(shared: &Arc<Mutex<UiShared>>) -> ChromeSnap {
     let ui = shared.lock();
     let s = ui.state.read();
-    let history_preview = s
-        .history
-        .iter()
-        .take(5)
-        .map(|h| {
-            let src = truncate(&h.source_text, 40);
-            let dst = truncate(&h.translated_text, 40);
-            format!("• {src} → {dst}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let history_preview = if history_preview.is_empty() {
-        "(no history yet)".into()
-    } else {
-        history_preview
-    };
-
-    let tier_idx = match ui.draft.ocr.model_tier {
-        ModelTier::Tiny => 0,
-        ModelTier::Small => 1,
-        ModelTier::Medium => 2,
-    };
-
-    Snapshot {
-        status: s.status.label(),
-        target: s.target_window_title.clone().unwrap_or_else(|| "(none)".into()),
-        preview_sequence: s.preview.sequence,
-        preview_width: s.preview.width,
-        preview_height: s.preview.height,
-        preview_rgba: s.preview.rgba.clone(),
-        ocr_text: if s.latest_ocr_text.is_empty() {
-            "(no OCR yet)".into()
-        } else {
-            s.latest_ocr_text.clone()
-        },
-        translation: if s.latest_translated_text.is_empty() {
-            "(no translation yet)".into()
-        } else {
-            s.latest_translated_text.clone()
-        },
-        provider: ui.draft.api.provider,
-        provider_idx: match ui.draft.api.provider {
-            ModelProvider::OpenaiCompatible => 0,
-            ModelProvider::GrokCli => 1,
-            ModelProvider::CodexCli => 2,
-        },
-        http_api_idx: match ui.draft.api.http_api {
-            HttpApi::ChatCompletions => 0,
-            HttpApi::Responses => 1,
-        },
-        structured_outputs: ui.draft.api.structured_outputs,
-        stream: ui.draft.api.stream,
-        send_reasoning_content: ui.draft.api.send_reasoning_content,
-        cli_path: ui.draft.api.cli_path.clone(),
-        priority_mode: ui.draft.api.service_tier == translator_core::ServiceTier::Priority,
+    ChromeSnap {
+        status: s.status.clone(),
+        target: s.target_window_title.clone(),
+        last_error: s.last_error.clone(),
         auto_running: s.auto_running,
-        last_ocr_ms: s.last_ocr_ms,
-        last_ocr_block_count: s.last_ocr_block_count,
-        region_select_active: s.region_select_active,
-        ocr_region_count: if s.region_select_active {
-            s.region_select_draft.len()
-        } else {
-            s.ocr_regions.len()
-        },
-        preview_regions: if s.region_select_active {
-            s.region_select_draft.clone()
-        } else {
-            s.ocr_regions.clone()
-        },
-        history_preview,
-        selected_window_idx: match ui.selected_idx {
-            Some(i) if i < ui.windows.len() => i as i32,
-            _ => -1,
-        },
         selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
-        target_hwnd: s.target_hwnd,
-        window_count: ui.windows.len(),
-        window_labels: ui.windows.iter().map(|w| truncate(&w.title, 72)).collect(),
-        translate_in_flight: s.translate_in_flight,
-        last_error: s.last_error.clone().unwrap_or_default(),
-        retrying: matches!(s.status, PipelineStatus::RetryingTranslate { .. }),
-        retry_attempt: match &s.status {
-            PipelineStatus::RetryingTranslate { attempt, .. } => *attempt,
-            _ => 0,
-        },
-        retry_max: match &s.status {
-            PipelineStatus::RetryingTranslate { max_retries, .. } => *max_retries,
-            _ => 0,
-        },
-        settings_message: s.settings_message.clone().unwrap_or_default(),
-        // Compare draft↔live config (not a sticky flag) so re-bind events
-        // from Slider/NumberBox do not show false "Unsaved changes".
         // Use already-held `s.config` — do not call is_settings_dirty (nested read).
         settings_dirty: draft_differs_from(&ui, &s.config),
-        form_error: ui.form_error.clone().unwrap_or_default(),
+        form_error: ui.form_error.clone(),
+        settings_message: s.settings_message.clone(),
         confirm: ui.confirm,
-        optional_tip_seen: ui.optional_tip_seen,
-        temp_val: ui.temp_val,
-        top_p_val: ui.top_p_val,
-        max_tokens_val: ui.max_tokens_val,
-        reasoning_str: ui.reasoning_str.clone(),
-        temp_enabled: ui.temp_enabled,
-        top_p_enabled: ui.top_p_enabled,
-        max_tokens_enabled: ui.max_tokens_enabled,
-        reasoning_enabled: ui.reasoning_enabled,
-        overlay_enabled: ui.draft.overlay.enabled,
-        reader_enabled: ui.draft.overlay.reader_enabled,
-        reader_font_px: ui.draft.overlay.reader_font_px as f64,
-        text_argb_str: ui.text_argb_str.clone(),
-        bg_argb_str: ui.bg_argb_str.clone(),
-        text_color_picker_open: ui.text_color_picker_open,
-        bg_color_picker_open: ui.bg_color_picker_open,
-        api_key_revealed: ui.api_key_revealed,
-        base_url: ui.draft.api.base_url.clone(),
-        api_key: ui.draft.api.api_key.clone(),
-        draft_model: ui.draft.api.model.clone(),
-        timeout_secs: ui.draft.api.request_timeout_secs as f64,
-        max_retries: ui.draft.api.max_retries as f64,
-        retry_backoff: ui.draft.api.retry_backoff_ms as f64,
-        source_lang_draft: ui.draft.translation.source_lang.clone(),
-        target_lang_draft: ui.draft.translation.target_lang.clone(),
-        history_max: ui.draft.translation.history_max_items as f64,
-        conv_max: ui.draft.translation.conversation_max_turns as f64,
-        cache_enabled: ui.draft.translation.cache_enabled,
-        cache_max: ui.draft.translation.cache_max_entries as f64,
-        cache_len: s.translation_cache_len,
-        system_prompt: ui.draft.translation.system_prompt.clone().unwrap_or_default(),
-        model_tier_idx: tier_idx,
-        confidence: ui.draft.ocr.confidence_threshold as f64,
-        stable_ms: ui.draft.ocr.stable_duration_ms as f64,
-        max_unstable_ms: ui.draft.ocr.max_unstable_ms as f64,
-        interval_ms: ui.draft.capture.min_interval_ms as f64,
-        filter_single: ui.draft.ocr.filter_single_char,
-        persist_ms: ui.draft.ocr.block_persist_ms as f64,
-        max_miss_ms: ui.draft.ocr.block_max_miss_ms as f64,
-        merge_enabled: ui.draft.ocr.line_merge.enabled,
-        merge_whole_region: ui.draft.ocr.line_merge.merge_whole_region,
-        merge_join_with_space: ui.draft.ocr.line_merge.join_with_space,
-        merge_reject_short_long: ui.draft.ocr.line_merge.reject_short_long,
-        merge_order_idx: match ui.draft.ocr.line_merge.order {
-            translator_core::LineMergeOrder::TopToBottomLeftToRight => 0,
-            translator_core::LineMergeOrder::LeftToRightTopToBottom => 1,
-        },
-        merge_gap_pct: (ui.draft.ocr.line_merge.gap_ratio as f64) * 100.0,
-        merge_horizontal_gap_pct: (ui.draft.ocr.line_merge.horizontal_gap_ratio as f64) * 100.0,
-        merge_height_delta_pct: (ui.draft.ocr.line_merge.height_delta_ratio as f64) * 100.0,
-        merge_align_pct: (ui.draft.ocr.line_merge.align_ratio as f64) * 100.0,
-        merge_order_band_pct: (ui.draft.ocr.line_merge.order_band_ratio as f64) * 100.0,
-        merge_below_mid_pct: (ui.draft.ocr.line_merge.below_mid_ratio as f64) * 100.0,
-        merge_width_delta_pct: (ui.draft.ocr.line_merge.width_delta_ratio as f64) * 100.0,
-        preset_names: ui.region_presets.iter().map(|p| p.name.clone()).collect(),
-        preset_selected_idx: ui.preset_selected_idx,
-        preset_name_draft: ui.preset_name_draft.clone(),
-        preset_dialog: ui.preset_dialog.clone(),
     }
 }

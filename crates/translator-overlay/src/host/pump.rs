@@ -12,13 +12,16 @@ use windows::Win32::{
 
 use crate::{
     command::OverlayCommand,
-    host::{OverlayHost, follow::FOLLOW_EVENT_MESSAGE},
-    picker,
+    host::{
+        OverlayHost,
+        follow::{FOLLOW_EVENT_MESSAGE, install_follow_hooks},
+    },
+    picker::is_picker_message,
 };
 
 impl OverlayHost {
     pub fn run(&mut self, mut rx: mpsc::UnboundedReceiver<OverlayCommand>) {
-        self.follow_hooks = crate::host::follow::install_follow_hooks();
+        self.follow_hooks = install_follow_hooks();
 
         loop {
             let mut apply = false;
@@ -89,7 +92,7 @@ impl OverlayHost {
                     continue;
                 }
             }
-            if self.picker.is_some() && msg.hwnd == self.hwnd && picker::is_picker_message(msg.message) {
+            if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
                 self.dispatch_picker_msg(&msg);
                 *apply = true;
                 if msg.message != WM_MOUSEMOVE {

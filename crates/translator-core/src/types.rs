@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Axis-aligned bounding box in capture-image pixel coordinates.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -66,19 +66,6 @@ impl Rect {
     /// Keep `self` when `candidate` is only OCR jitter; otherwise take `candidate`.
     pub fn stabilize_against(self, candidate: Self) -> Self {
         if self.is_significant_relayout(candidate) { candidate } else { self }
-    }
-
-    /// Follow a real move but keep previous width/height.
-    ///
-    /// Sticky overlay captions belong to the last translated source string.
-    /// Detector width swings must not resize the painted box; scroll/reflow that
-    /// actually moves the origin may follow. Uses the top-left (not a recentered
-    /// frozen box) so a longer line does not slide the caption sideways.
-    pub fn follow_move_keep_size(self, candidate: Self) -> Self {
-        if !self.is_significant_relayout(candidate) || !self.center_shift_exceeds_tol(candidate) {
-            return self;
-        }
-        Self::new(candidate.x, candidate.y, self.width, self.height)
     }
 
     fn center_shift_exceeds_tol(self, candidate: Self) -> bool {
@@ -157,10 +144,6 @@ impl NormRect {
     }
 }
 
-fn default_source_lines() -> u32 {
-    1
-}
-
 /// Collapse runs of whitespace so OCR thrash / layout compare stays stable.
 ///
 /// Used by stability fingerprints, block persistence, and sticky remap matching.
@@ -169,19 +152,18 @@ pub fn normalize_ocr_text(s: &str) -> String {
 }
 
 /// One OCR text region.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OcrBlock {
     pub id: u32,
     pub text: String,
     pub confidence: f32,
     pub bbox: Rect,
     /// Detector lines merged into this block (`1` = single line).
-    #[serde(default = "default_source_lines")]
     pub source_lines: u32,
 }
 
 /// OCR block after translation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TranslatedBlock {
     pub id: u32,
     pub source: String,
@@ -189,7 +171,6 @@ pub struct TranslatedBlock {
     pub confidence: f32,
     pub bbox: Rect,
     /// Detector lines in the source (`1` = single line; overlay may widen/shrink).
-    #[serde(default = "default_source_lines")]
     pub source_lines: u32,
 }
 
@@ -201,31 +182,6 @@ pub enum ModelTier {
     #[default]
     Small,
     Medium,
-}
-
-impl ModelTier {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Tiny => "tiny",
-            Self::Small => "small",
-            Self::Medium => "medium",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "tiny" => Some(Self::Tiny),
-            "small" => Some(Self::Small),
-            "medium" => Some(Self::Medium),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for ModelTier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 #[cfg(test)]
@@ -256,27 +212,6 @@ mod tests {
         let merged = Rect::new(98.0, 198.0, 240.0, 72.0);
         assert!(prev.is_significant_relayout(merged));
         assert_eq!(prev.stabilize_against(merged), merged);
-    }
-
-    #[test]
-    fn follow_move_keep_size_ignores_width_growth() {
-        let prev = Rect::new(100.0, 200.0, 80.0, 24.0);
-        // Same origin, longer detector box (new glyphs / persist pending).
-        let wider = Rect::new(100.0, 200.0, 160.0, 24.0);
-        assert_eq!(prev.follow_move_keep_size(wider), prev);
-        let jitter = Rect::new(103.0, 197.0, 76.0, 26.0);
-        assert_eq!(prev.follow_move_keep_size(jitter), prev);
-    }
-
-    #[test]
-    fn follow_move_keep_size_follows_origin_only() {
-        let prev = Rect::new(100.0, 200.0, 180.0, 28.0);
-        let moved = Rect::new(100.0, 320.0, 180.0, 28.0);
-        assert_eq!(prev.follow_move_keep_size(moved), moved);
-
-        // Moved *and* wider: still keep the previous caption size.
-        let moved_wider = Rect::new(100.0, 320.0, 300.0, 36.0);
-        assert_eq!(prev.follow_move_keep_size(moved_wider), Rect::new(100.0, 320.0, 180.0, 28.0));
     }
 
     #[test]

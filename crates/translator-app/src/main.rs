@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 use tracing::{error, info};
-use translator_core::{AppConfig, AppState};
+use translator_core::{AppConfig, AppState, config_path};
 use windows_reactor::{App, Backdrop};
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline};
@@ -39,7 +39,7 @@ async fn main() {
         }
     };
 
-    if let Ok(path) = translator_core::config_path() {
+    if let Ok(path) = config_path() {
         info!(path = %path.display(), "config path");
     }
 
@@ -65,7 +65,7 @@ async fn main() {
         // WinUI multi-pane range is ~1100–1300 × 720–840.
         .inner_size(1280.0, 800.0)
         .backdrop(Backdrop::Mica)
-        .render(ui::app);
+        .render(crate::ui::app);
 
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
     let _ = pipeline.await;

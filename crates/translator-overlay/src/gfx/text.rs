@@ -14,10 +14,7 @@ use windows::{
 
 use crate::{
     error::OverlayError,
-    gfx::{
-        draw::{Rgba, SurfaceRect, SurfaceSize},
-        layout::label_pad,
-    },
+    gfx::draw::{Rgba, SurfaceRect, SurfaceSize, label_pad},
 };
 
 /// Font size + text colour for one painted label.

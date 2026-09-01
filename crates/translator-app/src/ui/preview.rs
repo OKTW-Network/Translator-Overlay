@@ -30,14 +30,16 @@ struct CachedPreview {
 }
 
 fn regions_key(regions: &[NormRect]) -> u64 {
-    let mut h = regions.len() as u64;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    regions.len().hash(&mut h);
     for r in regions {
-        h = h.wrapping_mul(16777619) ^ u64::from(r.x.to_bits());
-        h = h.wrapping_mul(16777619) ^ u64::from(r.y.to_bits());
-        h = h.wrapping_mul(16777619) ^ u64::from(r.width.to_bits());
-        h = h.wrapping_mul(16777619) ^ u64::from(r.height.to_bits());
+        r.x.to_bits().hash(&mut h);
+        r.y.to_bits().hash(&mut h);
+        r.width.to_bits().hash(&mut h);
+        r.height.to_bits().hash(&mut h);
     }
-    h
+    h.finish()
 }
 
 fn gpu_device() -> Option<GpuDevice> {

@@ -1,15 +1,14 @@
 //! Reusable setting-row controls (text, toggle, slider, optional toggle+slider).
 
+use translator_core::parse_argb_hex;
+use translator_overlay::argb_channels;
 use windows_reactor::{
     BackgroundExt, Border, Color, ColorArgb, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, NumberBox,
     PaddingExt, PasswordBox, PasswordRevealMode, Slider, StackPanel, TextStyleExt, ThemeRef, Thickness, ToggleSwitch, TooltipExt,
     VerticalAlignment, border, button, color_picker, grid, hstack, text_block, text_box, vstack,
 };
 
-use crate::ui::{
-    chrome::{settings_card, settings_card_stack},
-    shared::{argb_u32_to_parts, parse_hex_u32},
-};
+use crate::ui::chrome::{settings_card, settings_card_stack};
 
 /// Compact right-edge ToggleSwitch (Windows Settings style).
 ///
@@ -416,7 +415,7 @@ pub fn card_color_popup(
     on_toggle_open: impl Fn() + 'static,
 ) -> Border {
     let key = p.key;
-    let (a, r, g, b) = argb_u32_to_parts(parse_hex_u32(&p.hex).unwrap_or(0xFF00_0000));
+    let (a, r, g, b) = argb_channels(parse_argb_hex(&p.hex).unwrap_or(0xFF00_0000));
     // Swatch fill uses opaque RGB so low-alpha colors stay visible on the card.
     let swatch_fill = Color::rgb(r, g, b);
 

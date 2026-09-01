@@ -104,20 +104,14 @@ impl StabilityGate {
         Self::with_max_unstable(config.stable_duration_ms, config.max_unstable_ms)
     }
 
-    pub fn reset(&mut self) {
+    /// Full reset including emitted history (e.g. new target window).
+    pub fn reset_all(&mut self) {
         self.active = None;
         self.active_since = None;
         self.active_hits = 0;
         self.pending = None;
         self.pending_hits = 0;
         self.unstable_since = None;
-        // Keep last_emitted so re-showing the same page after reset still dedupes
-        // unless force_emit is used.
-    }
-
-    /// Full reset including emitted history (e.g. new target window).
-    pub fn reset_all(&mut self) {
-        self.reset();
         self.last_emitted = None;
     }
 

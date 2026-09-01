@@ -40,22 +40,6 @@ pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact] {
     }
 }
 
-/// Bare registry file names for a tier (det, rec, dict).
-pub fn registry_names(tier: ModelTier) -> (&'static str, &'static str, &'static str) {
-    let arts = artifacts_for_tier(tier);
-    let mut det = "";
-    let mut rec = "";
-    let mut dict = "";
-    for a in arts {
-        match a.role {
-            ModelRole::Detection => det = a.file_name,
-            ModelRole::Recognition => rec = a.file_name,
-            ModelRole::Dictionary => dict = a.file_name,
-        }
-    }
-    (det, rec, dict)
-}
-
 const TINY: &[ModelArtifact] = &[
     ModelArtifact {
         role: ModelRole::Detection,
@@ -189,13 +173,25 @@ mod tests {
     #[test]
     fn all_tiers_have_registry_names_and_sizes() {
         for tier in [ModelTier::Tiny, ModelTier::Small, ModelTier::Medium] {
-            assert_eq!(artifacts_for_tier(tier).len(), 3, "{tier}");
-            let (det, rec, dict) = registry_names(tier);
-            assert!(det.ends_with(".onnx"), "{tier} det");
-            assert!(rec.ends_with(".onnx"), "{tier} rec");
-            assert!(dict.ends_with(".txt"), "{tier} dict");
-            for a in artifacts_for_tier(tier) {
-                assert!(a.expected_bytes > 0, "{tier} {}", a.file_name);
+            let arts = artifacts_for_tier(tier);
+            assert_eq!(arts.len(), 3, "{tier:?}");
+            assert!(
+                arts.iter()
+                    .any(|a| a.file_name.ends_with(".onnx") && a.role == ModelRole::Detection),
+                "{tier:?} det"
+            );
+            assert!(
+                arts.iter()
+                    .any(|a| a.file_name.ends_with(".onnx") && a.role == ModelRole::Recognition),
+                "{tier:?} rec"
+            );
+            assert!(
+                arts.iter()
+                    .any(|a| a.file_name.ends_with(".txt") && a.role == ModelRole::Dictionary),
+                "{tier:?} dict"
+            );
+            for a in arts {
+                assert!(a.expected_bytes > 0, "{tier:?} {}", a.file_name);
                 assert!(a.download_url().starts_with(RELEASE_BASE));
             }
         }

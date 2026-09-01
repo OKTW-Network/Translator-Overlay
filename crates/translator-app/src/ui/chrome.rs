@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use translator_core::PipelineStatus;
 use windows_reactor::{
     BackgroundExt, Border, ContentDialog, ContentDialogResult, Element, Grid, GridChildExt, GridLength, HorizontalAlignment, Icon, InfoBar,
     InfoBarSeverity, KeyExt, LayoutExt, PaddingExt, StackPanel, TextBlock, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater,
@@ -12,7 +13,7 @@ use windows_reactor::{
 use crate::{
     pipeline::PipelineCommand,
     ui::shared::{
-        ConfirmAction, Snapshot, UiCx, UiShared, commit_optional_fields, do_discard, do_reload_from_disk, form_validation_error,
+        ChromeSnap, ConfirmAction, UiCx, UiShared, commit_optional_fields, do_discard, do_reload_from_disk, form_validation_error,
         is_settings_dirty,
     },
 };
@@ -24,17 +25,6 @@ fn labeled_stack(header: TextBlock, description: Option<&str>) -> StackPanel {
     }
     .horizontal_alignment(HorizontalAlignment::Stretch)
     .vertical_alignment(VerticalAlignment::Center)
-}
-
-/// Windows Settings–style page title + optional description.
-pub fn page_header(title: impl Into<String>, description: Option<&str>) -> Element {
-    let title = text_block(title).font_size(28.0).bold();
-    match description {
-        Some(d) if !d.is_empty() => vstack((title, text_block(d).font_size(13.0).foreground(ThemeRef::SecondaryText).wrap()))
-            .spacing(4.0)
-            .into(),
-        _ => title.into(),
-    }
 }
 
 /// Section label above a group of cards.
@@ -127,15 +117,18 @@ pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Op
 /// Settings save success lives on the settings chrome (next to Save), not here.
 /// Always mounts the same `InfoBar` (stable key) so open/close does not remount
 /// the rest of the page tree.
-pub fn status_infobar(snap: &Snapshot) -> InfoBar {
+pub fn status_infobar(snap: &ChromeSnap) -> InfoBar {
+    let status_label = snap.status.label();
+    let target = snap.target.as_deref().unwrap_or("(none)");
+    let last_error = snap.last_error.as_deref().filter(|s| !s.is_empty());
     let retry_msg;
-    let (title, message, severity) = if snap.retrying && !snap.last_error.is_empty() {
-        retry_msg = format!("Retrying {} of {}", snap.retry_attempt, snap.retry_max);
-        (snap.last_error.as_str(), retry_msg.as_str(), InfoBarSeverity::Warning)
-    } else if !snap.last_error.is_empty() {
-        (snap.last_error.as_str(), "", InfoBarSeverity::Error)
-    } else {
-        (snap.status.as_str(), snap.target.as_str(), InfoBarSeverity::Informational)
+    let (title, message, severity) = match (&snap.status, last_error) {
+        (PipelineStatus::RetryingTranslate { attempt, max_retries, .. }, Some(err)) => {
+            retry_msg = format!("Retrying {attempt} of {max_retries}");
+            (err, retry_msg.as_str(), InfoBarSeverity::Warning)
+        }
+        (_, Some(err)) => (err, "", InfoBarSeverity::Error),
+        _ => (status_label.as_str(), target, InfoBarSeverity::Informational),
     };
 
     InfoBar::new(title)
@@ -147,8 +140,8 @@ pub fn status_infobar(snap: &Snapshot) -> InfoBar {
 }
 
 /// Compact title-bar status: pipeline label and target window only.
-pub fn app_status_strip(snap: &Snapshot) -> TextBlock {
-    text_block(format!("{}  ·  {}", snap.status, snap.target))
+pub fn app_status_strip(snap: &ChromeSnap) -> TextBlock {
+    text_block(format!("{}  ·  {}", snap.status.label(), snap.target.as_deref().unwrap_or("(none)")))
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)
         .vertical_alignment(VerticalAlignment::Center)
@@ -167,9 +160,9 @@ pub fn app_status_strip(snap: &Snapshot) -> TextBlock {
 /// Compact pane is 48px; nav items use a 40px icon box. Collapsed mode is a
 /// 40px chromeless control centered in a 48px footer so the glyph lines up
 /// with the menu icons (a Default-styled 32px button sat left and looked huge).
-pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>, pane_open: bool) -> Grid {
+pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &Updater<u32>, pane_open: bool) -> Grid {
     let cx = UiCx::new(shared, bump);
-    let has_window = snap.selected_window_idx >= 0;
+    let has_window = snap.selected_hwnd.is_some();
     let running = snap.auto_running;
     let label = if running { "Stop" } else { "Start" };
     // Segoe Fluent filled media glyphs (`Symbol::Play` / `Stop` are outlines).
@@ -267,13 +260,13 @@ pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot,
 ///
 /// `Button::accent()` cannot be cleared via Prop Unset (reactor no-op), so we
 /// remount with a different key when dirty toggles to force a fresh Default style.
-pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
+pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
     let dirty = snap.settings_dirty;
-    let has_form_error = !snap.form_error.is_empty();
+    let has_form_error = snap.form_error.is_some();
 
-    let tooltip = if has_form_error {
-        format!("Cannot save: {}", snap.form_error)
+    let tooltip = if let Some(err) = snap.form_error.as_deref() {
+        format!("Cannot save: {err}")
     } else if dirty {
         "Unsaved changes — click to save and apply".into()
     } else {
@@ -306,7 +299,6 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
                 }
                 commit_optional_fields(&mut ui);
                 let cfg = ui.draft.clone();
-                ui.settings_dirty = false;
                 ui.form_error = None;
                 // Optimistic: align live config now so dirty clears this frame
                 // (pipeline ApplyConfig is async).
@@ -323,13 +315,13 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
     });
 
     // Settings-only feedback (never routed to Dashboard InfoBar).
-    let status_hint = if has_form_error {
-        text_block(snap.form_error.clone())
+    let status_hint = if let Some(err) = snap.form_error.as_ref() {
+        text_block(err.clone())
             .font_size(12.0)
             .foreground(ThemeRef::SystemCritical)
             .with_key("settings-form-error")
-    } else if !snap.settings_message.is_empty() {
-        text_block(snap.settings_message.clone())
+    } else if let Some(msg) = snap.settings_message.as_ref().filter(|s| !s.is_empty()) {
+        text_block(msg.clone())
             .font_size(12.0)
             .foreground(ThemeRef::SystemSuccess)
             .with_key("settings-save-msg")
@@ -380,7 +372,7 @@ pub fn settings_sticky_chrome(
     title: &str,
     description: Option<&str>,
     shared: &Arc<Mutex<UiShared>>,
-    snap: &Snapshot,
+    snap: &ChromeSnap,
     bump: &Updater<u32>,
 ) -> Grid {
     let title_el = text_block(title).font_size(28.0).bold();
@@ -423,7 +415,7 @@ pub fn settings_sticky_chrome(
 }
 
 /// Confirm Reload / Discard when there are unsaved changes.
-fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> ContentDialog {
+fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &Updater<u32>) -> ContentDialog {
     let open = snap.confirm != ConfirmAction::None;
     let (title, body, primary) = match snap.confirm {
         ConfirmAction::Reload => {
@@ -460,7 +452,7 @@ fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater
 /// Title + Save live in [`settings_sticky_chrome`] (fixed above the scroll area).
 pub fn settings_page_shell(
     shared: &Arc<Mutex<UiShared>>,
-    snap: &Snapshot,
+    snap: &ChromeSnap,
     bump: &Updater<u32>,
     body: impl Into<Element> + LayoutExt,
 ) -> StackPanel {

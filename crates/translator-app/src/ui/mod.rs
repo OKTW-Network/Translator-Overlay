@@ -17,14 +17,19 @@ use windows_reactor::{
     border, grid, scroll_viewer, set_backdrop, set_requested_theme,
 };
 
-use crate::ui::{
-    chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
-    dashboard::dashboard_page,
-    page_api::api_page,
-    page_ocr::ocr_page,
-    page_overlay::overlay_page,
-    page_translation::translation_page,
-    shared::{make_shared, take_snapshot},
+use crate::{
+    pipeline::install_ui_ping,
+    taskbar_guard::restore_taskbar_zorder,
+    ui::{
+        chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
+        dashboard::dashboard_page,
+        nav_header::retarget,
+        page_api::api_page,
+        page_ocr::ocr_page,
+        page_overlay::overlay_page,
+        page_translation::translation_page,
+        shared::{make_shared, take_chrome},
+    },
 };
 
 /// Entry render function for the control window.
@@ -33,12 +38,12 @@ pub fn app(cx: &mut RenderCx) -> Element {
         set_requested_theme(RequestedTheme::Default);
         set_backdrop(Some(Backdrop::Mica));
         // WinUI 3 Activate can knock the taskbar out of the topmost stack (#11091).
-        crate::taskbar_guard::restore_taskbar_zorder();
+        restore_taskbar_zorder();
     });
     let _scheme = cx.use_color_scheme();
 
-    crate::ui::nav_header::retarget();
-    crate::pipeline::install_ui_ping(cx.use_ui_marshaller(), cx.host_id());
+    retarget();
+    install_ui_ping(cx.use_ui_marshaller(), cx.host_id());
 
     let shared = cx.use_ref(make_shared());
     let (tick, bump_tick) = cx.use_reducer(0_u32);
@@ -49,23 +54,25 @@ pub fn app(cx: &mut RenderCx) -> Element {
     cx.use_effect((), {
         let bump_tick = bump_tick.clone();
         move || {
-            if !crate::ui::nav_header::retarget() {
+            if !retarget() {
                 bump_tick.call(|n| n.wrapping_add(1));
             }
         }
     });
 
     let shared_arc = shared.borrow().clone();
-    let snap = take_snapshot(&shared_arc);
+    let chrome = take_chrome(&shared_arc);
 
     // Critical: every page needs a distinct key so the reconciler does not
     // positionally reuse StackPanel children across tab switches.
     let page: Element = match page_tag.as_str() {
-        "api" => api_page(&shared_arc, &snap, &bump_tick).with_key("page-api").into(),
-        "translation" => translation_page(&shared_arc, &snap, &bump_tick).with_key("page-translation").into(),
-        "ocr" => ocr_page(&shared_arc, &snap, &bump_tick).with_key("page-ocr").into(),
-        "overlay" => overlay_page(&shared_arc, &snap, &bump_tick).with_key("page-overlay").into(),
-        _ => dashboard_page(&shared_arc, &snap, &bump_tick).with_key("page-dashboard"),
+        "api" => api_page(&shared_arc, &chrome, &bump_tick).with_key("page-api").into(),
+        "translation" => translation_page(&shared_arc, &chrome, &bump_tick)
+            .with_key("page-translation")
+            .into(),
+        "ocr" => ocr_page(&shared_arc, &chrome, &bump_tick).with_key("page-ocr").into(),
+        "overlay" => overlay_page(&shared_arc, &chrome, &bump_tick).with_key("page-overlay").into(),
+        _ => dashboard_page(&shared_arc, &chrome, &bump_tick).with_key("page-dashboard"),
     };
 
     // Settings pages: pin title + Save above the scroll (color = unsaved).
@@ -99,7 +106,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
         .vertical_alignment(VerticalAlignment::Stretch)
         .with_key(format!("scroll-{}", page_tag.as_str()));
         grid((
-            settings_sticky_chrome(title, description, &shared_arc, &snap, &bump_tick)
+            settings_sticky_chrome(title, description, &shared_arc, &chrome, &bump_tick)
                 .grid_row(0)
                 .grid_column(0)
                 .horizontal_alignment(HorizontalAlignment::Stretch),
@@ -150,7 +157,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
                 }
             }
         })
-        .pane_footer(capture_start_stop_button(&shared_arc, &snap, &bump_tick, is_pane_open))
+        .pane_footer(capture_start_stop_button(&shared_arc, &chrome, &bump_tick, is_pane_open))
         .settings_visible(false)
         .back_button_visible(false)
         .pane_toggle_button_visible(false)
@@ -165,7 +172,7 @@ pub fn app(cx: &mut RenderCx) -> Element {
         .pane_toggle_button_visible(true)
         .back_button_visible(false)
         .on_pane_toggle_requested(move || set_pane_open.call(!is_pane_open))
-        .content(app_status_strip(&snap))
+        .content(app_status_strip(&chrome))
         .tall(true)
         .with_key("app-title-bar");
 

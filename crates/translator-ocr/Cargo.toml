@@ -4,8 +4,6 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-anyhow = { workspace = true }
-futures-util = { workspace = true }
 image = { workspace = true }
 oar-ocr = { version = "0.9", features = ["directml"] }
 reqwest = { workspace = true }

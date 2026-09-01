@@ -5,8 +5,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use translator_core::{HttpApi, ModelProvider, ServiceTier};
 use windows_reactor::{
-    Element, KeyExt, LayoutExt, RadioButton, StackPanel, TeachingTip, TextStyleExt, ThemeRef, Updater, VerticalAlignment, hstack,
-    text_block, vstack,
+    Element, LayoutExt, RadioButton, StackPanel, TextStyleExt, ThemeRef, Updater, VerticalAlignment, hstack, text_block, vstack,
 };
 
 use crate::ui::{
@@ -15,14 +14,22 @@ use crate::ui::{
         OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_password, card_slider_number, card_text,
         card_toggle, optional_number_row, optional_slider_row, optional_text_row,
     },
-    shared::{Snapshot, UiCx, UiShared, mark_dirty},
+    shared::{ChromeSnap, UiCx, UiShared, mark_dirty},
 };
 
-pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> StackPanel {
+pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
     let cx = UiCx::new(shared, bump);
+    let (api, optional, api_key_revealed) = {
+        let ui = shared.lock();
+        (ui.draft.api.clone(), ui.optional.clone(), ui.api_key_revealed)
+    };
 
     let provider_card = settings_card("api-provider", "Provider", Some("How to reach the translation model."), {
-        let idx = snap.provider_idx;
+        let idx = match api.provider {
+            ModelProvider::OpenaiCompatible => 0,
+            ModelProvider::GrokCli => 1,
+            ModelProvider::CodexCli => 2,
+        };
         let cx_p = cx.clone();
         let pick = move |choice: i32| {
             let cx = cx_p.clone();
@@ -48,7 +55,10 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
 
     let http_api_card =
         settings_card("api-http-api", "API type", Some("Select standard /chat/completions or newer /responses endpoint."), {
-            let idx = snap.http_api_idx;
+            let idx = match api.http_api {
+                HttpApi::ChatCompletions => 0,
+                HttpApi::Responses => 1,
+            };
             let cx_h = cx.clone();
             let pick = move |choice: i32| {
                 let cx = cx_h.clone();
@@ -71,18 +81,18 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             .vertical_alignment(VerticalAlignment::Center)
         });
 
-    let model_placeholder = match snap.provider {
+    let model_placeholder = match api.provider {
         ModelProvider::GrokCli => "grok-4.5",
         ModelProvider::CodexCli => "gpt-5.6",
         ModelProvider::OpenaiCompatible => "gpt-4o-mini",
     };
-    let model_hint = if snap.provider.is_cli() {
+    let model_hint = if api.provider.is_cli() {
         "Model id passed to the local CLI."
     } else {
         "Model name, e.g. gpt-4o-mini."
     };
 
-    let model_card = card_text("api-model", "Model", Some(model_hint), snap.draft_model.clone(), model_placeholder, {
+    let model_card = card_text("api-model", "Model", Some(model_hint), api.model.clone(), model_placeholder, {
         let cx = cx.clone();
         move |v| {
             cx.with_mut(|ui| {
@@ -92,12 +102,12 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         }
     });
 
-    let priority_tier_card = if snap.provider.supports_priority_tier() {
+    let priority_tier_card = if api.provider.supports_priority_tier() {
         card_toggle(
             "api-priority-mode",
             "Priority mode",
             Some("Request the provider's faster processing tier. May consume more credits."),
-            snap.priority_mode,
+            api.service_tier == ServiceTier::Priority,
             {
                 let cx = cx.clone();
                 move |on| {
@@ -113,7 +123,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         Element::Empty
     };
 
-    let connection = if snap.provider.is_cli() {
+    let connection = if api.provider.is_cli() {
         vstack((
             section_header("Connection"),
             provider_card,
@@ -121,8 +131,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 "api-cli-path",
                 "CLI path",
                 Some("Leave empty to use grok / codex on PATH. Uses your existing CLI login."),
-                snap.cli_path.clone(),
-                snap.provider.default_bin(),
+                api.cli_path.clone(),
+                api.provider.default_bin(),
                 {
                     let cx = cx.clone();
                     move |v| {
@@ -150,7 +160,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 "api-base-url",
                 "Base URL",
                 Some("OpenAI-compatible API endpoint."),
-                snap.base_url.clone(),
+                api.base_url.clone(),
                 "https://api.openai.com/v1",
                 {
                     let cx = cx.clone();
@@ -166,8 +176,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 "api-key",
                 "API key",
                 Some("Stored only on this PC."),
-                snap.api_key.clone(),
-                snap.api_key_revealed,
+                api.api_key.clone(),
+                api_key_revealed,
                 {
                     let cx = cx.clone();
                     move |v| {
@@ -192,7 +202,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 "api-structured-outputs",
                 "Structured outputs",
                 Some("Ask the model to return JSON matching the translation schema. Turn off if the endpoint rejects json_schema."),
-                snap.structured_outputs,
+                api.structured_outputs,
                 {
                     let cx = cx.clone();
                     move |on| {
@@ -207,7 +217,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 "api-stream",
                 "Stream",
                 Some("Receive the response as it is generated. Turn off if the endpoint rejects stream."),
-                snap.stream,
+                api.stream,
                 {
                     let cx = cx.clone();
                     move |on| {
@@ -222,7 +232,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 "api-send-reasoning-content",
                 "Send reasoning",
                 Some("Replay the model's reasoning with assistant messages on follow-up turns. Turn off if the endpoint rejects reasoning_content."),
-                snap.send_reasoning_content,
+                api.send_reasoning_content,
                 {
                     let cx = cx.clone();
                     move |on| {
@@ -237,26 +247,9 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         .spacing(4.0)
     };
 
-    // Note: windows-reactor TeachingTip emits CloseButtonText/ActionButtonText,
-    // but the WinUI backend only handles CloseButton/ActionButton — using
-    // close_button()/action_button() logs "unhandled prop". Light-dismiss only.
-    let tip = TeachingTip::new("Optional parameters")
-        .subtitle("Turn Off to leave a field out of the API request. Controls stay disabled while Off.")
-        .is_open(!snap.optional_tip_seen)
-        .light_dismiss()
-        .on_closed({
-            let cx = cx.clone();
-            move || {
-                cx.with_mut(|ui| {
-                    ui.optional_tip_seen = true;
-                });
-            }
-        })
-        .with_key("api-optional-tip");
-
     let sampling = vstack((
         section_header("Optional parameters"),
-        text_block(if snap.provider.is_cli() {
+        text_block(if api.provider.is_cli() {
             "Turn On to include. Temperature, Top P, and Max tokens apply to HTTP only. Reasoning effort is sent to the CLI."
         } else {
             "Turn On to include in the request. Off = omit."
@@ -264,14 +257,13 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
         .font_size(12.0)
         .foreground(ThemeRef::SecondaryText)
         .wrap(),
-        tip,
         optional_slider_row(
             OptionalSliderParams {
                 key: "api-temperature",
                 header: "Temperature".into(),
                 description: "Higher = more random (0–2).".into(),
-                value: snap.temp_val,
-                enabled: snap.temp_enabled,
+                value: optional.temp_val,
+                enabled: optional.temp_enabled,
                 min: 0.0,
                 max: 2.0,
                 step: 0.05,
@@ -280,7 +272,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
-                        ui.temp_val = v;
+                        ui.optional.temp_val = v;
                         mark_dirty(ui);
                     });
                 }
@@ -289,7 +281,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |on| {
                     cx.with_mut(|ui| {
-                        ui.temp_enabled = on;
+                        ui.optional.temp_enabled = on;
                         mark_dirty(ui);
                     });
                 }
@@ -300,8 +292,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 key: "api-top-p",
                 header: "Top P".into(),
                 description: "Nucleus sampling limit (0–1).".into(),
-                value: snap.top_p_val,
-                enabled: snap.top_p_enabled,
+                value: optional.top_p_val,
+                enabled: optional.top_p_enabled,
                 min: 0.0,
                 max: 1.0,
                 step: 0.01,
@@ -310,7 +302,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
-                        ui.top_p_val = v;
+                        ui.optional.top_p_val = v;
                         mark_dirty(ui);
                     });
                 }
@@ -319,7 +311,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |on| {
                     cx.with_mut(|ui| {
-                        ui.top_p_enabled = on;
+                        ui.optional.top_p_enabled = on;
                         mark_dirty(ui);
                     });
                 }
@@ -330,8 +322,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 key: "api-max-tokens",
                 header: "Max tokens".into(),
                 description: Some("Max reply length. Limit depends on the model.".into()),
-                value: snap.max_tokens_val,
-                enabled: snap.max_tokens_enabled,
+                value: optional.max_tokens_val,
+                enabled: optional.max_tokens_enabled,
                 min: 1.0,
                 max: 1_000_000.0,
                 step: 1.0,
@@ -340,7 +332,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
-                        ui.max_tokens_val = v;
+                        ui.optional.max_tokens_val = v;
                         mark_dirty(ui);
                     });
                 }
@@ -349,7 +341,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |on| {
                     cx.with_mut(|ui| {
-                        ui.max_tokens_enabled = on;
+                        ui.optional.max_tokens_enabled = on;
                         mark_dirty(ui);
                     });
                 }
@@ -360,15 +352,15 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 key: "api-reasoning",
                 header: "Reasoning effort".into(),
                 description: Some("For models that support it: low, medium, or high.".into()),
-                text: snap.reasoning_str.clone(),
-                enabled: snap.reasoning_enabled,
+                text: optional.reasoning_str.clone(),
+                enabled: optional.reasoning_enabled,
                 placeholder: "low | medium | high".into(),
             },
             {
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
-                        ui.reasoning_str = v;
+                        ui.optional.reasoning_str = v;
                         mark_dirty(ui);
                     });
                 }
@@ -377,7 +369,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 let cx = cx.clone();
                 move |on| {
                     cx.with_mut(|ui| {
-                        ui.reasoning_enabled = on;
+                        ui.optional.reasoning_enabled = on;
                         mark_dirty(ui);
                     });
                 }
@@ -392,14 +384,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
             SliderNumberParams {
                 key: "api-timeout",
                 header: "Timeout (seconds)".into(),
-                description: Some(if snap.provider.is_cli() {
+                description: Some(if api.provider.is_cli() {
                     "Idle timeout between CLI events. 0 = wait up to 1 hour.".into()
-                } else if snap.stream {
+                } else if api.stream {
                     "Idle timeout between stream chunks. 0 = wait forever.".into()
                 } else {
                     "Max wait for the HTTP response. 0 = wait forever.".into()
                 }),
-                value: snap.timeout_secs,
+                value: api.request_timeout_secs as f64,
                 min: 0.0,
                 max: 600.0,
                 step: 1.0,
@@ -419,7 +411,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 key: "api-retries",
                 header: "Retries".into(),
                 description: Some("Extra attempts after a failed request.".into()),
-                value: snap.max_retries,
+                value: f64::from(api.max_retries),
                 min: 0.0,
                 max: 10.0,
                 step: 1.0,
@@ -439,7 +431,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
                 key: "api-backoff",
                 header: "Retry delay (ms)".into(),
                 description: Some("Wait before retry; doubles each attempt.".into()),
-                value: snap.retry_backoff,
+                value: api.retry_backoff_ms as f64,
                 min: 50.0,
                 max: 30_000.0,
                 step: 50.0,
@@ -457,7 +449,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u
     ))
     .spacing(4.0);
 
-    settings_page_shell(shared, snap, bump, vstack((connection, sampling, reliability)).spacing(8.0))
+    settings_page_shell(shared, chrome, bump, vstack((connection, sampling, reliability)).spacing(8.0))
 }
 
 fn api_radio(group: &'static str, label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>) -> RadioButton {

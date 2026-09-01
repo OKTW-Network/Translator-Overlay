@@ -6,7 +6,6 @@ use tracing::{debug, error, info, warn};
 use translator_capture::CapturedFrame;
 use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
 use translator_ocr::{OcrEngine, OcrFingerprint, StabilityOutcome};
-use translator_translate::blocks_to_translated_text;
 
 use crate::pipeline::{
     remap::{remap_translations_to_ocr, translated_geometry_changed},
@@ -19,7 +18,7 @@ impl Pipeline {
     pub(crate) fn clear_translated_captions_only(&mut self, reason: &str) {
         let had = {
             let s = self.state.read();
-            !s.latest_translated_blocks.is_empty() || !s.latest_translated_text.is_empty()
+            !s.latest_translated_blocks.is_empty()
         };
         if !had {
             return;
@@ -28,7 +27,6 @@ impl Pipeline {
         {
             let mut s = self.state.write();
             s.latest_translated_blocks.clear();
-            s.latest_translated_text.clear();
         }
         self.last_translated_fp = None;
         self.remap_miss_since = None;
@@ -44,10 +42,7 @@ impl Pipeline {
     /// reappears. Use for true blank screens — not for layout remap misses.
     pub(crate) fn clear_stale_overlay(&mut self, reason: &str) {
         let mut s = self.state.write();
-        let had_content = !s.latest_translated_blocks.is_empty()
-            || !s.latest_ocr_blocks.is_empty()
-            || !s.latest_translated_text.is_empty()
-            || !s.latest_ocr_text.is_empty();
+        let had_content = !s.latest_translated_blocks.is_empty() || !s.latest_ocr_blocks.is_empty();
 
         if !had_content {
             // Still warming up (icons/flicker filtered out) — do not thrash status.
@@ -59,10 +54,7 @@ impl Pipeline {
 
         info!(%reason, "clearing stale overlay");
         s.latest_ocr_blocks.clear();
-        s.latest_ocr_text.clear();
         s.latest_translated_blocks.clear();
-        s.latest_translated_text.clear();
-        s.can_retry_translate = false;
         if s.auto_running {
             s.status = PipelineStatus::Capturing;
         } else {
@@ -206,15 +198,12 @@ impl Pipeline {
             // existing overlay every frame (that made thrash look like "no translate").
             let mut s = self.state.write();
             s.latest_ocr_blocks = raw;
-            s.latest_ocr_text = OcrEngine::blocks_to_text(&s.latest_ocr_blocks);
-            s.can_retry_translate = false;
             s.status = PipelineStatus::WaitingForStable {
                 elapsed_ms: content_elapsed.as_millis() as u64,
             };
             return;
         };
 
-        let text = OcrEngine::blocks_to_text(&blocks);
         let fp = OcrFingerprint::from_blocks(&blocks);
 
         match self.gate.observe(fp) {
@@ -224,8 +213,6 @@ impl Pipeline {
                 {
                     let mut s = self.state.write();
                     s.latest_ocr_blocks = blocks.clone();
-                    s.latest_ocr_text = text.clone();
-                    s.can_retry_translate = false;
                     s.status = PipelineStatus::WaitingForStable { elapsed_ms: 0 };
                 }
                 self.clear_translated_captions_only("fingerprint changed");
@@ -233,7 +220,7 @@ impl Pipeline {
             StabilityOutcome::Waiting { elapsed_ms } => {
                 // Settling a not-yet-emitted page: keep sticky only when most prior
                 // captions still match (partial thrash); otherwise clear.
-                self.apply_sticky_or_clear_low_hit(&blocks, &text, frame.width, frame.height);
+                self.apply_sticky_or_clear_low_hit(&blocks, frame.width, frame.height);
                 let mut s = self.state.write();
                 s.status = PipelineStatus::WaitingForStable { elapsed_ms };
             }
@@ -244,29 +231,24 @@ impl Pipeline {
                 {
                     let mut s = self.state.write();
                     s.latest_ocr_blocks = blocks.clone();
-                    s.latest_ocr_text = text.clone();
                 }
                 self.clear_translated_captions_only("new page ready for translate");
                 // Fresh content session for force-raw after this emit settles.
                 self.raw_content_since = Some(Instant::now());
                 let page = PendingPage {
                     blocks: blocks.clone(),
-                    source_text: text.clone(),
+                    source_text: OcrEngine::blocks_to_text(&blocks),
                     fingerprint,
                     content_width: frame.width,
                     content_height: frame.height,
                 };
                 self.last_page = Some(page.clone());
-                {
-                    let mut s = self.state.write();
-                    s.can_retry_translate = true;
-                }
                 self.start_translate(page, false);
             }
             StabilityOutcome::AlreadyEmitted { .. } => {
                 // Persist-frozen page: keep frozen captions while durable OCR
                 // still matches the last sources. Raw jitter must not hide them.
-                self.apply_sticky_overlay(&blocks, &text, frame.width, frame.height);
+                self.apply_sticky_overlay(&blocks, frame.width, frame.height);
                 if self.state.read().auto_running {
                     let mut s = self.state.write();
                     if !s.latest_translated_blocks.is_empty() {
@@ -278,12 +260,11 @@ impl Pipeline {
     }
 
     /// Sticky remap when hit-rate is high; clear captions on low coverage (page change).
-    fn apply_sticky_or_clear_low_hit(&mut self, blocks: &[OcrBlock], text: &str, frame_w: u32, frame_h: u32) {
+    fn apply_sticky_or_clear_low_hit(&mut self, blocks: &[OcrBlock], frame_w: u32, frame_h: u32) {
         let prior_count = self.state.read().latest_translated_blocks.len();
         if prior_count == 0 {
             let mut s = self.state.write();
             s.latest_ocr_blocks = blocks.to_vec();
-            s.latest_ocr_text = text.to_string();
             return;
         }
         let content_resized = self.capture_content_resized(frame_w, frame_h) || self.last_page.is_none();
@@ -297,16 +278,15 @@ impl Pipeline {
             {
                 let mut s = self.state.write();
                 s.latest_ocr_blocks = blocks.to_vec();
-                s.latest_ocr_text = text.to_string();
             }
             self.clear_translated_captions_only("sticky hit-rate low on page change");
             return;
         }
-        self.apply_sticky_overlay(blocks, text, frame_w, frame_h);
+        self.apply_sticky_overlay(blocks, frame_w, frame_h);
     }
 
     /// Sticky remap + delayed caption-only clear when nothing maps for a grace period.
-    fn apply_sticky_overlay(&mut self, blocks: &[OcrBlock], text: &str, frame_w: u32, frame_h: u32) {
+    fn apply_sticky_overlay(&mut self, blocks: &[OcrBlock], frame_w: u32, frame_h: u32) {
         let content_resized = self.capture_content_resized(frame_w, frame_h) || self.last_page.is_none();
 
         let (had_translated, remapped, geometry_changed) = {
@@ -320,7 +300,6 @@ impl Pipeline {
         {
             let mut s = self.state.write();
             s.latest_ocr_blocks = blocks.to_vec();
-            s.latest_ocr_text = text.to_string();
         }
 
         if remapped.is_empty() {
@@ -349,7 +328,6 @@ impl Pipeline {
             return;
         }
 
-        let translated_text = blocks_to_translated_text(&remapped);
         if let Some(o) = self.overlay.as_ref() {
             if let Some(hwnd) = self.state.read().target_hwnd {
                 let _ = o.attach(hwnd);
@@ -364,7 +342,6 @@ impl Pipeline {
         }
         let mut s = self.state.write();
         s.latest_translated_blocks = remapped;
-        s.latest_translated_text = translated_text;
     }
 
     pub(crate) async fn run_ocr_manual(&mut self, frame: &CapturedFrame) {
@@ -403,7 +380,7 @@ impl Pipeline {
         info!(ocr_ms, blocks = blocks.len(), "manual OCR complete — translating");
         let page = PendingPage {
             blocks: blocks.clone(),
-            source_text: text.clone(),
+            source_text: text,
             fingerprint: fp,
             content_width: frame.width,
             content_height: frame.height,
@@ -412,8 +389,6 @@ impl Pipeline {
         {
             let mut s = self.state.write();
             s.latest_ocr_blocks = blocks;
-            s.latest_ocr_text = text;
-            s.can_retry_translate = true;
         }
         // Manual always forces a new API call (user intent).
         self.start_translate(page, true);
@@ -459,10 +434,7 @@ impl Pipeline {
         {
             let mut s = self.state.write();
             s.latest_ocr_blocks.clear();
-            s.latest_ocr_text.clear();
             s.latest_translated_blocks.clear();
-            s.latest_translated_text.clear();
-            s.can_retry_translate = false;
             s.translate_in_flight = false;
         }
         if let Some(o) = self.overlay.as_ref() {

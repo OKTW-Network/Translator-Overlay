@@ -1,10 +1,10 @@
 //! Operator workspace: session settings above a divider, then preview | results.
 
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 
 use parking_lot::Mutex;
 use translator_capture::list_windows;
-use translator_core::sanitize_regions;
+use translator_core::{NormRect, PreviewInfo, sanitize_regions};
 use windows_reactor::{
     BackgroundExt, ComboBox, ContentDialog, ContentDialogResult, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt,
     PaddingExt, StackPanel, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater, VerticalAlignment, border, button, grid, hstack,
@@ -14,14 +14,93 @@ use windows_reactor::{
 use crate::{
     pipeline::PipelineCommand,
     ui::{
-        chrome::{page_header, status_infobar},
+        chrome::status_infobar,
         preview::capture_preview,
-        shared::{PresetDialog, Snapshot, UiCx, UiShared, commit_pending_preset, selected_preset},
+        shared::{ChromeSnap, PresetDialog, UiCx, UiShared, commit_pending_preset, save_region_presets, selected_preset, truncate},
     },
 };
 
-pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Updater<u32>) -> Element {
+struct DashSnap {
+    auto_running: bool,
+    translate_in_flight: bool,
+    last_ocr_ms: Option<u64>,
+    last_ocr_block_count: u32,
+    preview: PreviewInfo,
+    preview_regions: Vec<NormRect>,
+    ocr_text: String,
+    translation: String,
+    history_preview: String,
+    selected_idx: Option<usize>,
+    selected_hwnd: Option<isize>,
+    target_hwnd: Option<isize>,
+    window_labels: Vec<String>,
+    region_select_active: bool,
+    preset_names: Vec<String>,
+    preset_selected_idx: i32,
+    preset_name_draft: String,
+    preset_dialog: PresetDialog,
+}
+
+fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
+    let ui = shared.lock();
+    let s = ui.state.read();
+    let history_preview = s
+        .history
+        .iter()
+        .take(5)
+        .map(|h| {
+            let src = truncate(&h.source_text, 40);
+            let dst = truncate(&h.translated_text, 40);
+            format!("• {src} → {dst}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let history_preview = if history_preview.is_empty() {
+        "(no history yet)".into()
+    } else {
+        history_preview
+    };
+    DashSnap {
+        auto_running: s.auto_running,
+        translate_in_flight: s.translate_in_flight,
+        last_ocr_ms: s.last_ocr_ms,
+        last_ocr_block_count: s.last_ocr_block_count,
+        preview: s.preview.clone(),
+        preview_regions: if s.region_select_active {
+            s.region_select_draft.clone()
+        } else {
+            s.ocr_regions.clone()
+        },
+        ocr_text: {
+            let t = s.latest_ocr_blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
+            if t.is_empty() { "(no OCR yet)".into() } else { t }
+        },
+        translation: {
+            let t = s
+                .latest_translated_blocks
+                .iter()
+                .map(|b| b.translation.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if t.is_empty() { "(no translation yet)".into() } else { t }
+        },
+        history_preview,
+        selected_idx: ui.selected_idx.filter(|&i| i < ui.windows.len()),
+        selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
+        target_hwnd: s.target_hwnd,
+        window_labels: ui.windows.iter().map(|w| truncate(&w.title, 72)).collect(),
+        region_select_active: s.region_select_active,
+        preset_names: ui.region_presets.iter().map(|p| p.name.clone()).collect(),
+        preset_selected_idx: ui.preset_selected_idx,
+        preset_name_draft: ui.preset_name_draft.clone(),
+        preset_dialog: ui.preset_dialog.clone(),
+    }
+}
+
+pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> Element {
     let cx = UiCx::new(shared, bump);
+    let mut snap = take_dash(shared);
+    let window_labels = mem::take(&mut snap.window_labels);
     let in_flight = snap.translate_in_flight;
     let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
     let ocr_desc = format!("Last OCR: {ocr_time}  ·  {} blocks", snap.last_ocr_block_count);
@@ -33,11 +112,11 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
         .with_key("dash-divider");
 
     let settings = vstack((
-        page_header("Dashboard", None),
-        status_infobar(snap),
-        build_window_row(&cx, snap),
-        build_regions_pane(&cx, snap),
-        preset_confirm_dialog(&cx, snap),
+        text_block("Dashboard").font_size(28.0).bold(),
+        status_infobar(chrome),
+        build_window_row(&cx, &snap, window_labels),
+        build_regions_pane(&cx, &snap),
+        preset_confirm_dialog(&cx, &snap),
     ))
     .spacing(12.0)
     .horizontal_alignment(HorizontalAlignment::Stretch)
@@ -84,10 +163,10 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
     let preview_pane = vstack((
         actions,
         capture_preview(
-            snap.preview_sequence,
-            snap.preview_width,
-            snap.preview_height,
-            snap.preview_rgba.as_ref(),
+            snap.preview.sequence,
+            snap.preview.width,
+            snap.preview.height,
+            snap.preview.rgba.as_ref(),
             &snap.preview_regions,
             bump,
         ),
@@ -107,11 +186,11 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
                     .vertical_alignment(VerticalAlignment::Center),
             ))
             .spacing(12.0),
-            text_block(snap.ocr_text.clone()).wrap().selectable(),
+            text_block(snap.ocr_text).wrap().selectable(),
             text_block("Translation").semibold(),
-            text_block(snap.translation.clone()).wrap().selectable(),
+            text_block(snap.translation).wrap().selectable(),
             text_block("Recent").semibold(),
-            text_block(snap.history_preview.clone()).wrap().selectable(),
+            text_block(snap.history_preview).wrap().selectable(),
         ))
         .spacing(4.0)
         .horizontal_alignment(HorizontalAlignment::Stretch),
@@ -173,12 +252,13 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &Upd
     .into()
 }
 
-fn build_window_row(cx: &UiCx, snap: &Snapshot) -> StackPanel {
-    let window_selected = snap.selected_window_idx;
-    let window_items: Vec<String> = if snap.window_labels.is_empty() {
+fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> StackPanel {
+    let window_selected = snap.selected_idx.map(|i| i as i32).unwrap_or(-1);
+    let window_empty = window_labels.is_empty();
+    let window_items: Vec<String> = if window_empty {
         vec!["(no windows — refresh)".into()]
     } else {
-        snap.window_labels.clone()
+        window_labels
     };
 
     // ComboBox popup opens below the control (MenuFlyout on DropDownButton
@@ -186,7 +266,7 @@ fn build_window_row(cx: &UiCx, snap: &Snapshot) -> StackPanel {
     let mut picker = ComboBox::new(window_items)
         .selected_index(window_selected)
         .placeholder_text("Select window…")
-        .enabled(snap.window_count > 0 && !snap.auto_running)
+        .enabled(!window_empty && !snap.auto_running)
         .on_selection_changed({
             let cx = cx.clone();
             move |idx: i32| {
@@ -248,20 +328,21 @@ fn build_window_row(cx: &UiCx, snap: &Snapshot) -> StackPanel {
         .with_key("dash-window-row")
 }
 
-fn build_regions_pane(cx: &UiCx, snap: &Snapshot) -> StackPanel {
+fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> StackPanel {
     let select_hwnd = if snap.auto_running { snap.target_hwnd } else { snap.selected_hwnd };
     let can_select = select_hwnd.is_some();
     let selecting = snap.region_select_active;
+    let region_count = snap.preview_regions.len();
     let regions_label = if selecting {
         "Selecting…".to_string()
-    } else if snap.ocr_region_count == 0 {
+    } else if region_count == 0 {
         "Whole window".into()
     } else {
-        format!("{} selected", snap.ocr_region_count)
+        format!("{region_count} selected")
     };
     let has_presets = !snap.preset_names.is_empty();
     let preset_selected = has_presets && snap.preset_selected_idx >= 0;
-    let can_save = !snap.region_select_active && snap.ocr_region_count > 0;
+    let can_save = !snap.region_select_active && region_count > 0;
 
     // Distinct keys remount so Accent does not stick after Done
     // (`Button::accent()` cannot be cleared via Prop Unset).
@@ -326,7 +407,7 @@ fn build_regions_pane(cx: &UiCx, snap: &Snapshot) -> StackPanel {
         button("Save")
             .tooltip(if snap.region_select_active {
                 "Finish region select (Done) before saving a preset"
-            } else if snap.ocr_region_count == 0 {
+            } else if region_count == 0 {
                 "Select OCR regions first"
             } else {
                 "Save current OCR regions as a named preset"
@@ -377,7 +458,7 @@ fn build_regions_pane(cx: &UiCx, snap: &Snapshot) -> StackPanel {
         select_btn,
         button("Clear")
             .tooltip("Recognize text on the whole window")
-            .enabled(selecting || snap.ocr_region_count > 0)
+            .enabled(selecting || region_count > 0)
             .on_click({
                 let cx = cx.clone();
                 move || {
@@ -412,7 +493,7 @@ fn build_regions_pane(cx: &UiCx, snap: &Snapshot) -> StackPanel {
     .with_key("dash-regions-pane")
 }
 
-fn preset_name_row(cx: &UiCx, snap: &Snapshot) -> Element {
+fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> Element {
     if !matches!(snap.preset_dialog, PresetDialog::SaveName) {
         return Element::Empty;
     }
@@ -477,7 +558,7 @@ fn preset_name_row(cx: &UiCx, snap: &Snapshot) -> Element {
     .into()
 }
 
-fn preset_confirm_dialog(cx: &UiCx, snap: &Snapshot) -> ContentDialog {
+fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> ContentDialog {
     let (open, title, body, primary) = match &snap.preset_dialog {
         PresetDialog::Overwrite { name } => (true, "Overwrite preset?", format!("Replace the regions saved in \"{name}\"?"), "Overwrite"),
         PresetDialog::Delete { name } => (true, "Delete preset?", format!("Delete preset \"{name}\"? This cannot be undone."), "Delete"),
@@ -512,7 +593,7 @@ fn preset_confirm_dialog(cx: &UiCx, snap: &Snapshot) -> ContentDialog {
                             ui.region_presets.retain(|p| p.name != name);
                             ui.preset_selected_idx = -1;
                             ui.preset_name_draft.clear();
-                            if let Err(e) = crate::ui::shared::save_region_presets(ui) {
+                            if let Err(e) = save_region_presets(ui) {
                                 ui.state.write().set_error(e);
                             }
                         }

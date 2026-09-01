@@ -15,22 +15,11 @@ use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFing
 use translator_overlay::{OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
-use crate::pipeline::PipelineCommand;
+use crate::pipeline::{PipelineCommand, ping_ui};
 
 pub type SharedState = Arc<RwLock<AppState>>;
 pub type CmdRx = mpsc::UnboundedReceiver<PipelineCommand>;
-
-/// UI → pipeline command sender (safe to call from the WinUI thread).
-#[derive(Clone, Debug)]
-pub struct CmdTx {
-    tx: mpsc::UnboundedSender<PipelineCommand>,
-}
-
-impl CmdTx {
-    pub fn send(&self, cmd: PipelineCommand) -> Result<(), mpsc::error::SendError<PipelineCommand>> {
-        self.tx.send(cmd)
-    }
-}
+pub type CmdTx = mpsc::UnboundedSender<PipelineCommand>;
 
 pub(crate) struct InflightTranslate {
     pub cancel: CancellationToken,
@@ -86,8 +75,7 @@ pub(crate) struct Pipeline {
 }
 
 pub fn spawn_pipeline(state: SharedState) -> (CmdTx, tokio::task::JoinHandle<()>) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let cmd_tx = CmdTx { tx };
+    let (cmd_tx, rx) = mpsc::unbounded_channel();
     let join = tokio::spawn(async move {
         let mut pipeline = Pipeline::new(state).await;
         pipeline.run(rx).await;
@@ -144,7 +132,7 @@ impl Pipeline {
             }
 
             self.drive_capture().await;
-            crate::pipeline::ping_ui();
+            ping_ui();
             let wait = self.next_wait();
             match next_event(&mut rx, self.inflight.as_mut(), self.model_load.as_mut(), self.overlay.as_mut(), wait).await {
                 PipelineEvent::Command(None) => return,
@@ -171,7 +159,7 @@ impl Pipeline {
                 }
                 PipelineEvent::Tick => continue,
             }
-            crate::pipeline::ping_ui();
+            ping_ui();
         }
     }
 
@@ -212,26 +200,10 @@ impl Pipeline {
                     }
                 }
             }
-            PipelineCommand::RetryTranslate => {
-                if self.inflight.is_some() {
-                    warn!("retry ignored — translation already in flight");
-                } else if let Some(page) = self.last_page.clone() {
-                    // Force re-translate even if content fingerprint matches.
-                    self.last_translated_fp = None;
-                    self.start_translate(page, true);
-                } else {
-                    self.state.write().set_error("nothing to retry".to_string());
-                }
-            }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg).await,
             PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
             PipelineCommand::StopCapture => self.stop_capture(),
             PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
-            PipelineCommand::CancelRegionSelect => {
-                if let Some(o) = self.overlay.as_ref() {
-                    let _ = o.cancel_region_select();
-                }
-            }
             PipelineCommand::ConfirmRegionSelect => {
                 if let Some(o) = self.overlay.as_ref() {
                     let _ = o.confirm_region_select();
@@ -394,16 +366,12 @@ impl Pipeline {
         // Drop OCR + caption state so sticky remap cannot resurrect a prior session.
         let mut s = self.state.write();
         s.latest_ocr_blocks.clear();
-        s.latest_ocr_text.clear();
         s.latest_translated_blocks.clear();
-        s.latest_translated_text.clear();
-        s.can_retry_translate = false;
         s.translate_in_flight = false;
     }
 
     pub(crate) fn update_preview(&self, frame: &CapturedFrame) {
         let mut s = self.state.write();
-        s.frame_count = frame.sequence;
         s.preview.width = frame.width;
         s.preview.height = frame.height;
         s.preview.sequence = frame.sequence;
@@ -501,43 +469,28 @@ async fn next_event(
         }
     };
 
-    match (inflight, model_load) {
-        (Some(job), Some(model)) => {
-            tokio::select! {
-                biased;
-                cmd = rx.recv() => PipelineEvent::Command(cmd),
-                result = &mut job.rx => PipelineEvent::Translate(result),
-                _ = model.rx.changed() => PipelineEvent::ModelLoad,
-                ev = overlay_event => PipelineEvent::Overlay(ev),
-                () = sleep_or_pending(wait) => PipelineEvent::Tick,
-            }
+    let translate = async {
+        match inflight {
+            Some(job) => (&mut job.rx).await,
+            None => std::future::pending().await,
         }
-        (Some(job), None) => {
-            tokio::select! {
-                biased;
-                cmd = rx.recv() => PipelineEvent::Command(cmd),
-                result = &mut job.rx => PipelineEvent::Translate(result),
-                ev = overlay_event => PipelineEvent::Overlay(ev),
-                () = sleep_or_pending(wait) => PipelineEvent::Tick,
+    };
+    let model = async {
+        match model_load {
+            Some(m) => {
+                let _ = m.rx.changed().await;
             }
+            None => std::future::pending().await,
         }
-        (None, Some(model)) => {
-            tokio::select! {
-                biased;
-                cmd = rx.recv() => PipelineEvent::Command(cmd),
-                _ = model.rx.changed() => PipelineEvent::ModelLoad,
-                ev = overlay_event => PipelineEvent::Overlay(ev),
-                () = sleep_or_pending(wait) => PipelineEvent::Tick,
-            }
-        }
-        (None, None) => {
-            tokio::select! {
-                biased;
-                cmd = rx.recv() => PipelineEvent::Command(cmd),
-                ev = overlay_event => PipelineEvent::Overlay(ev),
-                () = sleep_or_pending(wait) => PipelineEvent::Tick,
-            }
-        }
+    };
+
+    tokio::select! {
+        biased;
+        cmd = rx.recv() => PipelineEvent::Command(cmd),
+        result = translate => PipelineEvent::Translate(result),
+        _ = model => PipelineEvent::ModelLoad,
+        ev = overlay_event => PipelineEvent::Overlay(ev),
+        () = sleep_or_pending(wait) => PipelineEvent::Tick,
     }
 }
 

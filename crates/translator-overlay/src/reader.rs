@@ -255,7 +255,7 @@ impl ReaderWindow {
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("reader paint bitmap missing".into()))?;
-        crate::gfx::text::draw_text_label(hdc, hfont, buf, surface, text_box, &self.last_text, LabelStyle {
+        text::draw_text_label(hdc, hfont, buf, surface, text_box, &self.last_text, LabelStyle {
             font_px: self.font_px,
             color: fg,
         })?;

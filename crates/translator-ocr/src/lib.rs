@@ -9,6 +9,7 @@ mod models;
 mod stability;
 
 use thiserror::Error;
+use translator_core::PathError;
 
 pub use crate::{crop::*, download::*, engine::*, filter::*, merge::*, models::*, stability::*};
 
@@ -23,7 +24,7 @@ pub enum OcrError {
     #[error("model download: {0}")]
     Download(String),
     #[error(transparent)]
-    Path(#[from] translator_core::PathError),
+    Path(#[from] PathError),
     #[error("{0}")]
     Other(String),
 }

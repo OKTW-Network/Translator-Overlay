@@ -21,6 +21,7 @@ use windows_capture::{
 
 use crate::{
     CaptureError, CapturedFrame,
+    client_area::crop_frame_to_client,
     resize_watch::{IN_MOVESIZE, ResizeWatch},
 };
 
@@ -189,19 +190,6 @@ impl CaptureSession {
         Ok(())
     }
 
-    /// Start capturing the current foreground window.
-    pub fn start_foreground(&mut self, min_interval_ms: u64) -> Result<(), CaptureError> {
-        let window = Window::foreground().map_err(|e| CaptureError::Window(e.to_string()))?;
-        let title = window.title().unwrap_or_else(|_| "Foreground".into());
-        let hwnd = window.as_raw_hwnd() as isize;
-        self.start_window(hwnd, title, min_interval_ms)
-    }
-
-    /// Stop the capture stream but keep the target window (overlay tracking).
-    pub fn stop_stream_keep_target(&mut self) {
-        self.stop_stream_inner(true);
-    }
-
     /// Stop capture if running and clear the target window.
     pub fn stop(&mut self) {
         self.stop_stream_inner(false);
@@ -265,7 +253,7 @@ impl CaptureSession {
 
     fn crop_to_client(&self, frame: CapturedFrame) -> CapturedFrame {
         match self.target_hwnd() {
-            Some(hwnd) => crate::client_area::crop_frame_to_client(hwnd, frame),
+            Some(hwnd) => crop_frame_to_client(hwnd, frame),
             None => frame,
         }
     }

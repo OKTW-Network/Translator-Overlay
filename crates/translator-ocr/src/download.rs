@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use futures_util::StreamExt;
 use tokio::{fs, io::AsyncWriteExt, sync::watch};
 use tracing::{info, warn};
 use translator_core::{ModelTier, OcrConfig, PipelineStatus};
@@ -251,7 +250,7 @@ async fn download_one(
 }
 
 async fn write_download_part(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     art: &ModelArtifact,
     part_path: &Path,
     dest: &Path,
@@ -264,7 +263,6 @@ async fn write_download_part(
         .map_err(|e| OcrError::Download(format!("create {}: {e}", part_path.display())))?;
 
     let mut downloaded = 0_u64;
-    let mut stream = response.bytes_stream();
     on_progress(DownloadProgress {
         file_name: art.file_name.to_string(),
         file_index,
@@ -273,8 +271,11 @@ async fn write_download_part(
         bytes_total: art.expected_bytes,
     });
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| OcrError::Download(format!("{}: stream: {e}", art.file_name)))?;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| OcrError::Download(format!("{}: stream: {e}", art.file_name)))?
+    {
         file.write_all(&chunk)
             .await
             .map_err(|e| OcrError::Download(format!("{}: write: {e}", art.file_name)))?;

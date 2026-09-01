@@ -20,16 +20,13 @@ impl Pipeline {
         {
             let mut s = self.state.write();
             s.latest_ocr_blocks = page.blocks.clone();
-            s.latest_ocr_text = page.source_text.clone();
         }
 
         if page.blocks.is_empty() || page.source_text.trim().is_empty() {
             self.last_translated_fp = None;
             self.last_page = None;
             let mut s = self.state.write();
-            s.latest_translated_text.clear();
             s.latest_translated_blocks.clear();
-            s.can_retry_translate = false;
             s.translate_in_flight = false;
             if s.auto_running {
                 s.status = PipelineStatus::Capturing;
@@ -93,7 +90,6 @@ impl Pipeline {
             apply_cached_preview(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
         }
 
-        // Canonical conversation prepare (shared with translate_blocks_*).
         let prepared = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
 
         let cancel = CancellationToken::new();
@@ -107,7 +103,6 @@ impl Pipeline {
             s.status = PipelineStatus::Translating;
             s.translate_in_flight = true;
             s.last_error = None;
-            s.can_retry_translate = true;
         }
 
         tokio::spawn(async move {
@@ -169,12 +164,11 @@ impl Pipeline {
                 }
                 Err(e) => {
                     error!(error = %e, "failed to merge translation");
-                    // Drop the pending user turn so Retry re-sends a clean request
-                    // (do not store invalid model JSON as assistant context).
+                    // Drop the pending user turn so the next translate does not
+                    // store invalid model JSON as assistant context.
                     self.conversation.rollback_user_turn();
                     let mut s = self.state.write();
                     s.translate_in_flight = false;
-                    s.can_retry_translate = true;
                     s.set_error(format!("translate parse: {e}"));
                 }
             },
@@ -183,7 +177,6 @@ impl Pipeline {
                 self.conversation.rollback_user_turn();
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
-                s.can_retry_translate = true;
                 if s.auto_running {
                     s.status = PipelineStatus::Capturing;
                 } else {
@@ -195,7 +188,6 @@ impl Pipeline {
                 self.conversation.rollback_user_turn();
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
-                s.can_retry_translate = true;
                 s.set_error(format!("translate: {e}"));
             }
         }
@@ -219,10 +211,8 @@ fn apply_cached_preview(
         }
     }
 
-    let translated_text = blocks_to_translated_text(&translated);
     let mut s = state.write();
     s.latest_translated_blocks = translated;
-    s.latest_translated_text = translated_text;
 }
 
 fn apply_translated(
@@ -244,11 +234,9 @@ fn apply_translated(
     }
 
     let mut s = state.write();
-    s.latest_translated_blocks = translated.clone();
-    s.latest_translated_text = translated_text.clone();
-    s.push_history(source_text, translated_text, translated);
+    s.latest_translated_blocks = translated;
+    s.push_history(source_text, translated_text);
     s.translate_in_flight = false;
-    s.can_retry_translate = true;
     s.last_error = None;
     s.status = PipelineStatus::OverlayActive;
 }

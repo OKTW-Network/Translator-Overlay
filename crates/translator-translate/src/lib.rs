@@ -18,10 +18,13 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use translator_core::{ApiConfig, HttpApi, OcrBlock, TranslatedBlock, TranslationConfig};
 
-use crate::http::{chat_completion_body, completion_from_http_body, responses_request_body};
 pub use crate::{
     cache::{CacheResolve, TranslationCache},
     http::{ChatMessage, ResponseItem},
+};
+use crate::{
+    cli::CliBackend,
+    http::{chat_completion_body, completion_from_http_body, responses_request_body},
 };
 
 #[derive(Debug, Error)]
@@ -144,10 +147,6 @@ impl Conversation {
 
     pub fn push_user(&mut self, content: impl Into<String>) {
         self.items.push(ResponseItem::message("user", content));
-    }
-
-    pub fn push_assistant(&mut self, content: impl Into<String>) {
-        self.items.push(ResponseItem::message("assistant", content));
     }
 
     /// Append a successful model turn. `replay_items` (Responses) replace a plain assistant message on the tape.
@@ -287,12 +286,7 @@ where
     deserializer.deserialize_any(IdVisitor)
 }
 
-/// Merge LLM JSON output with original OCR blocks.
-pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<Vec<TranslatedBlock>, TranslateError> {
-    Ok(merge_translations_detailed(source, response_json)?.blocks)
-}
-
-/// Same as [`merge_translations`], plus which block ids the model actually returned.
+/// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
 pub fn merge_translations_detailed(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
     let parsed = parse_translation_blocks(response_json)?;
     let model_ids: HashSet<u32> = parsed.iter().map(|b| b.id).collect();
@@ -512,7 +506,7 @@ fn truncate_for_error(s: &str, max_chars: usize) -> String {
 }
 
 struct CliHandle {
-    backend: tokio::sync::Mutex<cli::CliBackend>,
+    backend: tokio::sync::Mutex<CliBackend>,
     epoch: AtomicU64,
 }
 
@@ -538,7 +532,7 @@ impl TranslateClient {
             http: build_http_client(&config),
             config,
             cli: Arc::new(CliHandle {
-                backend: tokio::sync::Mutex::new(cli::CliBackend::new()),
+                backend: tokio::sync::Mutex::new(CliBackend::new()),
                 epoch: AtomicU64::new(0),
             }),
         }
@@ -712,74 +706,9 @@ pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
     blocks.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>().join("\n")
 }
 
-/// High-level translate step with conversation reuse + compression.
-pub async fn translate_blocks(
-    client: &TranslateClient,
-    conversation: &mut Conversation,
-    translation_cfg: &TranslationConfig,
-    blocks: &[OcrBlock],
-) -> Result<Vec<TranslatedBlock>, TranslateError> {
-    translate_blocks_cancellable(client, conversation, translation_cfg, blocks, None, false, &CancellationToken::new()).await
-}
-
-/// Same as [`translate_blocks`], but aborts when `cancel` is triggered.
-///
-/// When `cache` is `Some` and `force` is false, cached block texts are omitted
-/// from the HTTP payload. On failure / cancel the pending user message is popped
-/// so the conversation stays consistent for a later retry.
-pub async fn translate_blocks_cancellable(
-    client: &TranslateClient,
-    conversation: &mut Conversation,
-    translation_cfg: &TranslationConfig,
-    blocks: &[OcrBlock],
-    mut cache: Option<&mut TranslationCache>,
-    force: bool,
-    cancel: &CancellationToken,
-) -> Result<Vec<TranslatedBlock>, TranslateError> {
-    if blocks.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let resolved = cache.as_mut().map(|c| c.resolve(blocks, translation_cfg, force));
-    if let Some(resolved) = resolved.as_ref()
-        && resolved.misses.is_empty()
-    {
-        return Ok(TranslationCache::stitch(blocks, &resolved.hits, &[]));
-    }
-
-    let to_send: &[OcrBlock] = resolved.as_ref().map(|r| r.misses.as_slice()).unwrap_or(blocks);
-    let prepared = conversation.begin_translate_request(translation_cfg, to_send);
-
-    let completion = match client.complete_with_retry_on(&prepared, cancel, |_, _, _, _| {}).await {
-        Ok(c) => c,
-        Err(e) => {
-            conversation.rollback_user_turn();
-            return Err(e);
-        }
-    };
-
-    match merge_translations_detailed(to_send, &completion.text) {
-        Ok(outcome) => {
-            conversation.commit_completion(&completion);
-            if let (Some(cache), Some(resolved)) = (cache.as_mut(), resolved.as_ref()) {
-                cache.store_model_pairs(&resolved.misses, &outcome.blocks, &outcome.model_ids, translation_cfg);
-            }
-            let translated = match resolved.as_ref() {
-                Some(resolved) => TranslationCache::stitch(blocks, &resolved.hits, &outcome.blocks),
-                None => outcome.blocks,
-            };
-            Ok(translated)
-        }
-        Err(e) => {
-            conversation.rollback_user_turn();
-            Err(e)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use translator_core::{ApiConfig, Rect};
+    use translator_core::{ApiConfig, ModelProvider, Rect, ServiceTier};
 
     use super::*;
     use crate::http::extract_responses_completion;
@@ -800,14 +729,14 @@ mod tests {
     #[test]
     fn changing_service_tier_resets_cli_session() {
         let api = ApiConfig {
-            provider: translator_core::ModelProvider::CodexCli,
+            provider: ModelProvider::CodexCli,
             ..ApiConfig::default()
         };
         let mut client = TranslateClient::new(api.clone());
         let initial_epoch = client.cli.epoch.load(Ordering::SeqCst);
 
         let mut updated = api;
-        updated.service_tier = translator_core::ServiceTier::Priority;
+        updated.service_tier = ServiceTier::Priority;
         client.update_config(updated);
 
         assert_eq!(client.cli.epoch.load(Ordering::SeqCst), initial_epoch + 1);
@@ -832,7 +761,7 @@ mod tests {
         conv.ensure_system("sys");
         for i in 0..5 {
             conv.push_user(format!("u{i}"));
-            conv.push_assistant(format!("a{i}"));
+            conv.items.push(ResponseItem::message("assistant", format!("a{i}")));
         }
         assert_eq!(conv.turn_count(), 5);
         conv.compress_if_needed(5, 2);
@@ -853,7 +782,7 @@ mod tests {
             source_lines: 1,
         }];
         let json = r#"{"blocks":[{"id":1,"translation":"T1"}]}"#;
-        let out = merge_translations(&source, json).unwrap();
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T1");
     }
 
@@ -862,7 +791,7 @@ mod tests {
         let mut conv = Conversation::empty();
         conv.ensure_system("sys");
         conv.push_user("u");
-        conv.push_assistant("a");
+        conv.items.push(ResponseItem::message("assistant", "a"));
         let old_session = conv.session_id.clone();
         conv.clear();
         assert!(conv.messages().is_empty());
@@ -885,7 +814,7 @@ mod tests {
         conv.ensure_system("sys");
         let id = conv.session_id.clone();
         conv.push_user("u");
-        conv.push_assistant("a");
+        conv.items.push(ResponseItem::message("assistant", "a"));
         assert_eq!(conv.session_id, id);
     }
 
@@ -907,7 +836,7 @@ mod tests {
         conv.ensure_system("sys");
         for i in 0..2 {
             conv.push_user(format!("u{i}"));
-            conv.push_assistant(format!("a{i}"));
+            conv.items.push(ResponseItem::message("assistant", format!("a{i}")));
         }
         let id = conv.session_id.clone();
         conv.compress_if_needed(2, 8);
@@ -925,7 +854,7 @@ mod tests {
                 "type": "reasoning",
                 "encrypted_content": format!("enc{i}"),
             })));
-            conv.push_assistant(format!("a{i}"));
+            conv.items.push(ResponseItem::message("assistant", format!("a{i}")));
         }
         let old_session = conv.session_id.clone();
         conv.compress_if_needed(5, 2);
@@ -1113,7 +1042,7 @@ mod tests {
             source_lines: 1,
         }];
         let json = "```json\n{\"blocks\":[{\"id\":0,\"translation\":\"T2\"}]}\n```";
-        let out = merge_translations(&source, json).unwrap();
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T2");
     }
 
@@ -1136,7 +1065,7 @@ mod tests {
   ],
 }
 Hope that helps!"#;
-        let out = merge_translations(&source, json).unwrap();
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T3");
     }
 
@@ -1150,7 +1079,7 @@ Hope that helps!"#;
             source_lines: 1,
         }];
         let json = r#"{"blocks":[{"id":"2","text":"T4"}]}"#;
-        let out = merge_translations(&source, json).unwrap();
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T4");
     }
 
@@ -1189,7 +1118,7 @@ Hope that helps!"#;
             source_lines: 1,
         }];
         let json = r#"[{"id":1,"translation":"T5"}]"#;
-        let out = merge_translations(&source, json).unwrap();
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T5");
     }
 

@@ -4,10 +4,7 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-anyhow = { workspace = true }
 bytes = { workspace = true }
-chrono = { version = "0.4.45", features = ["serde"] }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = "1.1.4"

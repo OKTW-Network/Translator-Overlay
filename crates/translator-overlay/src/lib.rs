@@ -13,9 +13,4 @@ mod host;
 mod picker;
 mod reader;
 
-pub use crate::{
-    command::OverlayEvent,
-    controller::OverlayController,
-    error::OverlayError,
-    gfx::draw::{Rgba, SurfaceRect, SurfaceSize, argb_channels, map_rect_to_surface},
-};
+pub use crate::{command::OverlayEvent, controller::OverlayController, error::OverlayError, gfx::draw::argb_channels};

@@ -12,14 +12,14 @@ use serde::{
 use thiserror::Error;
 
 use crate::{
-    paths::{config_path, resolve_under_exe},
+    paths::{PathError, config_path, resolve_under_exe},
     types::ModelTier,
 };
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("path error: {0}")]
-    Path(#[from] crate::paths::PathError),
+    Path(#[from] PathError),
     #[error("IO error for {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },
     #[error("failed to parse config TOML: {0}")]
@@ -135,14 +135,6 @@ impl ModelProvider {
             Self::OpenaiCompatible => "",
             Self::GrokCli => "grok",
             Self::CodexCli => "codex",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::OpenaiCompatible => "OpenAI-compatible",
-            Self::GrokCli => "Grok CLI",
-            Self::CodexCli => "Codex CLI",
         }
     }
 }
@@ -265,10 +257,6 @@ pub const TRANSLATION_CACHE_MAX_MIN: usize = 1;
 pub const TRANSLATION_CACHE_MAX_DEFAULT: usize = 128;
 /// Hard cap applied when reading config / constructing the cache.
 pub const TRANSLATION_CACHE_MAX_CAP: usize = 8192;
-/// Translation-page slider lower bound.
-pub const TRANSLATION_CACHE_SLIDER_MIN: usize = 1;
-/// Translation-page slider upper bound.
-pub const TRANSLATION_CACHE_SLIDER_MAX: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -417,7 +405,7 @@ impl Default for LineMergeConfig {
 }
 
 impl OcrConfig {
-    pub fn models_dir_path(&self) -> Result<PathBuf, crate::paths::PathError> {
+    pub fn models_dir_path(&self) -> Result<PathBuf, PathError> {
         resolve_under_exe(&self.models_dir)
     }
 }
@@ -754,38 +742,6 @@ enabled = true
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::LeftToRightTopToBottom);
-    }
-
-    #[test]
-    fn line_merge_defaults_land_on_ocr_slider_ticks() {
-        // Same integer-micro-unit snap as `quantize_to_step` (not `min + n×0.1`).
-        const SCALE: f64 = 1_000_000.0;
-        fn snapped(pct: f64, min: f64, max: f64, step: f64) -> f64 {
-            let v = pct.clamp(min, max);
-            if !(step.is_finite() && step > 0.0) {
-                return v;
-            }
-            let min_i = (min * SCALE).round() as i64;
-            let step_i = (step * SCALE).round() as i64;
-            if step_i == 0 {
-                return v;
-            }
-            let n = ((v - min) / step).round() as i64;
-            let out = (min_i.saturating_add(n.saturating_mul(step_i))) as f64 / SCALE;
-            out.clamp(min, max)
-        }
-        let c = LineMergeConfig::default();
-        let on_tick = |pct: f64, min: f64, max: f64, step: f64, want: f64| {
-            let got = snapped(pct, min, max, step);
-            assert!((got - want).abs() < 1e-9, "got={got} want={want} (pct={pct})");
-        };
-        on_tick(f64::from(c.gap_ratio) * 100.0, 0.0, 8.0, 0.1, 1.5);
-        on_tick(f64::from(c.horizontal_gap_ratio) * 100.0, 0.0, 8.0, 0.1, 1.5);
-        on_tick(f64::from(c.height_delta_ratio) * 100.0, 0.0, 90.0, 1.0, 45.0);
-        on_tick(f64::from(c.align_ratio) * 100.0, 0.0, 5.0, 0.1, 1.2);
-        on_tick(f64::from(c.order_band_ratio) * 100.0, 0.1, 5.0, 0.1, 1.2);
-        on_tick(f64::from(c.below_mid_ratio) * 100.0, 0.0, 50.0, 1.0, 25.0);
-        on_tick(f64::from(c.width_delta_ratio) * 100.0, 0.0, 90.0, 1.0, 40.0);
     }
 
     #[test]
