@@ -11,12 +11,10 @@ mod page_translation;
 mod preview;
 mod shared;
 
-use std::time::Duration;
-
 use windows_reactor::{
-    Backdrop, BackgroundExt, Color, DispatcherTimer, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt,
-    NavViewItem, NavigationView, NavigationViewPaneDisplayMode, PaddingExt, RenderCx, RequestedTheme, ResourceExt, Symbol, Thickness,
-    TitleBar, VerticalAlignment, border, grid, scroll_viewer, set_backdrop, set_requested_theme,
+    Backdrop, BackgroundExt, Color, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, NavViewItem, NavigationView,
+    NavigationViewPaneDisplayMode, PaddingExt, RenderCx, RequestedTheme, ResourceExt, Symbol, Thickness, TitleBar, VerticalAlignment,
+    border, grid, scroll_viewer, set_backdrop, set_requested_theme,
 };
 
 use crate::ui::{
@@ -39,21 +37,21 @@ pub fn app(cx: &mut RenderCx) -> Element {
     });
     let _scheme = cx.use_color_scheme();
 
+    crate::ui::nav_header::retarget();
+    crate::pipeline::install_ui_ping(cx.use_ui_marshaller(), cx.host_id());
+
     let shared = cx.use_ref(make_shared());
     let (tick, bump_tick) = cx.use_reducer(0_u32);
     let _ = tick;
     let (page_tag, set_page) = cx.use_state(String::from("dashboard"));
     let (is_pane_open, set_pane_open) = cx.use_state(true);
 
-    cx.use_effect_with_cleanup((), {
+    cx.use_effect((), {
         let bump_tick = bump_tick.clone();
         move || {
-            let timer = DispatcherTimer::new(Duration::from_millis(250), move || {
-                crate::ui::nav_header::retarget();
+            if !crate::ui::nav_header::retarget() {
                 bump_tick.call(|n| n.wrapping_add(1));
-            })
-            .ok();
-            Some(move || drop(timer))
+            }
         }
     });
 

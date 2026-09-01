@@ -299,8 +299,8 @@ pub fn draft_differs_from(ui: &UiShared, live: &AppConfig) -> bool {
 /// True only when the form actually differs from the running config.
 ///
 /// Do not trust a sticky dirty flag: Slider/NumberBox/TextBox often fire
-/// change events when re-bound on the 250ms UI tick, which would mark dirty
-/// even when nothing changed.
+/// change events when re-bound on a snapshot-driven rerender, which would
+/// mark dirty even when nothing changed.
 ///
 /// Acquires `state` once; safe to call without an existing state lock.
 pub fn is_settings_dirty(ui: &UiShared) -> bool {

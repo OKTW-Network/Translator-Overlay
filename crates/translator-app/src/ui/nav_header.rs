@@ -133,20 +133,23 @@ fn inspectable(ptr: *mut core::ffi::c_void) -> Result<IInspectable> {
 }
 
 /// Replace TextBlock Content on every `NavigationViewItemHeader` with a boxed string.
-pub fn retarget() {
+/// Returns `true` once that has succeeded.
+pub fn retarget() -> bool {
     if DONE.load(Ordering::Relaxed) {
-        return;
+        return true;
     }
     let Some(content) =
         windows_reactor::with_active_host(|host| host.window().cast::<IWindow>().ok().and_then(|w| w.content().ok())).flatten()
     else {
-        return;
+        return false;
     };
     if let Some(nav) = find_nav(&content)
         && retarget_headers(&nav)
     {
         DONE.store(true, Ordering::Relaxed);
+        return true;
     }
+    false
 }
 
 fn find_nav(root: &IInspectable) -> Option<INavigationView> {

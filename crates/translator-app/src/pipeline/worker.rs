@@ -144,6 +144,7 @@ impl Pipeline {
             }
 
             self.drive_capture().await;
+            crate::pipeline::ping_ui();
             let wait = self.next_wait();
             match next_event(&mut rx, self.inflight.as_mut(), self.model_load.as_mut(), self.overlay.as_mut(), wait).await {
                 PipelineEvent::Command(None) => return,
@@ -168,8 +169,9 @@ impl Pipeline {
                         self.apply_overlay_event(ev);
                     }
                 }
-                PipelineEvent::Tick => {}
+                PipelineEvent::Tick => continue,
             }
+            crate::pipeline::ping_ui();
         }
     }
 

@@ -309,7 +309,7 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &Snapshot, bump: &U
                 ui.settings_dirty = false;
                 ui.form_error = None;
                 // Optimistic: align live config now so dirty clears this frame
-                // (pipeline ApplyConfig is async relative to the UI tick).
+                // (pipeline ApplyConfig is async).
                 {
                     let mut s = ui.state.write();
                     s.config = cfg.clone();
