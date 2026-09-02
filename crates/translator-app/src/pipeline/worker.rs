@@ -50,6 +50,25 @@ pub(crate) struct PendingPage {
     pub content_height: u32,
 }
 
+/// Raw OCR of one capture frame, keyed by frame identity.
+///
+/// Static windows stop producing WGC frames; re-running inference on the same
+/// frame would burn GPU for identical output. Only the inference is skipped —
+/// persist / stability gate / remap still consume the cached blocks every tick,
+/// which is how the gate accumulates its stable-duration clock.
+pub(crate) struct LastRawOcr {
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub blocks: Vec<OcrBlock>,
+}
+
+impl LastRawOcr {
+    pub(crate) fn matches(&self, frame: &CapturedFrame) -> bool {
+        self.sequence == frame.sequence && self.width == frame.width && self.height == frame.height
+    }
+}
+
 /// Owned pipeline state machine (one Tokio task).
 pub(crate) struct Pipeline {
     pub state: SharedState,
@@ -65,6 +84,7 @@ pub(crate) struct Pipeline {
     pub inflight: Option<InflightTranslate>,
     pub model_load: Option<InflightModelLoad>,
     pub ocr_tier: ModelTier,
+    pub last_raw_ocr: Option<LastRawOcr>,
     /// Wall-clock: raw OCR first went empty (may still have hysteresis tracks).
     pub raw_empty_since: Option<Instant>,
     /// Wall-clock since raw OCR last became non-empty.
@@ -112,6 +132,7 @@ impl Pipeline {
             inflight: None,
             model_load: None,
             ocr_tier,
+            last_raw_ocr: None,
             raw_empty_since: None,
             raw_content_since: None,
             remap_miss_since: None,
@@ -360,6 +381,7 @@ impl Pipeline {
         }
         self.last_translated_fp = None;
         self.last_page = None;
+        self.last_raw_ocr = None;
         self.raw_empty_since = None;
         self.raw_content_since = None;
         self.remap_miss_since = None;
@@ -372,6 +394,10 @@ impl Pipeline {
 
     pub(crate) fn update_preview(&self, frame: &CapturedFrame) {
         let mut s = self.state.write();
+        // Skip the write when the frame identity is unchanged (stale tick).
+        if s.preview.sequence == frame.sequence && s.preview.width == frame.width && s.preview.height == frame.height {
+            return;
+        }
         s.preview.width = frame.width;
         s.preview.height = frame.height;
         s.preview.sequence = frame.sequence;
@@ -416,7 +442,11 @@ impl Pipeline {
             return;
         }
 
-        self.session.sync_stream();
+        // A restarted stream renumbers frames from 0 — drop the raw-OCR cache so a
+        // repeated sequence is not mistaken for an unchanged frame.
+        if self.session.sync_stream() {
+            self.last_raw_ocr = None;
+        }
         if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
             if self.engine.is_none() {
@@ -498,5 +528,27 @@ async fn sleep_or_pending(wait: Option<Duration>) {
     match wait {
         Some(d) => tokio::time::sleep(d).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(w: u32, h: u32, seq: u64) -> CapturedFrame {
+        CapturedFrame::new(w, h, vec![0u8; (w * h * 4) as usize], seq)
+    }
+
+    #[test]
+    fn last_raw_ocr_matches_only_same_frame_identity() {
+        let cache = LastRawOcr {
+            sequence: 7,
+            width: 320,
+            height: 240,
+            blocks: Vec::new(),
+        };
+        assert!(cache.matches(&frame(320, 240, 7)));
+        assert!(!cache.matches(&frame(320, 240, 8)), "new sequence must miss");
+        assert!(!cache.matches(&frame(640, 480, 7)), "new dimensions must miss");
     }
 }

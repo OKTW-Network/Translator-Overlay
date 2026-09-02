@@ -28,6 +28,8 @@ impl Pipeline {
     }
 
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
+        // Threshold / filter / merge knobs change how raw blocks are derived.
+        self.last_raw_ocr = None;
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier;
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);

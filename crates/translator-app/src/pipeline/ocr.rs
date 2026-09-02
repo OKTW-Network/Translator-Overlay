@@ -9,7 +9,7 @@ use translator_ocr::{OcrEngine, OcrFingerprint, StabilityOutcome};
 
 use crate::pipeline::{
     remap::{remap_translations_to_ocr, translated_geometry_changed},
-    worker::{PendingPage, Pipeline},
+    worker::{LastRawOcr, PendingPage, Pipeline},
 };
 
 impl Pipeline {
@@ -124,29 +124,46 @@ impl Pipeline {
             }
         }
 
-        let ocr_start = Instant::now();
-        let regions = self.ocr_pixel_regions(frame.width, frame.height);
-        let Some(engine) = self.engine.as_ref() else {
-            return;
-        };
-        let raw = match engine
-            .recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions)
-            .await
-        {
-            Ok(b) => b,
-            Err(e) => {
-                error!(error = %e, "OCR failed");
-                self.state.write().set_error(format!("OCR: {e}"));
-                return;
+        // Reuse the raw blocks when the frame is unchanged (static content): skip
+        // only the inference; everything below still runs every tick.
+        let raw = match self.last_raw_ocr.as_ref().filter(|c| c.matches(frame)) {
+            Some(cached) => {
+                debug!(frame = frame.sequence, blocks = cached.blocks.len(), "OCR frame cache hit — skipping inference");
+                cached.blocks.clone()
+            }
+            None => {
+                let ocr_start = Instant::now();
+                let regions = self.ocr_pixel_regions(frame.width, frame.height);
+                let Some(engine) = self.engine.as_ref() else {
+                    return;
+                };
+                let raw = match engine
+                    .recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions)
+                    .await
+                {
+                    Ok(b) => b,
+                    Err(e) => {
+                        error!(error = %e, "OCR failed");
+                        self.state.write().set_error(format!("OCR: {e}"));
+                        return;
+                    }
+                };
+                let ocr_ms = ocr_start.elapsed().as_millis() as u64;
+                {
+                    let mut s = self.state.write();
+                    s.last_ocr_ms = Some(ocr_ms);
+                    s.last_ocr_block_count = raw.len() as u32;
+                }
+                debug!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
+                self.last_raw_ocr = Some(LastRawOcr {
+                    sequence: frame.sequence,
+                    width: frame.width,
+                    height: frame.height,
+                    blocks: raw.clone(),
+                });
+                raw
             }
         };
-        let ocr_ms = ocr_start.elapsed().as_millis() as u64;
-        {
-            let mut s = self.state.write();
-            s.last_ocr_ms = Some(ocr_ms);
-            s.last_ocr_block_count = raw.len() as u32;
-        }
-        debug!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
 
         let content_resized = self.capture_content_resized(frame.width, frame.height);
         if content_resized {
@@ -372,6 +389,13 @@ impl Pipeline {
             s.last_ocr_ms = Some(ocr_ms);
             s.last_ocr_block_count = blocks.len() as u32;
         }
+        // Manual capture always infers, but its result keys the frame for auto ticks.
+        self.last_raw_ocr = Some(LastRawOcr {
+            sequence: frame.sequence,
+            width: frame.width,
+            height: frame.height,
+            blocks: blocks.clone(),
+        });
 
         let text = OcrEngine::blocks_to_text(&blocks);
         let fp = OcrFingerprint::from_blocks(&blocks);
@@ -428,6 +452,7 @@ impl Pipeline {
         self.persist.reset();
         self.last_translated_fp = None;
         self.last_page = None;
+        self.last_raw_ocr = None;
         self.raw_empty_since = None;
         self.raw_content_since = None;
         self.remap_miss_since = None;
