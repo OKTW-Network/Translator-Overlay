@@ -458,6 +458,14 @@ impl Pipeline {
         s.preview.rgba = Some(frame.rgba.clone());
     }
 
+    /// A restarted stream renumbers frames from 0 — drop the raw-OCR cache so a
+    /// repeated sequence is not mistaken for an unchanged frame.
+    fn consume_stream_restart(&mut self) {
+        if self.session.sync_stream() {
+            self.last_raw_ocr = None;
+        }
+    }
+
     async fn manual_capture(&mut self) {
         if self.inflight.is_some() {
             warn!("manual capture ignored — translation in flight (cancel first)");
@@ -476,7 +484,7 @@ impl Pipeline {
             warn!("manual capture ignored — target is being moved or resized");
             return;
         }
-        self.session.sync_stream();
+        self.consume_stream_restart();
         match self.session.latest_frame() {
             Some(frame) => {
                 self.update_preview(&frame);
@@ -496,11 +504,7 @@ impl Pipeline {
             return;
         }
 
-        // A restarted stream renumbers frames from 0 — drop the raw-OCR cache so a
-        // repeated sequence is not mistaken for an unchanged frame.
-        if self.session.sync_stream() {
-            self.last_raw_ocr = None;
-        }
+        self.consume_stream_restart();
 
         // Stale tick (no new frame published): consume the cached blocks without
         // the client-area crop, Win32 queries, or a preview write.
