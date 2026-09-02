@@ -76,20 +76,21 @@ fn watch_rasterization_scale(bump: Updater<u32>) -> impl Fn(windows_reactor::Ima
 ///
 /// Capture frames are normally fully opaque; skip the multiplies then.
 fn rgba_to_premul_bgra(rgba: &[u8]) -> Vec<u8> {
-    let opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
     let mut out = Vec::with_capacity(rgba.len());
-    let mut px_out = [0u8; 4];
-    for px in rgba.chunks_exact(4) {
-        if opaque {
-            px_out = [px[2], px[1], px[0], 255];
-        } else {
-            let a = u16::from(px[3]);
-            px_out[0] = ((u16::from(px[2]) * a) / 255) as u8;
-            px_out[1] = ((u16::from(px[1]) * a) / 255) as u8;
-            px_out[2] = ((u16::from(px[0]) * a) / 255) as u8;
-            px_out[3] = px[3];
+    if rgba.chunks_exact(4).all(|px| px[3] == 255) {
+        for px in rgba.chunks_exact(4) {
+            out.extend_from_slice(&[px[2], px[1], px[0], 255]);
         }
-        out.extend_from_slice(&px_out);
+    } else {
+        for px in rgba.chunks_exact(4) {
+            let a = u16::from(px[3]);
+            out.extend_from_slice(&[
+                ((u16::from(px[2]) * a) / 255) as u8,
+                ((u16::from(px[1]) * a) / 255) as u8,
+                ((u16::from(px[0]) * a) / 255) as u8,
+                px[3],
+            ]);
+        }
     }
     out
 }

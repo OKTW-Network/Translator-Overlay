@@ -81,8 +81,15 @@ impl LastRawOcr {
     }
 
     /// Same scope pixels — an OCR pass would return the same blocks.
+    ///
+    /// Compares RGBA, a superset of what OCR reads (alpha is dropped): an
+    /// alpha-only change costs one redundant inference, never a stale hit.
     pub(crate) fn same_content(&self, frame: &CapturedFrame, rects: &[Rect]) -> bool {
         if self.width != frame.width || self.height != frame.height {
+            return false;
+        }
+        // Malformed buffer — miss instead of slicing out of bounds.
+        if frame.rgba.len() != frame.width as usize * frame.height as usize * 4 {
             return false;
         }
         if rects.is_empty() {
@@ -139,6 +146,9 @@ pub(crate) struct Pipeline {
     pub model_load: Option<InflightModelLoad>,
     pub ocr_tier: ModelTier,
     pub last_raw_ocr: Option<LastRawOcr>,
+    /// Raise-on-restart offset added to frame sequences in preview state, so a
+    /// renumbered stream never reuses a sequence the preview skip / UI cache saw.
+    pub preview_seq_bias: u64,
     /// Wall-clock: raw OCR first went empty (may still have hysteresis tracks).
     pub raw_empty_since: Option<Instant>,
     /// Wall-clock since raw OCR last became non-empty.
@@ -187,6 +197,7 @@ impl Pipeline {
             model_load: None,
             ocr_tier,
             last_raw_ocr: None,
+            preview_seq_bias: 0,
             raw_empty_since: None,
             raw_content_since: None,
             remap_miss_since: None,
@@ -350,6 +361,8 @@ impl Pipeline {
     /// Shared reset when a continuous capture session successfully starts.
     fn on_capture_started(&mut self) {
         self.reset_ocr_session(true);
+        // The fresh stream renumbers frames from 1.
+        self.absorb_preview_sequence();
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.clear();
             if let Some(hwnd) = self.session.target_hwnd() {
@@ -447,23 +460,33 @@ impl Pipeline {
     }
 
     pub(crate) fn update_preview(&self, frame: &CapturedFrame) {
+        let sequence = frame.sequence.saturating_add(self.preview_seq_bias);
         let mut s = self.state.write();
-        // Skip the write when the frame identity is unchanged (stale tick).
-        if s.preview.sequence == frame.sequence && s.preview.width == frame.width && s.preview.height == frame.height {
+        if s.preview.sequence == sequence && s.preview.width == frame.width && s.preview.height == frame.height {
             return;
         }
         s.preview.width = frame.width;
         s.preview.height = frame.height;
-        s.preview.sequence = frame.sequence;
+        s.preview.sequence = sequence;
         s.preview.rgba = Some(frame.rgba.clone());
     }
 
-    /// A restarted stream renumbers frames from 0 — drop the raw-OCR cache so a
-    /// repeated sequence is not mistaken for an unchanged frame.
+    /// A restarted stream renumbers frames from 1 — drop the raw-OCR cache and
+    /// raise the preview sequence bias so a repeated sequence is never mistaken
+    /// for an unchanged frame.
     fn consume_stream_restart(&mut self) {
         if self.session.sync_stream() {
             self.last_raw_ocr = None;
+            self.absorb_preview_sequence();
         }
+    }
+
+    /// Absorb the last published preview sequence into the bias: a renumbered
+    /// stream's frames then publish strictly higher sequences, so the preview
+    /// skip and the UI preview cache never match a stale entry.
+    fn absorb_preview_sequence(&mut self) {
+        let last = self.state.read().preview.sequence;
+        self.preview_seq_bias = self.preview_seq_bias.saturating_add(last);
     }
 
     async fn manual_capture(&mut self) {
@@ -630,6 +653,14 @@ mod tests {
         assert!(!cache.same_content(&other, &[]), "different pixels must miss");
 
         assert!(!cache.same_content(&frame(16, 4, 1), &[]), "different dimensions must miss");
+    }
+
+    #[test]
+    fn same_content_short_buffer_is_miss() {
+        let cache = cache(8, 8, 1, 5);
+        let short = CapturedFrame::new(8, 8, vec![5u8; 10], 2);
+        assert!(!cache.same_content(&short, &[]), "short whole-frame buffer must miss");
+        assert!(!cache.same_content(&short, &[Rect::new(0.0, 0.0, 4.0, 4.0)]), "short buffer must miss before any rect slicing");
     }
 
     #[test]
