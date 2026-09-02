@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 image = { workspace = true }
-oar-ocr = { version = "0.9", features = ["directml"] }
+oar-ocr = { version = "0.9.2", features = ["directml"] }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

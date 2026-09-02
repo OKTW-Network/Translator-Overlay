@@ -16,4 +16,4 @@ windows = { workspace = true, features = [
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
-windows-capture = "2.0.0"
+windows-capture = "2.0.1"
