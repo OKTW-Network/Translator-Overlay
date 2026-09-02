@@ -5,9 +5,10 @@ use std::{
     sync::{Arc, Once},
 };
 
-use image::{DynamicImage, RgbaImage};
+use image::RgbImage;
 use oar_ocr::{
     core::config::{OrtExecutionProvider, OrtSessionConfig},
+    oarocr::{OAROCR, OAROCRResult},
     prelude::OAROCRBuilder,
     processors::BoundingBox,
 };
@@ -16,7 +17,7 @@ use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, Rect};
 
 use crate::{
     OcrError,
-    crop::crop_rgba,
+    crop::{Rgb8Crop, crop_to_rgb8},
     filter::{filter_single_char_blocks, is_single_latin_or_digit},
     merge::merge_line_blocks_with,
     models::ModelPaths,
@@ -25,8 +26,7 @@ use crate::{
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
 #[derive(Clone)]
 pub struct OcrEngine {
-    // OAROCR is not exposed as a public type alias in all versions; use the builder output type.
-    inner: Arc<oar_ocr::oarocr::OAROCR>,
+    inner: Arc<OAROCR>,
     confidence_threshold: f32,
     filter_single_char: bool,
     line_merge: LineMergeConfig,
@@ -77,6 +77,7 @@ impl OcrEngine {
         let inner = tokio::task::spawn_blocking(move || {
             OAROCRBuilder::new(det, rec, dict)
                 .region_batch_size(4)
+                .image_batch_size(4)
                 .ort_session(ort)
                 .build()
                 .map_err(|e| OcrError::Engine(e.to_string()))
@@ -109,22 +110,28 @@ impl OcrEngine {
         self.line_merge = config.line_merge.clone();
     }
 
-    /// Run OCR on a dynamic image.
+    /// Run OCR on one RGB8 image.
     ///
     /// `frame_w` / `frame_h` are the full capture size (merge thresholds).
     /// `merge_all` is true only for a user-drawn region with whole-region merge on.
-    async fn recognize(&self, image: &DynamicImage, frame_w: u32, frame_h: u32, merge_all: bool) -> Result<Vec<OcrBlock>, OcrError> {
-        // oar-ocr predict takes RGB8 ImageBuffer.
-        let rgb = image.to_rgb8();
-        let inner = Arc::clone(&self.inner);
-        let results = tokio::task::spawn_blocking(move || inner.predict(vec![rgb]).map_err(|e| OcrError::Engine(e.to_string())))
-            .await
-            .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR task: {e}"))))?;
-
+    async fn recognize(&self, image: RgbImage, frame_w: u32, frame_h: u32, merge_all: bool) -> Result<Vec<OcrBlock>, OcrError> {
+        let results = self.predict_batch(vec![image]).await?;
         let Some(page) = results.into_iter().next() else {
             return Ok(Vec::new());
         };
+        Ok(self.blocks_from_page(page, frame_w, frame_h, merge_all))
+    }
 
+    /// One batched inference call across all images (det + rec batch on the GPU).
+    async fn predict_batch(&self, images: Vec<RgbImage>) -> Result<Vec<OAROCRResult>, OcrError> {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || inner.predict(images).map_err(|e| OcrError::Engine(e.to_string())))
+            .await
+            .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR task: {e}"))))
+    }
+
+    /// Threshold / filter / merge one OCR page into blocks.
+    fn blocks_from_page(&self, page: OAROCRResult, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
         let mut blocks = Vec::new();
         for (i, region) in page.text_regions.into_iter().enumerate() {
             let Some((text, confidence)) = region.text_with_confidence() else {
@@ -155,13 +162,11 @@ impl OcrEngine {
         let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
 
         // Re-apply after merge in case a merge edge case left a single token.
-        let blocks = if self.filter_single_char {
+        if self.filter_single_char {
             filter_single_char_blocks(blocks)
         } else {
             reindex_ids(blocks)
-        };
-
-        Ok(blocks)
+        }
     }
 
     /// Run OCR on each crop and offset boxes back into full-frame coordinates.
@@ -175,19 +180,29 @@ impl OcrEngine {
         }
 
         let merge_all = self.line_merge.merge_whole_region;
+        // Crop every region first, then one batched inference for all of them —
+        // oar-ocr batches detection across images and pools recognition crops.
+        let crops: Vec<(u32, u32, RgbImage)> = regions
+            .iter()
+            .filter_map(|region| crop_to_rgb8(width, height, rgba, *region))
+            .filter_map(|crop| {
+                let Rgb8Crop { x, y, width, height, rgb } = crop;
+                RgbImage::from_raw(width, height, rgb).map(|img| (x, y, img))
+            })
+            .collect();
+        if crops.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let origins: Vec<(u32, u32)> = crops.iter().map(|(x, y, _)| (*x, *y)).collect();
+        let results = self.predict_batch(crops.into_iter().map(|(_, _, img)| img).collect()).await?;
+
         let mut all = Vec::new();
-        for region in regions {
-            let Some(crop) = crop_rgba(width, height, rgba, *region) else {
-                continue;
-            };
-            let ox = crop.x as f32;
-            let oy = crop.y as f32;
-            let mut blocks = self
-                .recognize_rgba(crop.width, crop.height, &crop.rgba, width, height, merge_all)
-                .await?;
+        for ((ox, oy), page) in origins.into_iter().zip(results) {
+            let mut blocks = self.blocks_from_page(page, width, height, merge_all);
             for block in &mut blocks {
-                block.bbox.x += ox;
-                block.bbox.y += oy;
+                block.bbox.x += ox as f32;
+                block.bbox.y += oy as f32;
             }
             all.extend(blocks);
         }
@@ -204,18 +219,8 @@ impl OcrEngine {
         frame_h: u32,
         merge_all: bool,
     ) -> Result<Vec<OcrBlock>, OcrError> {
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or_else(|| OcrError::Image("frame dimensions overflow".into()))?;
-        if rgba.len() < expected {
-            return Err(OcrError::Image(format!("buffer too small: {} < {}", rgba.len(), expected)));
-        }
-
-        let rgba_img =
-            RgbaImage::from_raw(width, height, rgba[..expected].to_vec()).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))?;
-        let dyn_img = DynamicImage::ImageRgba8(rgba_img);
-        self.recognize(&dyn_img, frame_w, frame_h, merge_all).await
+        let rgb = rgba_to_rgb8(width, height, rgba)?;
+        self.recognize(rgb, frame_w, frame_h, merge_all).await
     }
 
     /// Join block texts for UI display.
@@ -236,6 +241,22 @@ fn aabb_to_rect(bb: &BoundingBox) -> Rect {
     let width = (x_max - x_min).abs().max(0.0);
     let height = (y_max - y_min).abs().max(0.0);
     Rect::new(left, top, width, height)
+}
+
+/// Convert tightly packed RGBA8 to RGB8 in one pass (drops alpha).
+fn rgba_to_rgb8(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage, OcrError> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| OcrError::Image("frame dimensions overflow".into()))?;
+    if rgba.len() < expected {
+        return Err(OcrError::Image(format!("buffer too small: {} < {}", rgba.len(), expected)));
+    }
+    let mut rgb = Vec::with_capacity(expected / 4 * 3);
+    for px in rgba[..expected].chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+    }
+    RgbImage::from_raw(width, height, rgb).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))
 }
 
 fn reindex_ids(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
@@ -266,5 +287,18 @@ mod tests {
         assert!((r.y - 20.0).abs() < 1e-3);
         assert!((r.width - 40.0).abs() < 1e-3);
         assert!((r.height - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn rgba_to_rgb8_drops_alpha_in_order() {
+        let rgba = [1u8, 2, 3, 255, 4, 5, 6, 128];
+        let img = rgba_to_rgb8(2, 1, &rgba).unwrap();
+        assert_eq!(img.as_raw(), &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn rgba_to_rgb8_rejects_short_buffers() {
+        assert!(rgba_to_rgb8(2, 1, &[0u8; 7]).is_err());
+        assert!(rgba_to_rgb8(2, 1, &[0u8; 8]).is_ok());
     }
 }
