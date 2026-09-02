@@ -16,6 +16,15 @@ impl Rect {
         Self { x, y, width, height }
     }
 
+    /// Clamp to a `width × height` frame and round to integer bounds `(x0, y0, x1, y1)`.
+    pub fn clamped_bounds(self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let x0 = self.x.round().clamp(0.0, width as f32) as u32;
+        let y0 = self.y.round().clamp(0.0, height as f32) as u32;
+        let x1 = (self.x + self.width).round().clamp(0.0, width as f32) as u32;
+        let y1 = (self.y + self.height).round().clamp(0.0, height as f32) as u32;
+        (x0, y0, x1.max(x0), y1.max(y0))
+    }
+
     pub fn center(self) -> (f32, f32) {
         (self.x + self.width * 0.5, self.y + self.height * 0.5)
     }

@@ -112,42 +112,25 @@ impl Pipeline {
     }
 
     pub(crate) async fn run_ocr_auto(&mut self, frame: &CapturedFrame) {
-        {
-            let mut s = self.state.write();
-            if s.translate_in_flight || s.status.is_translating() {
-                return;
-            }
-            // OCR can take hundreds of ms; avoid clobbering "waiting / overlay" so the
-            // UI does not look stuck on "Running OCR" while text is already stable.
-            if !matches!(s.status, PipelineStatus::WaitingForStable { .. } | PipelineStatus::OverlayActive) {
-                s.status = PipelineStatus::RunningOcr;
-            }
-        }
+        let rects = self.ocr_pixel_regions(frame.width, frame.height);
 
-        // Reuse the raw blocks when the frame content is unchanged: skip only the
-        // inference; everything below still runs every tick.
+        // Reuse the raw blocks when the OCR scope is unchanged: skip only the
+        // inference; consumption below still runs every tick.
         let raw = match self.last_raw_ocr.as_mut() {
-            Some(cached) if cached.matches(frame) => {
-                debug!(frame = frame.sequence, blocks = cached.blocks.len(), "OCR frame cache hit — skipping inference");
-                cached.blocks.clone()
-            }
-            Some(cached) if cached.same_content(frame) => {
-                // New sequence, identical pixels (continuously redrawing target):
-                // adopt the sequence so stale ticks skip at the drive_capture gate.
+            Some(cached) if cached.same_content(frame, &rects) => {
+                // New sequence, identical scope pixels (continuously redrawing
+                // target): adopt the sequence so stale ticks skip at the
+                // drive_capture gate.
                 cached.sequence = frame.sequence;
                 debug!(frame = frame.sequence, blocks = cached.blocks.len(), "OCR content cache hit — skipping inference");
                 cached.blocks.clone()
             }
             _ => {
                 let ocr_start = Instant::now();
-                let regions = self.ocr_pixel_regions(frame.width, frame.height);
                 let Some(engine) = self.engine.as_ref() else {
                     return;
                 };
-                let raw = match engine
-                    .recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions)
-                    .await
-                {
+                let raw = match engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &rects).await {
                     Ok(b) => b,
                     Err(e) => {
                         error!(error = %e, "OCR failed");
@@ -166,14 +149,32 @@ impl Pipeline {
                     sequence: frame.sequence,
                     width: frame.width,
                     height: frame.height,
-                    rgba: frame.rgba.clone(),
+                    scope: LastRawOcr::pack_scope(frame, &rects),
                     blocks: raw.clone(),
                 });
                 raw
             }
         };
 
-        let content_resized = self.capture_content_resized(frame.width, frame.height);
+        self.consume_raw_ocr(raw, frame.width, frame.height).await;
+    }
+
+    /// Status guard + persist / stability gate / remap. Runs on every capture
+    /// tick, including cache hits (`raw` / dims taken from the cache).
+    pub(crate) async fn consume_raw_ocr(&mut self, raw: Vec<OcrBlock>, frame_w: u32, frame_h: u32) {
+        {
+            let mut s = self.state.write();
+            if s.translate_in_flight || s.status.is_translating() {
+                return;
+            }
+            // OCR can take hundreds of ms; avoid clobbering "waiting / overlay" so the
+            // UI does not look stuck on "Running OCR" while text is already stable.
+            if !matches!(s.status, PipelineStatus::WaitingForStable { .. } | PipelineStatus::OverlayActive) {
+                s.status = PipelineStatus::RunningOcr;
+            }
+        }
+
+        let content_resized = self.capture_content_resized(frame_w, frame_h);
         if content_resized {
             // Old tracks are in the previous pixel space; hysteresis would paint
             // those boxes onto the new content size and freeze captions.
@@ -245,7 +246,7 @@ impl Pipeline {
             StabilityOutcome::Waiting { elapsed_ms } => {
                 // Settling a not-yet-emitted page: keep sticky only when most prior
                 // captions still match (partial thrash); otherwise clear.
-                self.apply_sticky_or_clear_low_hit(&blocks, frame.width, frame.height);
+                self.apply_sticky_or_clear_low_hit(&blocks, frame_w, frame_h);
                 let mut s = self.state.write();
                 s.status = PipelineStatus::WaitingForStable { elapsed_ms };
             }
@@ -264,8 +265,8 @@ impl Pipeline {
                     blocks: blocks.clone(),
                     source_text: OcrEngine::blocks_to_text(&blocks),
                     fingerprint,
-                    content_width: frame.width,
-                    content_height: frame.height,
+                    content_width: frame_w,
+                    content_height: frame_h,
                 };
                 self.last_page = Some(page.clone());
                 self.start_translate(page, false);
@@ -273,7 +274,7 @@ impl Pipeline {
             StabilityOutcome::AlreadyEmitted { .. } => {
                 // Persist-frozen page: keep frozen captions while durable OCR
                 // still matches the last sources. Raw jitter must not hide them.
-                self.apply_sticky_overlay(&blocks, frame.width, frame.height);
+                self.apply_sticky_overlay(&blocks, frame_w, frame_h);
                 if self.state.read().auto_running {
                     let mut s = self.state.write();
                     if !s.latest_translated_blocks.is_empty() {
@@ -402,7 +403,7 @@ impl Pipeline {
             sequence: frame.sequence,
             width: frame.width,
             height: frame.height,
-            rgba: frame.rgba.clone(),
+            scope: LastRawOcr::pack_scope(frame, &regions),
             blocks: blocks.clone(),
         });
 

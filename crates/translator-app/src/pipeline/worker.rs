@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
-use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
+use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus, Rect};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
@@ -57,25 +57,70 @@ pub(crate) struct PendingPage {
 /// frame would burn GPU for identical output. Only the inference is skipped —
 /// persist / stability gate / remap still consume the cached blocks every tick,
 /// which is how the gate accumulates its stable-duration clock. Continuously
-/// redrawing windows (games) get new sequences with identical pixels; those are
-/// caught by [`LastRawOcr::same_content`] instead.
+/// redrawing windows (games) get new sequences; [`LastRawOcr::same_content`]
+/// catches repaints whose OCR scope is pixel-identical.
 pub(crate) struct LastRawOcr {
     pub sequence: u64,
     pub width: u32,
     pub height: u32,
-    pub rgba: Bytes,
+    /// Pixels the OCR result depends on: one packed RGBA crop per OCR rect
+    /// (whole frame when no regions are configured). Pixels outside the rects
+    /// never affect recognition and are neither stored nor compared.
+    pub scope: Vec<Bytes>,
     pub blocks: Vec<OcrBlock>,
 }
 
 impl LastRawOcr {
-    pub(crate) fn matches(&self, frame: &CapturedFrame) -> bool {
-        self.sequence == frame.sequence && self.width == frame.width && self.height == frame.height
+    /// Pack the OCR scope of `frame`: each rect's rows, or the whole frame when
+    /// no regions are configured.
+    pub(crate) fn pack_scope(frame: &CapturedFrame, rects: &[Rect]) -> Vec<Bytes> {
+        if rects.is_empty() {
+            return vec![frame.rgba.clone()];
+        }
+        rects.iter().map(|r| pack_rect(frame, *r)).collect()
     }
 
-    /// Same pixels in the same geometry — an OCR pass would return the same blocks.
-    pub(crate) fn same_content(&self, frame: &CapturedFrame) -> bool {
-        self.width == frame.width && self.height == frame.height && self.rgba == frame.rgba
+    /// Same scope pixels — an OCR pass would return the same blocks.
+    pub(crate) fn same_content(&self, frame: &CapturedFrame, rects: &[Rect]) -> bool {
+        if self.width != frame.width || self.height != frame.height {
+            return false;
+        }
+        if rects.is_empty() {
+            // Whole-window scope: one packed buffer covering the full frame.
+            return self.scope.len() == 1 && self.scope[0] == frame.rgba;
+        }
+        self.scope.len() == rects.len() && self.scope.iter().zip(rects).all(|(stored, r)| rect_unchanged(frame, *r, stored))
     }
+}
+
+/// Pack one rect's rows out of a tightly packed RGBA frame.
+fn pack_rect(frame: &CapturedFrame, rect: Rect) -> Bytes {
+    let (x0, y0, x1, y1) = rect.clamped_bounds(frame.width, frame.height);
+    let cw = (x1 - x0) as usize;
+    let row_w = frame.width as usize;
+    let mut out = Vec::with_capacity(cw * (y1 - y0) as usize * 4);
+    for y in y0..y1 {
+        let start = (y as usize * row_w + x0 as usize) * 4;
+        out.extend_from_slice(&frame.rgba[start..start + cw * 4]);
+    }
+    Bytes::from(out)
+}
+
+/// Row-wise memcmp of one rect against its packed copy (early-exit on first row diff).
+fn rect_unchanged(frame: &CapturedFrame, rect: Rect, stored: &Bytes) -> bool {
+    let (x0, y0, x1, y1) = rect.clamped_bounds(frame.width, frame.height);
+    let cw = (x1 - x0) as usize;
+    if stored.len() != cw * (y1 - y0) as usize * 4 {
+        return false;
+    }
+    let row_w = frame.width as usize;
+    for (row, y) in (y0..y1).enumerate() {
+        let start = (y as usize * row_w + x0 as usize) * 4;
+        if stored[row * cw * 4..(row + 1) * cw * 4] != frame.rgba[start..start + cw * 4] {
+            return false;
+        }
+    }
+    true
 }
 
 /// Owned pipeline state machine (one Tokio task).
@@ -457,19 +502,17 @@ impl Pipeline {
             self.last_raw_ocr = None;
         }
 
-        // Stale tick (no new frame published): reuse the cached frame without the
-        // client-area crop, Win32 queries, or a preview write.
-        let stale_frame = self
+        // Stale tick (no new frame published): consume the cached blocks without
+        // the client-area crop, Win32 queries, or a preview write.
+        let stale = self
             .last_raw_ocr
             .as_ref()
             .filter(|c| Some(c.sequence) == self.session.latest_sequence())
-            .map(|cached| {
-                debug!(frame = cached.sequence, "capture frame unchanged — reusing cached OCR");
-                CapturedFrame::new(cached.width, cached.height, cached.rgba.clone(), cached.sequence)
-            });
+            .map(|c| (c.sequence, c.blocks.clone(), c.width, c.height));
 
-        if let Some(frame) = stale_frame {
-            self.run_ocr_auto(&frame).await;
+        if let Some((sequence, blocks, w, h)) = stale {
+            debug!(frame = sequence, "capture frame unchanged — reusing cached OCR");
+            self.consume_raw_ocr(blocks, w, h).await;
         } else if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
             if self.engine.is_none() {
@@ -567,29 +610,53 @@ mod tests {
             sequence: seq,
             width: w,
             height: h,
-            rgba: Bytes::from(vec![px; (w * h * 4) as usize]),
+            scope: vec![Bytes::from(vec![px; (w * h * 4) as usize])],
             blocks: Vec::new(),
         }
     }
 
     #[test]
-    fn last_raw_ocr_matches_only_same_frame_identity() {
-        let cache = cache(320, 240, 7, 1);
-        assert!(cache.matches(&frame(320, 240, 7)));
-        assert!(!cache.matches(&frame(320, 240, 8)), "new sequence must miss");
-        assert!(!cache.matches(&frame(640, 480, 7)), "new dimensions must miss");
-    }
-
-    #[test]
-    fn same_content_ignores_sequence_but_not_pixels_or_dims() {
+    fn same_content_whole_frame_compares_all_pixels() {
         let cache = cache(8, 8, 1, 5);
         let same_pixels = CapturedFrame::new(8, 8, vec![5u8; 8 * 8 * 4], 99);
-        assert!(cache.same_content(&same_pixels), "identical pixels must hit");
+        assert!(cache.same_content(&same_pixels, &[]), "identical pixels must hit");
 
         let mut other = same_pixels.clone();
         other.rgba = Bytes::from(vec![6u8; 8 * 8 * 4]);
-        assert!(!cache.same_content(&other), "different pixels must miss");
+        assert!(!cache.same_content(&other, &[]), "different pixels must miss");
 
-        assert!(!cache.same_content(&frame(16, 4, 1)), "different dimensions must miss");
+        assert!(!cache.same_content(&frame(16, 4, 1), &[]), "different dimensions must miss");
+    }
+
+    #[test]
+    fn same_content_ignores_pixels_outside_regions() {
+        // 32×32 frame; scope = one 8×8 region at (4, 4).
+        let rect = Rect::new(4.0, 4.0, 8.0, 8.0);
+        let mut base = vec![7u8; 32 * 32 * 4];
+        let src = CapturedFrame::new(32, 32, base.clone(), 1);
+        let cache = LastRawOcr {
+            sequence: 1,
+            width: 32,
+            height: 32,
+            scope: LastRawOcr::pack_scope(&src, &[rect]),
+            blocks: Vec::new(),
+        };
+
+        // Change a pixel OUTSIDE the region (31, 31): still a content hit.
+        let i = (31 * 32 + 31) as usize * 4;
+        base[i] = 9;
+        let outside = CapturedFrame::new(32, 32, base, 2);
+        assert!(cache.same_content(&outside, &[rect]), "changes outside regions must hit");
+
+        // Change a pixel INSIDE the region (5, 5): miss.
+        let mut inside = cache.scope[0].to_vec();
+        // crop-local (1, 1) in an 8-wide crop → (8 + 1) px, 4 bytes/px
+        inside[(8 + 1) * 4] = 9;
+        let scope = vec![Bytes::from(inside)];
+        let cache = LastRawOcr { scope, ..cache };
+        assert!(!cache.same_content(&src, &[rect]), "changes inside regions must miss");
+
+        // Different region count: miss.
+        assert!(!cache.same_content(&src, &[rect, rect]));
     }
 }

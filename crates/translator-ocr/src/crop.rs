@@ -28,10 +28,7 @@ pub fn crop_to_rgb8(width: u32, height: u32, rgba: &[u8], rect: Rect) -> Option<
         return None;
     }
 
-    let x0 = rect.x.round().clamp(0.0, width as f32) as u32;
-    let y0 = rect.y.round().clamp(0.0, height as f32) as u32;
-    let x1 = (rect.x + rect.width).round().clamp(0.0, width as f32) as u32;
-    let y1 = (rect.y + rect.height).round().clamp(0.0, height as f32) as u32;
+    let (x0, y0, x1, y1) = rect.clamped_bounds(width, height);
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
