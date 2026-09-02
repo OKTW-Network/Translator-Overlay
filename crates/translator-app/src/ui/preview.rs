@@ -73,17 +73,23 @@ fn watch_rasterization_scale(bump: Updater<u32>) -> impl Fn(windows_reactor::Ima
 }
 
 /// D2D `create_bitmap_with_alpha` expects premultiplied BGRA8.
+///
+/// Capture frames are normally fully opaque; skip the multiplies then.
 fn rgba_to_premul_bgra(rgba: &[u8]) -> Vec<u8> {
+    let opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
     let mut out = Vec::with_capacity(rgba.len());
+    let mut px_out = [0u8; 4];
     for px in rgba.chunks_exact(4) {
-        let r = u16::from(px[0]);
-        let g = u16::from(px[1]);
-        let b = u16::from(px[2]);
-        let a = u16::from(px[3]);
-        out.push(((b * a) / 255) as u8);
-        out.push(((g * a) / 255) as u8);
-        out.push(((r * a) / 255) as u8);
-        out.push(a as u8);
+        if opaque {
+            px_out = [px[2], px[1], px[0], 255];
+        } else {
+            let a = u16::from(px[3]);
+            px_out[0] = ((u16::from(px[2]) * a) / 255) as u8;
+            px_out[1] = ((u16::from(px[1]) * a) / 255) as u8;
+            px_out[2] = ((u16::from(px[0]) * a) / 255) as u8;
+            px_out[3] = px[3];
+        }
+        out.extend_from_slice(&px_out);
     }
     out
 }
@@ -182,5 +188,31 @@ pub fn capture_preview(sequence: u64, width: u32, height: u32, rgba: Option<&Byt
             .font_size(12.0)
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Straightforward definition (one push per output byte).
+    fn reference(rgba: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for px in rgba.chunks_exact(4) {
+            out.push((u32::from(px[2]) * u32::from(px[3]) / 255) as u8);
+            out.push((u32::from(px[1]) * u32::from(px[3]) / 255) as u8);
+            out.push((u32::from(px[0]) * u32::from(px[3]) / 255) as u8);
+            out.push(px[3]);
+        }
+        out
+    }
+
+    #[test]
+    fn premul_matches_reference_for_opaque_and_mixed_alpha() {
+        let opaque: &[u8] = &[10, 20, 30, 255, 200, 150, 100, 255];
+        let mixed: &[u8] = &[10, 20, 30, 128, 200, 150, 100, 255, 0, 255, 0, 51];
+        for rgba in [opaque, mixed] {
+            assert_eq!(rgba_to_premul_bgra(rgba), reference(rgba));
+        }
     }
 }
