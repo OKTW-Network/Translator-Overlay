@@ -124,14 +124,21 @@ impl Pipeline {
             }
         }
 
-        // Reuse the raw blocks when the frame is unchanged (static content): skip
-        // only the inference; everything below still runs every tick.
-        let raw = match self.last_raw_ocr.as_ref().filter(|c| c.matches(frame)) {
-            Some(cached) => {
+        // Reuse the raw blocks when the frame content is unchanged: skip only the
+        // inference; everything below still runs every tick.
+        let raw = match self.last_raw_ocr.as_mut() {
+            Some(cached) if cached.matches(frame) => {
                 debug!(frame = frame.sequence, blocks = cached.blocks.len(), "OCR frame cache hit — skipping inference");
                 cached.blocks.clone()
             }
-            None => {
+            Some(cached) if cached.same_content(frame) => {
+                // New sequence, identical pixels (continuously redrawing target):
+                // adopt the sequence so stale ticks skip at the drive_capture gate.
+                cached.sequence = frame.sequence;
+                debug!(frame = frame.sequence, blocks = cached.blocks.len(), "OCR content cache hit — skipping inference");
+                cached.blocks.clone()
+            }
+            _ => {
                 let ocr_start = Instant::now();
                 let regions = self.ocr_pixel_regions(frame.width, frame.height);
                 let Some(engine) = self.engine.as_ref() else {
@@ -159,6 +166,7 @@ impl Pipeline {
                     sequence: frame.sequence,
                     width: frame.width,
                     height: frame.height,
+                    rgba: frame.rgba.clone(),
                     blocks: raw.clone(),
                 });
                 raw
@@ -394,6 +402,7 @@ impl Pipeline {
             sequence: frame.sequence,
             width: frame.width,
             height: frame.height,
+            rgba: frame.rgba.clone(),
             blocks: blocks.clone(),
         });
 

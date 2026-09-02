@@ -5,10 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
@@ -55,17 +56,25 @@ pub(crate) struct PendingPage {
 /// Static windows stop producing WGC frames; re-running inference on the same
 /// frame would burn GPU for identical output. Only the inference is skipped —
 /// persist / stability gate / remap still consume the cached blocks every tick,
-/// which is how the gate accumulates its stable-duration clock.
+/// which is how the gate accumulates its stable-duration clock. Continuously
+/// redrawing windows (games) get new sequences with identical pixels; those are
+/// caught by [`LastRawOcr::same_content`] instead.
 pub(crate) struct LastRawOcr {
     pub sequence: u64,
     pub width: u32,
     pub height: u32,
+    pub rgba: Bytes,
     pub blocks: Vec<OcrBlock>,
 }
 
 impl LastRawOcr {
     pub(crate) fn matches(&self, frame: &CapturedFrame) -> bool {
         self.sequence == frame.sequence && self.width == frame.width && self.height == frame.height
+    }
+
+    /// Same pixels in the same geometry — an OCR pass would return the same blocks.
+    pub(crate) fn same_content(&self, frame: &CapturedFrame) -> bool {
+        self.width == frame.width && self.height == frame.height && self.rgba == frame.rgba
     }
 }
 
@@ -447,7 +456,21 @@ impl Pipeline {
         if self.session.sync_stream() {
             self.last_raw_ocr = None;
         }
-        if let Some(frame) = self.session.latest_frame() {
+
+        // Stale tick (no new frame published): reuse the cached frame without the
+        // client-area crop, Win32 queries, or a preview write.
+        let stale_frame = self
+            .last_raw_ocr
+            .as_ref()
+            .filter(|c| Some(c.sequence) == self.session.latest_sequence())
+            .map(|cached| {
+                debug!(frame = cached.sequence, "capture frame unchanged — reusing cached OCR");
+                CapturedFrame::new(cached.width, cached.height, cached.rgba.clone(), cached.sequence)
+            });
+
+        if let Some(frame) = stale_frame {
+            self.run_ocr_auto(&frame).await;
+        } else if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
             if self.engine.is_none() {
                 // Do not auto-retry after a failed load — wait for ApplyConfig / tier change.
@@ -539,16 +562,34 @@ mod tests {
         CapturedFrame::new(w, h, vec![0u8; (w * h * 4) as usize], seq)
     }
 
+    fn cache(w: u32, h: u32, seq: u64, px: u8) -> LastRawOcr {
+        LastRawOcr {
+            sequence: seq,
+            width: w,
+            height: h,
+            rgba: Bytes::from(vec![px; (w * h * 4) as usize]),
+            blocks: Vec::new(),
+        }
+    }
+
     #[test]
     fn last_raw_ocr_matches_only_same_frame_identity() {
-        let cache = LastRawOcr {
-            sequence: 7,
-            width: 320,
-            height: 240,
-            blocks: Vec::new(),
-        };
+        let cache = cache(320, 240, 7, 1);
         assert!(cache.matches(&frame(320, 240, 7)));
         assert!(!cache.matches(&frame(320, 240, 8)), "new sequence must miss");
         assert!(!cache.matches(&frame(640, 480, 7)), "new dimensions must miss");
+    }
+
+    #[test]
+    fn same_content_ignores_sequence_but_not_pixels_or_dims() {
+        let cache = cache(8, 8, 1, 5);
+        let same_pixels = CapturedFrame::new(8, 8, vec![5u8; 8 * 8 * 4], 99);
+        assert!(cache.same_content(&same_pixels), "identical pixels must hit");
+
+        let mut other = same_pixels.clone();
+        other.rgba = Bytes::from(vec![6u8; 8 * 8 * 4]);
+        assert!(!cache.same_content(&other), "different pixels must miss");
+
+        assert!(!cache.same_content(&frame(16, 4, 1)), "different dimensions must miss");
     }
 }

@@ -44,6 +44,11 @@ impl SharedLatest {
     fn latest(&self) -> Option<CapturedFrame> {
         self.slot.load_full().map(|frame| (*frame).clone())
     }
+
+    /// Latest published sequence without cloning the frame (staleness peek).
+    fn latest_sequence(&self) -> Option<u64> {
+        self.slot.load().as_ref().map(|frame| frame.sequence)
+    }
 }
 
 /// Copy tightly packed RGBA8 out of a mapped WGC buffer into owned [`Bytes`].
@@ -154,6 +159,13 @@ impl CaptureSession {
     /// Interactive title-bar drag or edge resize is in progress.
     pub fn in_movesize(&self) -> bool {
         self.resize.in_movesize()
+    }
+
+    /// Latest published raw frame sequence (O(1), no crop / Win32 calls).
+    ///
+    /// Lets callers detect "no new frame" before paying for client-area crop.
+    pub fn latest_sequence(&self) -> Option<u64> {
+        self.stream.as_ref()?.latest.latest_sequence()
     }
 
     /// Start capturing a window by HWND.
