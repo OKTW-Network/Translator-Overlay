@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
-use translator_core::{AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, parse_argb_hex, validate_preset};
+use translator_core::{
+    AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
+    validate_preset,
+};
 use windows_reactor::Updater;
 
 use crate::{
@@ -111,10 +114,11 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
     let draft = state.read().config.clone();
     let optional = optional_api_state(&draft);
     let (text_argb_str, bg_argb_str) = overlay_color_strings(&draft);
-    let (region_presets, preset_load_error) = match RegionPresetFile::load_or_empty() {
-        Ok(file) => (file.presets, None),
-        Err(e) => (Vec::new(), Some(format!("Could not load region presets: {e}"))),
-    };
+    let (region_presets, preset_load_error) = region_presets_path()
+        .map_err(|e| format!("Could not load region presets: {e}"))
+        .and_then(|path| RegionPresetFile::load_or_empty_at(&path).map_err(|e| format!("Could not load region presets: {e}")))
+        .map(|file| file.presets)
+        .map_or_else(|message| (Vec::new(), Some(message)), |presets| (presets, None));
     let shared = Arc::new(Mutex::new(UiShared {
         state,
         cmd_tx,
@@ -151,7 +155,8 @@ pub fn save_region_presets(ui: &mut UiShared) -> Result<(), String> {
     let file = RegionPresetFile {
         presets: ui.region_presets.clone(),
     };
-    file.save_default().map_err(|e| format!("Could not save region presets: {e}"))
+    let path = region_presets_path().map_err(|e| format!("Could not save region presets: {e}"))?;
+    file.save(&path).map_err(|e| format!("Could not save region presets: {e}"))
 }
 
 /// Write `pending_save_regions` under `name` (exact match overwrite).
@@ -205,7 +210,7 @@ fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
 }
 
 pub fn overlay_color_strings(cfg: &AppConfig) -> (String, String) {
-    (format!("{:08X}", cfg.overlay.text_color_argb), format!("{:08X}", cfg.overlay.background_color_argb))
+    (format_argb_hex(cfg.overlay.text_color_argb), format_argb_hex(cfg.overlay.background_color_argb))
 }
 
 pub fn reload_draft_from_state(ui: &mut UiShared) {
@@ -300,20 +305,28 @@ pub fn form_validation_error(ui: &UiShared) -> Option<String> {
     }
     let text = ui.text_argb_str.trim();
     if !text.is_empty() && parse_argb_hex(text).is_none() {
-        return Some("Text color must be 8-digit ARGB hex (e.g. FFFFFFFF).".into());
+        return Some("Text color must be 0xAARRGGBB hex (e.g. 0xFFFFFFFF).".into());
     }
     let bg = ui.bg_argb_str.trim();
     if !bg.is_empty() && parse_argb_hex(bg).is_none() {
-        return Some("Background color must be 8-digit ARGB hex (e.g. C8000000).".into());
+        return Some("Background color must be 0xAARRGGBB hex (e.g. 0xC8000000).".into());
     }
     None
 }
 
 pub fn do_reload_from_disk(ui: &mut UiShared) {
-    match AppConfig::load_or_create_default() {
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(e) => {
+            ui.state.write().set_error(format!("Could not reload config: {e}"));
+            ui.confirm = ConfirmAction::None;
+            return;
+        }
+    };
+    match AppConfig::load_or_create(&path) {
         Ok(cfg) => {
             let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
-            if let Ok(c) = AppConfig::load_or_create_default() {
+            if let Ok(c) = AppConfig::load_or_create(&path) {
                 ui.draft = c;
                 apply_optional_from_config(ui);
                 let (ta, ba) = overlay_color_strings(&ui.draft);

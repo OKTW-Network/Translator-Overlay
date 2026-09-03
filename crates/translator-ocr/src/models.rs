@@ -26,9 +26,9 @@ impl ModelArtifact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelRole {
-    Detection,
-    Recognition,
-    Dictionary,
+    Detection = 0,
+    Recognition = 1,
+    Dictionary = 2,
 }
 
 /// Artifacts required for the given PP-OCRv6 tier.
@@ -106,18 +106,11 @@ pub struct ModelPaths {
 
 impl ModelPaths {
     pub fn from_dir(models_dir: &Path, tier: ModelTier) -> Self {
-        let arts = artifacts_for_tier(tier);
-        let mut det = PathBuf::new();
-        let mut rec = PathBuf::new();
-        let mut dict = PathBuf::new();
-        for a in arts {
-            let p = models_dir.join(a.file_name);
-            match a.role {
-                ModelRole::Detection => det = p,
-                ModelRole::Recognition => rec = p,
-                ModelRole::Dictionary => dict = p,
-            }
+        let mut paths = [PathBuf::new(), PathBuf::new(), PathBuf::new()];
+        for a in artifacts_for_tier(tier) {
+            paths[a.role as usize] = models_dir.join(a.file_name);
         }
+        let [det, rec, dict] = paths;
         Self { tier, det, rec, dict }
     }
 

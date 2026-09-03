@@ -246,44 +246,8 @@ struct TranslationResponse {
 
 #[derive(Debug, Deserialize)]
 struct TranslationBlockOut {
-    /// Models sometimes emit string ids (`"0"`).
-    #[serde(deserialize_with = "deserialize_block_id")]
     id: u32,
-    /// Accept common alternate field names from loose model output.
-    #[serde(alias = "text", alias = "translated", alias = "target")]
     translation: String,
-}
-
-fn deserialize_block_id<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use std::fmt;
-
-    use serde::de::{self, Visitor};
-
-    struct IdVisitor;
-    impl<'de> Visitor<'de> for IdVisitor {
-        type Value = u32;
-
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("u32 or stringified u32")
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u32, E> {
-            u32::try_from(v).map_err(E::custom)
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u32, E> {
-            u32::try_from(v).map_err(E::custom)
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
-            v.trim().parse().map_err(|_| E::custom(format!("invalid block id: {v}")))
-        }
-    }
-
-    deserializer.deserialize_any(IdVisitor)
 }
 
 /// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
@@ -333,17 +297,9 @@ fn parse_translation_blocks(response_json: &str) -> Result<Vec<TranslationBlockO
 }
 
 fn try_parse_blocks(json: &str) -> Result<Vec<TranslationBlockOut>, String> {
-    // Preferred shape: {"blocks":[...]}
+    // Strict shape only: {"blocks":[...]} (structured outputs enforces this).
     if let Ok(parsed) = serde_json::from_str::<TranslationResponse>(json) {
         return Ok(parsed.blocks);
-    }
-    // Bare array: [{"id":0,"translation":"..."}]
-    if let Ok(blocks) = serde_json::from_str::<Vec<TranslationBlockOut>>(json) {
-        return Ok(blocks);
-    }
-    // Single object: {"id":0,"translation":"..."}
-    if let Ok(block) = serde_json::from_str::<TranslationBlockOut>(json) {
-        return Ok(vec![block]);
     }
 
     let err = serde_json::from_str::<TranslationResponse>(json)
@@ -353,7 +309,7 @@ fn try_parse_blocks(json: &str) -> Result<Vec<TranslationBlockOut>, String> {
     Err(err)
 }
 
-/// Produce increasingly repaired JSON candidates for lenient model output.
+/// Fence-strip plus balanced `{...}` extraction (ignore prose around JSON).
 fn json_parse_candidates(raw: &str) -> Vec<String> {
     let trimmed = raw.trim().trim_start_matches('\u{feff}');
     let unfenced = strip_markdown_fence(trimmed);
@@ -368,21 +324,9 @@ fn json_parse_candidates(raw: &str) -> Vec<String> {
     // 1) Whole string as-is (after fence strip).
     push(&mut out, unfenced.clone());
 
-    // 2) Balanced `{...}` / `[...]` extraction (ignore prose around JSON).
+    // 2) Balanced `{...}` extraction (ignore prose around JSON).
     if let Some(obj) = extract_balanced(unfenced.as_str(), '{', '}') {
         push(&mut out, obj.to_string());
-    }
-    if let Some(arr) = extract_balanced(unfenced.as_str(), '[', ']') {
-        push(&mut out, arr.to_string());
-    }
-
-    // 3) Same candidates with trailing commas removed (common LLM mistake).
-    let base_len = out.len();
-    for i in 0..base_len {
-        let cleaned = strip_trailing_commas(&out[i]);
-        if cleaned != out[i] {
-            push(&mut out, cleaned);
-        }
     }
 
     out
@@ -446,54 +390,6 @@ fn extract_balanced(s: &str, open: char, close: char) -> Option<&str> {
         i += ch_len;
     }
     None
-}
-
-/// Remove trailing commas before `}` / `]` outside of strings.
-fn strip_trailing_commas(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_string = false;
-    let mut escape = false;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0usize;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if in_string {
-            out.push(ch);
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
-        if ch == ',' {
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].is_whitespace() {
-                j += 1;
-            }
-            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
-                // Skip the trailing comma (keep following whitespace for readability).
-                i += 1;
-                continue;
-            }
-        }
-
-        out.push(ch);
-        i += 1;
-    }
-    out
 }
 
 fn truncate_for_error(s: &str, max_chars: usize) -> String {
@@ -1047,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_tolerates_trailing_commas_and_prose() {
+    fn merge_tolerates_prose_but_rejects_trailing_commas() {
         let source = vec![OcrBlock {
             id: 0,
             text: "Hi".into(),
@@ -1055,22 +951,16 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
         }];
-        let json = r#"Here you go:
-{
-  "blocks": [
-    {
-      "id": 0,
-      "translation": "T3",
-    },
-  ],
-}
-Hope that helps!"#;
+        let json = r#"Here you go: {"blocks": [{"id": 0, "translation": "T3"}]} Hope that helps!"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T3");
+
+        let json = r#"{"blocks": [{"id": 0, "translation": "T3",},]}"#;
+        assert!(merge_translations_detailed(&source, json).is_err());
     }
 
     #[test]
-    fn merge_accepts_string_ids_and_alias_fields() {
+    fn merge_rejects_string_ids_and_alias_fields() {
         let source = vec![OcrBlock {
             id: 2,
             text: "Bye".into(),
@@ -1079,8 +969,7 @@ Hope that helps!"#;
             source_lines: 1,
         }];
         let json = r#"{"blocks":[{"id":"2","text":"T4"}]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
-        assert_eq!(out[0].translation, "T4");
+        assert!(merge_translations_detailed(&source, json).is_err());
     }
 
     #[test]
@@ -1109,7 +998,7 @@ Hope that helps!"#;
     }
 
     #[test]
-    fn merge_accepts_bare_array() {
+    fn merge_rejects_bare_array() {
         let source = vec![OcrBlock {
             id: 1,
             text: "A".into(),
@@ -1118,8 +1007,7 @@ Hope that helps!"#;
             source_lines: 1,
         }];
         let json = r#"[{"id":1,"translation":"T5"}]"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
-        assert_eq!(out[0].translation, "T5");
+        assert!(merge_translations_detailed(&source, json).is_err());
     }
 
     #[test]

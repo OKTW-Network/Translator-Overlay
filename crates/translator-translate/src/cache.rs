@@ -183,6 +183,12 @@ impl TranslationCache {
 
     /// Rebuild a full page: cache hits first, then model rows (by id, then normalized text).
     pub fn stitch(source: &[OcrBlock], hits: &[Option<String>], model_blocks: &[TranslatedBlock]) -> Vec<TranslatedBlock> {
+        let mut by_id: HashMap<u32, &str> = HashMap::with_capacity(model_blocks.len());
+        let mut by_norm: HashMap<String, &str> = HashMap::with_capacity(model_blocks.len());
+        for b in model_blocks {
+            by_id.entry(b.id).or_insert(b.translation.as_str());
+            by_norm.entry(normalize_ocr_text(&b.source)).or_insert(b.translation.as_str());
+        }
         source
             .iter()
             .enumerate()
@@ -190,16 +196,13 @@ impl TranslationCache {
                 let translation = hits
                     .get(i)
                     .and_then(|h| h.clone())
-                    .or_else(|| model_blocks.iter().find(|b| b.id == src.id).map(|b| b.translation.clone()))
+                    .or_else(|| by_id.get(&src.id).map(|s| (*s).to_string()))
                     .or_else(|| {
                         let key = normalize_ocr_text(&src.text);
                         if key.is_empty() {
                             return None;
                         }
-                        model_blocks
-                            .iter()
-                            .find(|b| normalize_ocr_text(&b.source) == key)
-                            .map(|b| b.translation.clone())
+                        by_norm.get(&key).map(|s| (*s).to_string())
                     })
                     .unwrap_or_else(|| src.text.clone());
                 TranslatedBlock {

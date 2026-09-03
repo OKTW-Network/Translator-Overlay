@@ -231,7 +231,10 @@ struct IsolatedCodexHome(PathBuf);
 
 impl Drop for IsolatedCodexHome {
     fn drop(&mut self) {
-        remove_isolated_codex_home(&self.0);
+        // Single attempt, no sleep: this can run on a Tokio worker.
+        if let Err(e) = crate::cli::remove_dir_all_once(&self.0) {
+            tracing::warn!(path = %self.0.display(), %e, "failed to remove isolated Codex home");
+        }
     }
 }
 
@@ -256,14 +259,6 @@ fn source_codex_home() -> Option<PathBuf> {
             .map(PathBuf::from)
             .map(|home| home.join(".codex"))
     })
-}
-
-fn remove_isolated_codex_home(codex_home: &Path) {
-    if let Err(error) = std::fs::remove_dir_all(codex_home)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %codex_home.display(), %error, "failed to remove isolated Codex home");
-    }
 }
 
 fn extract_turn_id(value: &Value) -> Option<String> {

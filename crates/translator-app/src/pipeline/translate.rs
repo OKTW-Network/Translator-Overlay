@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
-use translator_overlay::OverlayController;
+use translator_overlay::{OverlayCommand, OverlayController};
 use translator_translate::{Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed};
 
 use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState};
@@ -36,7 +36,7 @@ impl Pipeline {
             drop(s);
             // Manual / empty-page path must also wipe the live overlay window.
             if let Some(o) = self.overlay.as_ref()
-                && let Err(e) = o.clear()
+                && let Err(e) = o.send(OverlayCommand::Clear)
             {
                 warn!(error = %e, "failed to clear overlay on empty page");
             }
@@ -204,9 +204,13 @@ fn apply_cached_preview(
 ) {
     if let Some(o) = overlay {
         if let Some(hwnd) = state.read().target_hwnd {
-            let _ = o.attach(hwnd);
+            let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
         }
-        if let Err(e) = o.set_blocks(translated.clone(), content_width, content_height) {
+        if let Err(e) = o.send(OverlayCommand::SetBlocks {
+            blocks: translated.clone(),
+            content_width,
+            content_height,
+        }) {
             warn!(error = %e, "failed to preview cached overlay");
         }
     }
@@ -226,9 +230,13 @@ fn apply_translated(
 ) {
     if let Some(o) = overlay {
         if let Some(hwnd) = state.read().target_hwnd {
-            let _ = o.attach(hwnd);
+            let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
         }
-        if let Err(e) = o.set_blocks(translated.clone(), content_width, content_height) {
+        if let Err(e) = o.send(OverlayCommand::SetBlocks {
+            blocks: translated.clone(),
+            content_width,
+            content_height,
+        }) {
             warn!(error = %e, "failed to update overlay");
         }
     }

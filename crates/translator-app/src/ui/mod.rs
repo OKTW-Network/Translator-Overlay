@@ -4,11 +4,8 @@ mod chrome;
 mod controls;
 mod dashboard;
 mod nav_header;
-mod page_api;
-mod page_ocr;
-mod page_overlay;
-mod page_translation;
 mod preview;
+mod settings;
 mod shared;
 
 use windows_reactor::{
@@ -24,10 +21,7 @@ use crate::{
         chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
         dashboard::dashboard_page,
         nav_header::retarget,
-        page_api::api_page,
-        page_ocr::ocr_page,
-        page_overlay::overlay_page,
-        page_translation::translation_page,
+        settings::{api_page, ocr_page, overlay_page, translation_page},
         shared::{make_shared, take_chrome},
     },
 };

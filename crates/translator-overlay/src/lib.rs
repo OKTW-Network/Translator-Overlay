@@ -13,4 +13,9 @@ mod host;
 mod picker;
 mod reader;
 
-pub use crate::{command::OverlayEvent, controller::OverlayController, error::OverlayError, gfx::draw::argb_channels};
+pub use crate::{
+    command::{OverlayCommand, OverlayEvent},
+    controller::OverlayController,
+    error::OverlayError,
+    gfx::draw::argb_channels,
+};

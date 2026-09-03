@@ -12,7 +12,7 @@ use serde::{
 use thiserror::Error;
 
 use crate::{
-    paths::{PathError, config_path, resolve_under_exe},
+    paths::{PathError, resolve_under_exe},
     types::ModelTier,
 };
 
@@ -40,13 +40,6 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Load from the default path (`{exe_dir}/config.toml`).
-    /// Creates a default file when missing.
-    pub fn load_or_create_default() -> Result<Self, ConfigError> {
-        let path = config_path()?;
-        Self::load_or_create(&path)
-    }
-
     /// Load from `path`, or write defaults and return them if the file is absent.
     pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
         if path.exists() {
@@ -80,11 +73,6 @@ impl AppConfig {
             source,
         })?;
         Ok(())
-    }
-
-    /// Persist to the default config path next to the executable.
-    pub fn save_default_path(&self) -> Result<(), ConfigError> {
-        self.save(&config_path()?)
     }
 }
 
@@ -124,11 +112,6 @@ impl ModelProvider {
         matches!(self, Self::GrokCli | Self::CodexCli)
     }
 
-    /// Whether this provider adapter can request the Priority processing tier.
-    pub fn supports_priority_tier(self) -> bool {
-        matches!(self, Self::CodexCli)
-    }
-
     /// Default executable name when `cli_path` is empty.
     pub fn default_bin(self) -> &'static str {
         match self {
@@ -164,20 +147,18 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     let path_var = std::env::var_os("PATH")?;
-    let mut names = vec![std::path::PathBuf::from(name)];
-    if cfg!(windows) {
-        let has_ext = std::path::Path::new(name).extension().is_some_and(|e| !e.is_empty());
-        if !has_ext {
-            for ext in [".exe", ".cmd", ".bat"] {
-                names.push(std::path::PathBuf::from(format!("{name}{ext}")));
-            }
-        }
-    }
+    let append_ext = cfg!(windows) && !std::path::Path::new(name).extension().is_some_and(|e| !e.is_empty());
     for dir in std::env::split_paths(&path_var) {
-        for file_name in &names {
-            let candidate = dir.join(file_name);
-            if candidate.is_file() {
-                return Some(candidate);
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if append_ext {
+            for ext in [".exe", ".cmd", ".bat"] {
+                let candidate = dir.join(format!("{name}{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -470,22 +451,17 @@ pub fn format_argb_hex(argb: u32) -> String {
     format!("0x{argb:08X}")
 }
 
-/// Parse ARGB from `"0xAARRGGBB"`, `"#AARRGGBB"`, bare hex, or a decimal integer string.
+/// Parse ARGB from `"0xAARRGGBB"` or `"#AARRGGBB"` (prefix case-insensitive for `0x`).
 pub fn parse_argb_hex(s: &str) -> Option<u32> {
     let t = s.trim();
-    if t.is_empty() {
-        return None;
-    }
     let hex = t
         .strip_prefix("0x")
         .or_else(|| t.strip_prefix("0X"))
-        .or_else(|| t.strip_prefix('#'))
-        .unwrap_or(t);
+        .or_else(|| t.strip_prefix('#'))?;
     if hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return u32::from_str_radix(hex, 16).ok();
     }
-    // Legacy / accidental decimal string.
-    t.parse::<u32>().ok()
+    None
 }
 
 fn serialize_argb_hex<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
@@ -505,7 +481,7 @@ where
         type Value = u32;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("ARGB color as \"0xAARRGGBB\" hex string or integer")
+            f.write_str("ARGB color as \"0xAARRGGBB\" hex string")
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
@@ -514,14 +490,6 @@ where
 
         fn visit_string<E: de::Error>(self, v: String) -> Result<u32, E> {
             self.visit_str(&v)
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u32, E> {
-            u32::try_from(v).map_err(|_| E::custom(format!("ARGB color out of range: {v}")))
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u32, E> {
-            u32::try_from(v).map_err(|_| E::custom(format!("ARGB color out of range: {v}")))
         }
     }
 
@@ -550,16 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_colors_accept_legacy_decimal_and_hex_forms() {
-        let text = r#"
-[overlay]
-text_color_argb = 4294967295
-background_color_argb = "C8000000"
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert_eq!(config.overlay.text_color_argb, 0xFFFF_FFFF);
-        assert_eq!(config.overlay.background_color_argb, 0xC800_0000);
-
+    fn overlay_colors_accept_hex_forms_and_reject_legacy_forms() {
         let hashed = r##"
 [overlay]
 text_color_argb = "#AABBCCDD"
@@ -568,6 +527,14 @@ background_color_argb = "0xc8000000"
         let config: AppConfig = toml::from_str(hashed).unwrap();
         assert_eq!(config.overlay.text_color_argb, 0xAABB_CCDD);
         assert_eq!(config.overlay.background_color_argb, 0xC800_0000);
+
+        // Legacy bare-hex and decimal forms are no longer accepted.
+        for bad in [
+            "[overlay]\ntext_color_argb = \"C8000000\"\n",
+            "[overlay]\ntext_color_argb = 4294967295\n",
+        ] {
+            assert!(toml::from_str::<AppConfig>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -629,13 +596,6 @@ model = "my-model"
 
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.api.service_tier, ServiceTier::Priority);
-    }
-
-    #[test]
-    fn only_codex_currently_supports_priority_tier() {
-        assert!(ModelProvider::CodexCli.supports_priority_tier());
-        assert!(!ModelProvider::GrokCli.supports_priority_tier());
-        assert!(!ModelProvider::OpenaiCompatible.supports_priority_tier());
     }
 
     #[test]

@@ -164,7 +164,11 @@ impl CliBackend {
             live.kill();
         }
         self.mirrored.clear();
-        remove_isolated_cwd(self.isolated_cwd.take());
+        if let Some(dir) = self.isolated_cwd.take()
+            && let Err(e) = remove_dir_all_once(&dir)
+        {
+            tracing::warn!(path = %dir.display(), %e, "failed to remove isolated CLI cwd");
+        }
     }
 
     pub async fn close(&mut self) {
@@ -172,7 +176,11 @@ impl CliBackend {
             live.close().await;
         }
         self.mirrored.clear();
-        remove_isolated_cwd(self.isolated_cwd.take());
+        if let Some(dir) = self.isolated_cwd.take()
+            && let Err(e) = remove_dir_all_once(&dir)
+        {
+            tracing::warn!(path = %dir.display(), %e, "failed to remove isolated CLI cwd");
+        }
     }
 
     pub async fn complete(
@@ -280,25 +288,12 @@ impl CliBackend {
     }
 }
 
-fn try_remove_isolated_cwd(dir: &Path) -> bool {
+/// Single best-effort recursive delete; `Ok` when the dir is gone.
+pub(crate) fn remove_dir_all_once(dir: &Path) -> Result<(), std::io::Error> {
     match std::fs::remove_dir_all(dir) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => !dir.exists(),
-    }
-}
-
-fn remove_isolated_cwd(dir: Option<PathBuf>) {
-    let Some(dir) = dir else {
-        return;
-    };
-    for attempt in 0..5 {
-        if try_remove_isolated_cwd(&dir) {
-            return;
-        }
-        if attempt + 1 < 5 {
-            std::thread::sleep(Duration::from_millis(50 * (attempt as u64 + 1)));
-        }
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 

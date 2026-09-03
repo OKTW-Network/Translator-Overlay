@@ -267,7 +267,7 @@ impl BlockPersistenceFilter {
             }
 
             let same_text = normalize_ocr_text(&track.text) == text_key;
-            let iou = rect_iou(block.bbox, track.bbox);
+            let iou = block.bbox.iou(track.bbox);
             // Different text at nearly the same center still matches (OCR thrash
             // often changes box size enough to tank IoU below 0.2).
             if !same_text && iou < 0.05 && (dx > max_dx * 0.45 || dy > max_dy * 0.45) {
@@ -287,10 +287,6 @@ impl BlockPersistenceFilter {
         }
         best.map(|(i, _)| i)
     }
-}
-
-fn rect_iou(a: Rect, b: Rect) -> f32 {
-    a.iou(b)
 }
 
 #[cfg(test)]

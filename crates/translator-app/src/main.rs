@@ -31,17 +31,20 @@ async fn main() {
 
     info!("Translator Overlay starting");
 
-    let config = match AppConfig::load_or_create_default() {
+    let config = match config_path() {
+        Ok(path) => {
+            info!(path = %path.display(), "config path");
+            AppConfig::load_or_create(&path).map_err(|e| e.to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    };
+    let config = match config {
         Ok(c) => c,
         Err(e) => {
             error!("failed to load config: {e}");
             AppConfig::default()
         }
     };
-
-    if let Ok(path) = config_path() {
-        info!(path = %path.display(), "config path");
-    }
 
     let state: SharedState = Arc::new(RwLock::new(AppState::new(config)));
     let (cmd_tx, pipeline) = spawn_pipeline(state.clone());

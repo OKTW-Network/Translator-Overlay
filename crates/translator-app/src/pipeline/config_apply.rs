@@ -1,12 +1,27 @@
 //! Config apply and OCR engine load wiring.
 
+use std::path::PathBuf;
+
 use tracing::{error, info};
-use translator_core::{AppConfig, PipelineStatus};
+use translator_core::{AppConfig, PipelineStatus, config_path};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, StabilityGate};
+use translator_overlay::OverlayCommand;
 
 use crate::pipeline::worker::{InflightModelLoad, Pipeline};
 
 impl Pipeline {
+    /// Resolve the default config path; on failure record `save config:` and return `None`.
+    fn default_config_path(&mut self) -> Option<PathBuf> {
+        match config_path() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                error!(error = %e, "failed to resolve config path");
+                self.state.write().set_error(format!("save config: {e}"));
+                None
+            }
+        }
+    }
+
     /// Persist only overlay / reader visibility on the live config.
     pub(crate) fn set_overlay_display(&mut self, enabled: bool, reader_enabled: bool) {
         let overlay = {
@@ -16,10 +31,13 @@ impl Pipeline {
             s.config.overlay.clone()
         };
         if let Some(o) = self.overlay.as_ref() {
-            let _ = o.update_config(overlay);
+            let _ = o.send(OverlayCommand::UpdateConfig(overlay));
         }
         let save = self.state.read().config.clone();
-        if let Err(e) = save.save_default_path() {
+        let Some(path) = self.default_config_path() else {
+            return;
+        };
+        if let Err(e) = save.save(&path) {
             error!(error = %e, "failed to save overlay display flags");
             self.state.write().set_error(format!("save config: {e}"));
             return;
@@ -45,10 +63,14 @@ impl Pipeline {
         self.translation_cache.set_max(cfg.translation.cache_max_entries_clamped());
 
         if let Some(o) = self.overlay.as_ref() {
-            let _ = o.update_config(cfg.overlay.clone());
+            let _ = o.send(OverlayCommand::UpdateConfig(cfg.overlay.clone()));
         }
 
-        if let Err(e) = cfg.save_default_path() {
+        self.state.write().config = cfg.clone();
+        let Some(path) = self.default_config_path() else {
+            return;
+        };
+        if let Err(e) = cfg.save(&path) {
             error!(error = %e, "failed to save config");
             let mut s = self.state.write();
             s.config = cfg;

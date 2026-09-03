@@ -6,11 +6,9 @@ use tracing::{debug, error, info, warn};
 use translator_capture::CapturedFrame;
 use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
 use translator_ocr::{OcrEngine, OcrFingerprint, StabilityOutcome};
+use translator_overlay::OverlayCommand;
 
-use crate::pipeline::{
-    remap::{remap_translations_to_ocr, translated_geometry_changed},
-    worker::{LastRawOcr, PendingPage, Pipeline},
-};
+use crate::pipeline::worker::{LastRawOcr, PendingPage, Pipeline, remap_translations_to_ocr, translated_geometry_changed};
 
 impl Pipeline {
     /// Clear captions / overlay only. Keeps OCR preview, gate, persist, and
@@ -31,7 +29,7 @@ impl Pipeline {
         self.last_translated_fp = None;
         self.remap_miss_since = None;
         if let Some(o) = self.overlay.as_ref()
-            && let Err(e) = o.clear()
+            && let Err(e) = o.send(OverlayCommand::Clear)
         {
             warn!(error = %e, "failed to clear overlay captions");
         }
@@ -70,7 +68,7 @@ impl Pipeline {
         self.remap_miss_since = None;
 
         if let Some(o) = self.overlay.as_ref()
-            && let Err(e) = o.clear()
+            && let Err(e) = o.send(OverlayCommand::Clear)
         {
             warn!(error = %e, "failed to clear overlay");
         }
@@ -356,9 +354,13 @@ impl Pipeline {
 
         if let Some(o) = self.overlay.as_ref() {
             if let Some(hwnd) = self.state.read().target_hwnd {
-                let _ = o.attach(hwnd);
+                let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
             }
-            if let Err(e) = o.set_blocks(remapped.clone(), frame_w, frame_h) {
+            if let Err(e) = o.send(OverlayCommand::SetBlocks {
+                blocks: remapped.clone(),
+                content_width: frame_w,
+                content_height: frame_h,
+            }) {
                 warn!(error = %e, "failed to refresh overlay bboxes");
             }
         }
@@ -473,7 +475,7 @@ impl Pipeline {
             s.translate_in_flight = false;
         }
         if let Some(o) = self.overlay.as_ref() {
-            let _ = o.clear();
+            let _ = o.send(OverlayCommand::Clear);
         }
     }
 }

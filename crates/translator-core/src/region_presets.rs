@@ -8,10 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    paths::{PathError, region_presets_path},
-    types::NormRect,
-};
+use crate::{paths::PathError, types::NormRect};
 
 #[derive(Debug, Error)]
 pub enum RegionPresetsError {
@@ -42,12 +39,6 @@ pub struct RegionPresetFile {
 }
 
 impl RegionPresetFile {
-    /// Load from the default path. Missing file → empty list (does not create).
-    pub fn load_or_empty() -> Result<Self, RegionPresetsError> {
-        let path = region_presets_path()?;
-        Self::load_or_empty_at(&path)
-    }
-
     pub fn load_or_empty_at(path: &Path) -> Result<Self, RegionPresetsError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -74,11 +65,6 @@ impl RegionPresetFile {
             source,
         })?;
         Ok(())
-    }
-
-    pub fn save_default(&self) -> Result<(), RegionPresetsError> {
-        let path = region_presets_path()?;
-        self.save(&path)
     }
 
     /// Drop invalid rects; drop presets that end up with no regions or empty names.

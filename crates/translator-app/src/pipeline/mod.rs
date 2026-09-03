@@ -2,7 +2,6 @@
 
 mod config_apply;
 mod ocr;
-mod remap;
 mod translate;
 mod worker;
 

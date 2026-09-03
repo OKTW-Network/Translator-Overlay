@@ -3,13 +3,13 @@
 use std::{
     any::Any,
     cell::{Cell, RefCell},
+    hash::{Hash, Hasher},
 };
 
 use bytes::Bytes;
 use translator_core::NormRect;
 use windows_canvas::{AlphaMode, ColorF, GpuDevice, Rect};
 use windows_reactor::{CanvasImageSource, Element, HorizontalAlignment, Image, KeyExt, LayoutExt, Stretch, Updater, text_block};
-
 thread_local! {
     static GPU: RefCell<Option<GpuDevice>> = const { RefCell::new(None) };
     static CACHE: RefCell<Option<CachedPreview>> = const { RefCell::new(None) };
@@ -30,7 +30,6 @@ struct CachedPreview {
 }
 
 fn regions_key(regions: &[NormRect]) -> u64 {
-    use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
     regions.len().hash(&mut h);
     for r in regions {

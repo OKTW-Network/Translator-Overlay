@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info};
-use translator_core::{NormRect, OverlayConfig, TranslatedBlock};
+use translator_core::OverlayConfig;
 
 use crate::{
     command::{OverlayCommand, OverlayEvent},
@@ -60,53 +60,6 @@ impl OverlayController {
         }
     }
 
-    /// Follow `target_hwnd` (screen position / size).
-    pub fn attach(&self, target_hwnd: isize) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::Attach { target_hwnd })
-    }
-
-    /// Stop following any target and hide.
-    pub fn detach(&self) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::Detach)
-    }
-
-    /// Replace drawn translation blocks.
-    ///
-    /// `content_width` / `content_height` are the capture-image dimensions the
-    /// block bboxes are expressed in.
-    pub fn set_blocks(&self, blocks: Vec<TranslatedBlock>, content_width: u32, content_height: u32) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::SetBlocks {
-            blocks,
-            content_width,
-            content_height,
-        })
-    }
-
-    /// Clear content and hide the overlay.
-    pub fn clear(&self) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::Clear)
-    }
-
-    pub fn update_config(&self, config: OverlayConfig) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::UpdateConfig(config))
-    }
-
-    pub fn begin_region_select(&self, regions: Vec<NormRect>) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::BeginRegionSelect { regions })
-    }
-
-    pub fn cancel_region_select(&self) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::CancelRegionSelect)
-    }
-
-    pub fn confirm_region_select(&self) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::ConfirmRegionSelect)
-    }
-
-    pub fn clear_region_select(&self) -> Result<(), OverlayError> {
-        self.send(OverlayCommand::ClearRegionSelect)
-    }
-
     pub fn try_recv_event(&mut self) -> Option<OverlayEvent> {
         self.events.try_recv().ok()
     }
@@ -127,7 +80,7 @@ impl OverlayController {
         }
     }
 
-    fn send(&self, cmd: OverlayCommand) -> Result<(), OverlayError> {
+    pub fn send(&self, cmd: OverlayCommand) -> Result<(), OverlayError> {
         self.tx.send(cmd).map_err(|_| OverlayError::NotRunning)?;
         wake_overlay_thread();
         Ok(())
