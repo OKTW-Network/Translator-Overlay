@@ -1222,7 +1222,7 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         settings_card_stack(
             "tr-system-prompt",
             "System prompt",
-            Some("Leave empty to use the built-in prompt."),
+            Some("Leave empty for the built-in prompt. Custom text must reply {\"b\":[[id,\"translation\"],...]}."),
             text_box(translation.system_prompt.clone().unwrap_or_default())
                 .multiline()
                 .height(120.0)

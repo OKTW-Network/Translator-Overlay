@@ -1,29 +1,33 @@
 //! OpenAI-compatible HTTP request/response types and parsers.
 
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use translator_core::{ApiConfig, HttpApi};
 
 use crate::{Completion, TranslateError};
 
 /// OpenAI `strict` requires every property in `required` and `additionalProperties: false`.
+/// xAI 400s if `items` is an array (tuple form); keep `items` an object and use `anyOf`.
 pub fn translation_json_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "blocks": {
+            "b": {
                 "type": "array",
                 "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" },
-                        "translation": { "type": "string" }
-                    },
-                    "required": ["id", "translation"],
-                    "additionalProperties": false
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                        "anyOf": [
+                            { "type": "integer" },
+                            { "type": "string" }
+                        ]
+                    }
                 }
             }
         },
-        "required": ["blocks"],
+        "required": ["b"],
         "additionalProperties": false
     })
 }
@@ -229,13 +233,125 @@ impl ChatMessage {
 
 pub fn completion_from_http_body(http_api: HttpApi, body: &str) -> Result<Completion, TranslateError> {
     let trimmed = body.trim();
-    let sse = trimmed.starts_with("data:") || trimmed.starts_with("event:") || trimmed.starts_with(':');
-    match http_api {
-        HttpApi::ChatCompletions if sse => completion_from_chat_sse(trimmed),
-        HttpApi::Responses if sse => completion_from_responses_sse(trimmed),
-        HttpApi::ChatCompletions => extract_chat_completion(trimmed),
-        HttpApi::Responses => extract_responses_completion(trimmed),
+    match (http_api, looks_like_sse(trimmed)) {
+        (HttpApi::ChatCompletions, true) => completion_from_chat_sse(trimmed),
+        (HttpApi::Responses, true) => completion_from_responses_sse(trimmed),
+        (HttpApi::ChatCompletions, false) => extract_chat_completion(trimmed),
+        (HttpApi::Responses, false) => extract_responses_completion(trimmed),
     }
+}
+
+fn looks_like_sse(s: &str) -> bool {
+    let t = s.trim_start();
+    t.starts_with("data:") || t.starts_with("event:") || t.starts_with(':')
+}
+
+pub(crate) async fn consume_http_response(
+    mut response: reqwest::Response,
+    http_api: HttpApi,
+    stream: bool,
+    cancel: &CancellationToken,
+    on_text: &mut impl FnMut(&str),
+) -> Result<Completion, TranslateError> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(TranslateError::Cancelled),
+            result = response.text() => result?,
+        };
+        return Err(TranslateError::ApiStatus {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    if !stream {
+        let body = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(TranslateError::Cancelled),
+            result = response.text() => result?,
+        };
+        return completion_from_http_body(http_api, &body);
+    }
+    consume_sse_response(&mut response, http_api, cancel, on_text).await
+}
+
+async fn consume_sse_response(
+    response: &mut reqwest::Response,
+    http_api: HttpApi,
+    cancel: &CancellationToken,
+    on_text: &mut impl FnMut(&str),
+) -> Result<Completion, TranslateError> {
+    let mut raw = Vec::new();
+    let mut buf = String::new();
+    let mut is_sse = false;
+    let mut chat = ChatSse::default();
+    let mut responses = ResponsesSse::default();
+
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(TranslateError::Cancelled),
+            result = response.chunk() => result?,
+        };
+        match chunk {
+            Some(bytes) => raw.extend_from_slice(&bytes),
+            None => break,
+        }
+        let text = take_utf8_prefix(&mut raw);
+        if text.is_empty() {
+            continue;
+        }
+        buf.push_str(&text);
+        if is_sse || looks_like_sse(&buf) {
+            is_sse = true;
+            push_sse_events(&mut buf, http_api, &mut chat, &mut responses, on_text, false)?;
+        }
+    }
+
+    if is_sse {
+        push_sse_events(&mut buf, http_api, &mut chat, &mut responses, on_text, true)?;
+        match http_api {
+            HttpApi::ChatCompletions => chat.finish(),
+            HttpApi::Responses => responses.finish(),
+        }
+    } else {
+        completion_from_http_body(http_api, &buf)
+    }
+}
+
+fn take_utf8_prefix(bytes: &mut Vec<u8>) -> String {
+    let n = match std::str::from_utf8(bytes) {
+        Ok(s) => s.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    if n == 0 {
+        return String::new();
+    }
+    String::from_utf8(bytes.drain(..n).collect()).unwrap_or_default()
+}
+
+fn push_sse_events(
+    buf: &mut String,
+    http_api: HttpApi,
+    chat: &mut ChatSse,
+    responses: &mut ResponsesSse,
+    on_text: &mut impl FnMut(&str),
+    flush: bool,
+) -> Result<(), TranslateError> {
+    for ev in drain_sse_events(buf, flush) {
+        let grew = match http_api {
+            HttpApi::ChatCompletions => chat.push(&ev)?,
+            HttpApi::Responses => responses.push(&ev)?,
+        };
+        if grew {
+            match http_api {
+                HttpApi::ChatCompletions => on_text(&chat.text),
+                HttpApi::Responses => on_text(&responses.delta_text),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn extract_chat_completion(response_json: &str) -> Result<Completion, TranslateError> {
@@ -368,28 +484,45 @@ fn extract_responses_value(root: &serde_json::Value) -> Result<Completion, Trans
 }
 
 fn completion_from_chat_sse(body: &str) -> Result<Completion, TranslateError> {
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut refusal = None;
+    let mut acc = ChatSse::default();
     for ev in sse_events(body) {
+        acc.push(&ev)?;
+    }
+    acc.finish()
+}
+
+#[derive(Default)]
+struct ChatSse {
+    text: String,
+    reasoning: String,
+    refusal: Option<String>,
+}
+
+impl ChatSse {
+    fn push(&mut self, ev: &SseEvent) -> Result<bool, TranslateError> {
         if ev.data.trim() == "[DONE]" {
-            continue;
+            return Ok(false);
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.data) else {
-            continue;
+            return Ok(false);
         };
         if let Some(err) = stream_event_error(ev.event.as_deref(), &v) {
             return Err(err);
         }
-        apply_chat_delta(&v, &mut text, &mut refusal, &mut reasoning);
+        let before = self.text.len();
+        apply_chat_delta(&v, &mut self.text, &mut self.refusal, &mut self.reasoning);
+        Ok(self.text.len() > before)
     }
-    if let Some(refusal) = refusal.filter(|s| !s.is_empty()) {
-        return Err(TranslateError::Parse(format!("model refused: {refusal}")));
+
+    fn finish(self) -> Result<Completion, TranslateError> {
+        if let Some(refusal) = self.refusal.filter(|s| !s.is_empty()) {
+            return Err(TranslateError::Parse(format!("model refused: {refusal}")));
+        }
+        if self.text.trim().is_empty() {
+            return Err(TranslateError::Parse("no choices/content in response".into()));
+        }
+        Ok(chat_completion_result(self.text, (!self.reasoning.is_empty()).then_some(self.reasoning)))
     }
-    if text.trim().is_empty() {
-        return Err(TranslateError::Parse("no choices/content in response".into()));
-    }
-    Ok(chat_completion_result(text, (!reasoning.is_empty()).then_some(reasoning)))
 }
 
 fn apply_chat_delta(v: &serde_json::Value, text: &mut String, refusal: &mut Option<String>, reasoning: &mut String) {
@@ -423,14 +556,27 @@ fn apply_chat_delta(v: &serde_json::Value, text: &mut String, refusal: &mut Opti
 }
 
 fn completion_from_responses_sse(body: &str) -> Result<Completion, TranslateError> {
-    let mut completed: Option<serde_json::Value> = None;
-    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut acc = ResponsesSse::default();
     for ev in sse_events(body) {
+        acc.push(&ev)?;
+    }
+    acc.finish()
+}
+
+#[derive(Default)]
+struct ResponsesSse {
+    delta_text: String,
+    completed: Option<serde_json::Value>,
+    items: Vec<serde_json::Value>,
+}
+
+impl ResponsesSse {
+    fn push(&mut self, ev: &SseEvent) -> Result<bool, TranslateError> {
         if ev.data.trim() == "[DONE]" {
-            continue;
+            return Ok(false);
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.data) else {
-            continue;
+            return Ok(false);
         };
         if let Some(err) = stream_event_error(ev.event.as_deref(), &v) {
             return Err(err);
@@ -441,25 +587,41 @@ fn completion_from_responses_sse(body: &str) -> Result<Completion, TranslateErro
             .filter(|s| !s.is_empty())
             .or_else(|| v.get("type").and_then(serde_json::Value::as_str))
             .unwrap_or("");
+        let before = self.delta_text.len();
         match ty {
             "response.completed" => {
-                completed = Some(v.get("response").cloned().unwrap_or(v));
+                self.completed = Some(v.get("response").cloned().unwrap_or(v));
             }
             "response.output_item.done" => {
                 if let Some(item) = v.get("item") {
-                    items.push(item.clone());
+                    self.items.push(item.clone());
+                }
+            }
+            "response.output_text.delta" => {
+                if let Some(piece) = v.get("delta").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) {
+                    self.delta_text.push_str(piece);
                 }
             }
             _ => {}
         }
+        Ok(self.delta_text.len() > before)
     }
-    if let Some(resp) = completed {
-        return extract_responses_value(&resp);
+
+    fn finish(self) -> Result<Completion, TranslateError> {
+        if let Some(resp) = self.completed {
+            return extract_responses_value(&resp);
+        }
+        if !self.items.is_empty() {
+            return extract_responses_value(&serde_json::json!({ "output": self.items }));
+        }
+        if !self.delta_text.trim().is_empty() {
+            return Ok(Completion {
+                text: self.delta_text,
+                replay_items: Vec::new(),
+            });
+        }
+        Err(TranslateError::Parse("no message/content in responses output".into()))
     }
-    if !items.is_empty() {
-        return extract_responses_value(&serde_json::json!({ "output": items }));
-    }
-    Err(TranslateError::Parse("no message/content in responses output".into()))
 }
 
 struct SseEvent {
@@ -507,8 +669,30 @@ fn stream_api_error(err: &serde_json::Value) -> TranslateError {
 }
 
 fn sse_events(body: &str) -> Vec<SseEvent> {
-    let normalized = body.replace("\r\n", "\n");
-    normalized.split("\n\n").filter_map(parse_sse_block).collect()
+    let mut buf = body.replace("\r\n", "\n");
+    drain_sse_events(&mut buf, true)
+}
+
+fn drain_sse_events(buf: &mut String, flush: bool) -> Vec<SseEvent> {
+    let n = buf.replace("\r\n", "\n");
+    let mut events = Vec::new();
+    let mut start = 0;
+    while let Some(rel) = n[start..].find("\n\n") {
+        let end = start + rel;
+        if let Some(ev) = parse_sse_block(&n[start..end]) {
+            events.push(ev);
+        }
+        start = end + 2;
+    }
+    if flush {
+        if let Some(ev) = parse_sse_block(&n[start..]) {
+            events.push(ev);
+        }
+        buf.clear();
+    } else {
+        *buf = n[start..].to_string();
+    }
+    events
 }
 
 fn parse_sse_block(block: &str) -> Option<SseEvent> {
@@ -534,6 +718,18 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translation_schema_keeps_items_as_object() {
+        let schema = translation_json_schema();
+        let pair = &schema["properties"]["b"]["items"];
+        assert_eq!(pair["type"], "array");
+        assert_eq!(pair["minItems"], 2);
+        assert_eq!(pair["maxItems"], 2);
+        assert!(pair["items"].is_object(), "{pair}");
+        assert!(pair["items"]["anyOf"].is_array());
+        assert!(pair.get("prefixItems").is_none());
+    }
 
     #[test]
     fn chat_body_has_stream_and_prompt_cache_key() {
@@ -730,6 +926,17 @@ mod tests {
         let err = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap_err();
         assert!(err.to_string().contains("overloaded"), "{err}");
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn responses_sse_accumulates_output_text_delta() {
+        let body = "event: response.output_text.delta\n\
+                    data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n\
+                    event: response.output_text.delta\n\
+                    data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n";
+        let completion = completion_from_http_body(HttpApi::Responses, body).unwrap();
+        assert_eq!(completion.text, "hello");
+        assert!(completion.replay_items.is_empty());
     }
 
     #[test]

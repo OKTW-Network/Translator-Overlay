@@ -7,7 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
@@ -22,9 +22,14 @@ pub type SharedState = Arc<RwLock<AppState>>;
 pub type CmdRx = mpsc::UnboundedReceiver<PipelineCommand>;
 pub type CmdTx = mpsc::UnboundedSender<PipelineCommand>;
 
+pub(crate) enum TranslateJobMsg {
+    Partial(Vec<(u32, String)>),
+    Done(Result<Completion, TranslateError>),
+}
+
 pub(crate) struct InflightTranslate {
     pub cancel: CancellationToken,
-    pub rx: oneshot::Receiver<Result<Completion, TranslateError>>,
+    pub rx: mpsc::UnboundedReceiver<TranslateJobMsg>,
     pub fingerprint: OcrFingerprint,
     pub blocks: Vec<OcrBlock>,
     pub source_text: String,
@@ -34,6 +39,8 @@ pub(crate) struct InflightTranslate {
     pub miss_blocks: Vec<OcrBlock>,
     /// Per-source-block cache hits (`None` = wait for the model / fallback).
     pub cached_hits: Vec<Option<String>>,
+    /// Overlay at job start (cache-hit preview or last committed page). Restored on retry / fail.
+    pub revert_blocks: Vec<TranslatedBlock>,
 }
 
 /// Background OCR model download + ORT session build (`watch` = latest phase only).
@@ -227,11 +234,21 @@ impl Pipeline {
                         return;
                     }
                 }
-                PipelineEvent::Translate(result) => {
-                    let job = self.inflight.take().expect("inflight present");
-                    let result = result.unwrap_or_else(|_| Err(TranslateError::Other("translate task dropped".into())));
-                    self.finish_translate(job, result);
-                }
+                PipelineEvent::Translate(msg) => match msg {
+                    Some(TranslateJobMsg::Partial(pairs)) => {
+                        if let Some(job) = self.inflight.as_ref() {
+                            self.apply_stream_preview(job, &pairs);
+                        }
+                    }
+                    Some(TranslateJobMsg::Done(result)) => {
+                        let job = self.inflight.take().expect("inflight present");
+                        self.finish_translate(job, result);
+                    }
+                    None => {
+                        let job = self.inflight.take().expect("inflight present");
+                        self.finish_translate(job, Err(TranslateError::Other("translate task dropped".into())));
+                    }
+                },
                 PipelineEvent::ModelLoad => self.sync_model_load(),
                 PipelineEvent::Overlay(None) => {
                     warn!("overlay host event channel closed");
@@ -572,7 +589,7 @@ impl Pipeline {
 
 enum PipelineEvent {
     Command(Option<PipelineCommand>),
-    Translate(Result<Result<Completion, TranslateError>, oneshot::error::RecvError>),
+    Translate(Option<TranslateJobMsg>),
     ModelLoad,
     Overlay(Option<OverlayEvent>),
     Tick,
@@ -594,7 +611,7 @@ async fn next_event(
 
     let translate = async {
         match inflight {
-            Some(job) => (&mut job.rx).await,
+            Some(job) => job.rx.recv().await,
             None => std::future::pending().await,
         }
     };

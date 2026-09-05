@@ -24,7 +24,7 @@ pub use crate::{
 };
 use crate::{
     cli::CliBackend,
-    http::{chat_completion_body, completion_from_http_body, responses_request_body},
+    http::{chat_completion_body, responses_request_body},
 };
 
 #[derive(Debug, Error)]
@@ -211,11 +211,9 @@ pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
         return custom.clone();
     }
     format!(
-        "You are a translation engine. Translate text from {src} to {dst}.\n\
-         Input is JSON with OCR blocks (id, text).\n\
-         Reply with a single JSON object only — no markdown fences, no commentary:\n\
-         {{\"blocks\":[{{\"id\":0,\"translation\":\"...\"}}]}}\n\
-         Escape quotes and backslashes inside strings. No trailing commas.\n\
+        "Translate {src}→{dst}. Input {{\"b\":[[id,\"source\"],...]}}. \
+         Reply JSON only: {{\"b\":[[id,\"translation\"],...]}} matching ids. \
+         No markdown fences, no trailing commas; escape quotes and backslashes. \
          Preserve proper nouns when appropriate.",
         src = cfg.source_lang,
         dst = cfg.target_lang
@@ -226,41 +224,30 @@ pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
 pub fn user_payload_from_blocks(blocks: &[OcrBlock]) -> String {
     #[derive(Serialize)]
     struct Payload<'a> {
-        blocks: Vec<BlockIn<'a>>,
+        b: Vec<(u32, &'a str)>,
     }
-    #[derive(Serialize)]
-    struct BlockIn<'a> {
-        id: u32,
-        text: &'a str,
-    }
-    let payload = Payload {
-        blocks: blocks.iter().map(|b| BlockIn { id: b.id, text: &b.text }).collect(),
-    };
-    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+    serde_json::to_string(&Payload {
+        b: blocks.iter().map(|b| (b.id, b.text.as_str())).collect(),
+    })
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 #[derive(Debug, Deserialize)]
 struct TranslationResponse {
-    blocks: Vec<TranslationBlockOut>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TranslationBlockOut {
-    id: u32,
-    translation: String,
+    b: Vec<(serde_json::Value, serde_json::Value)>,
 }
 
 /// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
 pub fn merge_translations_detailed(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
     let parsed = parse_translation_blocks(response_json)?;
-    let model_ids: HashSet<u32> = parsed.iter().map(|b| b.id).collect();
+    let model_ids: HashSet<u32> = parsed.iter().map(|(id, _)| *id).collect();
 
     let mut blocks = Vec::with_capacity(source.len());
     for src in source {
         let translation = parsed
             .iter()
-            .find(|b| b.id == src.id)
-            .map(|b| b.translation.clone())
+            .find(|(id, _)| *id == src.id)
+            .map(|(_, t)| t.clone())
             .unwrap_or_else(|| src.text.clone());
         blocks.push(TranslatedBlock {
             id: src.id,
@@ -281,14 +268,38 @@ pub struct MergeOutcome {
     pub model_ids: HashSet<u32>,
 }
 
-fn parse_translation_blocks(response_json: &str) -> Result<Vec<TranslationBlockOut>, TranslateError> {
+fn parse_translation_blocks(response_json: &str) -> Result<Vec<(u32, String)>, TranslateError> {
     let candidates = json_parse_candidates(response_json);
     let mut last_err = String::new();
 
     for candidate in &candidates {
-        match try_parse_blocks(candidate) {
-            Ok(blocks) => return Ok(blocks),
-            Err(e) => last_err = e,
+        match serde_json::from_str::<TranslationResponse>(candidate) {
+            Ok(parsed) => {
+                let raw_len = parsed.b.len();
+                let pairs: Vec<(u32, String)> = parsed
+                    .b
+                    .into_iter()
+                    .filter_map(|(id, text)| {
+                        let id = match id {
+                            serde_json::Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok())?,
+                            serde_json::Value::String(s) => s.parse().ok()?,
+                            _ => return None,
+                        };
+                        let text = match text {
+                            serde_json::Value::String(s) => s,
+                            serde_json::Value::Number(n) => n.to_string(),
+                            _ => return None,
+                        };
+                        Some((id, text))
+                    })
+                    .collect();
+                if pairs.is_empty() && raw_len != 0 {
+                    last_err = "no valid [id, text] pairs".into();
+                    continue;
+                }
+                return Ok(pairs);
+            }
+            Err(e) => last_err = e.to_string(),
         }
     }
 
@@ -296,17 +307,156 @@ fn parse_translation_blocks(response_json: &str) -> Result<Vec<TranslationBlockO
     Err(TranslateError::Parse(format!("{last_err}; content snippet: {snippet:?}")))
 }
 
-fn try_parse_blocks(json: &str) -> Result<Vec<TranslationBlockOut>, String> {
-    // Strict shape only: {"blocks":[...]} (structured outputs enforces this).
-    if let Ok(parsed) = serde_json::from_str::<TranslationResponse>(json) {
-        return Ok(parsed.blocks);
-    }
+/// Best-effort pairs from a possibly incomplete `{"b":[[id,"text"],...]}` stream.
+///
+/// Complete tuples are included as soon as the string closes. The last unfinished
+/// `[id, "partial` is included so the current block can paint while it grows.
+pub fn peek_translation_pairs(partial: &str) -> Vec<(u32, String)> {
+    let s = partial.trim().trim_start_matches('\u{feff}');
+    let s = strip_markdown_fence(s);
+    let Some(inner) = b_array_inner(&s) else {
+        return Vec::new();
+    };
+    parse_pairs_from_array(inner)
+}
 
-    let err = serde_json::from_str::<TranslationResponse>(json)
-        .err()
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| "unrecognized translation JSON shape".into());
-    Err(err)
+fn b_array_inner(s: &str) -> Option<&str> {
+    let mut from = 0;
+    while let Some(rel) = s[from..].find("\"b\"") {
+        let key = from + rel;
+        from = key + 3;
+        let before = s[..key].trim_end();
+        if !(before.ends_with('{') || before.ends_with(',')) {
+            continue;
+        }
+        let Some(after) = s[from..].trim_start().strip_prefix(':') else {
+            continue;
+        };
+        if let Some(rest) = after.trim_start().strip_prefix('[') {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+fn parse_pairs_from_array(mut s: &str) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    loop {
+        s = s.trim_start();
+        if s.is_empty() || s.starts_with(']') {
+            break;
+        }
+        if let Some(rest) = s.strip_prefix(',') {
+            s = rest;
+            continue;
+        }
+        let Some(rest) = s.strip_prefix('[') else {
+            break;
+        };
+        s = rest.trim_start();
+        let (id, rest) = if let Some(parsed) = parse_u32_prefix(s) {
+            parsed
+        } else {
+            match parse_json_string_prefix(s) {
+                Some((text, Some(rest))) => match text.parse() {
+                    Ok(id) => (id, rest),
+                    Err(_) => break,
+                },
+                _ => break,
+            }
+        };
+        s = rest.trim_start();
+        let Some(rest) = s.strip_prefix(',') else {
+            break;
+        };
+        s = rest.trim_start();
+        let Some((text, rest)) = parse_json_string_prefix(s).or_else(|| parse_json_number_prefix(s)) else {
+            break;
+        };
+        match rest {
+            Some(rest) => {
+                out.push((id, text));
+                s = rest.trim_start();
+                if let Some(rest) = s.strip_prefix(']') {
+                    s = rest;
+                } else {
+                    break;
+                }
+            }
+            None => {
+                if !text.is_empty() {
+                    out.push((id, text));
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn parse_u32_prefix(s: &str) -> Option<(u32, &str)> {
+    let n = s.bytes().take_while(u8::is_ascii_digit).count();
+    if n == 0 {
+        return None;
+    }
+    let id = s[..n].parse().ok()?;
+    Some((id, &s[n..]))
+}
+
+/// JSON number token; `None` rest = still growing at end of buffer.
+fn parse_json_number_prefix(s: &str) -> Option<(String, Option<&str>)> {
+    let body = s.strip_prefix('-').unwrap_or(s);
+    let int_digits = body.bytes().take_while(u8::is_ascii_digit).count();
+    if int_digits == 0 {
+        return None;
+    }
+    let mut end = (s.len() - body.len()) + int_digits;
+    if s.as_bytes().get(end) == Some(&b'.') {
+        let frac = s[end + 1..].bytes().take_while(u8::is_ascii_digit).count();
+        if frac == 0 {
+            return if end + 1 == s.len() {
+                Some((s[..end].to_string(), None))
+            } else {
+                None
+            };
+        }
+        end += 1 + frac;
+    }
+    if end == s.len() {
+        Some((s[..end].to_string(), None))
+    } else {
+        Some((s[..end].to_string(), Some(&s[end..])))
+    }
+}
+
+/// `(unescaped, Some(rest))` when the string closed; `None` rest = still open.
+fn parse_json_string_prefix(s: &str) -> Option<(String, Option<&str>)> {
+    let bytes = s.as_bytes();
+    if bytes.first().copied() != Some(b'"') {
+        return None;
+    }
+    let mut i = 1;
+    let mut escape = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escape = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            let text = serde_json::from_str(&s[..=i]).ok()?;
+            return Some((text, Some(&s[i + 1..])));
+        }
+        i += 1;
+    }
+    let end = bytes.len() - usize::from(escape);
+    Some((s[1..end].to_string(), None))
 }
 
 /// Fence-strip plus balanced `{...}` extraction (ignore prose around JSON).
@@ -461,45 +611,53 @@ impl TranslateClient {
         &self.config
     }
 
-    pub async fn complete_cancellable(&self, conv: &Conversation, cancel: &CancellationToken) -> Result<Completion, TranslateError> {
+    pub async fn complete_cancellable(
+        &self,
+        conv: &Conversation,
+        cancel: &CancellationToken,
+        on_text: &mut impl FnMut(&str),
+    ) -> Result<Completion, TranslateError> {
         if !self.config.provider.is_cli() && self.config.http_api == HttpApi::Responses {
             let body = responses_request_body(&self.config, &conv.items, &conv.session_id);
-            let text = self
-                .http_post_json(
+            return self
+                .http_complete(
                     &format!("{}/responses", self.config.base_url.trim_end_matches('/')),
                     &body,
                     Some(conv.session_id.as_str()),
+                    HttpApi::Responses,
                     cancel,
+                    on_text,
                 )
-                .await?;
-            return completion_from_http_body(HttpApi::Responses, &text);
+                .await;
         }
         let messages = conv.messages();
         if self.config.provider.is_cli() {
-            let text = self.cli_complete(&messages, cancel).await?;
+            let text = self.cli_complete(&messages, cancel, on_text).await?;
             return Ok(Completion {
                 text,
                 replay_items: Vec::new(),
             });
         }
-        let text = self
-            .http_post_json(
-                &format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')),
-                &chat_completion_body(&self.config, &messages, &conv.session_id),
-                Some(conv.session_id.as_str()),
-                cancel,
-            )
-            .await?;
-        completion_from_http_body(HttpApi::ChatCompletions, &text)
+        self.http_complete(
+            &format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')),
+            &chat_completion_body(&self.config, &messages, &conv.session_id),
+            Some(conv.session_id.as_str()),
+            HttpApi::ChatCompletions,
+            cancel,
+            on_text,
+        )
+        .await
     }
 
-    async fn http_post_json<T: Serialize>(
+    async fn http_complete<T: Serialize>(
         &self,
         url: &str,
         body: &T,
         session_id: Option<&str>,
+        http_api: HttpApi,
         cancel: &CancellationToken,
-    ) -> Result<String, TranslateError> {
+        on_text: &mut impl FnMut(&str),
+    ) -> Result<Completion, TranslateError> {
         if self.config.api_key.trim().is_empty() {
             return Err(TranslateError::MissingApiKey);
         }
@@ -519,23 +677,15 @@ impl TranslateClient {
             result = send => result?,
         };
 
-        let status = response.status();
-        let text = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(TranslateError::Cancelled),
-            result = response.text() => result?,
-        };
-
-        if !status.is_success() {
-            return Err(TranslateError::ApiStatus {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
-        Ok(text)
+        crate::http::consume_http_response(response, http_api, self.config.stream, cancel, on_text).await
     }
 
-    async fn cli_complete(&self, messages: &[ChatMessage], cancel: &CancellationToken) -> Result<String, TranslateError> {
+    async fn cli_complete(
+        &self,
+        messages: &[ChatMessage],
+        cancel: &CancellationToken,
+        on_text: &mut impl FnMut(&str),
+    ) -> Result<String, TranslateError> {
         if cancel.is_cancelled() {
             return Err(TranslateError::Cancelled);
         }
@@ -549,7 +699,7 @@ impl TranslateClient {
         if epoch != self.cli.epoch.load(Ordering::SeqCst) {
             backend.close().await;
         }
-        backend.complete(&self.config, messages, cancel, timeout, epoch).await
+        backend.complete(&self.config, messages, cancel, timeout, epoch, on_text).await
     }
 
     pub async fn complete_with_retry_on(
@@ -557,13 +707,14 @@ impl TranslateClient {
         conv: &Conversation,
         cancel: &CancellationToken,
         mut on_retry: impl FnMut(u32, u32, &TranslateError, u64),
+        on_text: &mut impl FnMut(&str),
     ) -> Result<Completion, TranslateError> {
         let max_retries = self.config.max_retries;
         let mut backoff_ms = self.config.retry_backoff_ms.max(50);
         let mut attempt = 0u32;
 
         loop {
-            match self.complete_cancellable(conv, cancel).await {
+            match self.complete_cancellable(conv, cancel, on_text).await {
                 Ok(content) => return Ok(content),
                 Err(e) if should_retry(&e, attempt, max_retries) => {
                     attempt += 1;
@@ -604,10 +755,10 @@ pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use translator_core::{ApiConfig, ModelProvider, Rect, ServiceTier};
+    use translator_core::{ApiConfig, ModelProvider, Rect, ServiceTier, TranslationConfig};
 
     use super::*;
-    use crate::http::extract_responses_completion;
+    use crate::http::{completion_from_http_body, extract_responses_completion};
 
     #[test]
     fn request_omits_unset_params() {
@@ -677,7 +828,7 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
         }];
-        let json = r#"{"blocks":[{"id":1,"translation":"T1"}]}"#;
+        let json = r#"{"b":[[1,"T1"]]}"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T1");
     }
@@ -788,10 +939,10 @@ mod tests {
         conv.ensure_system("sys");
         conv.push_user("u0");
         conv.commit_completion(&Completion {
-            text: "{\"blocks\":[]}".into(),
+            text: "{\"b\":[]}".into(),
             replay_items: vec![ResponseItem::Message {
                 role: "assistant".into(),
-                content: "{\"blocks\":[]}".into(),
+                content: "{\"b\":[]}".into(),
                 reasoning_content: Some("thought".into()),
             }],
         });
@@ -831,12 +982,12 @@ mod tests {
               "id": "msg_1",
               "role": "assistant",
               "status": "completed",
-              "content": [{"type": "output_text", "text": "{\"blocks\":[]}"}]
+              "content": [{"type": "output_text", "text": "{\"b\":[]}"}]
             }
           ]
         }"#;
         let completion = extract_responses_completion(json).unwrap();
-        assert_eq!(completion.text, "{\"blocks\":[]}");
+        assert_eq!(completion.text, "{\"b\":[]}");
         assert_eq!(completion.replay_items.len(), 2);
         assert!(matches!(
             &completion.replay_items[0],
@@ -937,7 +1088,7 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
         }];
-        let json = "```json\n{\"blocks\":[{\"id\":0,\"translation\":\"T2\"}]}\n```";
+        let json = "```json\n{\"b\":[[0,\"T2\"]]}\n```";
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T2");
     }
@@ -951,16 +1102,16 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
         }];
-        let json = r#"Here you go: {"blocks": [{"id": 0, "translation": "T3"}]} Hope that helps!"#;
+        let json = r#"Here you go: {"b": [[0, "T3"]]} Hope that helps!"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T3");
 
-        let json = r#"{"blocks": [{"id": 0, "translation": "T3",},]}"#;
+        let json = r#"{"b": [[0, "T3",],]}"#;
         assert!(merge_translations_detailed(&source, json).is_err());
     }
 
     #[test]
-    fn merge_rejects_string_ids_and_alias_fields() {
+    fn merge_accepts_string_ids_and_numeric_text() {
         let source = vec![OcrBlock {
             id: 2,
             text: "Bye".into(),
@@ -968,8 +1119,23 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
         }];
-        let json = r#"{"blocks":[{"id":"2","text":"T4"}]}"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        let json = r#"{"b":[["2","T4"]]}"#;
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        assert_eq!(out[0].translation, "T4");
+
+        let source = vec![OcrBlock {
+            id: 1,
+            text: "120".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
+        }];
+        let json = r#"{"b":[[1,120]]}"#;
+        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        assert_eq!(out[0].translation, "120");
+
+        assert!(merge_translations_detailed(&source, r#"{"b":[[true,"T"]]}"#).is_err());
+        assert!(merge_translations_detailed(&source, r#"{"b":[["text",1]]}"#).is_err());
     }
 
     #[test]
@@ -990,7 +1156,7 @@ mod tests {
                 source_lines: 1,
             },
         ];
-        let json = r#"{"blocks":[{"id":1,"translation":"T"}]}"#;
+        let json = r#"{"b":[[1,"T"]]}"#;
         let out = merge_translations_detailed(&source, json).unwrap();
         assert!(out.model_ids.contains(&1));
         assert!(!out.model_ids.contains(&2));
@@ -1006,8 +1172,53 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
         }];
-        let json = r#"[{"id":1,"translation":"T5"}]"#;
+        let json = r#"[[1,"T5"]]"#;
         assert!(merge_translations_detailed(&source, json).is_err());
+        let json = r#"{"blocks":[{"id":1,"translation":"T5"}]}"#;
+        assert!(merge_translations_detailed(&source, json).is_err());
+    }
+
+    #[test]
+    fn user_payload_is_compact_tuples() {
+        let source = vec![OcrBlock {
+            id: 0,
+            text: "Hi".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
+        }];
+        let payload = user_payload_from_blocks(&source);
+        assert_eq!(payload, r#"{"b":[[0,"Hi"]]}"#);
+        assert!(!payload.contains('\n'));
+    }
+
+    #[test]
+    fn default_system_prompt_shows_compact_shape() {
+        let prompt = default_system_prompt(&TranslationConfig::default());
+        assert!(prompt.contains(r#"{"b":[[id,"translation"],...]}"#), "{prompt}");
+        assert!(prompt.contains("No markdown fences"), "{prompt}");
+        assert!(prompt.contains("no trailing commas"), "{prompt}");
+        assert!(!prompt.contains("\"blocks\""));
+        assert!(!prompt.contains("\"translation\":"));
+    }
+
+    #[test]
+    fn peek_translation_pairs_complete_and_partial() {
+        assert!(peek_translation_pairs("").is_empty());
+        assert!(peek_translation_pairs("{").is_empty());
+        assert!(peek_translation_pairs(r#"{"b":["#).is_empty());
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A"]]}"#), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A"],[1,"B"#), [(0, "A".into()), (1, "B".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"B"]]}"#), [(0, "A\"B".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"#), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[2,"X"],[2,"Y"]]}"#), [(2, "X".into()), (2, "Y".into())]);
+        assert!(peek_translation_pairs(r#"{"b":[[0,"#).is_empty());
+        assert_eq!(peek_translation_pairs(r#"{"b":[[12,"x"]"#), [(12, "x".into())]);
+        assert_eq!(peek_translation_pairs(r#"The letter "b" is {"b":[[0,"A"]]}"#), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs("{\n  \"b\" : [[0,\"A\"]]\n}"), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[["0","A"]]}"#), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[1,120]]}"#), [(1, "120".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[1,12"#), [(1, "12".into())]);
     }
 
     #[test]

@@ -113,10 +113,11 @@ impl LiveSession {
         effort: Option<&str>,
         cancel: &CancellationToken,
         timeout: Duration,
+        on_text: &mut impl FnMut(&str),
     ) -> Result<String, TranslateError> {
         match self {
-            Self::Grok(s) => s.prompt(user, cancel, timeout).await,
-            Self::Codex(s) => s.prompt(user, effort, cancel, timeout).await,
+            Self::Grok(s) => s.prompt(user, cancel, timeout, on_text).await,
+            Self::Codex(s) => s.prompt(user, effort, cancel, timeout, on_text).await,
         }
     }
 
@@ -190,6 +191,7 @@ impl CliBackend {
         cancel: &CancellationToken,
         timeout: Duration,
         epoch: u64,
+        on_text: &mut impl FnMut(&str),
     ) -> Result<String, TranslateError> {
         if self.session_epoch != epoch {
             self.close().await;
@@ -209,7 +211,7 @@ impl CliBackend {
                 };
                 self.recreate(api, &system, cancel, timeout).await?;
                 let composed = compose_user(bootstrap.as_deref(), user);
-                return self.run_user(api, messages, &composed, cancel, timeout).await;
+                return self.run_user(api, messages, &composed, cancel, timeout, on_text).await;
             }
             SessionPlan::Recreate { system, .. } => {
                 self.recreate(api, system, cancel, timeout).await?;
@@ -220,7 +222,7 @@ impl CliBackend {
             SessionPlan::Append { user } => compose_user(None, user),
             SessionPlan::Recreate { bootstrap, user, .. } => compose_user(bootstrap.as_deref(), user),
         };
-        self.run_user(api, messages, &composed, cancel, timeout).await
+        self.run_user(api, messages, &composed, cancel, timeout, on_text).await
     }
 
     async fn run_user(
@@ -230,12 +232,13 @@ impl CliBackend {
         composed: &str,
         cancel: &CancellationToken,
         timeout: Duration,
+        on_text: &mut impl FnMut(&str),
     ) -> Result<String, TranslateError> {
         let Some(live) = self.live.as_mut() else {
             return Err(TranslateError::CliProtocol("CLI session missing".into()));
         };
         let effort = api.reasoning_effort.as_deref();
-        let result = live.prompt(composed, effort, cancel, timeout).await;
+        let result = live.prompt(composed, effort, cancel, timeout, on_text).await;
         if matches!(&result, Err(e) if e.is_cancelled()) {
             live.cancel_turn().await;
         }
@@ -377,7 +380,7 @@ mod tests {
 
     #[test]
     fn fence_wraps_ocr_only() {
-        let fenced = fence_user_payload("{\"blocks\":[{\"id\":0,\"text\":\"hi\"}]}");
+        let fenced = fence_user_payload("{\"b\":[[0,\"hi\"]]}");
         assert!(fenced.starts_with(UNTRUSTED_BEGIN));
         assert!(fenced.ends_with(UNTRUSTED_END));
         assert!(cli_system_prompt("base").contains(UNTRUSTED_BEGIN));

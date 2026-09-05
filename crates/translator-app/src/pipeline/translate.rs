@@ -2,14 +2,16 @@
 
 use std::sync::Arc;
 
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
 use translator_overlay::{OverlayCommand, OverlayController};
-use translator_translate::{Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed};
+use translator_translate::{
+    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed, peek_translation_pairs,
+};
 
-use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState};
+use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobMsg};
 
 impl Pipeline {
     pub(crate) fn start_translate(&mut self, page: PendingPage, force: bool) {
@@ -96,7 +98,9 @@ impl Pipeline {
         let cancel_job = cancel.clone();
         let client_clone = self.client.clone();
         let state_cb = Arc::clone(&self.state);
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let tx_done = tx.clone();
+        let tx_retry = tx.clone();
 
         {
             let mut s = self.state.write();
@@ -107,20 +111,32 @@ impl Pipeline {
 
         tokio::spawn(async move {
             let result = client_clone
-                .complete_with_retry_on(&prepared, &cancel_job, move |attempt, max_retries, error, _backoff_ms| {
-                    let message = error.to_string();
-                    let mut s = state_cb.write();
-                    s.last_error = Some(message.clone());
-                    s.status = PipelineStatus::RetryingTranslate {
-                        attempt,
-                        max_retries,
-                        message,
-                    };
-                })
+                .complete_with_retry_on(
+                    &prepared,
+                    &cancel_job,
+                    move |attempt, max_retries, error, _backoff_ms| {
+                        let _ = tx_retry.send(TranslateJobMsg::Partial(Vec::new()));
+                        let message = error.to_string();
+                        let mut s = state_cb.write();
+                        s.last_error = Some(message.clone());
+                        s.status = PipelineStatus::RetryingTranslate {
+                            attempt,
+                            max_retries,
+                            message,
+                        };
+                    },
+                    &mut move |text| {
+                        let pairs = peek_translation_pairs(text);
+                        if !pairs.is_empty() {
+                            let _ = tx.send(TranslateJobMsg::Partial(pairs));
+                        }
+                    },
+                )
                 .await;
-            let _ = tx.send(result);
+            let _ = tx_done.send(TranslateJobMsg::Done(result));
         });
 
+        let revert_blocks = self.state.read().latest_translated_blocks.clone();
         self.inflight = Some(InflightTranslate {
             cancel,
             rx,
@@ -131,6 +147,7 @@ impl Pipeline {
             content_height: page.content_height,
             miss_blocks: resolved.misses,
             cached_hits: resolved.hits,
+            revert_blocks,
         });
     }
 
@@ -167,6 +184,7 @@ impl Pipeline {
                     // Drop the pending user turn so the next translate does not
                     // store invalid model JSON as assistant context.
                     self.conversation.rollback_user_turn();
+                    self.apply_stream_preview(&job, &[]);
                     let mut s = self.state.write();
                     s.translate_in_flight = false;
                     s.set_error(format!("translate parse: {e}"));
@@ -175,6 +193,7 @@ impl Pipeline {
             Err(e) if e.is_cancelled() => {
                 info!("translation cancelled");
                 self.conversation.rollback_user_turn();
+                self.apply_stream_preview(&job, &[]);
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
                 if s.auto_running {
@@ -186,11 +205,27 @@ impl Pipeline {
             Err(e) => {
                 error!(error = %e, "translation failed");
                 self.conversation.rollback_user_turn();
+                self.apply_stream_preview(&job, &[]);
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
                 s.set_error(format!("translate: {e}"));
             }
         }
+    }
+
+    pub(crate) fn apply_stream_preview(&self, job: &InflightTranslate, pairs: &[(u32, String)]) {
+        if pairs.is_empty() && !job.revert_blocks.is_empty() {
+            apply_cached_preview(&self.state, self.overlay.as_ref(), job.revert_blocks.clone(), job.content_width, job.content_height);
+            return;
+        }
+        let mut hits = job.cached_hits.clone();
+        for (id, text) in pairs {
+            if let Some(i) = job.blocks.iter().position(|b| b.id == *id) {
+                hits[i] = Some(text.clone());
+            }
+        }
+        let preview = TranslationCache::hits_only(&job.blocks, &hits);
+        apply_cached_preview(&self.state, self.overlay.as_ref(), preview, job.content_width, job.content_height);
     }
 }
 

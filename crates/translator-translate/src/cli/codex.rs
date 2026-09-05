@@ -139,6 +139,7 @@ impl CodexSession {
         effort: Option<&str>,
         cancel: &CancellationToken,
         timeout: Duration,
+        on_text: &mut impl FnMut(&str),
     ) -> Result<String, TranslateError> {
         let mut text = String::new();
         let mut saw_tool = false;
@@ -148,7 +149,11 @@ impl CodexSession {
         let started = self
             .rpc
             .request_with_notes("turn/start", turn_start_params(&self.thread_id, user, effort), cancel, timeout, |method, params| {
+                let before = text.len();
                 collect_codex_event(method, params, &mut text, &mut saw_tool);
+                if text.len() != before {
+                    on_text(&text);
+                }
                 if let Some(id) = extract_turn_id(params) {
                     seen_turn_id = Some(id);
                 }
@@ -174,7 +179,11 @@ impl CodexSession {
                         timeout,
                         |method, _| method == "turn/completed",
                         |method, params| {
+                            let before = text.len();
                             collect_codex_event(method, params, &mut text, &mut saw_tool);
+                            if text.len() != before {
+                                on_text(&text);
+                            }
                             if let Some(id) = extract_turn_id(params) {
                                 later_turn_id = Some(id);
                             }
@@ -350,12 +359,12 @@ mod tests {
         collect_codex_event(
             "item/completed",
             &serde_json::json!({
-                "item": { "id": "item_3", "type": "agentMessage", "text": "{\"blocks\":[]}" }
+                "item": { "id": "item_3", "type": "agentMessage", "text": "{\"b\":[]}" }
             }),
             &mut text,
             &mut saw_tool,
         );
-        assert_eq!(text, "{\"blocks\":[]}");
+        assert_eq!(text, "{\"b\":[]}");
         assert!(!saw_tool);
     }
 

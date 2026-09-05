@@ -115,7 +115,13 @@ impl GrokSession {
         Ok(Self { rpc, session_id })
     }
 
-    pub async fn prompt(&mut self, user: &str, cancel: &CancellationToken, timeout: Duration) -> Result<String, TranslateError> {
+    pub async fn prompt(
+        &mut self,
+        user: &str,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        on_text: &mut impl FnMut(&str),
+    ) -> Result<String, TranslateError> {
         let mut text = String::new();
         let mut saw_tool = false;
         self.rpc
@@ -127,7 +133,13 @@ impl GrokSession {
                 }),
                 cancel,
                 timeout,
-                |method, params| collect_acp_update(method, params, &mut text, &mut saw_tool),
+                |method, params| {
+                    let before = text.len();
+                    collect_acp_update(method, params, &mut text, &mut saw_tool);
+                    if text.len() != before {
+                        on_text(&text);
+                    }
+                },
             )
             .await?;
 
@@ -236,7 +248,7 @@ mod tests {
             &serde_json::json!({
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
-                    "content": { "type": "text", "text": "{\"blocks\"" }
+                    "content": { "type": "text", "text": "{\"b\"" }
                 }
             }),
             &mut text,
@@ -253,7 +265,7 @@ mod tests {
             &mut text,
             &mut saw_tool,
         );
-        assert_eq!(text, "{\"blocks\":[]}");
+        assert_eq!(text, "{\"b\":[]}");
         assert!(!saw_tool);
         collect_acp_update(
             "session/update",
