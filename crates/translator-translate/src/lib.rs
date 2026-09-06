@@ -92,7 +92,7 @@ pub struct Completion {
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub items: Vec<ResponseItem>,
-    /// Client-generated id sent as `x-grok-conv-id` / `prompt_cache_key`.
+    /// Client-generated id sent as `x-grok-conv-id` / `x-opencode-session` / `prompt_cache_key`.
     /// Stable for the conversation lifetime; new id only on [`Self::clear`].
     pub session_id: String,
 }
@@ -701,7 +701,7 @@ impl TranslateClient {
 
         let mut req = self.http.post(url).bearer_auth(&self.config.api_key);
         if let Some(session_id) = session_id.filter(|s| !s.is_empty()) {
-            req = req.header("x-grok-conv-id", session_id);
+            req = req.header("x-grok-conv-id", session_id).header("x-opencode-session", session_id);
         }
         let send = req.json(body).send();
 
