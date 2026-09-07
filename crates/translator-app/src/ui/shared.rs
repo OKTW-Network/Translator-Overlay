@@ -8,7 +8,7 @@ use translator_core::{
     AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
     validate_preset,
 };
-use windows_reactor::Updater;
+use windows_reactor::LocalSender;
 
 use crate::{
     APP_HANDLES,
@@ -22,15 +22,27 @@ pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bo
     let _ = ui.cmd_tx.send(PipelineCommand::SetOverlayDisplay { enabled, reader_enabled });
 }
 
+/// Messages the root `AppRoot` component accepts.
+#[derive(Clone, Debug)]
+pub enum AppMsg {
+    /// UI-thread refresh (do not re-arm the pipeline waiter).
+    Refresh,
+    /// Background pipeline requested a rerender; re-arm the waiter.
+    PipelineWake,
+    SelectPage(String),
+    PaneOpen(bool),
+    TogglePane,
+}
+
 /// Shared UI handle for event closures. Clone once per handler (cheap Arc bumps).
 #[derive(Clone)]
 pub struct UiCx {
     pub shared: Arc<Mutex<UiShared>>,
-    pub bump: Updater<u32>,
+    pub bump: LocalSender<AppMsg>,
 }
 
 impl UiCx {
-    pub fn new(shared: &Arc<Mutex<UiShared>>, bump: &Updater<u32>) -> Self {
+    pub fn new(shared: &Arc<Mutex<UiShared>>, bump: &LocalSender<AppMsg>) -> Self {
         Self {
             shared: shared.clone(),
             bump: bump.clone(),
@@ -39,7 +51,7 @@ impl UiCx {
 
     /// Re-render after a UI mutation.
     pub fn refresh(&self) {
-        self.bump.call(|n| n.wrapping_add(1));
+        let _ = self.bump.send(AppMsg::Refresh);
     }
 
     /// Mutate shared UI state, then refresh.
@@ -257,11 +269,6 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
         cfg.overlay.background_color_argb = v;
     }
     cfg
-}
-
-/// Write free-text fields into `ui.draft` before ApplyConfig / Save.
-pub fn commit_optional_fields(ui: &mut UiShared) {
-    ui.draft = effective_draft(ui);
 }
 
 /// True when the form (draft + free-text fields) differs from `live`.

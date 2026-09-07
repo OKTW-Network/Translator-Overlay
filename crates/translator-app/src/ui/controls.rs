@@ -3,27 +3,22 @@
 use translator_core::parse_argb_hex;
 use translator_overlay::argb_channels;
 use windows_reactor::{
-    BackgroundExt, Border, Color, ColorArgb, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, NumberBox,
-    PaddingExt, PasswordBox, PasswordRevealMode, Slider, StackPanel, TextStyleExt, ThemeRef, Thickness, ToggleSwitch, TooltipExt,
-    VerticalAlignment, border, button, color_picker, grid, hstack, text_block, text_box, vstack,
+    Border, Button, ButtonStyle, ChildrenControl, Color, ColorPicker, ContentControl, FontIcon, HorizontalAlignment, LayoutControl,
+    NumberBox, Orientation, PasswordBox, PasswordRevealMode, Slider, StackPanel, TextBox, ThemeBrush, Thickness, ToggleSwitch, TooltipExt,
+    VerticalAlignment, View,
 };
 
 use crate::ui::chrome::{settings_card, settings_card_stack};
 
-/// Compact right-edge ToggleSwitch (Windows Settings style).
-///
-/// Default ToggleSwitch is wide: On/Off content presenters + theme MinWidth
-/// leave empty space to the right of the track, so the knob looks off-edge.
-/// Force a track-sized width and never set On/Off labels.
 fn compact_toggle(is_on: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
-    let mut sw = ToggleSwitch::new(is_on).on_toggled(on_toggled);
-    // Track-only size (~40); max keeps theme from expanding empty content columns.
-    sw.modifiers.width = Some(40.0);
-    sw.modifiers.min_width = Some(40.0);
-    sw.modifiers.max_width = Some(44.0);
-    sw.modifiers.horizontal_alignment = Some(HorizontalAlignment::Right);
-    sw.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-    sw
+    ToggleSwitch::new()
+        .is_on(is_on)
+        .on_toggled(on_toggled)
+        .width(40.0)
+        .min_width(40.0)
+        .max_width(44.0)
+        .horizontal_alignment(HorizontalAlignment::Right)
+        .vertical_alignment(VerticalAlignment::Center)
 }
 
 /// Label + single-line text box as a settings card.
@@ -34,18 +29,18 @@ pub fn card_text(
     value: String,
     placeholder: impl Into<String>,
     on_changed: impl Fn(String) + 'static,
-) -> Border {
-    let mut tb = text_box(value).placeholder_text(placeholder).on_text_changed(on_changed);
-    tb.modifiers.min_width = Some(200.0);
-    tb.modifiers.width = Some(280.0);
-    tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+) -> View {
+    let tb = TextBox::new()
+        .text(value)
+        .placeholder_text(placeholder)
+        .on_text_changed(on_changed)
+        .min_width(200.0)
+        .width(280.0)
+        .vertical_alignment(VerticalAlignment::Center);
     settings_card(key, header, description, tb)
 }
 
 /// Label + password box + show/hide toggle as a settings card.
-///
-/// WinUI Peek reveal button only appears under narrow focus/width conditions and
-/// often never shows. We use Hidden/Visible + a custom eye button instead.
 pub fn card_password(
     key: &str,
     header: impl Into<String>,
@@ -54,35 +49,39 @@ pub fn card_password(
     revealed: bool,
     on_changed: impl Fn(String) + 'static,
     on_reveal_toggled: impl Fn() + 'static,
-) -> Border {
-    let mut pb = PasswordBox::new()
-        .value(value)
-        .reveal_button_enabled(false)
+) -> View {
+    let pb = PasswordBox::new()
+        .password(value)
         .password_reveal_mode(if revealed {
             PasswordRevealMode::Visible
         } else {
             PasswordRevealMode::Hidden
         })
-        .on_password_changed(on_changed);
-    pb.modifiers.min_width = Some(180.0);
-    pb.modifiers.width = Some(240.0);
-    pb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+        .on_password_changed(on_changed)
+        .min_width(180.0)
+        .width(240.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    // Segoe MDL2: View (E890) / Hide (E7B3) — show-password affordance.
     let glyph = if revealed { "\u{E7B3}" } else { "\u{E890}" };
     let tip = if revealed { "Hide key" } else { "Show key" };
-    let reveal = button(glyph)
-        .font_family("Segoe MDL2 Assets")
-        .font_size(14.0)
-        .subtle()
-        .padding(Thickness::uniform(8.0))
+    let reveal = Button::new()
+        .style(ButtonStyle::Subtle)
         .min_width(36.0)
         .min_height(36.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .tooltip(tip)
-        .on_click(on_reveal_toggled);
+        .on_click(on_reveal_toggled)
+        .content(FontIcon::new().glyph(glyph))
+        .tooltip(tip);
 
-    settings_card(key, header, description, hstack((pb, reveal)).spacing(8.0))
+    settings_card(
+        key,
+        header,
+        description,
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((pb, reveal)),
+    )
 }
 
 /// Label + toggle as a settings card (switch flush-right).
@@ -92,7 +91,7 @@ pub fn card_toggle(
     description: Option<&str>,
     is_on: bool,
     on_toggled: impl Fn(bool) + 'static,
-) -> Border {
+) -> View {
     settings_card(key, header, description, compact_toggle(is_on, on_toggled))
 }
 
@@ -108,9 +107,6 @@ pub struct SliderNumberParams {
 }
 
 /// Snap `v` to the nearest step within [min, max].
-///
-/// Uses integer micro-units so `min + n×step` is not `1.2000000000000002`
-/// (binary `0.1`). Slider/f32 round-trips stay on the labeled tick.
 pub fn quantize_to_step(v: f64, min: f64, max: f64, step: f64) -> f64 {
     const SCALE: f64 = 1_000_000.0;
     let v = v.clamp(min, max);
@@ -127,7 +123,7 @@ pub fn quantize_to_step(v: f64, min: f64, max: f64, step: f64) -> f64 {
     out.clamp(min, max)
 }
 
-fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> StackPanel {
+fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> View {
     let min = p.min;
     let max = p.max;
     let step = p.step;
@@ -137,23 +133,38 @@ fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clo
         let on_changed = on_changed.clone();
         move |v: f64| on_changed(quantize_to_step(v, min, max, step))
     };
-    let on_box = move |v: f64| on_changed(quantize_to_step(v, min, max, step));
+    let on_box = move |v: Option<f64>| {
+        if let Some(v) = v {
+            on_changed(quantize_to_step(v, min, max, step));
+        }
+    };
 
-    let mut slider = Slider::new(value).range(min, max).step(step).on_value_changed(on_slider);
-    // Fixed width so the control column stays Auto-sized and right-aligned.
-    slider.modifiers.width = Some(180.0);
-    slider.modifiers.min_width = Some(140.0);
-    slider.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+    let slider = Slider::new()
+        .value(value)
+        .minimum(min)
+        .maximum(max)
+        .step_frequency(step)
+        .on_value_changed(on_slider)
+        .width(180.0)
+        .min_width(140.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    let mut nb = NumberBox::new(value).range(min, max).on_value_changed(on_box);
-    nb.modifiers.width = Some(100.0);
-    nb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+    let nb = NumberBox::new()
+        .value(value)
+        .minimum(min)
+        .maximum(max)
+        .on_value_changed(on_box)
+        .width(100.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    hstack((slider, nb)).spacing(12.0)
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(12.0)
+        .children((slider, nb))
 }
 
 /// Slider + NumberBox on one row (labels left, controls flush-right) — standalone card.
-pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> Border {
+pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> View {
     let controls = slider_number_controls(&p, on_changed);
     settings_card(p.key, p.header, p.description.as_deref(), controls)
 }
@@ -175,8 +186,7 @@ pub fn optional_slider_row(
     p: OptionalSliderParams,
     on_value: impl Fn(f64) + Clone + 'static,
     on_enabled: impl Fn(bool) + Clone + 'static,
-) -> Element {
-    let key = p.key;
+) -> View {
     let min = p.min;
     let max = p.max;
     let step = p.step;
@@ -189,66 +199,44 @@ pub fn optional_slider_row(
     };
     let on_box = {
         let on_value = on_value;
-        move |v: f64| on_value(quantize_to_step(v, min, max, step))
+        move |v: Option<f64>| {
+            if let Some(v) = v {
+                on_value(quantize_to_step(v, min, max, step));
+            }
+        }
     };
 
-    let toggle = compact_toggle(enabled, on_enabled);
-
-    let labels = vstack((
-        text_block(p.header).semibold().font_size(14.0),
-        text_block(p.description).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap(),
-    ))
-    .spacing(2.0)
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Center);
-
-    let mut slider = Slider::new(value)
-        .range(min, max)
-        .step(step)
-        .enabled(enabled)
-        .on_value_changed(on_slider);
-    slider.modifiers.width = Some(160.0);
-    slider.modifiers.min_width = Some(120.0);
-    slider.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-
-    let mut nb = NumberBox::new(value).range(min, max).enabled(enabled).on_value_changed(on_box);
-    nb.modifiers.width = Some(88.0);
-    nb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-
-    let right = hstack((slider, nb, toggle))
-        .spacing(12.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .horizontal_alignment(HorizontalAlignment::Right);
-
-    let body = grid((
-        labels
-            .grid_row(0)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
+    settings_card(
+        p.key,
+        p.header,
+        Some(p.description.as_str()),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(12.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .margin(Thickness {
-                left: 0.0,
-                top: 0.0,
-                right: 16.0,
-                bottom: 0.0,
-            }),
-        right
-            .grid_row(0)
-            .grid_column(1)
             .horizontal_alignment(HorizontalAlignment::Right)
-            .vertical_alignment(VerticalAlignment::Center),
-    ))
-    .rows([GridLength::Auto])
-    .columns([GridLength::Star(1.0), GridLength::Auto])
-    .horizontal_alignment(HorizontalAlignment::Stretch);
-
-    border(body)
-        .background(ThemeRef::CardBackground)
-        .corner_radius(8.0)
-        .padding(Thickness::uniform(16.0))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(key)
-        .into()
+            .children((
+                Slider::new()
+                    .value(value)
+                    .minimum(min)
+                    .maximum(max)
+                    .step_frequency(step)
+                    .is_enabled(enabled)
+                    .on_value_changed(on_slider)
+                    .width(160.0)
+                    .min_width(120.0)
+                    .vertical_alignment(VerticalAlignment::Center),
+                NumberBox::new()
+                    .value(value)
+                    .minimum(min)
+                    .maximum(max)
+                    .is_enabled(enabled)
+                    .on_value_changed(on_box)
+                    .width(88.0)
+                    .vertical_alignment(VerticalAlignment::Center),
+                compact_toggle(enabled, on_enabled),
+            )),
+    )
 }
 
 /// Params for [`optional_number_row`] (NumberBox only, no slider).
@@ -264,64 +252,36 @@ pub struct OptionalNumberParams {
 }
 
 /// Optional integer/float with master toggle (e.g. max_tokens).
-pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'static, on_enabled: impl Fn(bool) + 'static) -> Element {
+pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'static, on_enabled: impl Fn(bool) + 'static) -> View {
     let min = p.min;
     let max = p.max;
     let step = p.step;
     let value = quantize_to_step(p.value, min, max, step);
-    let toggle = compact_toggle(p.enabled, on_enabled);
-
-    let header_el = text_block(p.header).semibold().font_size(14.0);
-    let labels = match p.description.as_deref() {
-        Some(d) if !d.is_empty() => {
-            vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap())).spacing(2.0)
-        }
-        _ => vstack((header_el,)),
-    }
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Center);
-
-    let mut nb = NumberBox::new(value)
-        .range(min, max)
-        .enabled(p.enabled)
-        .on_value_changed(move |v: f64| on_value(quantize_to_step(v, min, max, step)));
-    nb.modifiers.width = Some(120.0);
-    nb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-
-    let right = hstack((nb, toggle))
-        .spacing(12.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .horizontal_alignment(HorizontalAlignment::Right);
-
-    let body = grid((
-        labels
-            .grid_row(0)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
+    settings_card(
+        p.key,
+        p.header,
+        p.description.as_deref(),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(12.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .margin(Thickness {
-                left: 0.0,
-                top: 0.0,
-                right: 16.0,
-                bottom: 0.0,
-            }),
-        right
-            .grid_row(0)
-            .grid_column(1)
             .horizontal_alignment(HorizontalAlignment::Right)
-            .vertical_alignment(VerticalAlignment::Center),
-    ))
-    .rows([GridLength::Auto])
-    .columns([GridLength::Star(1.0), GridLength::Auto])
-    .horizontal_alignment(HorizontalAlignment::Stretch);
-
-    border(body)
-        .background(ThemeRef::CardBackground)
-        .corner_radius(8.0)
-        .padding(Thickness::uniform(16.0))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(p.key)
-        .into()
+            .children((
+                NumberBox::new()
+                    .value(value)
+                    .minimum(min)
+                    .maximum(max)
+                    .is_enabled(p.enabled)
+                    .on_value_changed(move |v: Option<f64>| {
+                        if let Some(v) = v {
+                            on_value(quantize_to_step(v, min, max, step));
+                        }
+                    })
+                    .width(120.0)
+                    .vertical_alignment(VerticalAlignment::Center),
+                compact_toggle(p.enabled, on_enabled),
+            )),
+    )
 }
 
 /// Params for [`optional_text_row`].
@@ -335,61 +295,28 @@ pub struct OptionalTextParams {
 }
 
 /// Optional string field with master toggle (e.g. reasoning_effort).
-pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'static, on_enabled: impl Fn(bool) + 'static) -> Element {
-    let toggle = compact_toggle(p.enabled, on_enabled);
-
-    let header_el = text_block(p.header).semibold().font_size(14.0);
-    let labels = match p.description.as_deref() {
-        Some(d) if !d.is_empty() => {
-            vstack((header_el, text_block(d).font_size(12.0).foreground(ThemeRef::SecondaryText).wrap())).spacing(2.0)
-        }
-        _ => vstack((header_el,)),
-    }
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Center);
-
-    let mut tb = text_box(p.text)
-        .placeholder_text(p.placeholder)
-        .enabled(p.enabled)
-        .on_text_changed(on_text);
-    tb.modifiers.min_width = Some(140.0);
-    tb.modifiers.width = Some(180.0);
-    tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-
-    let right = hstack((tb, toggle))
-        .spacing(12.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .horizontal_alignment(HorizontalAlignment::Right);
-
-    let body = grid((
-        labels
-            .grid_row(0)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
+pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'static, on_enabled: impl Fn(bool) + 'static) -> View {
+    settings_card(
+        p.key,
+        p.header,
+        p.description.as_deref(),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(12.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .margin(Thickness {
-                left: 0.0,
-                top: 0.0,
-                right: 16.0,
-                bottom: 0.0,
-            }),
-        right
-            .grid_row(0)
-            .grid_column(1)
             .horizontal_alignment(HorizontalAlignment::Right)
-            .vertical_alignment(VerticalAlignment::Center),
-    ))
-    .rows([GridLength::Auto])
-    .columns([GridLength::Star(1.0), GridLength::Auto])
-    .horizontal_alignment(HorizontalAlignment::Stretch);
-
-    border(body)
-        .background(ThemeRef::CardBackground)
-        .corner_radius(8.0)
-        .padding(Thickness::uniform(16.0))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key(p.key)
-        .into()
+            .children((
+                TextBox::new()
+                    .text(p.text)
+                    .placeholder_text(p.placeholder)
+                    .is_enabled(p.enabled)
+                    .on_text_changed(on_text)
+                    .min_width(140.0)
+                    .width(180.0)
+                    .vertical_alignment(VerticalAlignment::Center),
+                compact_toggle(p.enabled, on_enabled),
+            )),
+    )
 }
 
 /// Params for [`card_color_popup`].
@@ -398,71 +325,67 @@ pub struct ColorPopupParams {
     pub header: String,
     pub description: Option<String>,
     pub hex: String,
-    /// Whether the ColorPicker panel is open.
     pub open: bool,
     pub alpha_enabled: bool,
     pub placeholder: String,
 }
 
 /// Compact color row: clickable swatch + hex; ColorPicker only when the swatch is open.
-///
-/// windows-reactor `Button::flyout` is text-only, so the swatch button toggles an
-/// expandable panel (ColorPickerButton-style).
 pub fn card_color_popup(
     p: ColorPopupParams,
     on_hex_changed: impl Fn(String) + 'static,
     on_color_changed: impl Fn((u8, u8, u8, u8)) + 'static,
     on_toggle_open: impl Fn() + 'static,
-) -> Border {
+) -> View {
     let key = p.key;
     let (a, r, g, b) = argb_channels(parse_argb_hex(&p.hex).unwrap_or(0xFF00_0000));
-    // Swatch fill uses opaque RGB so low-alpha colors stay visible on the card.
-    let swatch_fill = Color::rgb(r, g, b);
+    let swatch_fill = Color::argb(255, r, g, b);
 
-    // Click the preview to open/close the picker (no separate Pick button).
-    let swatch = button("")
-        .background(swatch_fill)
+    let swatch = Button::new()
         .width(32.0)
         .height(32.0)
         .min_width(32.0)
         .min_height(32.0)
-        .padding(Thickness::uniform(0.0))
         .vertical_alignment(VerticalAlignment::Center)
-        .tooltip(if p.open { "Close color picker" } else { "Open color picker" })
-        .on_click(on_toggle_open);
+        .on_click(on_toggle_open)
+        .content(Border::new().background(swatch_fill).width(24.0).height(24.0).corner_radius(4.0))
+        .tooltip(if p.open { "Close color picker" } else { "Open color picker" });
 
-    let mut hex_tb = text_box(p.hex).placeholder_text(p.placeholder).on_text_changed(on_hex_changed);
-    hex_tb.modifiers.width = Some(120.0);
-    hex_tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+    let hex_tb = TextBox::new()
+        .text(p.hex)
+        .placeholder_text(p.placeholder)
+        .on_text_changed(on_hex_changed)
+        .width(120.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    let row = hstack((swatch, hex_tb)).spacing(8.0).vertical_alignment(VerticalAlignment::Center);
+    let mut row = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
+        .vertical_alignment(VerticalAlignment::Center);
+    if p.open {
+        row = row.horizontal_alignment(HorizontalAlignment::Right);
+    }
+    let row = row.children((swatch, hex_tb));
 
     if p.open {
-        // Spectrum + alpha only — hex is on the row; channel boxes clutter the popup.
-        // Open state needs full-width picker below the one-line header/controls.
-        let picker = color_picker(ColorArgb::with_alpha(a, r, g, b))
-            .alpha_enabled(p.alpha_enabled)
-            .hex_input_visible(false)
-            .color_channel_text_input_visible(false)
-            .color_slider_visible(true)
-            .on_color_changed(on_color_changed);
+        let picker = ColorPicker::new()
+            .color(Color::argb(a, r, g, b))
+            .is_alpha_enabled(p.alpha_enabled)
+            .is_hex_input_visible(false)
+            .is_color_channel_text_input_visible(false)
+            .is_color_slider_visible(true)
+            .on_color_changed(move |c: Color| on_color_changed((c.a, c.r, c.g, c.b)));
 
-        let panel = border(picker)
-            .border_brush(ThemeRef::CardStroke)
+        let panel = Border::new()
+            .border_brush(ThemeBrush::CardStroke)
             .border_thickness(Thickness::uniform(1.0))
             .corner_radius(8.0)
             .padding(Thickness::uniform(12.0))
-            .background(ThemeRef::SubtleFill)
-            .with_key(format!("{key}-popup"));
+            .background(ThemeBrush::CardBackground)
+            .content(picker);
 
-        settings_card_stack(
-            key,
-            p.header,
-            p.description.as_deref(),
-            vstack((row.horizontal_alignment(HorizontalAlignment::Right), panel)).spacing(10.0),
-        )
+        settings_card_stack(key, p.header, p.description.as_deref(), StackPanel::new().spacing(10.0).children((row, panel)))
     } else {
-        // Closed: one-line card, swatch + hex flush-right.
         settings_card(key, p.header, p.description.as_deref(), row)
     }
 }

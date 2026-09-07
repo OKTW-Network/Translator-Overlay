@@ -3,15 +3,15 @@
   Build translator-app (release) and pack a portable ZIP (framework-dependent).
 
 .DESCRIPTION
-  Produces dist/TranslatorOverlay-<version>-win-x64.zip containing only the files
-  required to run a framework-dependent windows-reactor app:
+  Produces dist/TranslatorOverlay-<version>-win-x64.zip containing the files
+  required to run a framework-dependent windows-reactor 0.100 app:
 
     - translator-app.exe
-    - Microsoft.WindowsAppRuntime.Bootstrap.dll
     - DirectML.dll          (ONNX Runtime GPU EP; PE import — required next to exe)
-    - resources.pri
+    - resources.pri         (copied when present)
 
-  Target machines must have a matching Windows App Runtime installed.
+  windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
+  Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
   See: https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
   Visual C++ Redistributable may also be needed for MSVC CRT DLLs.
 
@@ -90,14 +90,6 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Missing $ExePath — run without -SkipBuild or build first."
 }
 
-$BootstrapPath = Join-Path $ReleaseDir "Microsoft.WindowsAppRuntime.Bootstrap.dll"
-if (-not (Test-Path -LiteralPath $BootstrapPath)) {
-    throw @"
-Missing Microsoft.WindowsAppRuntime.Bootstrap.dll in $ReleaseDir.
-Ensure build.rs calls windows_reactor_setup::as_framework_dependent() and rebuild.
-"@
-}
-
 $DirectMlPath = Join-Path $ReleaseDir "DirectML.dll"
 if (-not (Test-Path -LiteralPath $DirectMlPath)) {
     throw @"
@@ -121,20 +113,18 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host "==> Copying runtime files..."
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-app.exe")
-Copy-Item -LiteralPath $BootstrapPath -Destination (Join-Path $StageDir "Microsoft.WindowsAppRuntime.Bootstrap.dll")
 Copy-Item -LiteralPath $DirectMlPath -Destination (Join-Path $StageDir "DirectML.dll")
 
 if (Test-Path -LiteralPath $ResourcesPri) {
     Copy-Item -LiteralPath $ResourcesPri -Destination (Join-Path $StageDir "resources.pri")
 }
 
-# README stub inside package
 $packReadme = @"
 # Translator Overlay $Version (portable)
 
 ## Requirements
-- Windows 10/11 x64
-- Windows App Runtime (framework-dependent)
+- Windows 11 x64 (build 22000 or later)
+- Windows App Runtime 2.4 (framework-dependent)
   https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
 - Microsoft Visual C++ Redistributable
 - Network for first-run OCR model download (oar-ocr) and translation API
@@ -156,10 +146,8 @@ Get-ChildItem -LiteralPath $StageDir -Recurse -File |
         "  $rel  ($mb MB)"
     }
 
-# Fail if required sidecars are missing from the stage (guard against future script drift).
 $requiredSidecars = @(
     "translator-app.exe",
-    "Microsoft.WindowsAppRuntime.Bootstrap.dll",
     "DirectML.dll"
 )
 foreach ($name in $requiredSidecars) {
@@ -174,7 +162,6 @@ if (Test-Path -LiteralPath $ZipPath) {
 }
 
 Write-Host "==> Creating ZIP..."
-# Compress stage folder so extract yields TranslatorOverlay\
 Compress-Archive -Path $StageDir -DestinationPath $ZipPath -CompressionLevel Optimal
 
 $zipMb = [math]::Round((Get-Item -LiteralPath $ZipPath).Length / 1MB, 2)
@@ -183,4 +170,4 @@ Write-Host "Done."
 Write-Host "  Stage: $StageDir"
 Write-Host "  Zip:   $ZipPath  ($zipMb MB)"
 Write-Host ""
-Write-Host "Note: Users need Windows App Runtime installed before launching."
+Write-Host "Note: Users need Windows 11 and Windows App Runtime 2.4 before launching."

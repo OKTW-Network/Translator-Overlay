@@ -8,8 +8,8 @@ use translator_core::{
     TRANSLATION_CACHE_MAX_CAP, TRANSLATION_CACHE_MAX_MIN,
 };
 use windows_reactor::{
-    Element, HorizontalAlignment, LayoutExt, RadioButton, StackPanel, TextStyleExt, ThemeRef, TooltipExt, Updater, VerticalAlignment,
-    button, hstack, text_block, text_box, vstack,
+    Button, ChildrenControl, ContentControl, HorizontalAlignment, LayoutControl, LocalSender, Orientation, RadioButton, StackPanel,
+    TextBlock, TextBox, TextWrapping, ThemeBrush, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
@@ -20,10 +20,38 @@ use crate::{
             ColorPopupParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_color_popup,
             card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row,
         },
-        shared::{ChromeSnap, UiCx, UiShared, mark_dirty, parts_to_argb_u32, send_overlay_display},
+        shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty, parts_to_argb_u32, send_overlay_display},
     },
 };
-pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
+
+fn radio(group: &'static str, label: &str, width: Option<f64>, checked: bool, on: impl Fn() + 'static) -> View {
+    let mut rb = RadioButton::new()
+        .group_name(group)
+        .is_checked(checked)
+        .on_checked(move |is_checked: bool| {
+            if is_checked {
+                on();
+            }
+        })
+        .vertical_alignment(VerticalAlignment::Center);
+    if let Some(w) = width {
+        rb = rb.min_width(w).width(w);
+    } else {
+        rb = rb.horizontal_alignment(HorizontalAlignment::Left);
+    }
+    rb.content(label)
+}
+
+fn note(text: &str) -> TextBlock {
+    TextBlock::new()
+        .text(text)
+        .font_size(12.0)
+        .foreground(ThemeBrush::PrimaryText)
+        .opacity(0.72)
+        .text_wrapping(TextWrapping::WrapWholeWords)
+}
+
+pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let (api, optional, api_key_revealed) = {
         let ui = shared.lock();
@@ -50,13 +78,15 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 });
             }
         };
-        hstack((
-            api_radio("api-provider", "OpenAI-compatible", 168.0, idx == 0, Box::new(pick(0))),
-            api_radio("api-provider", "Grok CLI", 96.0, idx == 1, Box::new(pick(1))),
-            api_radio("api-provider", "Codex CLI", 104.0, idx == 2, Box::new(pick(2))),
-        ))
-        .spacing(12.0)
-        .vertical_alignment(VerticalAlignment::Center)
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(12.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .children((
+                radio("api-provider", "OpenAI-compatible", Some(168.0), idx == 0, pick(0)),
+                radio("api-provider", "Grok CLI", Some(96.0), idx == 1, pick(1)),
+                radio("api-provider", "Codex CLI", Some(104.0), idx == 2, pick(2)),
+            ))
     });
 
     let http_api_card =
@@ -79,12 +109,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                     });
                 }
             };
-            hstack((
-                api_radio("api-http-api", "Chat Completions", 168.0, idx == 0, Box::new(pick(0))),
-                api_radio("api-http-api", "Responses", 120.0, idx == 1, Box::new(pick(1))),
-            ))
-            .spacing(12.0)
-            .vertical_alignment(VerticalAlignment::Center)
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(12.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    radio("api-http-api", "Chat Completions", Some(168.0), idx == 0, pick(0)),
+                    radio("api-http-api", "Responses", Some(120.0), idx == 1, pick(1)),
+                ))
         });
 
     let model_placeholder = match api.provider {
@@ -108,7 +140,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
         }
     });
 
-    let priority_tier_card = if api.provider == ModelProvider::CodexCli {
+    let priority_tier_card: View = if api.provider == ModelProvider::CodexCli {
         card_toggle(
             "api-priority-mode",
             "Priority mode",
@@ -124,13 +156,12 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 }
             },
         )
-        .into()
     } else {
-        Element::Empty
+        View::empty()
     };
 
     let connection = if api.provider.is_cli() {
-        vstack((
+        StackPanel::new().spacing(4.0).children((
             section_header("Connection"),
             provider_card,
             card_text(
@@ -150,119 +181,113 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 },
             ),
             priority_tier_card,
-            text_block("A local agent session stays open and only the new turn is sent. Tools are denied.")
-                .font_size(12.0)
-                .foreground(ThemeRef::SecondaryText)
-                .wrap(),
+            note("A local agent session stays open and only the new turn is sent. Tools are denied."),
             model_card,
         ))
-        .spacing(4.0)
     } else {
-        vstack((
-            section_header("Connection"),
-            provider_card,
-            http_api_card,
-            card_text(
-                "api-base-url",
-                "Base URL",
-                Some("OpenAI-compatible API endpoint."),
-                api.base_url.clone(),
-                "https://api.openai.com/v1",
-                {
-                    let cx = cx.clone();
-                    move |v| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.base_url = v;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-            ),
-            card_password(
-                "api-key",
-                "API key",
-                Some("Stored only on this PC."),
-                api.api_key.clone(),
-                api_key_revealed,
-                {
-                    let cx = cx.clone();
-                    move |v| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.api_key = v;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-                {
-                    let cx = cx.clone();
-                    move || {
-                        cx.with_mut(|ui| {
-                            ui.api_key_revealed = !ui.api_key_revealed;
-                        });
-                    }
-                },
-            ),
-            priority_tier_card,
-            model_card,
-            card_toggle(
-                "api-structured-outputs",
-                "Structured outputs",
-                Some("Ask the model to return JSON matching the translation schema. Turn off if the endpoint rejects json_schema."),
-                api.structured_outputs,
-                {
-                    let cx = cx.clone();
-                    move |on| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.structured_outputs = on;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-            ),
-            card_toggle(
-                "api-stream",
-                "Stream",
-                Some("Receive the response as it is generated. Turn off if the endpoint rejects stream."),
-                api.stream,
-                {
-                    let cx = cx.clone();
-                    move |on| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.stream = on;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-            ),
-            card_toggle(
-                "api-send-reasoning-content",
-                "Send reasoning",
-                Some("Replay the model's reasoning with assistant messages on follow-up turns. Turn off if the endpoint rejects reasoning_content."),
-                api.send_reasoning_content,
-                {
-                    let cx = cx.clone();
-                    move |on| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.send_reasoning_content = on;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-            ),
-        ))
-        .spacing(4.0)
+        StackPanel::new()
+            .spacing(4.0)
+            .children((
+                section_header("Connection"),
+                provider_card,
+                http_api_card,
+                card_text(
+                    "api-base-url",
+                    "Base URL",
+                    Some("OpenAI-compatible API endpoint."),
+                    api.base_url.clone(),
+                    "https://api.openai.com/v1",
+                    {
+                        let cx = cx.clone();
+                        move |v| {
+                            cx.with_mut(|ui| {
+                                ui.draft.api.base_url = v;
+                                mark_dirty(ui);
+                            });
+                        }
+                    },
+                ),
+                card_password(
+                    "api-key",
+                    "API key",
+                    Some("Stored only on this PC."),
+                    api.api_key.clone(),
+                    api_key_revealed,
+                    {
+                        let cx = cx.clone();
+                        move |v| {
+                            cx.with_mut(|ui| {
+                                ui.draft.api.api_key = v;
+                                mark_dirty(ui);
+                            });
+                        }
+                    },
+                    {
+                        let cx = cx.clone();
+                        move || {
+                            cx.with_mut(|ui| {
+                                ui.api_key_revealed = !ui.api_key_revealed;
+                            });
+                        }
+                    },
+                ),
+                priority_tier_card,
+                model_card,
+                card_toggle(
+                    "api-structured-outputs",
+                    "Structured outputs",
+                    Some("Ask the model to return JSON matching the translation schema. Turn off if the endpoint rejects json_schema."),
+                    api.structured_outputs,
+                    {
+                        let cx = cx.clone();
+                        move |on| {
+                            cx.with_mut(|ui| {
+                                ui.draft.api.structured_outputs = on;
+                                mark_dirty(ui);
+                            });
+                        }
+                    },
+                ),
+                card_toggle(
+                    "api-stream",
+                    "Stream",
+                    Some("Receive the response as it is generated. Turn off if the endpoint rejects stream."),
+                    api.stream,
+                    {
+                        let cx = cx.clone();
+                        move |on| {
+                            cx.with_mut(|ui| {
+                                ui.draft.api.stream = on;
+                                mark_dirty(ui);
+                            });
+                        }
+                    },
+                ),
+                card_toggle(
+                    "api-send-reasoning-content",
+                    "Send reasoning",
+                    Some("Replay the model's reasoning with assistant messages on follow-up turns. Turn off if the endpoint rejects reasoning_content."),
+                    api.send_reasoning_content,
+                    {
+                        let cx = cx.clone();
+                        move |on| {
+                            cx.with_mut(|ui| {
+                                ui.draft.api.send_reasoning_content = on;
+                                mark_dirty(ui);
+                            });
+                        }
+                    },
+                ),
+            ))
     };
 
-    let sampling = vstack((
+    let sampling = StackPanel::new().spacing(4.0).children((
         section_header("Optional parameters"),
-        text_block(if api.provider.is_cli() {
+        note(if api.provider.is_cli() {
             "Turn On to include. Temperature, Top P, and Max tokens apply to HTTP only. Reasoning effort is sent to the CLI."
         } else {
             "Turn On to include in the request. Off = omit."
-        })
-        .font_size(12.0)
-        .foreground(ThemeRef::SecondaryText)
-        .wrap(),
+        }),
         optional_slider_row(
             OptionalSliderParams {
                 key: "api-temperature",
@@ -381,10 +406,9 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let reliability = vstack((
+    let reliability = StackPanel::new().spacing(4.0).children((
         section_header("Reliability"),
         card_slider_number(
             SliderNumberParams {
@@ -452,21 +476,11 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    settings_page_shell(shared, chrome, bump, vstack((connection, sampling, reliability)).spacing(8.0))
+    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((connection, sampling, reliability)))
 }
 
-fn api_radio(group: &'static str, label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>) -> RadioButton {
-    let mut rb = RadioButton::new(label).group(group).checked(checked).on_checked(on);
-    rb.modifiers.min_width = Some(width);
-    rb.modifiers.width = Some(width);
-    rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-    rb
-}
-
-/// Bind a line-merge f32 field from a slider/number value.
 fn set_merge_f32(cx: &UiCx, set: impl FnOnce(&mut LineMergeConfig, f32), v: f64) {
     cx.with_mut(|ui| {
         set(&mut ui.draft.ocr.line_merge, v as f32);
@@ -474,11 +488,7 @@ fn set_merge_f32(cx: &UiCx, set: impl FnOnce(&mut LineMergeConfig, f32), v: f64)
     });
 }
 
-/// Percent slider: UI shows 0–100 (or a subrange); config stores the 0–1 ratio.
-///
-/// Slider min/max/step are the displayed percents so defaults land on ticks
-/// (`min + n×step`). The stored ratio is `percent / 100`, clamped to the same range.
-fn card_merge_pct(cx: &UiCx, p: SliderNumberParams, set: impl Fn(&mut LineMergeConfig, f32) + Copy + 'static) -> windows_reactor::Border {
+fn card_merge_pct(cx: &UiCx, p: SliderNumberParams, set: impl Fn(&mut LineMergeConfig, f32) + Copy + 'static) -> View {
     let lo = (p.min / 100.0) as f32;
     let hi = (p.max / 100.0) as f32;
     card_slider_number(p, {
@@ -487,18 +497,15 @@ fn card_merge_pct(cx: &UiCx, p: SliderNumberParams, set: impl Fn(&mut LineMergeC
     })
 }
 
-pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
+pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let (ocr, capture) = {
         let ui = shared.lock();
         (ui.draft.ocr.clone(), ui.draft.capture.clone())
     };
 
-    let model = vstack((
+    let model = StackPanel::new().spacing(4.0).children((
         section_header("Model"),
-        // Compact but readable: default RadioButton MinWidth (~120) spreads
-        // short labels too far; zero padding/min-width crushes circle+text.
-        // Cap width near content size and space items with hstack only.
         settings_card("ocr-tier", "Model size", Some("Smaller is faster; larger is more accurate. Reloads on Save."), {
             let idx = match ocr.model_tier {
                 ModelTier::Tiny => 0,
@@ -519,26 +526,19 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                     });
                 }
             };
-            // Width ≈ glyph + label; leave template padding for circle↔text.
-            let radio = |label: &str, width: f64, checked: bool, on: Box<dyn Fn() + 'static>| {
-                let mut rb = RadioButton::new(label).group("ocr-model-tier").checked(checked).on_checked(on);
-                rb.modifiers.min_width = Some(width);
-                rb.modifiers.width = Some(width);
-                rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-                rb
-            };
-            hstack((
-                radio("tiny", 64.0, idx == 0, Box::new(pick(0))),
-                radio("small", 72.0, idx == 1, Box::new(pick(1))),
-                radio("medium", 84.0, idx == 2, Box::new(pick(2))),
-            ))
-            .spacing(12.0)
-            .vertical_alignment(VerticalAlignment::Center)
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(12.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    radio("ocr-model-tier", "tiny", Some(64.0), idx == 0, pick(0)),
+                    radio("ocr-model-tier", "small", Some(72.0), idx == 1, pick(1)),
+                    radio("ocr-model-tier", "medium", Some(84.0), idx == 2, pick(2)),
+                ))
         }),
-    ))
-    .spacing(4.0);
+    ));
 
-    let timing = vstack((
+    let timing = StackPanel::new().spacing(4.0).children((
         section_header("Timing"),
         card_slider_number(
             SliderNumberParams {
@@ -640,8 +640,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
     let order_idx = match ocr.line_merge.order {
         LineMergeOrder::TopToBottomLeftToRight => 0,
@@ -660,15 +659,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
             });
         }
     };
-    // Shrink-wrap: a fixed width left-aligns the glyph inside the box.
-    let order_radio = |label: &str, checked: bool, on: Box<dyn Fn() + 'static>| {
-        let mut rb = RadioButton::new(label).group("ocr-merge-order").checked(checked).on_checked(on);
-        rb.modifiers.horizontal_alignment = Some(HorizontalAlignment::Left);
-        rb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
-        rb
-    };
-
-    let detection = vstack((
+    let detection = StackPanel::new().spacing(4.0).children((
         section_header("Detection"),
         card_slider_number(
             SliderNumberParams {
@@ -705,10 +696,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let merge_join = vstack((
+    let merge_join = StackPanel::new().spacing(4.0).children((
         section_header("Line merge"),
         card_toggle(
             "ocr-line-merge",
@@ -755,21 +745,21 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let merge_order = vstack((
+    let merge_order = StackPanel::new().spacing(4.0).children((
         subsection_header("Reading order"),
         settings_card(
             "ocr-merge-order",
             "Merge order",
             Some("Reading order when joining lines inside a merged block."),
-            vstack((
-                order_radio("Left to right, then top to bottom", order_idx == 1, Box::new(pick_order(1))),
-                order_radio("Top to bottom, then left to right", order_idx == 0, Box::new(pick_order(0))),
-            ))
-            .spacing(4.0)
-            .horizontal_alignment(HorizontalAlignment::Right),
+            StackPanel::new()
+                .spacing(4.0)
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .children((
+                    radio("ocr-merge-order", "Left to right, then top to bottom", None, order_idx == 1, pick_order(1)),
+                    radio("ocr-merge-order", "Top to bottom, then left to right", None, order_idx == 0, pick_order(0)),
+                )),
         ),
         card_merge_pct(
             &cx,
@@ -784,10 +774,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
             },
             |m, x| m.order_band_ratio = x,
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let merge_stacking = vstack((
+    let merge_stacking = StackPanel::new().spacing(4.0).children((
         subsection_header("Vertical"),
         card_merge_pct(
             &cx,
@@ -828,47 +817,46 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
             },
             |m, x| m.height_delta_ratio = x,
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let merge_column = vstack((
-        subsection_header("Horizontal"),
-        card_merge_pct(
-            &cx,
-            SliderNumberParams {
-                key: "merge-horizontal-gap",
-                header: "Gap (% of window width)".into(),
-                description: Some(
-                    "Allowed |horizontal gap| for side-by-side lines. Overlap and a small space count the same. Default 1.5. Set 0 to disable."
-                        .into(),
-                ),
-                value: f64::from(ocr.line_merge.horizontal_gap_ratio) * 100.0,
-                min: 0.0,
-                max: 8.0,
-                step: 0.1,
-            },
-            |m, x| m.horizontal_gap_ratio = x,
-        ),
-        card_merge_pct(
-            &cx,
-            SliderNumberParams {
-                key: "merge-align",
-                header: "Align tolerance (% of window width)".into(),
-                description: Some(
-                    "Left-/center-edge delta for one column (× width), or top-/center for one row (× height). Default 1.2."
-                        .into(),
-                ),
-                value: f64::from(ocr.line_merge.align_ratio) * 100.0,
-                min: 0.0,
-                max: 5.0,
-                step: 0.1,
-            },
-            |m, x| m.align_ratio = x,
-        ),
-    ))
-    .spacing(4.0);
+    let merge_column = StackPanel::new()
+        .spacing(4.0)
+        .children((
+            subsection_header("Horizontal"),
+            card_merge_pct(
+                &cx,
+                SliderNumberParams {
+                    key: "merge-horizontal-gap",
+                    header: "Gap (% of window width)".into(),
+                    description: Some(
+                        "Allowed |horizontal gap| for side-by-side lines. Overlap and a small space count the same. Default 1.5. Set 0 to disable."
+                            .into(),
+                    ),
+                    value: f64::from(ocr.line_merge.horizontal_gap_ratio) * 100.0,
+                    min: 0.0,
+                    max: 8.0,
+                    step: 0.1,
+                },
+                |m, x| m.horizontal_gap_ratio = x,
+            ),
+            card_merge_pct(
+                &cx,
+                SliderNumberParams {
+                    key: "merge-align",
+                    header: "Align tolerance (% of window width)".into(),
+                    description: Some(
+                        "Left-/center-edge delta for one column (× width), or top-/center for one row (× height). Default 1.2.".into(),
+                    ),
+                    value: f64::from(ocr.line_merge.align_ratio) * 100.0,
+                    min: 0.0,
+                    max: 5.0,
+                    step: 0.1,
+                },
+                |m, x| m.align_ratio = x,
+            ),
+        ));
 
-    let merge_short = vstack((
+    let merge_short = StackPanel::new().spacing(4.0).children((
         subsection_header("Short into long"),
         card_toggle(
             "ocr-merge-reject-short",
@@ -898,22 +886,23 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updat
             },
             |m, x| m.width_delta_ratio = x,
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let line_merge = vstack((merge_join, merge_order, merge_stacking, merge_column, merge_short)).spacing(4.0);
+    let line_merge = StackPanel::new()
+        .spacing(4.0)
+        .children((merge_join, merge_order, merge_stacking, merge_column, merge_short));
 
-    settings_page_shell(shared, chrome, bump, vstack((model, timing, detection, line_merge)).spacing(8.0))
+    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((model, timing, detection, line_merge)))
 }
 
-pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
+pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let (overlay, text_argb_str, bg_argb_str, text_color_picker_open, bg_color_picker_open) = {
         let ui = shared.lock();
         (ui.draft.overlay.clone(), ui.text_argb_str.clone(), ui.bg_argb_str.clone(), ui.text_color_picker_open, ui.bg_color_picker_open)
     };
 
-    let display = vstack((
+    let display = StackPanel::new().spacing(4.0).children((
         section_header("Display"),
         card_toggle("ov-enabled", "In-place overlay", Some("Draw translations on the target window (click-through)."), overlay.enabled, {
             let cx = cx.clone();
@@ -943,10 +932,9 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &U
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let colors = vstack((
+    let colors = StackPanel::new().spacing(4.0).children((
         section_header("Appearance"),
         card_color_popup(
             ColorPopupParams {
@@ -1063,22 +1051,19 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &U
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let notes = vstack((
-        section_header("Notes"),
-        text_block("The in-place overlay is click-through and follows the target window only while it is in the foreground. The translation window is borderless and semi-transparent, uses the same colours and typeface, and stays visible independently.")
-            .font_size(12.0)
-            .foreground(ThemeRef::SecondaryText)
-            .wrap(),
-    ))
-    .spacing(4.0);
+    let notes = StackPanel::new()
+        .spacing(4.0)
+        .children((
+            section_header("Notes"),
+            note("The in-place overlay is click-through and follows the target window only while it is in the foreground. The translation window is borderless and semi-transparent, uses the same colours and typeface, and stays visible independently."),
+        ));
 
-    settings_page_shell(shared, chrome, bump, vstack((display, colors, notes)).spacing(8.0))
+    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((display, colors, notes)))
 }
 
-pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> StackPanel {
+pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let (translation, cache_len) = {
         let ui = shared.lock();
@@ -1086,7 +1071,7 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         (ui.draft.translation.clone(), cache_len)
     };
 
-    let languages = vstack((
+    let languages = StackPanel::new().spacing(4.0).children((
         section_header("Languages"),
         card_text("tr-source-lang", "Source language", Some("Language on screen, or auto."), translation.source_lang.clone(), "auto", {
             let cx = cx.clone();
@@ -1113,10 +1098,9 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let context = vstack((
+    let context = StackPanel::new().spacing(4.0).children((
         section_header("History"),
         card_slider_number(
             SliderNumberParams {
@@ -1158,10 +1142,9 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
                 }
             },
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let cache = vstack((
+    let cache = StackPanel::new().spacing(4.0).children((
         section_header("Cache"),
         card_toggle(
             "tr-cache-enabled",
@@ -1206,25 +1189,27 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
                 "{} of {} phrases cached this session. Closing the app also clears it.",
                 cache_len, translation.cache_max_entries
             )),
-            button("Clear cache")
-                .enabled(cache_len > 0)
-                .tooltip("Drop all cached translations. Does not clear chat history.")
+            Button::new()
+                .is_enabled(cache_len > 0)
                 .on_click({
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::ClearTranslationCache)
-                }),
+                })
+                .content("Clear cache")
+                .tooltip("Drop all cached translations. Does not clear chat history."),
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    let prompt = vstack((
+    let prompt = StackPanel::new().spacing(4.0).children((
         section_header("Prompt"),
         settings_card_stack(
             "tr-system-prompt",
             "System prompt",
             Some("Leave empty for the built-in prompt. Custom text must reply {\"b\":[[id,\"translation\"],...]}."),
-            text_box(translation.system_prompt.clone().unwrap_or_default())
-                .multiline()
+            TextBox::new()
+                .text(translation.system_prompt.clone().unwrap_or_default())
+                .accepts_return(true)
+                .text_wrapping(TextWrapping::Wrap)
                 .height(120.0)
                 .placeholder_text("Built-in prompt")
                 .on_text_changed({
@@ -1238,8 +1223,7 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
                     }
                 }),
         ),
-    ))
-    .spacing(4.0);
+    ));
 
-    settings_page_shell(shared, chrome, bump, vstack((languages, context, cache, prompt)).spacing(8.0))
+    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((languages, context, cache, prompt)))
 }

@@ -20,11 +20,11 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 | 項目 | 說明 |
 |------|------|
-| 作業系統 | Windows 10 / 11 **x64** |
-| 執行階段 | Windows App Runtime（framework-dependent） |
+| 作業系統 | Windows 11 **x64**（build 22000 以上） |
+| 執行階段 | Windows App Runtime **2.4**（framework-dependent） |
 | 執行庫 | Microsoft Visual C++ Redistributable（x64），若系統缺少 CRT |
 | 網路 | 首次下載 OCR 模型（若本機尚無）；翻譯 API 連線 |
-| 開發建置 | Rust（edition 2024）、Visual Studio Build Tools（Windows 目標） |
+| 開發建置 | Rust 1.95+（edition 2024）、Visual Studio Build Tools（Windows 目標） |
 
 ## 快速開始（預建置 / 可攜包）
 
@@ -38,9 +38,8 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 可攜包內建議包含：
 
 - `translator-app.exe`
-- `Microsoft.WindowsAppRuntime.Bootstrap.dll`
 - `DirectML.dll`（ONNX Runtime DirectML EP）
-- `resources.pri`
+- `resources.pri`（若建置產出）
 
 ## 從原始碼建置
 

@@ -8,27 +8,22 @@ mod worker;
 use std::sync::OnceLock;
 
 use translator_core::{AppConfig, NormRect};
-use windows_reactor::{HostId, UiMarshaller, request_ui_rerender_on_ui_thread};
 
 pub use crate::pipeline::worker::{CmdTx, SharedState, spawn_pipeline};
 
-static UI_PING: OnceLock<(UiMarshaller, HostId)> = OnceLock::new();
+static UI_PING: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
 
-/// Capture the WinUI marshaller so the pipeline can request a root rerender.
+/// Capture a Send ping so the pipeline can wake the UI component.
 /// First call wins; later calls are ignored.
-pub fn install_ui_ping(marshaller: UiMarshaller, host_id: HostId) {
-    let _ = UI_PING.set((marshaller, host_id));
+pub fn install_ui_ping(tx: std::sync::mpsc::Sender<()>) {
+    let _ = UI_PING.set(tx);
 }
 
 /// Request a control-window rerender. No-op until [`install_ui_ping`].
 pub fn ping_ui() {
-    let Some((marshaller, host_id)) = UI_PING.get() else {
-        return;
-    };
-    let host_id = *host_id;
-    let _ = marshaller.dispatch(move || {
-        request_ui_rerender_on_ui_thread(host_id);
-    });
+    if let Some(tx) = UI_PING.get() {
+        let _ = tx.send(());
+    }
 }
 
 /// Commands the UI sends to the pipeline worker.

@@ -6,9 +6,9 @@ use parking_lot::Mutex;
 use translator_capture::list_windows;
 use translator_core::{NormRect, PreviewInfo, sanitize_regions};
 use windows_reactor::{
-    BackgroundExt, ComboBox, ContentDialog, ContentDialogResult, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt,
-    PaddingExt, StackPanel, TextStyleExt, ThemeRef, Thickness, TooltipExt, Updater, VerticalAlignment, border, button, grid, hstack,
-    scroll_viewer, text_block, text_box, vstack,
+    Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontIcon, FontWeight, Grid,
+    GridChildExt, GridLength, HorizontalAlignment, LayoutControl, LocalSender, Orientation, ScrollViewer, StackPanel, TextBlock, TextBox,
+    TextWrapping, ThemeBrush, Thickness, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
     ui::{
         chrome::status_infobar,
         preview::capture_preview,
-        shared::{ChromeSnap, PresetDialog, UiCx, UiShared, commit_pending_preset, save_region_presets, selected_preset, truncate},
+        shared::{AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_pending_preset, save_region_presets, selected_preset, truncate},
     },
 };
 
@@ -97,7 +97,7 @@ fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
     }
 }
 
-pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Updater<u32>) -> Element {
+pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let mut snap = take_dash(shared);
     let window_labels = mem::take(&mut snap.window_labels);
@@ -105,22 +105,27 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
     let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
     let ocr_desc = format!("Last OCR: {ocr_time}  ·  {} blocks", snap.last_ocr_block_count);
 
-    let divider = border(Element::Empty)
-        .background(ThemeRef::DividerStroke)
+    let divider = Border::new()
+        .background(ThemeBrush::CardStroke)
         .height(1.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
-        .with_key("dash-divider");
+        .grid_row(1)
+        .grid_column(0)
+        .margin(Thickness::new(0.0, 12.0, 0.0, 16.0));
 
-    let settings = vstack((
-        text_block("Dashboard").font_size(28.0).bold(),
-        status_infobar(chrome),
-        build_window_row(&cx, &snap, window_labels),
-        build_regions_pane(&cx, &snap),
-        preset_confirm_dialog(&cx, &snap),
-    ))
-    .spacing(12.0)
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .with_key("dash-settings");
+    let settings = StackPanel::new()
+        .spacing(12.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .grid_row(0)
+        .grid_column(0)
+        .vertical_alignment(VerticalAlignment::Top)
+        .children((
+            TextBlock::new().text("Dashboard").font_size(28.0).font_weight(FontWeight::BOLD),
+            status_infobar(chrome),
+            build_window_row(&cx, &snap, window_labels),
+            build_regions_pane(&cx, &snap),
+            preset_confirm_dialog(&cx, &snap),
+        ));
 
     let retry_tip = if in_flight {
         "Cancel the translation in progress first"
@@ -130,130 +135,112 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
         "Start capture first"
     };
 
-    let actions = hstack((
-        button("Cancel")
-            .tooltip(if in_flight {
-                "Cancel the translation in progress"
-            } else {
-                "No translation in progress"
-            })
-            .enabled(in_flight)
-            .on_click({
-                let cx = cx.clone();
-                move || cx.send_cmd(PipelineCommand::CancelTranslate)
-            }),
-        button("Retry")
-            .tooltip(retry_tip)
-            .enabled(snap.auto_running && !in_flight)
-            .on_click({
-                let cx = cx.clone();
-                move || cx.send_cmd(PipelineCommand::ManualCapture)
-            }),
-        button("Clear chat")
-            .tooltip("Clear the translation model conversation history")
-            .on_click({
-                let cx = cx.clone();
-                move || cx.send_cmd(PipelineCommand::ResetConversation)
-            }),
-    ))
-    .spacing(8.0)
-    .horizontal_alignment(HorizontalAlignment::Left)
-    .with_key("dash-actions");
+    let actions = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .children((
+            Button::new()
+                .is_enabled(in_flight)
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::CancelTranslate)
+                })
+                .content("Cancel")
+                .tooltip(if in_flight {
+                    "Cancel the translation in progress"
+                } else {
+                    "No translation in progress"
+                }),
+            Button::new()
+                .is_enabled(snap.auto_running && !in_flight)
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::ManualCapture)
+                })
+                .content("Retry")
+                .tooltip(retry_tip),
+            Button::new()
+                .on_click({
+                    let cx = cx.clone();
+                    move || cx.send_cmd(PipelineCommand::ResetConversation)
+                })
+                .content("Clear chat")
+                .tooltip("Clear the translation model conversation history"),
+        ));
 
-    let preview_pane = vstack((
-        actions,
-        capture_preview(
-            snap.preview.sequence,
-            snap.preview.width,
-            snap.preview.height,
-            snap.preview.rgba.as_ref(),
-            &snap.preview_regions,
-            bump,
-        ),
-    ))
-    .spacing(8.0)
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Stretch)
-    .with_key("dash-preview-pane");
+    let preview_pane = StackPanel::new()
+        .spacing(8.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .vertical_alignment(VerticalAlignment::Stretch)
+        .grid_row(0)
+        .grid_column(0)
+        .margin(Thickness::new(0.0, 0.0, 16.0, 0.0))
+        .children((
+            actions,
+            capture_preview(
+                snap.preview.sequence,
+                snap.preview.width,
+                snap.preview.height,
+                snap.preview.rgba.as_ref(),
+                &snap.preview_regions,
+            ),
+        ));
 
-    let output = scroll_viewer(
-        vstack((
-            hstack((
-                text_block("OCR").semibold(),
-                text_block(ocr_desc)
-                    .font_size(12.0)
-                    .foreground(ThemeRef::SecondaryText)
-                    .vertical_alignment(VerticalAlignment::Center),
-            ))
-            .spacing(12.0),
-            text_block(snap.ocr_text).wrap().selectable(),
-            text_block("Translation").semibold(),
-            text_block(snap.translation).wrap().selectable(),
-            text_block("Recent").semibold(),
-            text_block(snap.history_preview).wrap().selectable(),
-        ))
-        .spacing(4.0)
-        .horizontal_alignment(HorizontalAlignment::Stretch),
-    )
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Stretch)
-    .with_key("dash-output");
+    let output = ScrollViewer::new()
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .vertical_alignment(VerticalAlignment::Stretch)
+        .grid_row(0)
+        .grid_column(1)
+        .content(
+            StackPanel::new()
+                .spacing(4.0)
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .children((
+                    StackPanel::new().orientation(Orientation::Horizontal).spacing(12.0).children((
+                        TextBlock::new().text("OCR").font_weight(FontWeight::SEMI_BOLD),
+                        TextBlock::new()
+                            .text(ocr_desc)
+                            .font_size(12.0)
+                            .foreground(ThemeBrush::PrimaryText)
+                            .opacity(0.72)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    )),
+                    TextBlock::new()
+                        .text(snap.ocr_text)
+                        .text_wrapping(TextWrapping::WrapWholeWords)
+                        .is_text_selection_enabled(true),
+                    TextBlock::new().text("Translation").font_weight(FontWeight::SEMI_BOLD),
+                    TextBlock::new()
+                        .text(snap.translation)
+                        .text_wrapping(TextWrapping::WrapWholeWords)
+                        .is_text_selection_enabled(true),
+                    TextBlock::new().text("Recent").font_weight(FontWeight::SEMI_BOLD),
+                    TextBlock::new()
+                        .text(snap.history_preview)
+                        .text_wrapping(TextWrapping::WrapWholeWords)
+                        .is_text_selection_enabled(true),
+                )),
+        );
 
-    let workspace = grid((
-        preview_pane
-            .grid_row(0)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Stretch)
-            .margin(Thickness {
-                left: 0.0,
-                top: 0.0,
-                right: 16.0,
-                bottom: 0.0,
-            }),
-        output
-            .grid_row(0)
-            .grid_column(1)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Stretch),
-    ))
-    .rows([GridLength::Star(1.0)])
-    .columns([GridLength::Star(1.0), GridLength::Star(1.0)])
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Stretch)
-    .with_key("dash-workspace");
+    let workspace = Grid::new()
+        .rows([GridLength::Star(1.0)])
+        .columns([GridLength::Star(1.0), GridLength::Star(1.0)])
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .vertical_alignment(VerticalAlignment::Stretch)
+        .grid_row(2)
+        .grid_column(0)
+        .children((preview_pane, output));
 
-    grid((
-        settings
-            .grid_row(0)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Top),
-        divider
-            .grid_row(1)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .margin(Thickness {
-                left: 0.0,
-                top: 12.0,
-                right: 0.0,
-                bottom: 16.0,
-            }),
-        workspace
-            .grid_row(2)
-            .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Stretch),
-    ))
-    .rows([GridLength::Auto, GridLength::Auto, GridLength::Star(1.0)])
-    .columns([GridLength::Star(1.0)])
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Stretch)
-    .into()
+    Grid::new()
+        .rows([GridLength::Auto, GridLength::Auto, GridLength::Star(1.0)])
+        .columns([GridLength::Star(1.0)])
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .vertical_alignment(VerticalAlignment::Stretch)
+        .children((settings, divider, workspace))
 }
 
-fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> StackPanel {
-    let window_selected = snap.selected_idx.map(|i| i as i32).unwrap_or(-1);
+fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> View {
     let window_empty = window_labels.is_empty();
     let window_items: Vec<String> = if window_empty {
         vec!["(no windows — refresh)".into()]
@@ -261,20 +248,18 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> S
         window_labels
     };
 
-    // ComboBox popup opens below the control (MenuFlyout on DropDownButton
-    // defaults to Top placement and often expands upward).
-    let mut picker = ComboBox::new(window_items)
-        .selected_index(window_selected)
+    let picker = ComboBox::new()
+        .items_source(window_items)
+        .selected_index(snap.selected_idx)
         .placeholder_text("Select window…")
-        .enabled(!window_empty && !snap.auto_running)
+        .is_enabled(!window_empty && !snap.auto_running)
         .on_selection_changed({
             let cx = cx.clone();
-            move |idx: i32| {
-                if idx < 0 {
+            move |idx: Option<usize>| {
+                let Some(i) = idx else {
                     return;
-                }
+                };
                 cx.with_mut(|ui| {
-                    let i = idx as usize;
                     let Some(new_hwnd) = ui.windows.get(i).map(|w| w.hwnd) else {
                         return;
                     };
@@ -290,25 +275,16 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> S
                 });
             }
         })
-        .with_key("window-combo");
-    picker.modifiers.width = Some(320.0);
-    picker.modifiers.min_width = Some(280.0);
-    picker.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+        .width(320.0)
+        .min_width(280.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    let refresh = button("\u{E72C}")
-        .font_family("Segoe MDL2 Assets")
-        .font_size(16.0)
-        .subtle()
-        .padding(Thickness::uniform(8.0))
+    let refresh = Button::new()
+        .style(ButtonStyle::Subtle)
         .min_width(40.0)
         .min_height(36.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .tooltip(if snap.auto_running {
-            "Stop capture to change window"
-        } else {
-            "Refresh window list"
-        })
-        .enabled(!snap.auto_running)
+        .is_enabled(!snap.auto_running)
         .on_click({
             let cx = cx.clone();
             move || {
@@ -319,16 +295,30 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> S
                     }
                 });
             }
+        })
+        .content(FontIcon::new().glyph("\u{E72C}"))
+        .tooltip(if snap.auto_running {
+            "Stop capture to change window"
+        } else {
+            "Refresh window list"
         });
 
-    hstack((text_block("Window").semibold().vertical_alignment(VerticalAlignment::Center), picker, refresh))
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
         .spacing(8.0)
         .vertical_alignment(VerticalAlignment::Center)
         .horizontal_alignment(HorizontalAlignment::Left)
-        .with_key("dash-window-row")
+        .children((
+            TextBlock::new()
+                .text("Window")
+                .font_weight(FontWeight::SEMI_BOLD)
+                .vertical_alignment(VerticalAlignment::Center),
+            picker,
+            refresh,
+        ))
 }
 
-fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> StackPanel {
+fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
     let select_hwnd = if snap.auto_running { snap.target_hwnd } else { snap.selected_hwnd };
     let can_select = select_hwnd.is_some();
     let selecting = snap.region_select_active;
@@ -344,10 +334,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> StackPanel {
     let preset_selected = has_presets && snap.preset_selected_idx >= 0;
     let can_save = !snap.region_select_active && region_count > 0;
 
-    // Distinct keys remount so Accent does not stick after Done
-    // (`Button::accent()` cannot be cleared via Prop Unset).
     let select_label = if selecting { "Done" } else { "Select regions" };
-    let select_key = if selecting { "btn-done-regions" } else { "btn-select-regions" };
     let select_tip = if selecting {
         "Use the selected areas"
     } else if can_select {
@@ -355,218 +342,230 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> StackPanel {
     } else {
         "Select a window first"
     };
-    let mut select_btn = button(select_label)
-        .tooltip(select_tip)
-        .enabled(selecting || can_select)
-        .with_key(select_key);
+    let mut select_btn = Button::new().is_enabled(selecting || can_select);
     if selecting {
-        select_btn = select_btn.accent();
+        select_btn = select_btn.style(ButtonStyle::Accent);
     }
-    let select_btn = select_btn.on_click({
-        let cx = cx.clone();
-        let hwnd = select_hwnd;
-        move || {
-            if selecting {
-                cx.send_cmd(PipelineCommand::ConfirmRegionSelect);
-            } else if let Some(hwnd) = hwnd {
-                cx.send_cmd(PipelineCommand::BeginRegionSelect { hwnd });
+    let select_btn = select_btn
+        .on_click({
+            let cx = cx.clone();
+            let hwnd = select_hwnd;
+            move || {
+                if selecting {
+                    cx.send_cmd(PipelineCommand::ConfirmRegionSelect);
+                } else if let Some(hwnd) = hwnd {
+                    cx.send_cmd(PipelineCommand::BeginRegionSelect { hwnd });
+                }
             }
-        }
-    });
+        })
+        .content(select_label)
+        .tooltip(select_tip);
 
-    let mut preset_combo = ComboBox::new(snap.preset_names.clone())
-        .selected_index(if has_presets { snap.preset_selected_idx } else { -1 })
+    let preset_idx = if has_presets && snap.preset_selected_idx >= 0 {
+        Some(snap.preset_selected_idx as usize)
+    } else {
+        None
+    };
+    let preset_combo = ComboBox::new()
+        .items_source(snap.preset_names.clone())
+        .selected_index(preset_idx)
         .placeholder_text("Select preset…")
-        .enabled(has_presets)
+        .is_enabled(has_presets)
         .on_selection_changed({
             let cx = cx.clone();
-            move |idx: i32| {
+            move |idx: Option<usize>| {
                 cx.with_mut(|ui| {
-                    ui.preset_selected_idx = if idx >= 0 && (idx as usize) < ui.region_presets.len() {
-                        idx
-                    } else {
-                        -1
-                    };
+                    ui.preset_selected_idx = idx.filter(|&i| i < ui.region_presets.len()).map(|i| i as i32).unwrap_or(-1);
                 });
             }
         })
-        .with_key("preset-combo");
-    preset_combo.modifiers.width = Some(180.0);
-    preset_combo.modifiers.min_width = Some(140.0);
-    preset_combo.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+        .width(180.0)
+        .min_width(140.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    let sep = border(Element::Empty)
-        .background(ThemeRef::DividerStroke)
+    let sep = Border::new()
+        .background(ThemeBrush::CardStroke)
         .width(1.0)
         .height(24.0)
+        .vertical_alignment(VerticalAlignment::Center);
+
+    let toolbar = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
         .vertical_alignment(VerticalAlignment::Center)
-        .with_key("region-row-sep");
-
-    let toolbar = hstack((
-        preset_combo,
-        button("Save")
-            .tooltip(if snap.region_select_active {
-                "Finish region select (Done) before saving a preset"
-            } else if region_count == 0 {
-                "Select OCR regions first"
-            } else {
-                "Save current OCR regions as a named preset"
-            })
-            .enabled(can_save)
-            .on_click({
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        let regions = sanitize_regions(&ui.state.read().ocr_regions);
-                        if regions.is_empty() {
-                            ui.state.write().set_error("Nothing to save: select at least one OCR region.");
-                            return;
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .children((
+            preset_combo,
+            Button::new()
+                .is_enabled(can_save)
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            let regions = sanitize_regions(&ui.state.read().ocr_regions);
+                            if regions.is_empty() {
+                                ui.state.write().set_error("Nothing to save: select at least one OCR region.");
+                                return;
+                            }
+                            ui.pending_save_regions = regions;
+                            ui.preset_name_draft = selected_preset(ui).map(|p| p.name.clone()).unwrap_or_default();
+                            ui.preset_dialog = PresetDialog::SaveName;
+                        });
+                    }
+                })
+                .content("Save")
+                .tooltip(if snap.region_select_active {
+                    "Finish region select (Done) before saving a preset"
+                } else if region_count == 0 {
+                    "Select OCR regions first"
+                } else {
+                    "Save current OCR regions as a named preset"
+                }),
+            Button::new()
+                .is_enabled(preset_selected)
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        let regions = selected_preset(&cx.shared.lock()).map(|p| p.regions.clone());
+                        if let Some(regions) = regions {
+                            cx.send_cmd(PipelineCommand::SetCaptureRegions { regions });
                         }
-                        ui.pending_save_regions = regions;
-                        ui.preset_name_draft = selected_preset(ui).map(|p| p.name.clone()).unwrap_or_default();
-                        ui.preset_dialog = PresetDialog::SaveName;
-                    });
-                }
-            }),
-        button("Load")
-            .tooltip("Apply the selected preset to the current window")
-            .enabled(preset_selected)
-            .on_click({
-                let cx = cx.clone();
-                move || {
-                    let regions = selected_preset(&cx.shared.lock()).map(|p| p.regions.clone());
-                    if let Some(regions) = regions {
-                        cx.send_cmd(PipelineCommand::SetCaptureRegions { regions });
                     }
-                }
-            }),
-        button("Delete")
-            .tooltip("Delete the selected preset")
-            .enabled(preset_selected)
-            .on_click({
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        let Some(name) = selected_preset(ui).map(|p| p.name.clone()) else {
-                            return;
-                        };
-                        ui.preset_dialog = PresetDialog::Delete { name };
-                    });
-                }
-            }),
-        sep,
-        select_btn,
-        button("Clear")
-            .tooltip("Recognize text on the whole window")
-            .enabled(selecting || region_count > 0)
-            .on_click({
-                let cx = cx.clone();
-                move || {
-                    if selecting {
-                        cx.send_cmd(PipelineCommand::ClearRegionSelect);
-                    } else {
-                        cx.send_cmd(PipelineCommand::SetCaptureRegions { regions: Vec::new() });
+                })
+                .content("Load")
+                .tooltip("Apply the selected preset to the current window"),
+            Button::new()
+                .is_enabled(preset_selected)
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            let Some(name) = selected_preset(ui).map(|p| p.name.clone()) else {
+                                return;
+                            };
+                            ui.preset_dialog = PresetDialog::Delete { name };
+                        });
                     }
-                }
-            }),
-        text_block(regions_label)
-            .font_size(12.0)
-            .foreground(ThemeRef::SecondaryText)
-            .vertical_alignment(VerticalAlignment::Center),
-    ))
-    .spacing(8.0)
-    .vertical_alignment(VerticalAlignment::Center)
-    .horizontal_alignment(HorizontalAlignment::Left)
-    .with_key("region-toolbar-row");
+                })
+                .content("Delete")
+                .tooltip("Delete the selected preset"),
+            sep,
+            select_btn,
+            Button::new()
+                .is_enabled(selecting || region_count > 0)
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        if selecting {
+                            cx.send_cmd(PipelineCommand::ClearRegionSelect);
+                        } else {
+                            cx.send_cmd(PipelineCommand::SetCaptureRegions { regions: Vec::new() });
+                        }
+                    }
+                })
+                .content("Clear")
+                .tooltip("Recognize text on the whole window"),
+            TextBlock::new()
+                .text(regions_label)
+                .font_size(12.0)
+                .foreground(ThemeBrush::PrimaryText)
+                .opacity(0.72)
+                .vertical_alignment(VerticalAlignment::Center),
+        ));
 
-    vstack((
-        text_block("Regions").semibold(),
-        toolbar,
-        preset_name_row(cx, snap),
-        text_block("Drag on the selected window to choose what to translate — drag to move or resize, right-click to remove.")
-            .font_size(12.0)
-            .foreground(ThemeRef::SecondaryText)
-            .wrap(),
-    ))
-    .spacing(8.0)
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .with_key("dash-regions-pane")
+    StackPanel::new()
+        .spacing(8.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .children((
+            TextBlock::new().text("Regions").font_weight(FontWeight::SEMI_BOLD),
+            toolbar,
+            preset_name_row(cx, snap),
+            TextBlock::new()
+                .text("Drag on the selected window to choose what to translate — drag to move or resize, right-click to remove.")
+                .font_size(12.0)
+                .foreground(ThemeBrush::PrimaryText)
+                .opacity(0.72)
+                .text_wrapping(TextWrapping::WrapWholeWords),
+        ))
 }
 
-fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> Element {
+fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> View {
     if !matches!(snap.preset_dialog, PresetDialog::SaveName) {
-        return Element::Empty;
+        return View::empty();
     }
 
-    let mut name_tb = text_box(snap.preset_name_draft.clone()).on_text_changed({
-        let cx = cx.clone();
-        move |text: String| {
-            cx.with_mut(|ui| ui.preset_name_draft = text);
-        }
-    });
-    name_tb.modifiers.width = Some(180.0);
-    name_tb.modifiers.vertical_alignment = Some(VerticalAlignment::Center);
+    let name_tb = TextBox::new()
+        .text(snap.preset_name_draft.clone())
+        .on_text_changed({
+            let cx = cx.clone();
+            move |text: String| {
+                cx.with_mut(|ui| ui.preset_name_draft = text);
+            }
+        })
+        .width(180.0)
+        .vertical_alignment(VerticalAlignment::Center);
 
-    border(
-        hstack((
-            text_block("Name").semibold().vertical_alignment(VerticalAlignment::Center),
-            name_tb,
-            button("Save").accent().on_click({
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        let name = ui.preset_name_draft.trim().to_string();
-                        if name.is_empty() {
-                            ui.state.write().set_error("Preset name is required.");
-                            return;
+    Border::new()
+        .background(ThemeBrush::CardBackground)
+        .border_brush(ThemeBrush::CardStroke)
+        .border_thickness(Thickness::uniform(1.0))
+        .corner_radius(4.0)
+        .padding(Thickness::new(8.0, 4.0, 8.0, 4.0))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .content(
+            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                TextBlock::new()
+                    .text("Name")
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+                name_tb,
+                Button::new()
+                    .style(ButtonStyle::Accent)
+                    .on_click({
+                        let cx = cx.clone();
+                        move || {
+                            cx.with_mut(|ui| {
+                                let name = ui.preset_name_draft.trim().to_string();
+                                if name.is_empty() {
+                                    ui.state.write().set_error("Preset name is required.");
+                                    return;
+                                }
+                                if ui.region_presets.iter().any(|p| p.name == name) {
+                                    ui.preset_dialog = PresetDialog::Overwrite { name };
+                                    return;
+                                }
+                                if let Err(e) = commit_pending_preset(ui, name) {
+                                    ui.state.write().set_error(e);
+                                }
+                            });
                         }
-                        if ui.region_presets.iter().any(|p| p.name == name) {
-                            ui.preset_dialog = PresetDialog::Overwrite { name };
-                            return;
+                    })
+                    .content("Save"),
+                Button::new()
+                    .on_click({
+                        let cx = cx.clone();
+                        move || {
+                            cx.with_mut(|ui| {
+                                ui.preset_dialog = PresetDialog::None;
+                                ui.pending_save_regions.clear();
+                                ui.preset_name_draft.clear();
+                            });
                         }
-                        if let Err(e) = commit_pending_preset(ui, name) {
-                            ui.state.write().set_error(e);
-                        }
-                    });
-                }
-            }),
-            button("Cancel").on_click({
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        ui.preset_dialog = PresetDialog::None;
-                        ui.pending_save_regions.clear();
-                        ui.preset_name_draft.clear();
-                    });
-                }
-            }),
-        ))
-        .spacing(8.0),
-    )
-    .background(ThemeRef::SubtleFill)
-    .border_brush(ThemeRef::CardStroke)
-    .border_thickness(Thickness::uniform(1.0))
-    .corner_radius(4.0)
-    .padding(Thickness {
-        left: 8.0,
-        top: 4.0,
-        right: 8.0,
-        bottom: 4.0,
-    })
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .with_key("preset-name-row")
-    .into()
+                    })
+                    .content("Cancel"),
+            )),
+        )
 }
 
-fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> ContentDialog {
+fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> View {
     let (open, title, body, primary) = match &snap.preset_dialog {
         PresetDialog::Overwrite { name } => (true, "Overwrite preset?", format!("Replace the regions saved in \"{name}\"?"), "Overwrite"),
         PresetDialog::Delete { name } => (true, "Delete preset?", format!("Delete preset \"{name}\"? This cannot be undone."), "Delete"),
         PresetDialog::None | PresetDialog::SaveName => (false, "", String::new(), "OK"),
     };
 
-    ContentDialog::new(title)
-        .content(body)
+    ContentDialog::new()
+        .title(title)
         .primary_button_text(primary)
         .close_button_text("Cancel")
         .is_open(open)
@@ -578,7 +577,6 @@ fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> ContentDialog {
                     ui.preset_dialog = PresetDialog::None;
                     if result != ContentDialogResult::Primary {
                         if matches!(action, PresetDialog::Overwrite { .. }) {
-                            // Keep the inline name row open with pending regions.
                             ui.preset_dialog = PresetDialog::SaveName;
                         }
                         return;
@@ -602,5 +600,5 @@ fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> ContentDialog {
                 });
             }
         })
-        .with_key("preset-confirm-dialog")
+        .content(body)
 }

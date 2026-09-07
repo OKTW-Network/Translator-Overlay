@@ -3,15 +3,24 @@
 mod chrome;
 mod controls;
 mod dashboard;
-mod nav_header;
+mod mica;
 mod preview;
 mod settings;
 mod shared;
 
+use std::{
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, RecvTimeoutError},
+    },
+    time::Duration,
+};
+
 use windows_reactor::{
-    Backdrop, BackgroundExt, Color, Element, GridChildExt, GridLength, HorizontalAlignment, KeyExt, LayoutExt, NavViewItem, NavigationView,
-    NavigationViewPaneDisplayMode, PaddingExt, RenderCx, RequestedTheme, ResourceExt, Symbol, Thickness, TitleBar, VerticalAlignment,
-    border, grid, scroll_viewer, set_backdrop, set_requested_theme,
+    Border, ChildrenControl, Color, Component, ComponentContext, ContentControl, Grid, GridChildExt, GridLength, HorizontalAlignment,
+    LayoutControl, LocalSender, NavigationView, NavigationViewBackButtonVisible, NavigationViewItem, NavigationViewItemSlot,
+    NavigationViewPaneDisplayMode, NavigationViewSlot, ScrollViewer, SlotView, SlotsControl, Symbol, SymbolIcon, TitleBar, TitleBarSlot,
+    VerticalAlignment, View, ViewContext, WindowBackdrop, WindowTheme, WindowTitleBarHeight, WindowVisuals,
 };
 
 use crate::{
@@ -20,169 +29,207 @@ use crate::{
     ui::{
         chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
         dashboard::dashboard_page,
-        nav_header::retarget,
         settings::{api_page, ocr_page, overlay_page, translation_page},
-        shared::{make_shared, take_chrome},
+        shared::{AppMsg, make_shared, take_chrome},
     },
 };
 
-/// Entry render function for the control window.
-pub fn app(cx: &mut RenderCx) -> Element {
-    cx.use_effect((), || {
-        set_requested_theme(RequestedTheme::Default);
-        set_backdrop(Some(Backdrop::Mica));
-        // WinUI 3 Activate can knock the taskbar out of the topmost stack (#11091).
-        restore_taskbar_zorder();
-    });
-    let _scheme = cx.use_color_scheme();
+/// Root WinUI component for the control window.
+pub struct AppRoot {
+    shared: Arc<parking_lot::Mutex<shared::UiShared>>,
+    ping: LocalSender<AppMsg>,
+    ping_rx: Arc<Mutex<Receiver<()>>>,
+    page_tag: String,
+    is_pane_open: bool,
+}
 
-    retarget();
-    install_ui_ping(cx.use_ui_marshaller(), cx.host_id());
-
-    let shared = cx.use_ref(make_shared());
-    let (tick, bump_tick) = cx.use_reducer(0_u32);
-    let _ = tick;
-    let (page_tag, set_page) = cx.use_state(String::from("dashboard"));
-    let (is_pane_open, set_pane_open) = cx.use_state(true);
-
-    cx.use_effect((), {
-        let bump_tick = bump_tick.clone();
-        move || {
-            if !retarget() {
-                bump_tick.call(|n| n.wrapping_add(1));
-            }
-        }
-    });
-
-    let shared_arc = shared.borrow().clone();
-    let chrome = take_chrome(&shared_arc);
-
-    // Critical: every page needs a distinct key so the reconciler does not
-    // positionally reuse StackPanel children across tab switches.
-    let page: Element = match page_tag.as_str() {
-        "api" => api_page(&shared_arc, &chrome, &bump_tick).with_key("page-api").into(),
-        "translation" => translation_page(&shared_arc, &chrome, &bump_tick)
-            .with_key("page-translation")
-            .into(),
-        "ocr" => ocr_page(&shared_arc, &chrome, &bump_tick).with_key("page-ocr").into(),
-        "overlay" => overlay_page(&shared_arc, &chrome, &bump_tick).with_key("page-overlay").into(),
-        _ => dashboard_page(&shared_arc, &chrome, &bump_tick).with_key("page-dashboard"),
-    };
-
-    // Settings pages: pin title + Save above the scroll (color = unsaved).
-    let settings_meta: Option<(&str, Option<&str>)> = match page_tag.as_str() {
-        "api" => Some(("API", Some("Choose how to reach a translation model."))),
-        "translation" => Some(("Translation", Some("Languages and translation context."))),
-        "ocr" => Some(("OCR", Some("Text recognition and capture timing."))),
-        "overlay" => Some(("Overlay", Some("Where and how translations are shown."))),
-        _ => None,
-    };
-
-    let page_padding = Thickness {
-        left: 24.0,
-        top: if settings_meta.is_some() { 8.0 } else { 16.0 },
-        right: 24.0,
-        bottom: 24.0,
-    };
-
-    // Settings: Grid Auto+* so ScrollViewer gets a bounded height.
-    // A VStack measures children with infinite height → ScrollViewer never scrolls.
-    // Dashboard: same Auto+* fill (page is already a Grid); do not wrap it in an
-    // unbounded ScrollViewer or the workspace Star row collapses.
-    let content: Element = if let Some((title, description)) = settings_meta {
-        let scrolled = scroll_viewer(
-            border(page)
-                .padding(page_padding)
-                .horizontal_alignment(HorizontalAlignment::Stretch)
-                .with_key(format!("body-{}", page_tag.as_str())),
-        )
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .vertical_alignment(VerticalAlignment::Stretch)
-        .with_key(format!("scroll-{}", page_tag.as_str()));
-        grid((
-            settings_sticky_chrome(title, description, &shared_arc, &chrome, &bump_tick)
-                .grid_row(0)
-                .grid_column(0)
-                .horizontal_alignment(HorizontalAlignment::Stretch),
-            scrolled.grid_row(1).grid_column(0),
-        ))
-        .rows([GridLength::Auto, GridLength::Star(1.0)])
-        .columns([GridLength::Star(1.0)])
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .vertical_alignment(VerticalAlignment::Stretch)
-        .with_key(format!("settings-frame-{}", page_tag.as_str()))
-        .into()
-    } else {
-        border(page)
-            .padding(page_padding)
-            .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Stretch)
-            .with_key(format!("body-{}", page_tag.as_str()))
-            .into()
-    };
-
-    let nav_items = [
-        NavViewItem::new("Dashboard").tag("dashboard").icon(Symbol::Home),
-        NavViewItem::header("Settings"),
-        NavViewItem::new("API").tag("api").icon(Symbol::Link),
-        NavViewItem::new("Translation").tag("translation").icon(Symbol::Globe),
-        NavViewItem::new("OCR").tag("ocr").icon(Symbol::Camera),
-        NavViewItem::new("Overlay").tag("overlay").icon(Symbol::ViewAll),
-    ];
-
-    let current_tag = page_tag.clone();
-    // Fluent card pattern on Mica: clear NavigationView content-layer fill + border
-    // so Mica shows between settings cards (cards keep CardBackground).
-    // Brush overrides only — Thickness/CornerRadius resource boxing can crash.
-    // Pane hamburger lives on TitleBar (WinUI Gallery shell).
-    let nav = NavigationView::new(nav_items, content)
-        .pane_display_mode(NavigationViewPaneDisplayMode::Left)
-        .open_pane_length(168.0)
-        .pane_open(is_pane_open)
-        .on_pane_open_changed({
-            let set_pane_open = set_pane_open.clone();
-            move |open| set_pane_open.call(open)
-        })
-        .selected_tag(page_tag.as_str())
-        .on_selection_changed({
-            move |tag: String| {
-                if !tag.is_empty() && tag != current_tag {
-                    set_page.call(tag);
+impl AppRoot {
+    fn arm_pipeline_ping(&self, context: &ComponentContext<Self>) {
+        let rx = Arc::clone(&self.ping_rx);
+        context.spawn_background(move |cancel| {
+            loop {
+                if cancel.is_cancelled() {
+                    return AppMsg::Refresh;
+                }
+                let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.recv_timeout(Duration::from_millis(100)) {
+                    Ok(()) => {
+                        while guard.try_recv().is_ok() {}
+                        return AppMsg::PipelineWake;
+                    }
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return AppMsg::Refresh,
                 }
             }
-        })
-        .pane_footer(capture_start_stop_button(&shared_arc, &chrome, &bump_tick, is_pane_open))
-        .settings_visible(false)
-        .back_button_visible(false)
-        .pane_toggle_button_visible(false)
-        .background(Color::transparent())
-        .resource_overrides(|r| {
-            r.set("NavigationViewContentBackground", Color::transparent())
-                .set("NavigationViewContentGridBorderBrush", Color::transparent())
-        })
-        .with_key("main-nav");
+        });
+    }
+}
 
-    let title_bar = TitleBar::new("Translator Overlay")
-        .pane_toggle_button_visible(true)
-        .back_button_visible(false)
-        .on_pane_toggle_requested(move || set_pane_open.call(!is_pane_open))
-        .content(app_status_strip(&chrome))
-        .tall(true)
-        .with_key("app-title-bar");
+impl Component for AppRoot {
+    type Input = ();
+    type Message = AppMsg;
 
-    grid((
-        title_bar
+    fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
+        restore_taskbar_zorder();
+        mica::apply();
+        let (tx, rx) = std::sync::mpsc::channel();
+        install_ui_ping(tx);
+        let ping = context.sender();
+        let root = Self {
+            shared: make_shared(),
+            ping,
+            ping_rx: Arc::new(Mutex::new(rx)),
+            page_tag: String::from("dashboard"),
+            is_pane_open: true,
+        };
+        root.arm_pipeline_ping(context);
+        root
+    }
+
+    fn update(&mut self, message: AppMsg, context: &ComponentContext<Self>) {
+        match message {
+            AppMsg::Refresh => {}
+            AppMsg::PipelineWake => self.arm_pipeline_ping(context),
+            AppMsg::SelectPage(tag) => {
+                if !tag.is_empty() && tag != self.page_tag {
+                    self.page_tag = tag;
+                }
+            }
+            AppMsg::PaneOpen(open) => self.is_pane_open = open,
+            AppMsg::TogglePane => self.is_pane_open = !self.is_pane_open,
+        }
+    }
+
+    fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
+        context.window_title("Translator Overlay");
+        context.window_visuals(
+            WindowVisuals::new()
+                .backdrop(WindowBackdrop::Mica)
+                .theme(WindowTheme::System)
+                .client_size(1280.0, 800.0),
+        );
+        context.use_effect("taskbar-zorder", (), || {
+            restore_taskbar_zorder();
+            None
+        });
+
+        let chrome = take_chrome(&self.shared);
+        let bump = &self.ping;
+        let page_tag = self.page_tag.as_str();
+        let is_pane_open = self.is_pane_open;
+
+        let page: View = match page_tag {
+            "api" => api_page(&self.shared, &chrome, bump),
+            "translation" => translation_page(&self.shared, &chrome, bump),
+            "ocr" => ocr_page(&self.shared, &chrome, bump),
+            "overlay" => overlay_page(&self.shared, &chrome, bump),
+            _ => dashboard_page(&self.shared, &chrome, bump),
+        };
+
+        let settings_meta: Option<(&str, Option<&str>)> = match page_tag {
+            "api" => Some(("API", Some("Choose how to reach a translation model."))),
+            "translation" => Some(("Translation", Some("Languages and translation context."))),
+            "ocr" => Some(("OCR", Some("Text recognition and capture timing."))),
+            "overlay" => Some(("Overlay", Some("Where and how translations are shown."))),
+            _ => None,
+        };
+
+        let page_padding = windows_reactor::Thickness::new(24.0, if settings_meta.is_some() { 8.0 } else { 16.0 }, 24.0, 24.0);
+
+        let content: View = if let Some((title, description)) = settings_meta {
+            let scrolled = ScrollViewer::new()
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .vertical_alignment(VerticalAlignment::Stretch)
+                .grid_row(1)
+                .grid_column(0)
+                .content(
+                    Border::new()
+                        .padding(page_padding)
+                        .horizontal_alignment(HorizontalAlignment::Stretch)
+                        .content(page),
+                );
+            Grid::new()
+                .rows([GridLength::Auto, GridLength::Star(1.0)])
+                .columns([GridLength::Star(1.0)])
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .vertical_alignment(VerticalAlignment::Stretch)
+                .children((
+                    Border::new()
+                        .grid_row(0)
+                        .grid_column(0)
+                        .horizontal_alignment(HorizontalAlignment::Stretch)
+                        .content(settings_sticky_chrome(title, description, &self.shared, &chrome, bump)),
+                    scrolled,
+                ))
+        } else {
+            Border::new()
+                .padding(page_padding)
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .vertical_alignment(VerticalAlignment::Stretch)
+                .content(page)
+        };
+
+        let nav_items = [
+            ("nav-dashboard", nav_item("dashboard", "Dashboard", Symbol::Home, page_tag == "dashboard")),
+            ("nav-settings", settings_nav(page_tag)),
+        ];
+
+        let nav = NavigationView::new()
+            .pane_display_mode(NavigationViewPaneDisplayMode::Left)
+            .open_pane_length(196.0)
+            .is_pane_open(is_pane_open)
+            .on_is_pane_open_changed(context.callback(AppMsg::PaneOpen))
+            .on_selected_tag_changed(context.callback(|tag: Option<String>| AppMsg::SelectPage(tag.unwrap_or_default())))
+            .is_settings_visible(false)
+            .is_back_button_visible(NavigationViewBackButtonVisible::Collapsed)
+            .is_pane_toggle_button_visible(false)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .vertical_alignment(VerticalAlignment::Stretch)
+            .grid_row(1)
+            .grid_column(0)
+            .slots([
+                SlotView::collection(NavigationViewSlot::MenuItems, nav_items),
+                SlotView::new(NavigationViewSlot::Content, content),
+                SlotView::new(NavigationViewSlot::PaneFooter, capture_start_stop_button(&self.shared, &chrome, bump, is_pane_open)),
+            ]);
+
+        let title_bar = TitleBar::new()
+            .title("Translator Overlay")
+            .preferred_height(WindowTitleBarHeight::Tall)
+            .is_pane_toggle_button_visible(true)
+            .is_back_button_visible(false)
+            .on_pane_toggle_requested(context.message(AppMsg::TogglePane))
+            .horizontal_alignment(HorizontalAlignment::Stretch)
             .grid_row(0)
             .grid_column(0)
-            .horizontal_alignment(HorizontalAlignment::Stretch),
-        nav.grid_row(1)
-            .grid_column(0)
+            .slot(TitleBarSlot::Content, app_status_strip(&chrome));
+
+        Grid::new()
+            .rows([GridLength::Auto, GridLength::Star(1.0)])
+            .columns([GridLength::Star(1.0)])
             .horizontal_alignment(HorizontalAlignment::Stretch)
-            .vertical_alignment(VerticalAlignment::Stretch),
-    ))
-    .rows([GridLength::Auto, GridLength::Star(1.0)])
-    .columns([GridLength::Star(1.0)])
-    .horizontal_alignment(HorizontalAlignment::Stretch)
-    .vertical_alignment(VerticalAlignment::Stretch)
-    .into()
+            .vertical_alignment(VerticalAlignment::Stretch)
+            .background(Color::transparent())
+            .children((title_bar, nav))
+    }
+}
+
+fn nav_item(tag: &str, label: &str, symbol: Symbol, selected: bool) -> View {
+    NavigationViewItem::new().tag(tag).is_selected(selected).slots([
+        SlotView::new(NavigationViewItemSlot::Icon, SymbolIcon::new().symbol(symbol)),
+        SlotView::new(NavigationViewItemSlot::Content, label),
+    ])
+}
+
+fn settings_nav(page_tag: &str) -> View {
+    NavigationViewItem::new().selects_on_invoked(false).is_expanded(true).slots([
+        SlotView::new(NavigationViewItemSlot::Icon, SymbolIcon::new().symbol(Symbol::Setting)),
+        SlotView::new(NavigationViewItemSlot::Content, "Settings"),
+        SlotView::collection(NavigationViewItemSlot::MenuItems, [
+            ("nav-api", nav_item("api", "API", Symbol::Link, page_tag == "api")),
+            ("nav-translation", nav_item("translation", "Translation", Symbol::Globe, page_tag == "translation")),
+            ("nav-ocr", nav_item("ocr", "OCR", Symbol::Camera, page_tag == "ocr")),
+            ("nav-overlay", nav_item("overlay", "Overlay", Symbol::ViewAll, page_tag == "overlay")),
+        ]),
+    ])
 }

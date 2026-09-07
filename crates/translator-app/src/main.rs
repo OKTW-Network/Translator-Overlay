@@ -9,11 +9,11 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::RwLock;
 use tracing::{error, info};
 use translator_core::{AppConfig, AppState, config_path};
-use windows_reactor::{App, Backdrop};
+use windows_reactor::App;
 
 use crate::pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline};
 
-/// Process-wide handles for the UI render function (set before App::render).
+/// Process-wide handles for the UI (set before `App::run_component`).
 pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
 #[tokio::main]
@@ -51,30 +51,16 @@ async fn main() {
 
     APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
 
-    // Framework-dependent: initialize Windows App Runtime via Bootstrap.dll.
-    // Requires Windows App Runtime on the machine (install prompt if missing).
-    if let Err(e) = windows_reactor::bootstrap() {
-        error!(error = %e, "Windows App Runtime bootstrap failed");
-        let _ = cmd_tx.send(PipelineCommand::Shutdown);
-        let _ = pipeline.await;
-        std::process::exit(1);
-    }
-
     // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
     // `block_on`s this future on that thread — do not move render off-thread.
-    let result = App::new()
-        .title("Translator Overlay")
-        // Nav (168) + padding + Regions pane (480) + preview column.
-        // WinUI multi-pane range is ~1100–1300 × 720–840.
-        .inner_size(1280.0, 800.0)
-        .backdrop(Backdrop::Mica)
-        .render(crate::ui::app);
+    // 0.100 inlines WASDK framework bootstrap (no Bootstrap.dll / setup crate).
+    let result = App::run_component::<crate::ui::AppRoot>(());
 
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
     let _ = pipeline.await;
 
     if let Err(e) = result {
-        error!(error = %e, "App::render failed");
+        error!(error = %e, "App::run_component failed");
         std::process::exit(1);
     }
 }
