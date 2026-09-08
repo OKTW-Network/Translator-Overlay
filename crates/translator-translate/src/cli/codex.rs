@@ -107,7 +107,7 @@ impl CodexSession {
                 "clientInfo": {
                     "name": "translator-overlay",
                     "title": "Translator Overlay",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }),
             cancel,

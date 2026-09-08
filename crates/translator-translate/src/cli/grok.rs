@@ -77,7 +77,7 @@ impl GrokSession {
             "initialize",
             serde_json::json!({
                 "protocolVersion": 1,
-                "clientInfo": { "name": "translator-overlay", "version": "0.1.0" },
+                "clientInfo": { "name": "translator-overlay", "version": env!("CARGO_PKG_VERSION") },
                 "clientCapabilities": {
                     "fs": { "readTextFile": false, "writeTextFile": false },
                     "terminal": false
