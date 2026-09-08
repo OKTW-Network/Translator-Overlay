@@ -41,6 +41,8 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// Load from `path`, or write defaults and return them if the file is absent.
+    ///
+    /// Invalid fields are skipped (see [`Self::load`]).
     pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
         if path.exists() {
             Self::load(path)
@@ -51,13 +53,25 @@ impl AppConfig {
         }
     }
 
+    /// Load from `path`.
+    ///
+    /// Each TOML field is applied independently: a value that fails to parse is
+    /// skipped and that field keeps its default. IO errors and TOML syntax
+    /// errors still fail the whole load.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let config: Self = toml::from_str(&text)?;
-        Ok(config)
+        Self::from_toml_lenient(&text)
+    }
+
+    /// Parse TOML, keeping valid fields and dropping values that do not match the schema.
+    fn from_toml_lenient(text: &str) -> Result<Self, ConfigError> {
+        let src: toml::Table = toml::from_str(text)?;
+        let mut dest = toml::Table::new();
+        apply_lenient(&mut dest, &src, "");
+        Ok(Self::deserialize(toml::Value::Table(dest)).unwrap_or_default())
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
@@ -74,6 +88,60 @@ impl AppConfig {
         })?;
         Ok(())
     }
+}
+
+/// Try each key as a whole value; if a table fails, apply its children independently.
+fn apply_lenient(root: &mut toml::Table, src: &toml::Table, prefix: &str) {
+    for (key, value) in src {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+
+        insert_by_path(root, &path, value.clone());
+        if AppConfig::deserialize(toml::Value::Table(root.clone())).is_ok() {
+            continue;
+        }
+        remove_by_path(root, &path);
+
+        if let toml::Value::Table(child) = value {
+            apply_lenient(root, child, &path);
+        }
+    }
+}
+
+fn insert_by_path(root: &mut toml::Table, path: &str, value: toml::Value) {
+    let mut parts = path.split('.');
+    let Some(last) = parts.next_back() else {
+        return;
+    };
+    let mut current = root;
+    for part in parts {
+        if !matches!(current.get(part), Some(toml::Value::Table(_))) {
+            current.insert(part.to_string(), toml::Value::Table(toml::Table::new()));
+        }
+        let Some(toml::Value::Table(next)) = current.get_mut(part) else {
+            unreachable!("insert_by_path ensures a table");
+        };
+        current = next;
+    }
+    current.insert(last.to_string(), value);
+}
+
+fn remove_by_path(root: &mut toml::Table, path: &str) {
+    let mut parts = path.split('.');
+    let Some(last) = parts.next_back() else {
+        return;
+    };
+    let mut current = root;
+    for part in parts {
+        let Some(toml::Value::Table(next)) = current.get_mut(part) else {
+            return;
+        };
+        current = next;
+    }
+    current.remove(last);
 }
 
 /// How the translator reaches a model.
@@ -789,5 +857,61 @@ text_color_argb = "#FFFFFFFF"
         assert!(config.overlay.enabled);
         assert!(config.overlay.reader_enabled);
         assert_eq!(config.overlay.reader_font_px, READER_FONT_PX_DEFAULT);
+    }
+
+    #[test]
+    fn invalid_fields_are_dropped_not_whole_config() {
+        let text = r##"
+[api]
+model = "keep-me"
+provider = "not_a_real_provider"
+
+[overlay]
+enabled = false
+text_color_argb = "FFFFFFFF"
+background_color_argb = "#C8000000"
+
+[translation]
+target_lang = "ja"
+history_max_items = "nope"
+"##;
+        let config = AppConfig::from_toml_lenient(text).unwrap();
+        assert_eq!(config.api.model, "keep-me");
+        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert!(!config.overlay.enabled);
+        assert_eq!(config.overlay.text_color_argb, OverlayConfig::default().text_color_argb);
+        assert_eq!(config.overlay.background_color_argb, 0xC800_0000);
+        assert_eq!(config.translation.target_lang, "ja");
+        assert_eq!(config.translation.history_max_items, TranslationConfig::default().history_max_items);
+    }
+
+    #[test]
+    fn nested_invalid_field_keeps_siblings() {
+        let text = r#"
+[ocr.line_merge]
+enabled = false
+gap_ratio = "bad"
+join_with_space = false
+"#;
+        let config = AppConfig::from_toml_lenient(text).unwrap();
+        assert!(!config.ocr.line_merge.enabled);
+        assert!(!config.ocr.line_merge.join_with_space);
+        assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
+    }
+
+    #[test]
+    fn syntax_error_still_fails_lenient_parse() {
+        assert!(AppConfig::from_toml_lenient("[[[not valid").is_err());
+    }
+
+    #[test]
+    fn load_skips_invalid_field_and_keeps_the_rest() {
+        let path = temp_config_path("lenient");
+        let _ = fs::remove_file(&path);
+        fs::write(&path, "[api]\nmodel = \"keep-me\"\nprovider = \"nope\"\n").unwrap();
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.api.model, "keep-me");
+        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        let _ = fs::remove_file(&path);
     }
 }
