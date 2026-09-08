@@ -4,6 +4,7 @@ mod chrome;
 mod controls;
 mod dashboard;
 mod mica;
+mod nav_header;
 mod preview;
 mod settings;
 mod shared;
@@ -72,6 +73,7 @@ impl Component for AppRoot {
     fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
         restore_taskbar_zorder();
         mica::apply();
+        nav_header::apply();
         let (tx, rx) = std::sync::mpsc::channel();
         install_ui_ping(tx);
         let ping = context.sender();
@@ -171,7 +173,10 @@ impl Component for AppRoot {
 
         let nav_items = [
             ("nav-dashboard", nav_item("dashboard", "Dashboard", Symbol::Home, page_tag == "dashboard")),
-            ("nav-settings", settings_nav(page_tag)),
+            ("nav-api", nav_item("api", "API", Symbol::Link, page_tag == "api")),
+            ("nav-translation", nav_item("translation", "Translation", Symbol::Globe, page_tag == "translation")),
+            ("nav-ocr", nav_item("ocr", "OCR", Symbol::Camera, page_tag == "ocr")),
+            ("nav-overlay", nav_item("overlay", "Overlay", Symbol::ViewAll, page_tag == "overlay")),
         ];
 
         let nav = NavigationView::new()
@@ -218,18 +223,5 @@ fn nav_item(tag: &str, label: &str, symbol: Symbol, selected: bool) -> View {
     NavigationViewItem::new().tag(tag).is_selected(selected).slots([
         SlotView::new(NavigationViewItemSlot::Icon, SymbolIcon::new().symbol(symbol)),
         SlotView::new(NavigationViewItemSlot::Content, label),
-    ])
-}
-
-fn settings_nav(page_tag: &str) -> View {
-    NavigationViewItem::new().selects_on_invoked(false).is_expanded(true).slots([
-        SlotView::new(NavigationViewItemSlot::Icon, SymbolIcon::new().symbol(Symbol::Setting)),
-        SlotView::new(NavigationViewItemSlot::Content, "Settings"),
-        SlotView::collection(NavigationViewItemSlot::MenuItems, [
-            ("nav-api", nav_item("api", "API", Symbol::Link, page_tag == "api")),
-            ("nav-translation", nav_item("translation", "Translation", Symbol::Globe, page_tag == "translation")),
-            ("nav-ocr", nav_item("ocr", "OCR", Symbol::Camera, page_tag == "ocr")),
-            ("nav-overlay", nav_item("overlay", "Overlay", Symbol::ViewAll, page_tag == "overlay")),
-        ]),
     ])
 }
