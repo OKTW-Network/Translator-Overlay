@@ -703,7 +703,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_toggle(
             "ocr-line-merge",
             "Merge lines",
-            Some("Join nearby OCR lines that share a column or row, similar height, and a small gap."),
+            Some("Join nearby lines that share a column or row, similar height, and a small gap."),
             ocr.line_merge.enabled,
             {
                 let cx = cx.clone();
@@ -718,7 +718,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_toggle(
             "ocr-merge-whole-region",
             "Merge entire selected region",
-            Some("When OCR regions are set, join every line inside each region. Ignored for whole-window OCR."),
+            Some("Join every line in each drawn OCR region. Ignored for whole-window capture."),
             ocr.line_merge.merge_whole_region,
             {
                 let cx = cx.clone();
@@ -733,7 +733,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_toggle(
             "ocr-merge-join-space",
             "Join with space",
-            Some("On: insert a space between joined lines. Off: concatenate (typical for CJK)."),
+            Some("On: space between joined lines. Off: glue them (typical for CJK)."),
             ocr.line_merge.join_with_space,
             {
                 let cx = cx.clone();
@@ -751,22 +751,22 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         subsection_header("Reading order"),
         settings_card(
             "ocr-merge-order",
-            "Merge order",
-            Some("Reading order when joining lines inside a merged block."),
+            "Reading order",
+            Some("Order for joining lines and listing the blocks."),
             StackPanel::new()
                 .spacing(4.0)
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .children((
-                    radio("ocr-merge-order", "Left to right, then top to bottom", None, order_idx == 1, pick_order(1)),
-                    radio("ocr-merge-order", "Top to bottom, then left to right", None, order_idx == 0, pick_order(0)),
+                    radio("ocr-merge-order", "Left to right, then top to bottom (rows)", None, order_idx == 1, pick_order(1)),
+                    radio("ocr-merge-order", "Top to bottom, then left to right (columns)", None, order_idx == 0, pick_order(0)),
                 )),
         ),
         card_merge_pct(
             &cx,
             SliderNumberParams {
                 key: "merge-order-band",
-                header: "Order band (% of window)".into(),
-                description: Some("Row/column grouping width for reading order. Default 1.2.".into()),
+                header: "Row/column band (% of window)".into(),
+                description: Some("How close lines must be to count as the same row or column. Default 1.2.".into()),
                 value: f64::from(ocr.line_merge.order_band_ratio) * 100.0,
                 min: 0.1,
                 max: 5.0,
@@ -783,7 +783,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             SliderNumberParams {
                 key: "merge-gap",
                 header: "Gap (% of window height)".into(),
-                description: Some("Allowed |vertical gap|. Overlap and a small space count the same. Default 1.5.".into()),
+                description: Some("Max distance between stacked lines. A small overlap counts as a small gap. Default 1.5.".into()),
                 value: f64::from(ocr.line_merge.gap_ratio) * 100.0,
                 min: 0.0,
                 max: 8.0,
@@ -795,8 +795,10 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-below-mid",
-                header: "Below-mid slack (% of line height)".into(),
-                description: Some("How far a lower/right line may cross the mid and still count as below/right. Default 25.".into()),
+                header: "Midpoint slack (% of line size)".into(),
+                description: Some(
+                    "How far a line may sit past the previous midpoint and still count as below or to the right. Default 25.".into(),
+                ),
                 value: f64::from(ocr.line_merge.below_mid_ratio) * 100.0,
                 min: 0.0,
                 max: 50.0,
@@ -808,8 +810,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-height-delta",
-                header: "Height delta (%)".into(),
-                description: Some("Allowed |h1 − h2| / larger height. Default 45.".into()),
+                header: "Height difference (%)".into(),
+                description: Some("Max height difference vs the taller line. Default 45.".into()),
                 value: f64::from(ocr.line_merge.height_delta_ratio) * 100.0,
                 min: 0.0,
                 max: 90.0,
@@ -819,49 +821,45 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         ),
     ));
 
-    let merge_column = StackPanel::new()
-        .spacing(4.0)
-        .children((
-            subsection_header("Horizontal"),
-            card_merge_pct(
-                &cx,
-                SliderNumberParams {
-                    key: "merge-horizontal-gap",
-                    header: "Gap (% of window width)".into(),
-                    description: Some(
-                        "Allowed |horizontal gap| for side-by-side lines. Overlap and a small space count the same. Default 1.5. Set 0 to disable."
-                            .into(),
-                    ),
-                    value: f64::from(ocr.line_merge.horizontal_gap_ratio) * 100.0,
-                    min: 0.0,
-                    max: 8.0,
-                    step: 0.1,
-                },
-                |m, x| m.horizontal_gap_ratio = x,
-            ),
-            card_merge_pct(
-                &cx,
-                SliderNumberParams {
-                    key: "merge-align",
-                    header: "Align tolerance (% of window width)".into(),
-                    description: Some(
-                        "Left-/center-edge delta for one column (× width), or top-/center for one row (× height). Default 1.2.".into(),
-                    ),
-                    value: f64::from(ocr.line_merge.align_ratio) * 100.0,
-                    min: 0.0,
-                    max: 5.0,
-                    step: 0.1,
-                },
-                |m, x| m.align_ratio = x,
-            ),
-        ));
+    let merge_column = StackPanel::new().spacing(4.0).children((
+        subsection_header("Horizontal"),
+        card_merge_pct(
+            &cx,
+            SliderNumberParams {
+                key: "merge-horizontal-gap",
+                header: "Gap (% of window width)".into(),
+                description: Some(
+                    "Max distance between side-by-side lines. A small overlap counts as a small gap. 0 = only if they touch. Default 1.5."
+                        .into(),
+                ),
+                value: f64::from(ocr.line_merge.horizontal_gap_ratio) * 100.0,
+                min: 0.0,
+                max: 8.0,
+                step: 0.1,
+            },
+            |m, x| m.horizontal_gap_ratio = x,
+        ),
+        card_merge_pct(
+            &cx,
+            SliderNumberParams {
+                key: "merge-align",
+                header: "Align tolerance (%)".into(),
+                description: Some("Max left/center drift for one column, or top/center for one row. Default 1.2.".into()),
+                value: f64::from(ocr.line_merge.align_ratio) * 100.0,
+                min: 0.0,
+                max: 5.0,
+                step: 0.1,
+            },
+            |m, x| m.align_ratio = x,
+        ),
+    ));
 
     let merge_short = StackPanel::new().spacing(4.0).children((
         subsection_header("Short into long"),
         card_toggle(
             "ocr-merge-reject-short",
             "Don't merge short into long",
-            Some("On: a shorter line above a much wider line stays its own block. Off: width is ignored."),
+            Some("Keep a short line separate from a much wider line below or to its right."),
             ocr.line_merge.reject_short_long,
             {
                 let cx = cx.clone();
@@ -877,8 +875,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-width-delta",
-                header: "Width delta (%)".into(),
-                description: Some("When the short-into-long guard is on: allowed (lower − upper) / lower width. Default 40.".into()),
+                header: "Width difference (%)".into(),
+                description: Some("How much wider that lower/right line may be before the short line stays separate. Default 40.".into()),
                 value: f64::from(ocr.line_merge.width_delta_ratio) * 100.0,
                 min: 0.0,
                 max: 90.0,
