@@ -1,184 +1,90 @@
 # Translator Overlay
 
-Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 翻譯 → 在原位置以可點穿（click-through）覆蓋層顯示譯文。
+Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以可點穿覆蓋層顯示譯文。
 
 ## 功能
 
-- **視窗擷取**：Windows Graphics Capture，可選清單視窗或前景視窗
-- **多區域 OCR**：在目標視窗上框選多個辨識範圍；可存成可命名的 region preset（`region-presets.toml`）；無框時仍辨識整窗
-- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（GPU，失敗時回退 CPU）
-- **穩定門檻**：畫面文字穩定一段時間後才送翻譯，減少抖動與誤觸發
-- **區塊過濾**：過濾單字元雜訊、動畫圖示誤辨識；可調多行合併（幾何規則）
-- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs），或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）。HTTP/CLI 串流時 overlay 與譯文窗會隨每個 block 即時更新
-- **翻譯記憶**：同一句原文只翻一次，人名、按鈕、重播台詞不會一直重送。可在 Translation 頁調整記住多少句或按 Clear cache 清空；關閉程式後會忘掉
-- **對話上下文**：多輪歷史壓縮，維持用語一致
-- **透明覆蓋層**：WS_EX_LAYERED + 點穿，跟隨目標視窗位置與 OCR 框；可即時開關
-- **譯文懸浮窗**：無邊框半透明置頂視窗顯示最新譯文（拖曳移動、邊緣縮放），樣式與 overlay 相同，不跟隨遊戲焦點
-- **設定 UI**：Dashboard + API / Translation / OCR / Overlay 分頁，設定寫入 `config.toml`
+- **視窗擷取**：Windows Graphics Capture。可在目標視窗上框選多個 OCR 區域，或辨識整窗；區域可存成具名 preset
+- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
+- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
+- **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
+- **顯示**：點穿 in-place overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂譯文窗（拖曳移動、邊緣縮放）
+- **設定 UI**：Dashboard + API / Translation / OCR / Overlay
 
 ## 系統需求
 
-| 項目 | 說明 |
-|------|------|
-| 作業系統 | Windows 11 **x64**（build 22000 以上） |
-| 執行階段 | Windows App Runtime **2.4**（framework-dependent） |
-| 執行庫 | Microsoft Visual C++ Redistributable（x64），若系統缺少 CRT |
-| 網路 | 首次下載 OCR 模型（若本機尚無）；翻譯 API 連線 |
-| 開發建置 | Rust 1.95+（edition 2024）、Visual Studio Build Tools（Windows 目標） |
+- Windows 11 **x64**（build 22000 以上）
+- [Windows App Runtime 2.4](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
+- Microsoft Visual C++ Redistributable（x64），若系統缺少 CRT
 
-## 快速開始（預建置 / 可攜包）
+## 快速開始
 
-1. 解壓 `TranslatorOverlay-*-win-x64.zip`（保持 DLL 與 exe 同目錄）
+1. 解壓 `TranslatorOverlay-*-win-x64.zip`（`DirectML.dll` 須與 exe 同目錄）
 2. 雙擊 `translator-app.exe`
-3. 在 **API** 頁選 Provider：HTTP 填 `api_key`，或改用本機 Grok / Codex CLI；然後 **Save**
-4. 回 **Dashboard**：重新整理視窗清單 → 選取目標 → 左側導覽底部 **Start**
+3. **API** 頁選 Provider：
+   - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
+   - **Grok CLI** / **Codex CLI**：本機 `grok` / `codex`
+4. **Save**
+5. **Dashboard** 選視窗 → 左側導覽底部 **Start**
 
-`config.toml`、`region-presets.toml` 與 `models/` 會放在可執行檔同目錄。
+首次執行若缺少 OCR 模型，會從 [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0) 下載到 exe 同目錄的 `models/`；完成前無法 Start。
 
-可攜包內建議包含：
+## 使用
 
-- `translator-app.exe`
-- `DirectML.dll`（ONNX Runtime DirectML EP）
-- `resources.pri`（若建置產出）
+**Dashboard** 選目標視窗。可選 **Select regions** 在該視窗上框選辨識範圍（目標前景時才看得到選取層）；空區域 = 整窗。框選結果可存成 preset 再 **Load**。擷取中可 **Capture now** 立刻 OCR + 翻譯（略過穩定等待），或 **Cancel** 取消進行中的翻譯。
+
+**Overlay** 頁開關 in-place 覆蓋與獨立譯文窗（即時生效）。其餘選項改完需 **Save**。
+
+## 管線
+
+```
+目標視窗
+  → Windows Graphics Capture
+  → PP-OCRv6（oar-ocr / ONNX + DirectML，失敗回退 CPU）
+  → 信心過濾 / 單字元過濾 / 多行合併 / block 持續追蹤
+  → 穩定閘門
+  → LLM 翻譯（session cache + 多輪上下文；HTTP 可串流）
+  → 點穿 overlay（跟隨前景視窗）+ 獨立譯文窗
+```
+
+## OCR 模型
+
+來源：[GreatV/oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0)。檔案須存在且大小相符才會載入。
+
+| 尺寸 | Detection | Recognition | Dictionary |
+| --- | --- | --- | --- |
+| tiny | `pp-ocrv6_tiny_det.onnx` | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt` |
+| small（預設） | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` |
+| medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt`（與 small 共用） |
+
+較小較快，較大較準。換尺寸後 **Save** 會重新載入。
 
 ## 從原始碼建置
 
+需要 Rust 1.95+（edition 2024）與 Visual Studio Build Tools。
+
 ```powershell
 cargo build --release -p translator-app
-```
-
-執行：
-
-```powershell
-.\target\release\translator-app.exe
-```
-
-打包可攜 ZIP：
-
-```powershell
 .\scripts\package-portable.ps1
-# 或略過編譯、只用現有 release 產物：
-.\scripts\package-portable.ps1 -SkipBuild
 ```
 
-產物位於 `dist/TranslatorOverlay-<version>-win-x64.zip`。
+產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（內含 `translator-app.exe`、`DirectML.dll`）。目標機器仍需 Windows App Runtime 2.4。
 
-## 使用方式
+開發時格式與 lint：
 
-1. **API**：選 Provider（OpenAI-compatible / Grok CLI / Codex CLI）。HTTP 填 `base_url`、`api_key`、`model`，並可選 Chat Completions 或 Responses；CLI 用本機已登入的 `grok` / `codex`，可選 `cli_path`
-2. **Translation**：來源語 / 目標語（預設 `auto` → `zh-TW`）、可選提示詞。可開關翻譯記憶、設定記住多少句，以及清空已記住的譯文。譯文不滿意時在 Dashboard 按 **Retry** 會立刻重擷取並跑完整 OCR + 翻譯
-3. **OCR**：模型等級、信心閾值、穩定時間、區塊持續過濾、行合併等
-4. **Overlay**：開關 in-place overlay / 譯文窗、譯文窗字級，以及文字色、背景色（ARGB）
-5. **Dashboard**：
-   - 左側導覽底部 **Start** / **Stop** 連續擷取；標題列狀態為 `status · target`。選視窗後 **Select regions** 與 **Presets** 同一列（中間有分隔線）：在目標視窗上拖曳畫 OCR 框（可改大小／移動；右鍵刪除該框）；選取層與翻譯 overlay 一樣，只在目標視窗前景時顯示。再按同一顆按鈕（**Done**）套用；**Clear** 回到整窗。**Save** / **Load** / **Delete** 寫入 `{exe 目錄}/region-presets.toml`。
-   - 分隔線下左欄：擷取預覽與 **Cancel** / **Retry** / **Clear chat**。**Retry** 立刻擷取一幀並跑完整 OCR + 翻譯（略過穩定等待；需已 Start）
-   - 右欄：OCR 結果、譯文、最近歷史
-   - Overlay / 譯文窗開關在 **Overlay** 頁
-
-首次載入 OCR 時，若 `models/` 缺少對應 ONNX（或檔案大小不符），程式會在背景從 GitHub Releases 下載到 `models_dir`（預設 `models/`），狀態列會顯示進度；下載／載入完成前無法開始擷取，其餘 UI 仍可操作。
-
-## 設定（`config.toml`）
-
-設定檔預設路徑：`{exe 目錄}/config.toml`。不存在時會自動建立預設值。
-
-OCR 區域 preset 存在獨立檔 `{exe 目錄}/region-presets.toml`（與 `config.toml` 分開；首次 Save 才會建立）。
-
-精簡範例：
-
-```toml
-[api]
-provider = "openai_compatible"   # openai_compatible | grok_cli | codex_cli
-# cli_path = ""                  # 空 = PATH 上的 grok / codex
-service_tier = "standard"       # standard | priority；目前 Codex CLI 支援 Priority（Fast mode）
-base_url = "https://api.openai.com/v1"
-api_key = ""
-model = "gpt-4o-mini"
-structured_outputs = true         # HTTP only; DeepSeek Chat Completions: set false
-request_timeout_secs = 60
-max_retries = 2
-retry_backoff_ms = 500
-# temperature = 0.3
-# top_p = 0.9
-# max_tokens = 2048
-# reasoning_effort = "medium"     # Meta rejects "none"
-
-[translation]
-source_lang = "auto"
-target_lang = "zh-TW"
-# system_prompt = ""              # empty = built-in; custom must reply {"b":[[id,"translation"],...]}
-history_max_items = 8
-conversation_max_turns = 20
-cache_enabled = true
-cache_max_entries = 128
-
-[ocr]
-model_tier = "small"   # tiny | small | medium
-models_dir = "models"
-confidence_threshold = 0.5
-stable_duration_ms = 500
-filter_single_char = true
-block_persist_ms = 450
-block_max_miss_ms = 700
-
-[ocr.line_merge]
-enabled = true
-merge_whole_region = false          # join every line in each hand-drawn OCR region (ignored if no regions)
-order = "left_to_right_top_to_bottom"  # or top_to_bottom_left_to_right
-join_with_space = true              # false concatenates (typical for CJK)
-reject_short_long = true            # do not glue a short line onto a wider line below
-# gap_ratio = 0.015                 # allowed |vertical gap| × window height
-# height_delta_ratio = 0.45         # allowed |h1 − h2| / larger height
-# width_delta_ratio = 0.40          # allowed (lower − upper) / lower width (when reject_short_long)
-# overlap_ratio = 0.35              # vs shorter line width
-# align_ratio = 0.012               # × window width (left or center)
-# align_overlap_ratio = 0.10        # overlap floor on the align path
-# order_band_ratio = 0.012          # reading-order row/column band
-# below_mid_ratio = 0.25            # stacked-vs-side-by-side slack
-
-[capture]
-min_interval_ms = 300
-
-[overlay]
-enabled = true          # in-place click-through overlay
-reader_enabled = true   # independent always-on-top translation window
-reader_font_px = 20     # translation-window font size
-# ARGB hex: 0xAARRGGBB
-text_color_argb = "0xFFFFFFFF"
-background_color_argb = "0xC8000000"
+```powershell
+cargo +nightly fmt
+cargo clippy --all-targets -- -D warnings
 ```
-
-### OCR 模型檔
-
-| 等級 | 偵測 | 辨識 | 字典 |
-|------|------|------|------|
-| tiny | `pp-ocrv6_tiny_det.onnx` | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt` |
-| small | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` |
-| medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt` |
-
-## 管線架構
-
-```
-┌─────────────┐    ┌──────────┐    ┌────────────────┐    ┌────────────┐    ┌─────────────┐
-│  Capture    │ →  │   OCR    │ →  │ Stability /    │ →  │  Translate │ →  │   Overlay   │
-│  (WGC)      │    │ PP-OCRv6 │    │ block filter   │    │  (LLM API) │    │ (layered)   │
-└─────────────┘    └──────────┘    └────────────────┘    └────────────┘    └─────────────┘
-        ▲                                                                          │
-        └────────────────── 跟隨目標 HWND / 客戶區 座標 ──────────────────────────┘
-```
-
-控制 UI（WinUI 3）與背景 pipeline 執行緒分離；UI 透過命令通道控制擷取、設定套用與翻譯取消。
 
 ## 專案結構
 
 ```
 crates/
-  translator-app/         # 主程式、UI、pipeline 協調
-  translator-capture/     # Windows Graphics Capture 視窗擷取
-  translator-core/        # config / state / 共用型別
-  translator-ocr/         # OCR 引擎、模型目錄、穩定門檻、行合併
-  translator-overlay/     # 透明點穿覆蓋視窗
-  translator-translate/   # HTTP / Grok ACP / Codex app-server 翻譯客戶端
-scripts/
-  package-portable.ps1    # release 建置 + 可攜 ZIP
-config.toml               # 開發用預設設定範本
+  translator-app         # WinUI 3 控制視窗（windows-reactor）與管線
+  translator-capture     # Windows Graphics Capture
+  translator-core        # 設定、路徑、區域 preset、共用型別
+  translator-ocr         # PP-OCRv6、下載、穩定閘門、過濾、合併
+  translator-overlay     # 點穿覆蓋層、區域選取、譯文窗
+  translator-translate   # HTTP / Grok ACP / Codex app-server、session cache
 ```
