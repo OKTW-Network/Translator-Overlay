@@ -1,6 +1,6 @@
 //! Reusable setting-row controls (text, toggle, slider, optional toggle+slider).
 
-use translator_core::parse_argb_hex;
+use translator_core::{format_argb_hex, parse_argb_hex};
 use translator_overlay::argb_channels;
 use windows_reactor::{
     Border, Button, ButtonStyle, ChildrenControl, Color, ColorPicker, ContentControl, FontIcon, HorizontalAlignment, LayoutControl,
@@ -8,7 +8,7 @@ use windows_reactor::{
     VerticalAlignment, View,
 };
 
-use crate::ui::chrome::{settings_card, settings_card_stack};
+use crate::ui::chrome::{settings_card, settings_card_with_below};
 
 fn compact_toggle(is_on: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
     ToggleSwitch::new()
@@ -323,69 +323,65 @@ pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'stat
 pub struct ColorPopupParams {
     pub key: &'static str,
     pub header: String,
-    pub description: Option<String>,
     pub hex: String,
     pub open: bool,
-    pub alpha_enabled: bool,
     pub placeholder: String,
 }
 
-/// Compact color row: clickable swatch + hex; ColorPicker only when the swatch is open.
+/// Compact color row: swatch + hex; ColorPicker expands under the same header row.
+///
+/// Not a Flyout (ThemeShadow over Mica paints as a solid block). Subtle Button
+/// keeps native PointerOver; the 32×32 chip is content so colour stays full size.
 pub fn card_color_popup(
     p: ColorPopupParams,
-    on_hex_changed: impl Fn(String) + 'static,
-    on_color_changed: impl Fn((u8, u8, u8, u8)) + 'static,
+    on_hex_changed: impl Fn(String) + Clone + 'static,
     on_toggle_open: impl Fn() + 'static,
 ) -> View {
-    let key = p.key;
     let (a, r, g, b) = argb_channels(parse_argb_hex(&p.hex).unwrap_or(0xFF00_0000));
-    let swatch_fill = Color::argb(255, r, g, b);
+    // Opaque RGB so low-alpha colours stay visible on the card.
+    let swatch_fill = Color::rgb(r, g, b);
 
     let swatch = Button::new()
-        .width(32.0)
-        .height(32.0)
-        .min_width(32.0)
-        .min_height(32.0)
+        .style(ButtonStyle::Subtle)
+        .min_width(0.0)
+        .min_height(0.0)
         .vertical_alignment(VerticalAlignment::Center)
         .on_click(on_toggle_open)
-        .content(Border::new().background(swatch_fill).width(24.0).height(24.0).corner_radius(4.0))
+        .content(
+            Border::new()
+                .background(swatch_fill)
+                .width(32.0)
+                .height(32.0)
+                .corner_radius(4.0)
+                .border_brush(ThemeBrush::CardStroke)
+                .border_thickness(Thickness::uniform(1.0)),
+        )
         .tooltip(if p.open { "Close color picker" } else { "Open color picker" });
 
     let hex_tb = TextBox::new()
         .text(p.hex)
         .placeholder_text(p.placeholder)
-        .on_text_changed(on_hex_changed)
+        .on_text_changed(on_hex_changed.clone())
         .width(120.0)
         .vertical_alignment(VerticalAlignment::Center);
 
-    let mut row = StackPanel::new()
+    let row = StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(8.0)
-        .vertical_alignment(VerticalAlignment::Center);
-    if p.open {
-        row = row.horizontal_alignment(HorizontalAlignment::Right);
-    }
-    let row = row.children((swatch, hex_tb));
+        .vertical_alignment(VerticalAlignment::Center)
+        .children((swatch, hex_tb));
 
-    if p.open {
-        let picker = ColorPicker::new()
+    let below = p.open.then(|| {
+        ColorPicker::new()
             .color(Color::argb(a, r, g, b))
-            .is_alpha_enabled(p.alpha_enabled)
+            .is_alpha_enabled(true)
             .is_hex_input_visible(false)
             .is_color_channel_text_input_visible(false)
-            .is_color_slider_visible(true)
-            .on_color_changed(move |c: Color| on_color_changed((c.a, c.r, c.g, c.b)));
+            .on_color_changed(move |c: Color| {
+                on_hex_changed(format_argb_hex((u32::from(c.a) << 24) | (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)))
+            })
+            .into()
+    });
 
-        let panel = Border::new()
-            .border_brush(ThemeBrush::CardStroke)
-            .border_thickness(Thickness::uniform(1.0))
-            .corner_radius(8.0)
-            .padding(Thickness::uniform(12.0))
-            .background(ThemeBrush::CardBackground)
-            .content(picker);
-
-        settings_card_stack(key, p.header, p.description.as_deref(), StackPanel::new().spacing(10.0).children((row, panel)))
-    } else {
-        settings_card(key, p.header, p.description.as_deref(), row)
-    }
+    settings_card_with_below(p.key, p.header, Some("Click the swatch to pick colour and opacity, or type #AARRGGBB hex."), row, below)
 }

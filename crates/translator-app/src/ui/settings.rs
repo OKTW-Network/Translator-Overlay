@@ -20,7 +20,7 @@ use crate::{
             ColorPopupParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_color_popup,
             card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row,
         },
-        shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty, parts_to_argb_u32, send_overlay_display},
+        shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty, send_overlay_display},
     },
 };
 
@@ -938,11 +938,9 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
             ColorPopupParams {
                 key: "ov-text-color",
                 header: "Text color".into(),
-                description: Some("Click the swatch to pick colour and opacity, or type 0xAARRGGBB hex.".into()),
                 hex: text_argb_str.clone(),
                 open: text_color_picker_open,
-                alpha_enabled: true,
-                placeholder: "0xFFFFFFFF".into(),
+                placeholder: "#FFFFFFFF".into(),
             },
             {
                 let cx = cx.clone();
@@ -950,19 +948,6 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                     cx.with_mut(|ui| {
                         if ui.text_argb_str != v {
                             ui.text_argb_str = v;
-                            mark_dirty(ui);
-                        }
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move |(a, r, g, b)| {
-                    cx.with_mut(|ui| {
-                        let v = parts_to_argb_u32(a, r, g, b);
-                        let hex = format!("0x{v:08X}");
-                        if ui.text_argb_str != hex {
-                            ui.text_argb_str = hex;
                             mark_dirty(ui);
                         }
                     });
@@ -984,11 +969,9 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
             ColorPopupParams {
                 key: "ov-bg-color",
                 header: "Background color".into(),
-                description: Some("Click the swatch to pick colour and opacity, or type 0xAARRGGBB hex.".into()),
                 hex: bg_argb_str.clone(),
                 open: bg_color_picker_open,
-                alpha_enabled: true,
-                placeholder: "0xC8000000".into(),
+                placeholder: "#C8000000".into(),
             },
             {
                 let cx = cx.clone();
@@ -996,19 +979,6 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                     cx.with_mut(|ui| {
                         if ui.bg_argb_str != v {
                             ui.bg_argb_str = v;
-                            mark_dirty(ui);
-                        }
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move |(a, r, g, b)| {
-                    cx.with_mut(|ui| {
-                        let v = parts_to_argb_u32(a, r, g, b);
-                        let hex = format!("0x{v:08X}");
-                        if ui.bg_argb_str != hex {
-                            ui.bg_argb_str = hex;
                             mark_dirty(ui);
                         }
                     });

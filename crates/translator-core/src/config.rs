@@ -412,10 +412,10 @@ pub struct OverlayConfig {
     pub reader_enabled: bool,
     /// Translation-window font size in pixels (Segoe UI). Clamped when applied.
     pub reader_font_px: u32,
-    /// Text colour including alpha (`0xAARRGGBB` in config.toml).
+    /// Text colour including alpha (`#AARRGGBB` in config.toml).
     #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
     pub text_color_argb: u32,
-    /// Box fill colour including alpha (`0xAARRGGBB` in config.toml).
+    /// Box fill colour including alpha (`#AARRGGBB` in config.toml).
     #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
     pub background_color_argb: u32,
 }
@@ -446,22 +446,18 @@ impl OverlayConfig {
     }
 }
 
-/// Format ARGB as a readable hex string for TOML (e.g. `"0xC8000000"`).
+/// Format ARGB as `"#AARRGGBB"`.
 pub fn format_argb_hex(argb: u32) -> String {
-    format!("0x{argb:08X}")
+    format!("#{argb:08X}")
 }
 
-/// Parse ARGB from `"0xAARRGGBB"` or `"#AARRGGBB"` (prefix case-insensitive for `0x`).
+/// Parse `"#AARRGGBB"` (optional surrounding space; hex digits case-insensitive).
 pub fn parse_argb_hex(s: &str) -> Option<u32> {
-    let t = s.trim();
-    let hex = t
-        .strip_prefix("0x")
-        .or_else(|| t.strip_prefix("0X"))
-        .or_else(|| t.strip_prefix('#'))?;
-    if hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return u32::from_str_radix(hex, 16).ok();
+    let hex = s.trim().strip_prefix('#')?;
+    if hex.len() != 8 {
+        return None;
     }
-    None
+    u32::from_str_radix(hex, 16).ok()
 }
 
 fn serialize_argb_hex<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
@@ -481,7 +477,7 @@ where
         type Value = u32;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("ARGB color as \"0xAARRGGBB\" hex string")
+            f.write_str("ARGB color as \"#AARRGGBB\"")
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
@@ -511,27 +507,40 @@ mod tests {
     fn default_roundtrip_toml() {
         let config = AppConfig::default();
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("text_color_argb = \"0xFFFFFFFF\""), "expected hex string in TOML, got:\n{text}");
-        assert!(text.contains("background_color_argb = \"0xC8000000\""), "expected hex string in TOML, got:\n{text}");
+        assert!(text.contains("text_color_argb = \"#FFFFFFFF\""), "expected hex string in TOML, got:\n{text}");
+        assert!(text.contains("background_color_argb = \"#C8000000\""), "expected hex string in TOML, got:\n{text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(config, parsed);
     }
 
     #[test]
-    fn overlay_colors_accept_hex_forms_and_reject_legacy_forms() {
+    fn parse_argb_hex_hash_argb() {
+        assert_eq!(parse_argb_hex("#AABBCCDD"), Some(0xAABB_CCDD));
+        assert_eq!(parse_argb_hex("#aabbccdd"), Some(0xAABB_CCDD));
+        assert_eq!(parse_argb_hex("  #C8000000  "), Some(0xC800_0000));
+        assert_eq!(parse_argb_hex("0xC8000000"), None);
+        assert_eq!(parse_argb_hex("#AABBCC"), None);
+        assert_eq!(parse_argb_hex("FFFFFFFF"), None);
+        assert_eq!(parse_argb_hex("#FFFF"), None);
+        assert_eq!(parse_argb_hex("#"), None);
+    }
+
+    #[test]
+    fn overlay_colors_accept_hash_argb_and_reject_legacy_forms() {
         let hashed = r##"
 [overlay]
 text_color_argb = "#AABBCCDD"
-background_color_argb = "0xc8000000"
+background_color_argb = "#c8000000"
 "##;
         let config: AppConfig = toml::from_str(hashed).unwrap();
         assert_eq!(config.overlay.text_color_argb, 0xAABB_CCDD);
         assert_eq!(config.overlay.background_color_argb, 0xC800_0000);
 
-        // Legacy bare-hex and decimal forms are no longer accepted.
         for bad in [
             "[overlay]\ntext_color_argb = \"C8000000\"\n",
             "[overlay]\ntext_color_argb = 4294967295\n",
+            "[overlay]\ntext_color_argb = \"0xC8000000\"\n",
+            "[overlay]\ntext_color_argb = \"#AABBCC\"\n",
         ] {
             assert!(toml::from_str::<AppConfig>(bad).is_err(), "{bad}");
         }
@@ -772,10 +781,10 @@ reader_enabled = false
         assert!(!config.overlay.enabled);
         assert!(!config.overlay.reader_enabled);
 
-        let partial = r#"
+        let partial = r##"
 [overlay]
-text_color_argb = "0xFFFFFFFF"
-"#;
+text_color_argb = "#FFFFFFFF"
+"##;
         let config: AppConfig = toml::from_str(partial).unwrap();
         assert!(config.overlay.enabled);
         assert!(config.overlay.reader_enabled);

@@ -103,7 +103,7 @@ pub struct UiShared {
     pub optional: OptionalApiState,
     pub text_argb_str: String,
     pub bg_argb_str: String,
-    /// ColorPicker popup open (text / background). Only one should be true.
+    /// ColorPicker panel open (text / background). Only one should be true.
     pub text_color_picker_open: bool,
     pub bg_color_picker_open: bool,
     /// Show API key as plain text (PasswordRevealMode::Visible).
@@ -312,11 +312,11 @@ pub fn form_validation_error(ui: &UiShared) -> Option<String> {
     }
     let text = ui.text_argb_str.trim();
     if !text.is_empty() && parse_argb_hex(text).is_none() {
-        return Some("Text color must be 0xAARRGGBB hex (e.g. 0xFFFFFFFF).".into());
+        return Some("Text color must be #AARRGGBB hex (e.g. #FFFFFFFF).".into());
     }
     let bg = ui.bg_argb_str.trim();
     if !bg.is_empty() && parse_argb_hex(bg).is_none() {
-        return Some("Background color must be 0xAARRGGBB hex (e.g. 0xC8000000).".into());
+        return Some("Background color must be #AARRGGBB hex (e.g. #C8000000).".into());
     }
     None
 }
@@ -354,10 +354,6 @@ pub fn do_discard(ui: &mut UiShared) {
     reload_draft_from_state(ui);
     ui.form_error = None;
     ui.confirm = ConfirmAction::None;
-}
-
-pub fn parts_to_argb_u32(a: u8, r: u8, g: u8, b: u8) -> u32 {
-    (u32::from(a) << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
 
 pub fn truncate(s: &str, max: usize) -> String {

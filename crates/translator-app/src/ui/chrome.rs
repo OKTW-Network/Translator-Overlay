@@ -87,13 +87,33 @@ fn settings_row_body(header: impl Into<String>, description: Option<&str>, contr
 
 /// Standalone settings card: Header + Description on the left, control flush-right.
 pub fn settings_card(key: &str, header: impl Into<String>, description: Option<&str>, control: impl Into<View>) -> View {
+    settings_card_with_below(key, header, description, control, None)
+}
+
+/// [`settings_card`] with optional extra content under the header/control row.
+pub fn settings_card_with_below(
+    key: &str,
+    header: impl Into<String>,
+    description: Option<&str>,
+    control: impl Into<View>,
+    below: Option<View>,
+) -> View {
+    let row = settings_row_body(header, description, control);
+    let content = if let Some(below) = below {
+        StackPanel::new()
+            .spacing(10.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .children((row, below))
+    } else {
+        row
+    };
     Border::new()
         .automation_id(key)
         .background(ThemeBrush::CardBackground)
         .corner_radius(8.0)
         .padding(Thickness::uniform(16.0))
         .horizontal_alignment(HorizontalAlignment::Stretch)
-        .content(settings_row_body(header, description, control))
+        .content(content)
 }
 
 /// Card with header/description on top and full-width content below (sliders, multiline).
