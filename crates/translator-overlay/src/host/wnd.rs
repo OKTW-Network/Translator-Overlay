@@ -19,6 +19,8 @@ use crate::{
 };
 
 pub(crate) const CLASS_NAME: PCWSTR = w!("TranslatorOverlayLayer.v1");
+/// Distinct from the WinUI control window (`Translator Overlay`) so OBS Window Capture can pick this HWND.
+pub(crate) const WINDOW_TITLE: PCWSTR = w!("Translator Overlay Captions");
 
 /// `wnd_proc` cannot reach `OverlayHost`; picker hit-testing is a process-wide flag
 /// because this crate hosts a single overlay window.

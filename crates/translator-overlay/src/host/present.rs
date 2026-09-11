@@ -203,7 +203,29 @@ impl OverlayHost {
         };
 
         if self.blocks.is_empty() || self.content_w == 0 || self.content_h == 0 {
-            self.hide();
+            let (_, _, client_w, client_h) = rect;
+            if client_w <= 0 || client_h <= 0 {
+                return;
+            }
+            if client_w != self.surface_w || client_h != self.surface_h {
+                self.surface_w = client_w;
+                self.surface_h = client_h;
+                self.dirty = true;
+            }
+            let content_changed = if self.dirty {
+                if let Err(e) = self.surface.ensure(client_w, client_h) {
+                    warn!(error = %e, "overlay blank present failed");
+                    return;
+                }
+                if let Some(px) = self.surface.pixels() {
+                    px.fill(0);
+                }
+                self.dirty = false;
+                true
+            } else {
+                false
+            };
+            self.update_overlay_window(target, rect, content_changed, OverlayOwnership::OwnedByTarget, allow_restack);
             return;
         }
 
@@ -384,6 +406,7 @@ impl OverlayHost {
         }
         self.presented_rect = None;
         self.replay_present = false;
+        self.dirty = true;
         let _ = unsafe { ShowWindow(self.hwnd, SW_HIDE) };
     }
 
@@ -457,26 +480,33 @@ mod tests {
         }
     }
 
-    fn first_picker_hwnd_smoke() -> Result<(), String> {
+    #[test]
+    fn empty_captions_stay_visible_and_clear_the_dib() {
+        if let Err(e) = empty_captions_hwnd_smoke() {
+            panic!("{e}");
+        }
+    }
+
+    fn overlay_ex_style(hwnd: HWND) -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
+        use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE};
+
+        WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32)
+    }
+
+    fn spawn_overlay_and_target() -> Result<(crate::host::OverlayHost, HWND, parking_lot::MutexGuard<'static, ()>), String> {
         use tokio::sync::mpsc;
         use translator_core::OverlayConfig;
         use windows::{
             Win32::{
                 System::LibraryLoader::GetModuleHandleW,
-                UI::WindowsAndMessaging::{
-                    CreateWindowExW, DestroyWindow, GWL_EXSTYLE, GetWindowLongPtrW, SW_SHOW, SetForegroundWindow, ShowWindow,
-                    WINDOW_EX_STYLE, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPEDWINDOW,
-                },
+                UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SW_SHOW, SetForegroundWindow, ShowWindow, WS_OVERLAPPEDWINDOW},
             },
             core::w,
         };
 
-        use crate::{
-            command::OverlayCommand,
-            host::{OverlayHost, win32::lock_hwnd_tests},
-        };
+        use crate::host::{OverlayHost, win32::lock_hwnd_tests};
 
-        let _lock = lock_hwnd_tests();
+        let lock = lock_hwnd_tests();
         let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let target = unsafe {
             CreateWindowExW(
@@ -499,30 +529,42 @@ mod tests {
         let _ = unsafe { SetForegroundWindow(target) };
 
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let mut host = OverlayHost::create(
+        match OverlayHost::create(
             OverlayConfig {
                 reader_enabled: false,
                 ..OverlayConfig::default()
             },
             event_tx,
-        )
-        .map_err(|e| format!("OverlayHost::create: {e}"))?;
+        ) {
+            Ok(host) => Ok((host, target, lock)),
+            Err(e) => {
+                let _ = unsafe { DestroyWindow(target) };
+                Err(format!("OverlayHost::create: {e}"))
+            }
+        }
+    }
 
-        // Two-wake cold start: attach (empty captions → hide) then first picker apply.
+    fn first_picker_hwnd_smoke() -> Result<(), String> {
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT};
+
+        use crate::command::OverlayCommand;
+
+        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+
         host.handle(OverlayCommand::Attach {
             target_hwnd: target.0 as isize,
         });
         host.apply_overlay(true);
         host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
         host.apply_overlay(true);
-        if !host.replay_present {
-            return Err("first picker show did not schedule a replay present".into());
+        if host.replay_present {
+            host.apply_overlay(true);
         }
-        host.apply_overlay(true);
 
         let visible = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
-        let ex = WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(host.hwnd, GWL_EXSTYLE) } as u32);
+        let ex = overlay_ex_style(host.hwnd);
         let click_through = ex.contains(WS_EX_TRANSPARENT);
+        let toolwindow = ex.contains(WS_EX_TOOLWINDOW);
         let topmost = ex.contains(WS_EX_TOPMOST);
         let presented = host.presented_rect.is_some();
         let veil = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
@@ -537,6 +579,9 @@ mod tests {
         if click_through {
             return Err("picker is still WS_EX_TRANSPARENT (click-through)".into());
         }
+        if toolwindow {
+            return Err("picker HWND is WS_EX_TOOLWINDOW (OBS skips it)".into());
+        }
         if target_fg && !topmost {
             return Err("picker is not WS_EX_TOPMOST while the target is foreground".into());
         }
@@ -545,6 +590,78 @@ mod tests {
         }
         if !veil {
             return Err("picker DIB has no non-zero alpha (blank veil)".into());
+        }
+        Ok(())
+    }
+
+    fn empty_captions_hwnd_smoke() -> Result<(), String> {
+        use translator_core::{Rect, TranslatedBlock};
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GetWindowTextW, WS_EX_TOOLWINDOW};
+
+        use crate::command::OverlayCommand;
+
+        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        host.apply_overlay(true);
+
+        let mut title_buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(host.hwnd, &mut title_buf) }.max(0) as usize;
+        let title = String::from_utf16_lossy(&title_buf[..n]);
+        let ex = overlay_ex_style(host.hwnd);
+        let visible_empty = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
+        let blank_empty = host.surface.pixels().is_some_and(|px| px.iter().all(|&b| b == 0));
+        let presented_empty = host.presented_rect.is_some();
+        let toolwindow = ex.contains(WS_EX_TOOLWINDOW);
+
+        host.handle(OverlayCommand::SetBlocks {
+            blocks: vec![TranslatedBlock {
+                id: 1,
+                source: "src".into(),
+                translation: "hello".into(),
+                confidence: 1.0,
+                bbox: Rect::new(20.0, 20.0, 200.0, 40.0),
+                source_lines: 1,
+            }],
+            content_width: 400,
+            content_height: 300,
+        });
+        host.apply_overlay(true);
+        let ink = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
+
+        host.handle(OverlayCommand::Clear);
+        host.apply_overlay(true);
+        let visible_clear = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
+        let blank_clear = host.surface.pixels().is_some_and(|px| px.iter().all(|&b| b == 0));
+
+        host.teardown();
+        let _ = unsafe { DestroyWindow(target) };
+
+        if title != "Translator Overlay Captions" {
+            return Err(format!("overlay title is {title:?}, expected Translator Overlay Captions"));
+        }
+        if toolwindow {
+            return Err("overlay HWND is WS_EX_TOOLWINDOW (OBS skips it)".into());
+        }
+        if !visible_empty {
+            return Err("empty captions hid the overlay (OBS would freeze the last frame)".into());
+        }
+        if !blank_empty {
+            return Err("empty captions DIB is not fully transparent".into());
+        }
+        if !presented_empty {
+            return Err("empty captions did not present a client rect".into());
+        }
+        if !ink {
+            return Err("caption present painted no pixels".into());
+        }
+        if !visible_clear {
+            return Err("Clear hid the overlay (OBS would freeze the last caption)".into());
+        }
+        if !blank_clear {
+            return Err("Clear left non-zero pixels in the overlay DIB".into());
         }
         Ok(())
     }

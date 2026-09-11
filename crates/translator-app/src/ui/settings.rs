@@ -1025,7 +1025,7 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
         .spacing(4.0)
         .children((
             section_header("Notes"),
-            note("The in-place overlay is click-through and follows the target window only while it is in the foreground. The translation window is borderless and semi-transparent, uses the same colours and typeface, and stays visible independently."),
+            note("The in-place overlay is click-through and follows the target window only while it is in the foreground. OBS Window Capture should use Translator Overlay Captions, not the control window. The translation window is borderless and semi-transparent, uses the same colours and typeface, and stays visible independently."),
         ));
 
     settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((display, colors, notes)))

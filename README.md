@@ -35,6 +35,8 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 **Overlay** 頁開關 in-place 覆蓋與獨立譯文窗（即時生效）。其餘選項改完需 **Save**。
 
+**OBS：** Window Capture 選 `Translator Overlay Captions`，不要選控制窗 `Translator Overlay`。Game Capture 只抓得到遊戲本身，需再加一層 Window Capture 疊譯文。
+
 ## 管線
 
 ```

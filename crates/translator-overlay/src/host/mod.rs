@@ -10,21 +10,18 @@ pub(crate) mod wnd;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use translator_core::{OverlayConfig, TranslatedBlock};
-use windows::{
-    Win32::{
-        Foundation::HWND,
-        Graphics::Gdi::{DeleteObject, HFONT},
-        System::LibraryLoader::GetModuleHandleW,
-        UI::{
-            Accessibility::HWINEVENTHOOK,
-            WindowsAndMessaging::{
-                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsWindow, LoadCursorW,
-                RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, UnregisterClassW, WNDCLASSEXW,
-                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
-            },
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Gdi::{DeleteObject, HFONT},
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        Accessibility::HWINEVENTHOOK,
+        WindowsAndMessaging::{
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsWindow, LoadCursorW,
+            RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, UnregisterClassW, WNDCLASSEXW,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
-    core::w,
 };
 
 pub(crate) use crate::host::follow::wake_overlay_thread;
@@ -35,7 +32,7 @@ use crate::{
     host::{
         follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, uninstall_follow_hooks},
         win32::{ClientRect, set_overlay_owner},
-        wnd::{CLASS_NAME, HOST_TEARING_DOWN, overlay_wnd_proc},
+        wnd::{CLASS_NAME, HOST_TEARING_DOWN, WINDOW_TITLE, overlay_wnd_proc},
     },
     picker::{PickerEnd, RegionPicker},
     reader::{ReaderWindow, format_reader_text},
@@ -95,9 +92,9 @@ impl OverlayHost {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
                 CLASS_NAME,
-                w!("Translator Overlay"),
+                WINDOW_TITLE,
                 WS_POPUP,
                 CW_USEDEFAULT,
                 0,
@@ -237,7 +234,6 @@ impl OverlayHost {
                 self.content_w = 0;
                 self.content_h = 0;
                 self.dirty = true;
-                self.hide();
                 if let Some(reader) = self.reader.as_mut() {
                     reader.set_text("");
                 }
@@ -324,9 +320,9 @@ impl OverlayHost {
         let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
                 CLASS_NAME,
-                w!("Translator Overlay"),
+                WINDOW_TITLE,
                 WS_POPUP,
                 CW_USEDEFAULT,
                 0,
