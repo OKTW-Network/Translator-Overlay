@@ -382,10 +382,10 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             OptionalTextParams {
                 key: "api-reasoning",
                 header: "Reasoning effort".into(),
-                description: Some("For models that support it: low, medium, or high.".into()),
+                description: Some("For models that support it: none, minimal, low, medium, high, xhigh, or max.".into()),
                 text: optional.reasoning_str.clone(),
                 enabled: optional.reasoning_enabled,
-                placeholder: "low | medium | high".into(),
+                placeholder: "none | minimal | low | medium | high | xhigh | max".into(),
             },
             {
                 let cx = cx.clone();
