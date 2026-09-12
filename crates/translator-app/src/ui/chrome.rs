@@ -364,32 +364,9 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: 
     ))
 }
 
-/// Sticky top bar: page title + description + Save actions (outside scroll).
-pub fn settings_sticky_chrome(
-    title: &str,
-    description: Option<&str>,
-    shared: &Arc<Mutex<UiShared>>,
-    snap: &ChromeSnap,
-    bump: &LocalSender<AppMsg>,
-) -> View {
+/// Sticky top bar: page title + Save actions (outside scroll).
+pub fn settings_sticky_chrome(title: &str, shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let title_el = TextBlock::new().text(title).font_size(28.0).font_weight(FontWeight::BOLD);
-    let head = match description {
-        Some(d) if !d.is_empty() => StackPanel::new()
-            .spacing(4.0)
-            .vertical_alignment(VerticalAlignment::Center)
-            .children((
-                title_el,
-                TextBlock::new()
-                    .text(d)
-                    .font_size(13.0)
-                    .foreground(ThemeBrush::PrimaryText)
-                    .opacity(0.72)
-                    .text_wrapping(TextWrapping::WrapWholeWords),
-            )),
-        _ => StackPanel::new()
-            .vertical_alignment(VerticalAlignment::Center)
-            .children((title_el,)),
-    };
 
     Border::new()
         .padding(Thickness::new(24.0, 16.0, 24.0, 12.0))
@@ -406,7 +383,7 @@ pub fn settings_sticky_chrome(
                         .horizontal_alignment(HorizontalAlignment::Stretch)
                         .vertical_alignment(VerticalAlignment::Center)
                         .margin(Thickness::new(0.0, 0.0, 16.0, 0.0))
-                        .content(head),
+                        .content(title_el),
                     Border::new()
                         .grid_row(0)
                         .grid_column(1)

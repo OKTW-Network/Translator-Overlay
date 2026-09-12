@@ -8,8 +8,9 @@ use translator_core::{
     TRANSLATION_CACHE_MAX_CAP, TRANSLATION_CACHE_MAX_MIN,
 };
 use windows_reactor::{
-    Button, ChildrenControl, ContentControl, HorizontalAlignment, LayoutControl, LocalSender, Orientation, RadioButton, StackPanel,
-    TextBlock, TextBox, TextWrapping, ThemeBrush, TooltipExt, VerticalAlignment, View,
+    Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontWeight,
+    HorizontalAlignment, LayoutControl, LocalSender, Orientation, RadioButton, StackPanel, TextBlock, TextBox, TextWrapping, ThemeBrush,
+    Thickness, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
@@ -20,7 +21,10 @@ use crate::{
             ColorPopupParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_color_popup,
             card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row,
         },
-        shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty, send_overlay_display},
+        shared::{
+            AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_api_profile, load_api_profile, mark_dirty, save_api_profiles,
+            selected_api_profile, send_overlay_display,
+        },
     },
 };
 
@@ -51,14 +55,231 @@ fn note(text: &str) -> TextBlock {
         .text_wrapping(TextWrapping::WrapWholeWords)
 }
 
-pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
-    let cx = UiCx::new(shared, bump);
-    let (api, optional, api_key_revealed) = {
-        let ui = shared.lock();
-        (ui.draft.api.clone(), ui.optional.clone(), ui.api_key_revealed)
+fn provider_label(provider: ModelProvider) -> &'static str {
+    match provider {
+        ModelProvider::OpenaiCompatible => "OpenAI-compatible",
+        ModelProvider::GrokCli => "Grok CLI",
+        ModelProvider::CodexCli => "Codex CLI",
+    }
+}
+
+struct ApiProfileSnap {
+    names: Vec<String>,
+    selected_idx: i32,
+    name_draft: String,
+    dialog: PresetDialog,
+}
+
+fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
+    let has_profiles = !snap.names.is_empty();
+    let profile_selected = has_profiles && snap.selected_idx >= 0;
+    let profile_idx = if profile_selected { Some(snap.selected_idx as usize) } else { None };
+
+    let combo = ComboBox::new()
+        .items_source(snap.names.clone())
+        .selected_index(profile_idx)
+        .placeholder_text("Select profile…")
+        .is_enabled(has_profiles)
+        .on_selection_changed({
+            let cx = cx.clone();
+            move |idx: Option<usize>| {
+                cx.with_mut(|ui| {
+                    ui.api_profile_selected_idx = idx.filter(|&i| i < ui.api_profiles.len()).map(|i| i as i32).unwrap_or(-1);
+                });
+            }
+        })
+        .width(180.0)
+        .min_width(140.0)
+        .vertical_alignment(VerticalAlignment::Center);
+
+    let toolbar = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .children((
+            combo,
+            Button::new()
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            ui.api_profile_name_draft = selected_api_profile(ui)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| provider_label(ui.draft.api.provider).into());
+                            ui.api_profile_dialog = PresetDialog::SaveName;
+                        });
+                    }
+                })
+                .content("Save")
+                .tooltip("Save current API settings as a named profile"),
+            Button::new()
+                .is_enabled(profile_selected)
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            if let Err(e) = load_api_profile(ui) {
+                                ui.state.write().set_error(e);
+                            }
+                        });
+                    }
+                })
+                .content("Load")
+                .tooltip("Copy the selected profile into the form"),
+            Button::new()
+                .is_enabled(profile_selected)
+                .on_click({
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            let Some(name) = selected_api_profile(ui).map(|p| p.name.clone()) else {
+                                return;
+                            };
+                            ui.api_profile_dialog = PresetDialog::Delete { name };
+                        });
+                    }
+                })
+                .content("Delete")
+                .tooltip("Delete the selected profile"),
+        ));
+
+    StackPanel::new().spacing(4.0).children((
+        section_header("Profiles"),
+        toolbar,
+        api_profile_name_row(cx, snap),
+        api_profile_confirm_dialog(cx, snap),
+    ))
+}
+
+fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
+    if !matches!(snap.dialog, PresetDialog::SaveName) {
+        return View::empty();
+    }
+
+    let name_tb = TextBox::new()
+        .text(snap.name_draft.clone())
+        .on_text_changed({
+            let cx = cx.clone();
+            move |text: String| {
+                cx.with_mut(|ui| ui.api_profile_name_draft = text);
+            }
+        })
+        .width(180.0)
+        .vertical_alignment(VerticalAlignment::Center);
+
+    Border::new()
+        .background(ThemeBrush::CardBackground)
+        .border_brush(ThemeBrush::CardStroke)
+        .border_thickness(Thickness::uniform(1.0))
+        .corner_radius(4.0)
+        .padding(Thickness::new(8.0, 4.0, 8.0, 4.0))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .content(
+            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                TextBlock::new()
+                    .text("Name")
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+                name_tb,
+                Button::new()
+                    .style(ButtonStyle::Accent)
+                    .on_click({
+                        let cx = cx.clone();
+                        move || {
+                            cx.with_mut(|ui| {
+                                let name = ui.api_profile_name_draft.trim().to_string();
+                                if name.is_empty() {
+                                    ui.state.write().set_error("Profile name is required.");
+                                    return;
+                                }
+                                if ui.api_profiles.iter().any(|p| p.name == name) {
+                                    ui.api_profile_dialog = PresetDialog::Overwrite { name };
+                                    return;
+                                }
+                                if let Err(e) = commit_api_profile(ui, name) {
+                                    ui.state.write().set_error(e);
+                                }
+                            });
+                        }
+                    })
+                    .content("Save"),
+                Button::new()
+                    .on_click({
+                        let cx = cx.clone();
+                        move || {
+                            cx.with_mut(|ui| {
+                                ui.api_profile_dialog = PresetDialog::None;
+                                ui.api_profile_name_draft.clear();
+                            });
+                        }
+                    })
+                    .content("Cancel"),
+            )),
+        )
+}
+
+fn api_profile_confirm_dialog(cx: &UiCx, snap: &ApiProfileSnap) -> View {
+    let (open, title, body, primary) = match &snap.dialog {
+        PresetDialog::Overwrite { name } => {
+            (true, "Overwrite profile?", format!("Replace the API settings saved in \"{name}\"?"), "Overwrite")
+        }
+        PresetDialog::Delete { name } => (true, "Delete profile?", format!("Delete profile \"{name}\"? This cannot be undone."), "Delete"),
+        PresetDialog::None | PresetDialog::SaveName => (false, "", String::new(), "OK"),
     };
 
-    let provider_card = settings_card("api-provider", "Provider", Some("How to reach the translation model."), {
+    ContentDialog::new()
+        .title(title)
+        .primary_button_text(primary)
+        .close_button_text("Cancel")
+        .is_open(open)
+        .on_closed({
+            let cx = cx.clone();
+            move |result: ContentDialogResult| {
+                cx.with_mut(|ui| {
+                    let action = ui.api_profile_dialog.clone();
+                    ui.api_profile_dialog = PresetDialog::None;
+                    if result != ContentDialogResult::Primary {
+                        if matches!(action, PresetDialog::Overwrite { .. }) {
+                            ui.api_profile_dialog = PresetDialog::SaveName;
+                        }
+                        return;
+                    }
+                    match action {
+                        PresetDialog::Overwrite { name } => {
+                            if let Err(e) = commit_api_profile(ui, name) {
+                                ui.state.write().set_error(e);
+                            }
+                        }
+                        PresetDialog::Delete { name } => {
+                            ui.api_profiles.retain(|p| p.name != name);
+                            ui.api_profile_selected_idx = -1;
+                            ui.api_profile_name_draft.clear();
+                            if let Err(e) = save_api_profiles(ui) {
+                                ui.state.write().set_error(e);
+                            }
+                        }
+                        PresetDialog::None | PresetDialog::SaveName => {}
+                    }
+                });
+            }
+        })
+        .content(body)
+}
+
+pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
+    let cx = UiCx::new(shared, bump);
+    let (api, optional, api_key_revealed, profile_snap) = {
+        let ui = shared.lock();
+        (ui.draft.api.clone(), ui.optional.clone(), ui.api_key_revealed, ApiProfileSnap {
+            names: ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
+            selected_idx: ui.api_profile_selected_idx,
+            name_draft: ui.api_profile_name_draft.clone(),
+            dialog: ui.api_profile_dialog.clone(),
+        })
+    };
+
+    let provider_card = settings_card("api-provider", "Provider", Some("HTTP endpoint or a local CLI."), {
         let idx = match api.provider {
             ModelProvider::OpenaiCompatible => 0,
             ModelProvider::GrokCli => 1,
@@ -83,9 +304,9 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             .spacing(12.0)
             .vertical_alignment(VerticalAlignment::Center)
             .children((
-                radio("api-provider", "OpenAI-compatible", Some(168.0), idx == 0, pick(0)),
-                radio("api-provider", "Grok CLI", Some(96.0), idx == 1, pick(1)),
-                radio("api-provider", "Codex CLI", Some(104.0), idx == 2, pick(2)),
+                radio("api-provider", provider_label(ModelProvider::OpenaiCompatible), Some(168.0), idx == 0, pick(0)),
+                radio("api-provider", provider_label(ModelProvider::GrokCli), Some(96.0), idx == 1, pick(1)),
+                radio("api-provider", provider_label(ModelProvider::CodexCli), Some(104.0), idx == 2, pick(2)),
             ))
     });
 
@@ -478,7 +699,14 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         ),
     ));
 
-    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((connection, sampling, reliability)))
+    settings_page_shell(
+        shared,
+        chrome,
+        bump,
+        StackPanel::new()
+            .spacing(8.0)
+            .children((api_profile_section(&cx, &profile_snap), connection, sampling, reliability)),
+    )
 }
 
 fn set_merge_f32(cx: &UiCx, set: impl FnOnce(&mut LineMergeConfig, f32), v: f64) {

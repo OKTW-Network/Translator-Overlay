@@ -11,6 +11,7 @@ Thumbs.db
 config.toml
 !crates/**/config.toml
 region-profiles.toml
+api-profiles.toml
 .idea/
 .vscode/
 *.pdb

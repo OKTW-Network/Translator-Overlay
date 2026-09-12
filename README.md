@@ -9,7 +9,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 - **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
 - **顯示**：點穿 in-place overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂譯文窗（拖曳移動、邊緣縮放）
-- **設定 UI**：Dashboard + API / Translation / OCR / Overlay
+- **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名 profile（Save / Load，與區域 preset 相同）
 
 ## 系統需求
 
@@ -24,6 +24,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 3. **API** 頁選 Provider：
    - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
    - **Grok CLI** / **Codex CLI**：本機 `grok` / `codex`
+   - **Profile**：把目前連線設定存成具名 profile（`api-profiles.toml`）。**Load** 填入表單，再按頁面 **Save** 套用
 4. **Save**
 5. **Dashboard** 選視窗 → 左側導覽底部 **Start**
 

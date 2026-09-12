@@ -5,8 +5,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
-    AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
-    validate_preset,
+    ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, api_profiles_path, config_path,
+    format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
 };
 use windows_reactor::LocalSender;
 
@@ -119,6 +119,12 @@ pub struct UiShared {
     pub preset_name_draft: String,
     pub pending_save_regions: Vec<NormRect>,
     pub preset_dialog: PresetDialog,
+    /// Named API connection profiles (`api-profiles.toml`).
+    pub api_profiles: Vec<ApiProfile>,
+    /// Selected profile in the API combo (`-1` = none).
+    pub api_profile_selected_idx: i32,
+    pub api_profile_name_draft: String,
+    pub api_profile_dialog: PresetDialog,
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
@@ -131,6 +137,11 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         .and_then(|path| RegionPresetFile::load_or_empty_at(&path).map_err(|e| format!("Could not load region presets: {e}")))
         .map(|file| file.presets)
         .map_or_else(|message| (Vec::new(), Some(message)), |presets| (presets, None));
+    let (api_profiles, api_profile_load_error) = api_profiles_path()
+        .map_err(|e| format!("Could not load API profiles: {e}"))
+        .and_then(|path| ApiProfileFile::load_or_empty_at(&path).map_err(|e| format!("Could not load API profiles: {e}")))
+        .map(|file| file.profiles)
+        .map_or_else(|message| (Vec::new(), Some(message)), |profiles| (profiles, None));
     let shared = Arc::new(Mutex::new(UiShared {
         state,
         cmd_tx,
@@ -150,8 +161,12 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         preset_name_draft: String::new(),
         pending_save_regions: Vec::new(),
         preset_dialog: PresetDialog::None,
+        api_profiles,
+        api_profile_selected_idx: -1,
+        api_profile_name_draft: String::new(),
+        api_profile_dialog: PresetDialog::None,
     }));
-    if let Some(msg) = preset_load_error {
+    if let Some(msg) = preset_load_error.or(api_profile_load_error) {
         shared.lock().state.write().set_error(msg);
     }
     shared
@@ -192,6 +207,53 @@ pub fn commit_pending_preset(ui: &mut UiShared, name: String) -> Result<(), Stri
         .unwrap_or(-1);
     ui.pending_save_regions.clear();
     ui.preset_dialog = PresetDialog::None;
+    Ok(())
+}
+
+/// Selected API profile, if the combo index is in range.
+pub fn selected_api_profile(ui: &UiShared) -> Option<&ApiProfile> {
+    ui.api_profile_selected_idx
+        .try_into()
+        .ok()
+        .and_then(|i: usize| ui.api_profiles.get(i))
+}
+
+/// Persist current in-memory API profiles to `api-profiles.toml`.
+pub fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
+    let file = ApiProfileFile {
+        profiles: ui.api_profiles.clone(),
+    };
+    let path = api_profiles_path().map_err(|e| format!("Could not save API profiles: {e}"))?;
+    file.save(&path).map_err(|e| format!("Could not save API profiles: {e}"))
+}
+
+/// Write current form API settings under `name` (exact match overwrite).
+pub fn commit_api_profile(ui: &mut UiShared, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Profile name is required.".into());
+    }
+    let api = effective_draft(ui).api;
+    if let Some(p) = ui.api_profiles.iter_mut().find(|p| p.name == name) {
+        p.api = api;
+    } else {
+        ui.api_profiles.push(ApiProfile { name: name.clone(), api });
+    }
+    ui.api_profile_name_draft = name.clone();
+    ui.api_profile_selected_idx = ui.api_profiles.iter().position(|p| p.name == name).map(|i| i as i32).unwrap_or(-1);
+    ui.api_profile_dialog = PresetDialog::None;
+    save_api_profiles(ui)
+}
+
+/// Copy the selected profile into the API form. Does not apply until Settings Save.
+pub fn load_api_profile(ui: &mut UiShared) -> Result<(), String> {
+    let profile = selected_api_profile(ui)
+        .cloned()
+        .ok_or_else(|| "Select a profile to load.".to_string())?;
+    ui.draft.api = profile.api;
+    apply_optional_from_config(ui);
+    ui.api_profile_dialog = PresetDialog::None;
+    mark_dirty(ui);
     Ok(())
 }
 

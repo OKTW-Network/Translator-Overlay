@@ -128,17 +128,17 @@ impl Component for AppRoot {
             _ => dashboard_page(&self.shared, &chrome, bump),
         };
 
-        let settings_meta: Option<(&str, Option<&str>)> = match page_tag {
-            "api" => Some(("API", Some("Choose how to reach a translation model."))),
-            "translation" => Some(("Translation", Some("Languages and translation context."))),
-            "ocr" => Some(("OCR", Some("Text recognition and capture timing."))),
-            "overlay" => Some(("Overlay", Some("Where and how translations are shown."))),
+        let settings_meta: Option<&str> = match page_tag {
+            "api" => Some("API"),
+            "translation" => Some("Translation"),
+            "ocr" => Some("OCR"),
+            "overlay" => Some("Overlay"),
             _ => None,
         };
 
         let page_padding = windows_reactor::Thickness::new(24.0, if settings_meta.is_some() { 8.0 } else { 16.0 }, 24.0, 24.0);
 
-        let content: View = if let Some((title, description)) = settings_meta {
+        let content: View = if let Some(title) = settings_meta {
             let scrolled = ScrollViewer::new()
                 .horizontal_alignment(HorizontalAlignment::Stretch)
                 .vertical_alignment(VerticalAlignment::Stretch)
@@ -160,7 +160,7 @@ impl Component for AppRoot {
                         .grid_row(0)
                         .grid_column(0)
                         .horizontal_alignment(HorizontalAlignment::Stretch)
-                        .content(settings_sticky_chrome(title, description, &self.shared, &chrome, bump)),
+                        .content(settings_sticky_chrome(title, &self.shared, &chrome, bump)),
                     scrolled,
                 ))
         } else {

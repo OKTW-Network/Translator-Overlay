@@ -37,6 +37,11 @@ pub fn region_presets_path() -> Result<PathBuf, PathError> {
     Ok(exe_dir()?.join("region-presets.toml"))
 }
 
+/// Path to `api-profiles.toml` next to the executable.
+pub fn api_profiles_path() -> Result<PathBuf, PathError> {
+    Ok(exe_dir()?.join("api-profiles.toml"))
+}
+
 /// Resolve a path that may be relative to the executable directory.
 pub fn resolve_under_exe(path: impl AsRef<Path>) -> Result<PathBuf, PathError> {
     let path = path.as_ref();
