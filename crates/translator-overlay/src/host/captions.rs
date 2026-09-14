@@ -139,13 +139,9 @@ impl OverlayHost {
                 need_w.min(expand_cap).min(max_w).max(source_w)
             };
 
-            // Height: one line if it fits; otherwise wrap within the chosen width.
-            let text_h = if need_w <= box_w {
-                natural.1
-            } else {
-                self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1
-            };
-            let box_h = (text_h + pad * 2).max(font_px + pad * 2);
+            // Stay one line so the caption cannot cover the OCR line below.
+            // Wrapping then clipping the rect is what chopped glyphs.
+            let box_h = (natural.1 + pad * 2).max(font_px + pad * 2).max(base.h);
             return Ok((place_label(base, box_w, box_h, surface), font_px));
         }
 

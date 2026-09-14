@@ -343,4 +343,18 @@ mod tests {
         // Must not treat full column height as font size.
         assert!(px < 40, "vertical text must not use full height, got {px}");
     }
+
+    #[test]
+    fn place_label_shifts_up_past_the_bottom() {
+        let surface = SurfaceSize::new(200, 100);
+        let base = SurfaceRect {
+            x: 10,
+            y: 80,
+            w: 80,
+            h: 16,
+        };
+        let placed = place_label(base, 80, 40, surface);
+        assert_eq!(placed.y, 60);
+        assert_eq!(placed.h, 40);
+    }
 }

@@ -133,6 +133,10 @@ impl BlockPersistenceFilter {
         let now = Instant::now();
         let persist = self.persist;
         let max_unstable = self.max_unstable;
+        // One OCR box per track per frame. Stacked unmerged lines sit inside the
+        // match radius of their neighbors; without this they collapse onto the
+        // last couple of tracks.
+        let mut claimed = vec![false; self.tracks.len()];
 
         for block in blocks {
             let text_key = normalize_ocr_text(&block.text);
@@ -140,7 +144,8 @@ impl BlockPersistenceFilter {
                 continue;
             }
 
-            if let Some(idx) = self.find_track(&block, &text_key) {
+            if let Some(idx) = self.find_track(&block, &text_key, &claimed) {
+                claimed[idx] = true;
                 let track = &mut self.tracks[idx];
                 if normalize_ocr_text(&track.text) == text_key {
                     // Same region + same text → accumulate persistence.
@@ -216,6 +221,7 @@ impl BlockPersistenceFilter {
                     pending_since: None,
                     thrash_since: None,
                 });
+                claimed.push(true);
             }
         }
 
@@ -247,13 +253,16 @@ impl BlockPersistenceFilter {
         reindex(out)
     }
 
-    fn find_track(&self, block: &OcrBlock, text_key: &str) -> Option<usize> {
+    fn find_track(&self, block: &OcrBlock, text_key: &str, claimed: &[bool]) -> Option<usize> {
         let cx = block.bbox.x + block.bbox.width * 0.5;
         let cy = block.bbox.y + block.bbox.height * 0.5;
         let q = self.quant.max(1);
 
         let mut best: Option<(usize, f32)> = None;
         for (i, track) in self.tracks.iter().enumerate() {
+            if claimed[i] {
+                continue;
+            }
             let tcx = track.bbox.x + track.bbox.width * 0.5;
             let tcy = track.bbox.y + track.bbox.height * 0.5;
             let dx = (cx - tcx).abs();
@@ -496,5 +505,25 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
         let forced = f.filter(vec![block("a?", 10.0, 11.0)]);
         assert_eq!(forced.len(), 1, "should force after total first_seen >= 120ms");
+    }
+
+    #[test]
+    fn stacked_unmerged_lines_do_not_share_a_track() {
+        // Four overlapping dialogue lines (merge off). Matching must be 1:1 per
+        // frame — otherwise later lines steal earlier tracks and only the last
+        // couple survive.
+        let mut f = BlockPersistenceFilter::new(50, 300);
+        let lines = vec![
+            block_wh("一行目です", 100.0, 200.0, 240.0, 32.0),
+            block_wh("二行目です", 100.0, 228.0, 240.0, 32.0),
+            block_wh("三行目です", 100.0, 256.0, 240.0, 32.0),
+            block_wh("四行目です", 100.0, 284.0, 240.0, 32.0),
+        ];
+        let _ = f.filter(lines.clone());
+        std::thread::sleep(Duration::from_millis(60));
+        let out = f.filter(lines);
+        assert_eq!(out.len(), 4, "texts={:?}", out.iter().map(|b| b.text.as_str()).collect::<Vec<_>>());
+        assert_eq!(out[0].text, "一行目です");
+        assert_eq!(out[3].text, "四行目です");
     }
 }
