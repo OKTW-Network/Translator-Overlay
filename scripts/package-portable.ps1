@@ -8,7 +8,6 @@
 
     - translator-app.exe
     - DirectML.dll          (ONNX Runtime GPU EP; PE import — required next to exe)
-    - resources.pri         (copied when present)
 
   windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
   Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
@@ -99,11 +98,6 @@ ort-sys should copy DirectML.dll next to the exe when the `directml` feature is 
 "@
 }
 
-$ResourcesPri = Join-Path $ReleaseDir "resources.pri"
-if (-not (Test-Path -LiteralPath $ResourcesPri)) {
-    Write-Warning "resources.pri not found in release dir (continuing; app may still run)."
-}
-
 # Clean stage
 if (Test-Path -LiteralPath $StageDir) {
     Remove-Item -LiteralPath $StageDir -Recurse -Force
@@ -114,10 +108,6 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Write-Host "==> Copying runtime files..."
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-app.exe")
 Copy-Item -LiteralPath $DirectMlPath -Destination (Join-Path $StageDir "DirectML.dll")
-
-if (Test-Path -LiteralPath $ResourcesPri) {
-    Copy-Item -LiteralPath $ResourcesPri -Destination (Join-Path $StageDir "resources.pri")
-}
 
 $packReadme = @"
 # Translator Overlay $Version (portable)
