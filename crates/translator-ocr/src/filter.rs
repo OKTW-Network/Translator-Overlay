@@ -153,14 +153,10 @@ impl BlockPersistenceFilter {
                     track.pending_text = None;
                     track.pending_since = None;
                     track.thrash_since = None;
-                    // Once confirmed, freeze the box against detector jitter so
-                    // overlay captions do not shake when the background animates.
-                    // Unconfirmed tracks still track the latest sample so the
-                    // first emit lands on a fresh reading.
+                    // Once confirmed, freeze the box. Overlay remap already keeps
+                    // the caption box; detector jitter / trailing glyphs must not
+                    // walk it. Unconfirmed tracks still track the latest sample.
                     if track.confirmed {
-                        let bbox = track.bbox.stabilize_against(block.bbox);
-                        track.bbox = bbox;
-                        track.last_block.bbox = bbox;
                         track.last_block.confidence = block.confidence;
                     } else {
                         track.bbox = block.bbox;
@@ -403,17 +399,19 @@ mod tests {
     }
 
     #[test]
-    fn persistence_adopts_confirmed_bbox_on_real_move() {
+    fn persistence_freezes_confirmed_bbox_on_real_move() {
         let mut f = BlockPersistenceFilter::new(50, 300);
         let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
         std::thread::sleep(Duration::from_millis(60));
-        let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
+        let confirmed = f.filter(vec![block("Menu", 100.0, 200.0)]);
+        assert_eq!(confirmed.len(), 1);
+        let frozen = confirmed[0].bbox;
 
-        // ~20px center shift: beyond stabilize deadzone, still within track match.
+        // Same text, different row: overlay remap keeps the caption box anyway.
         let moved = block("Menu", 100.0, 220.0);
-        let out = f.filter(vec![moved.clone()]);
+        let out = f.filter(vec![moved]);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].bbox, moved.bbox);
+        assert_eq!(out[0].bbox, frozen);
     }
 
     #[test]
@@ -505,6 +503,40 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
         let forced = f.filter(vec![block("a?", 10.0, 11.0)]);
         assert_eq!(forced.len(), 1, "should force after total first_seen >= 120ms");
+    }
+
+    #[test]
+    fn persistence_ellipsis_length_is_same_text() {
+        let mut f = BlockPersistenceFilter::new(50, 300);
+        let origin = block_wh("待って…", 100.0, 200.0, 80.0, 22.0);
+        let _ = f.filter(vec![origin.clone()]);
+        std::thread::sleep(Duration::from_millis(60));
+        let confirmed = f.filter(vec![origin.clone()]);
+        assert_eq!(confirmed.len(), 1);
+        let frozen = confirmed[0].bbox;
+
+        let longer = block_wh("待って………", 96.0, 198.0, 170.0, 26.0);
+        let out = f.filter(vec![longer]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "待って…");
+        assert_eq!(out[0].bbox, frozen, "ellipsis-length flicker must keep frozen bbox");
+    }
+
+    #[test]
+    fn persistence_fullwidth_question_is_same_text() {
+        let mut f = BlockPersistenceFilter::new(50, 300);
+        let origin = block_wh("何？", 100.0, 200.0, 80.0, 22.0);
+        let _ = f.filter(vec![origin.clone()]);
+        std::thread::sleep(Duration::from_millis(60));
+        let confirmed = f.filter(vec![origin.clone()]);
+        assert_eq!(confirmed.len(), 1);
+        let frozen = confirmed[0].bbox;
+
+        let half = block_wh("何?", 102.0, 201.0, 76.0, 20.0);
+        let out = f.filter(vec![half]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "何？");
+        assert_eq!(out[0].bbox, frozen, "？ vs ? must keep frozen bbox");
     }
 
     #[test]

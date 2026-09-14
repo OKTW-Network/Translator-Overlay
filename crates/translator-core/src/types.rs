@@ -153,11 +153,49 @@ impl NormRect {
     }
 }
 
-/// Collapse runs of whitespace so OCR thrash / layout compare stays stable.
+/// Collapse whitespace and punctuation flicker so OCR matching stays stable.
 ///
-/// Used by stability fingerprints, block persistence, and sticky remap matching.
+/// Used by stability fingerprints, block persistence, sticky remap, and the
+/// translation cache. Does not rewrite `OcrBlock.text` sent to the model.
+///
+/// - Fullwidth `？` / `！` fold to ASCII `?` / `!`.
+/// - Ellipsis-length thrash (`…` / `……` / `...` / `・・・`) collapses to one `…`.
+/// - A trailing collapsed `…` is dropped unless the whole line is only `…`.
 pub fn normalize_ocr_text(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let is_ellipsis = |c: char| matches!(c, '…' | '⋯' | '‥' | '︙');
+    let is_unit = |c: char| is_ellipsis(c) || matches!(c, '.' | '．' | '。' | '・' | '･' | '·');
+
+    let mut out = String::with_capacity(collapsed.len());
+    let mut chars = collapsed.chars().peekable();
+    while let Some(c) = chars.next() {
+        let c = match c {
+            '？' => '?',
+            '！' => '!',
+            other => other,
+        };
+        if is_unit(c) {
+            if is_ellipsis(c) || chars.peek().copied().is_some_and(is_unit) {
+                while chars.peek().copied().is_some_and(is_unit) {
+                    let _ = chars.next();
+                }
+                out.push('…');
+            } else {
+                out.push(c);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+
+    if out != "…" {
+        while out.ends_with('…') {
+            out.pop();
+        }
+        let end = out.trim_end().len();
+        out.truncate(end);
+    }
+    out
 }
 
 /// One OCR text region.
@@ -196,6 +234,35 @@ pub enum ModelTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_collapses_whitespace() {
+        assert_eq!(normalize_ocr_text("hello   world"), "hello world");
+        assert_eq!(normalize_ocr_text("  a\n\tb  "), "a b");
+    }
+
+    #[test]
+    fn normalize_collapses_ellipsis_length() {
+        assert_eq!(normalize_ocr_text("…"), "…");
+        assert_eq!(normalize_ocr_text("……"), "…");
+        assert_eq!(normalize_ocr_text("………"), "…");
+        assert_eq!(normalize_ocr_text("..."), "…");
+        assert_eq!(normalize_ocr_text("・・・"), "…");
+        assert_eq!(normalize_ocr_text("待って………"), "待って");
+        assert_eq!(normalize_ocr_text("待って…"), "待って");
+        assert_eq!(normalize_ocr_text("待って"), "待って");
+        assert_eq!(normalize_ocr_text("待って…ください"), "待って…ください");
+        assert_eq!(normalize_ocr_text("セリフ。"), "セリフ。");
+        assert_eq!(normalize_ocr_text("Hello."), "Hello.");
+    }
+
+    #[test]
+    fn normalize_folds_fullwidth_question_and_bang() {
+        assert_eq!(normalize_ocr_text("何？"), "何?");
+        assert_eq!(normalize_ocr_text("何?"), "何?");
+        assert_eq!(normalize_ocr_text("嘘！"), "嘘!");
+        assert_eq!(normalize_ocr_text("嘘!"), "嘘!");
+    }
 
     #[test]
     fn stabilize_keeps_bbox_under_small_jitter() {
