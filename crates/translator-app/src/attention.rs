@@ -21,7 +21,9 @@ pub fn flash_control_window_taskbar() {
     // exposes `context.run_window(|w| w.as_raw())` via `IWindowNative::WindowHandle` — switch
     // when that ships on crates.io instead of pid + `WinUIDesktopWin32WindowClass`.
     let mut hwnd = HWND::default();
-    if unsafe { EnumWindows(Some(enum_control), LPARAM(std::ptr::from_mut(&mut hwnd) as isize)) }.is_err() || hwnd.is_invalid() {
+    // Callback returns FALSE to stop the walk; windows-rs maps that to Err even when we found a window.
+    let _ = unsafe { EnumWindows(Some(enum_control), LPARAM(std::ptr::from_mut(&mut hwnd) as isize)) };
+    if hwnd.is_invalid() {
         debug!("control window HWND not found — skip taskbar flash");
         return;
     }
