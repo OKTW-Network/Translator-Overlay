@@ -2,7 +2,8 @@
 //!
 //! Strategy (tunable via [`LineMergeConfig`]):
 //! 1. **Frame-relative `|gap|`** — vertical vs height, horizontal vs width.
-//! 2. **Paragraph** — nearest-below / nearest-right links when gap + align match.
+//! 2. **Same-row first** — nearest-right fragments, then nearest-below (a split
+//!    long line becomes one box before stacking).
 //! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
 //! 4. **Reading order** — row-major or column-major join / emit order.
 
@@ -33,38 +34,68 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, fram
     let frame_h = frame_h.max(1);
 
     if merge_all {
-        return merge_whole_region(blocks, cfg, frame_w, frame_h);
+        let members: Vec<usize> = (0..blocks.len()).collect();
+        return reindex(vec![assemble_group(&blocks, members, cfg, frame_w, frame_h)]);
     }
 
-    merge_paragraph(blocks, cfg, frame_w, frame_h)
+    let rows = join_nearest(blocks, cfg, frame_w, frame_h, Neighbor::Right);
+    let mut merged = join_nearest(rows, cfg, frame_w, frame_h, Neighbor::Below);
+    sort_blocks(&mut merged, cfg, frame_w, frame_h);
+    reindex(merged)
 }
 
-fn merge_whole_region(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) -> Vec<OcrBlock> {
-    let members: Vec<usize> = (0..blocks.len()).collect();
-    reindex(vec![assemble_group(&blocks, members, cfg, frame_w, frame_h)])
+#[derive(Clone, Copy)]
+enum Neighbor {
+    Below,
+    Right,
 }
 
-fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) -> Vec<OcrBlock> {
+fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32, neighbor: Neighbor) -> Vec<OcrBlock> {
     let n = blocks.len();
+    if n <= 1 {
+        return blocks;
+    }
+
     let frame_w_f = frame_w as f32;
     let frame_h_f = frame_h as f32;
-
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank = vec![0u8; n];
-
     for i in 0..n {
         let mut best: Option<(usize, f32)> = None;
         for j in 0..n {
             if i == j {
                 continue;
             }
-            let Some(gap) = vertical_gap_if_below(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_h_f) else {
+            let Some(gap) = (match neighbor {
+                Neighbor::Below => vertical_gap_if_below(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_h_f),
+                Neighbor::Right => horizontal_gap_if_right(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_w_f),
+            }) else {
                 continue;
             };
-            if !approx_le(gap.abs() / frame_h_f, cfg.gap_ratio) {
+            let (span, max_gap) = match neighbor {
+                Neighbor::Below => (frame_h_f, cfg.gap_ratio),
+                Neighbor::Right => (frame_w_f, cfg.horizontal_gap_ratio),
+            };
+            if !approx_le(gap.abs() / span, max_gap) {
                 continue;
             }
-            if !can_link_stacked(&blocks[i], &blocks[j], frame_w, cfg) {
+            let can = match neighbor {
+                Neighbor::Below => {
+                    can_link_stacked(&blocks[i], &blocks[j], frame_w, cfg)
+                        && !(cfg.reject_short_long
+                            && approx_lt(blocks[i].bbox.width, blocks[j].bbox.width)
+                            && blocks.iter().enumerate().any(|(k, a)| {
+                                k != i
+                                    && vertical_gap_if_below(a, &blocks[i], cfg.below_mid_ratio, frame_h_f)
+                                        .is_some_and(|g| approx_le(g.abs() / frame_h_f, cfg.gap_ratio))
+                                    && can_link_stacked(a, &blocks[i], frame_w, cfg)
+                                    && approx_lt(blocks[i].bbox.width.max(1.0), a.bbox.width.max(1.0))
+                                    && !has_intervening_below(&blocks, k, i, frame_w, frame_h, cfg)
+                            }))
+                }
+                Neighbor::Right => height_compatible(&blocks[i], &blocks[j], cfg) && vert_compatible(&blocks[i], &blocks[j], frame_h, cfg),
+            };
+            if !can {
                 continue;
             }
             if best.map(|(_, g)| approx_lt(gap.abs(), g.abs())).unwrap_or(true) {
@@ -72,33 +103,10 @@ fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, f
             }
         }
         if let Some((j, _)) = best
-            && !has_intervening_below(&blocks, i, j, frame_w, frame_h, cfg)
-        {
-            union(&mut parent, &mut rank, i, j);
-        }
-    }
-
-    for i in 0..n {
-        let mut best: Option<(usize, f32)> = None;
-        for j in 0..n {
-            if i == j {
-                continue;
+            && !match neighbor {
+                Neighbor::Below => has_intervening_below(&blocks, i, j, frame_w, frame_h, cfg),
+                Neighbor::Right => has_intervening_right(&blocks, i, j, frame_w, frame_h, cfg),
             }
-            let Some(gap) = horizontal_gap_if_right(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_w_f) else {
-                continue;
-            };
-            if !approx_le(gap.abs() / frame_w_f, cfg.horizontal_gap_ratio) {
-                continue;
-            }
-            if !can_link_side_by_side(&blocks[i], &blocks[j], frame_h, cfg) {
-                continue;
-            }
-            if best.map(|(_, g)| approx_lt(gap.abs(), g.abs())).unwrap_or(true) {
-                best = Some((j, gap));
-            }
-        }
-        if let Some((j, _)) = best
-            && !has_intervening_right(&blocks, i, j, frame_w, frame_h, cfg)
         {
             union(&mut parent, &mut rank, i, j);
         }
@@ -108,16 +116,11 @@ fn merge_paragraph(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, f
     for i in 0..n {
         groups[find(&mut parent, i)].push(i);
     }
-
-    let mut merged: Vec<OcrBlock> = Vec::with_capacity(n);
-    for members in groups {
-        if members.is_empty() {
-            continue;
-        }
-        merged.push(assemble_group(&blocks, members, cfg, frame_w, frame_h));
-    }
-    sort_blocks(&mut merged, cfg, frame_w, frame_h);
-    reindex(merged)
+    groups
+        .into_iter()
+        .filter(|g| !g.is_empty())
+        .map(|members| assemble_group(&blocks, members, cfg, frame_w, frame_h))
+        .collect()
 }
 
 fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -292,19 +295,6 @@ fn can_link_stacked(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, cfg: &Line
         return false;
     }
     if cfg.reject_short_long && short_into_long(upper, lower, cfg) {
-        return false;
-    }
-    true
-}
-
-fn can_link_side_by_side(left: &OcrBlock, right: &OcrBlock, frame_h: u32, cfg: &LineMergeConfig) -> bool {
-    if !height_compatible(left, right, cfg) {
-        return false;
-    }
-    if !vert_compatible(left, right, frame_h, cfg) {
-        return false;
-    }
-    if cfg.reject_short_long && short_into_long(left, right, cfg) {
         return false;
     }
     true
@@ -527,6 +517,64 @@ mod tests {
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "short much longer body");
+    }
+
+    #[test]
+    fn merges_short_left_into_long_right() {
+        let blocks = vec![
+            line(0, "short", 10.0, 10.0, 60.0, 18.0),
+            line(1, "much longer body", 75.0, 12.0, 160.0, 18.0),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "short much longer body");
+    }
+
+    #[test]
+    fn split_first_line_short_wrap_joins_upper_not_next() {
+        let h = 18.0;
+        let blocks = vec![
+            line(0, "Hi", 10.0, 10.0, 40.0, h),
+            line(1, "there this line is long", 55.0, 10.0, 180.0, h),
+            line(2, "wraps.", 10.0, 32.0, 90.0, h),
+            line(3, "Next paragraph here", 10.0, 54.0, 140.0, h),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert_eq!(merged[0].text, "Hi there this line is long wraps.");
+        assert_eq!(merged[1].text, "Next paragraph here");
+    }
+
+    #[test]
+    fn split_first_line_all_merge_when_guard_off() {
+        let cfg = LineMergeConfig {
+            reject_short_long: false,
+            ..Default::default()
+        };
+        let h = 18.0;
+        let blocks = vec![
+            line(0, "Hi", 10.0, 10.0, 40.0, h),
+            line(1, "there this line is long", 55.0, 10.0, 180.0, h),
+            line(2, "wraps.", 10.0, 32.0, 90.0, h),
+            line(3, "Next paragraph here", 10.0, 54.0, 140.0, h),
+        ];
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hi there this line is long wraps. Next paragraph here");
+    }
+
+    #[test]
+    fn long_short_long_wraps_upward_not_down() {
+        let h = 18.0;
+        let blocks = vec![
+            line(0, "Long first line of paragraph", 10.0, 10.0, 200.0, h),
+            line(1, "short wrap", 10.0, 32.0, 150.0, h),
+            line(2, "Long next paragraph line", 10.0, 54.0, 200.0, h),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert_eq!(merged[0].text, "Long first line of paragraph short wrap");
+        assert_eq!(merged[1].text, "Long next paragraph line");
     }
 
     #[test]

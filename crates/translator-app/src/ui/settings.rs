@@ -1087,7 +1087,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_toggle(
             "ocr-merge-reject-short",
             "Don't merge short into long",
-            Some("Keep a short line separate from a much wider line below or to its right."),
+            Some("Keep a short line separate from a much wider line below."),
             ocr.line_merge.reject_short_long,
             {
                 let cx = cx.clone();
@@ -1104,7 +1104,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             SliderNumberParams {
                 key: "merge-width-delta",
                 header: "Width difference (%)".into(),
-                description: Some("How much wider that lower/right line may be before the short line stays separate. Default 40.".into()),
+                description: Some("How much wider that lower line may be before the short line stays separate. Default 40.".into()),
                 value: f64::from(ocr.line_merge.width_delta_ratio) * 100.0,
                 min: 0.0,
                 max: 90.0,
