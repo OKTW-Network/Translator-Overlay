@@ -1,5 +1,6 @@
 //! Translator Overlay — WinUI 3 control app (windows-reactor).
 
+mod attention;
 mod pipeline;
 mod taskbar_guard;
 mod ui;

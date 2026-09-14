@@ -11,7 +11,10 @@ use translator_translate::{
     Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed, peek_translation_pairs,
 };
 
-use crate::pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobMsg};
+use crate::{
+    attention::flash_control_window_taskbar,
+    pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobMsg},
+};
 
 impl Pipeline {
     pub(crate) fn start_translate(&mut self, page: PendingPage, force: bool) {
@@ -175,9 +178,7 @@ impl Pipeline {
                     // store invalid model JSON as assistant context.
                     self.conversation.rollback_user_turn();
                     self.apply_stream_preview(&job, &[]);
-                    let mut s = self.state.write();
-                    s.translate_in_flight = false;
-                    s.set_error(format!("translate parse: {e}"));
+                    self.fail_translate(format!("translate parse: {e}"));
                 }
             },
             Err(e) if e.is_cancelled() => {
@@ -196,10 +197,22 @@ impl Pipeline {
                 error!(error = %e, "translation failed");
                 self.conversation.rollback_user_turn();
                 self.apply_stream_preview(&job, &[]);
-                let mut s = self.state.write();
-                s.translate_in_flight = false;
-                s.set_error(format!("translate: {e}"));
+                self.fail_translate(format!("translate: {e}"));
             }
+        }
+    }
+
+    fn fail_translate(&self, message: String) {
+        let flash = {
+            let mut s = self.state.write();
+            s.translate_in_flight = false;
+            s.set_error(message);
+            let flash = !s.attention_sent;
+            s.attention_sent = true;
+            flash
+        };
+        if flash {
+            flash_control_window_taskbar();
         }
     }
 
@@ -269,4 +282,5 @@ fn apply_translated(
     s.translate_in_flight = false;
     s.last_error = None;
     s.status = PipelineStatus::OverlayActive;
+    s.attention_sent = false;
 }

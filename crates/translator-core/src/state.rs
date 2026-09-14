@@ -195,6 +195,8 @@ pub struct AppState {
     pub region_select_draft: Vec<NormRect>,
     /// Unique source strings currently in the session translation cache.
     pub translation_cache_len: usize,
+    /// True after a translate failure until a translate succeeds (one flash per streak).
+    pub attention_sent: bool,
     next_history_id: u64,
 }
 
@@ -219,6 +221,7 @@ impl AppState {
             region_select_active: false,
             region_select_draft: Vec::new(),
             translation_cache_len: 0,
+            attention_sent: false,
             next_history_id: 0,
         }
     }
