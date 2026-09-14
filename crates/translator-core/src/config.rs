@@ -426,7 +426,8 @@ pub struct LineMergeConfig {
     pub below_mid_ratio: f32,
     /// When true, do not glue a shorter upper line onto a much wider line below.
     pub reject_short_long: bool,
-    /// Allowed `(w_lower − w_upper) / w_lower` when [`Self::reject_short_long`] is on.
+    /// When [`Self::reject_short_long`] is on, a shorter upper line stays separate
+    /// if `(w_lower − w_upper) / w_lower` is at least this.
     pub width_delta_ratio: f32,
     /// Insert a space between joined lines (`false` concatenates).
     pub join_with_space: bool,
@@ -447,7 +448,7 @@ impl Default for LineMergeConfig {
             order_band_ratio: 0.012,
             below_mid_ratio: 0.25,
             reject_short_long: true,
-            width_delta_ratio: 0.40,
+            width_delta_ratio: 0.25,
             join_with_space: true,
         }
     }

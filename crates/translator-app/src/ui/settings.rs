@@ -1104,7 +1104,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             SliderNumberParams {
                 key: "merge-width-delta",
                 header: "Width difference (%)".into(),
-                description: Some("How much wider that lower line may be before the short line stays separate. Default 40.".into()),
+                description: Some("If the lower line is at least this much wider, keep the short line separate. Default 25.".into()),
                 value: f64::from(ocr.line_merge.width_delta_ratio) * 100.0,
                 min: 0.0,
                 max: 90.0,

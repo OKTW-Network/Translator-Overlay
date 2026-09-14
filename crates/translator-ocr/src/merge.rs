@@ -80,19 +80,7 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, fram
                 continue;
             }
             let can = match neighbor {
-                Neighbor::Below => {
-                    can_link_stacked(&blocks[i], &blocks[j], frame_w, cfg)
-                        && !(cfg.reject_short_long
-                            && approx_lt(blocks[i].bbox.width, blocks[j].bbox.width)
-                            && blocks.iter().enumerate().any(|(k, a)| {
-                                k != i
-                                    && vertical_gap_if_below(a, &blocks[i], cfg.below_mid_ratio, frame_h_f)
-                                        .is_some_and(|g| approx_le(g.abs() / frame_h_f, cfg.gap_ratio))
-                                    && can_link_stacked(a, &blocks[i], frame_w, cfg)
-                                    && approx_lt(blocks[i].bbox.width.max(1.0), a.bbox.width.max(1.0))
-                                    && !has_intervening_below(&blocks, k, i, frame_w, frame_h, cfg)
-                            }))
-                }
+                Neighbor::Below => can_link_stacked(&blocks[i], &blocks[j], frame_w, cfg),
                 Neighbor::Right => height_compatible(&blocks[i], &blocks[j], cfg) && vert_compatible(&blocks[i], &blocks[j], frame_h, cfg),
             };
             if !can {
@@ -294,19 +282,14 @@ fn can_link_stacked(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, cfg: &Line
     if !horiz_compatible(upper, lower, frame_w, cfg) {
         return false;
     }
-    if cfg.reject_short_long && short_into_long(upper, lower, cfg) {
-        return false;
+    if cfg.reject_short_long {
+        let sw = upper.bbox.width.max(1.0);
+        let ww = lower.bbox.width.max(1.0);
+        if approx_lt(sw, ww) && approx_ge((ww - sw) / ww, cfg.width_delta_ratio) {
+            return false;
+        }
     }
     true
-}
-
-fn short_into_long(upper: &OcrBlock, lower: &OcrBlock, cfg: &LineMergeConfig) -> bool {
-    let uw = upper.bbox.width.max(1.0);
-    let lw = lower.bbox.width.max(1.0);
-    if !approx_lt(uw, lw) {
-        return false;
-    }
-    !approx_le((lw - uw) / lw, cfg.width_delta_ratio)
 }
 
 fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool {
@@ -575,6 +558,36 @@ mod tests {
         assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
         assert_eq!(merged[0].text, "Long first line of paragraph short wrap");
         assert_eq!(merged[1].text, "Long next paragraph line");
+    }
+
+    #[test]
+    fn three_line_wrap_last_slightly_wider_still_merges() {
+        let h = 18.0;
+        let blocks = vec![
+            line(0, "This is a long first line", 10.0, 10.0, 220.0, h),
+            line(1, "middle wraps shorter", 10.0, 32.0, 160.0, h),
+            line(2, "last line a bit longer.", 10.0, 54.0, 161.0, h),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert_eq!(merged[0].text, "This is a long first line middle wraps shorter last line a bit longer.");
+    }
+
+    #[test]
+    fn four_long_lines_merge_despite_width_jitter() {
+        let h = 18.0;
+        let blocks = vec![
+            line(0, "Line one of a long paragraph", 10.0, 10.0, 200.0, h),
+            line(1, "Line two of a long paragraph", 10.0, 32.0, 188.0, h),
+            line(2, "Line three of a long paragraph", 10.0, 54.0, 196.0, h),
+            line(3, "Line four of a long paragraph", 10.0, 76.0, 190.0, h),
+        ];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
+        assert_eq!(
+            merged[0].text,
+            "Line one of a long paragraph Line two of a long paragraph Line three of a long paragraph Line four of a long paragraph"
+        );
     }
 
     #[test]
