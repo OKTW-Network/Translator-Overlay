@@ -48,11 +48,7 @@ fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
         .history
         .iter()
         .take(5)
-        .map(|h| {
-            let src = truncate(&h.source_text, 40);
-            let dst = truncate(&h.translated_text, 40);
-            format!("• {src} → {dst}")
-        })
+        .map(|h| format!("• {} → {}", h.source_text, h.translated_text))
         .collect::<Vec<_>>()
         .join("\n");
     let history_preview = if history_preview.is_empty() {
@@ -218,7 +214,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
                     TextBlock::new().text("Recent").font_weight(FontWeight::SEMI_BOLD),
                     TextBlock::new()
                         .text(snap.history_preview)
-                        .text_wrapping(TextWrapping::WrapWholeWords)
+                        .text_wrapping(TextWrapping::Wrap)
                         .is_text_selection_enabled(true),
                 )),
         );
