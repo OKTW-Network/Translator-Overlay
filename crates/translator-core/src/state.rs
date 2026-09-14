@@ -108,12 +108,51 @@ mod tests {
         };
         assert_eq!(downloading.label(), "Downloading OCR models (1/3 · pp-ocrv6_small_det.onnx · 42%)");
     }
+
+    #[test]
+    fn push_history_caps_to_max_and_assigns_ids() {
+        let mut state = AppState::new(AppConfig::default());
+        for i in 0..4 {
+            state.push_history(format!("s{i}"), format!("t{i}"), 3);
+        }
+        let ids: Vec<u64> = state.history.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![3, 2, 1]);
+        assert_eq!(state.history.front().unwrap().source_text, "s3");
+        assert_eq!(state.history.back().unwrap().source_text, "s1");
+    }
+
+    #[test]
+    fn history_entry_covered_by_live_page() {
+        let entry = HistoryEntry {
+            id: 1,
+            source_text: "new line".into(),
+            translated_text: "新行".into(),
+        };
+        assert!(entry.covered_by("cached\nnew line", "快取\n新行"));
+        assert!(entry.covered_by("new line", "新行"));
+        assert!(!entry.covered_by("cached", "快取"));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
+    /// Stable UI key; assigned by [`AppState::push_history`].
+    pub id: u64,
     pub source_text: String,
     pub translated_text: String,
+}
+
+impl HistoryEntry {
+    /// True when every line of this API turn already appears on the live page.
+    pub fn covered_by(&self, live_source: &str, live_translation: &str) -> bool {
+        lines_subset(&self.source_text, live_source) && lines_subset(&self.translated_text, live_translation)
+    }
+}
+
+fn lines_subset(part: &str, whole: &str) -> bool {
+    part.lines()
+        .filter(|line| !line.is_empty())
+        .all(|line| whole.lines().any(|w| w == line))
 }
 
 /// Capture thumbnail shared with the control UI.
@@ -156,6 +195,7 @@ pub struct AppState {
     pub region_select_draft: Vec<NormRect>,
     /// Unique source strings currently in the session translation cache.
     pub translation_cache_len: usize,
+    next_history_id: u64,
 }
 
 impl AppState {
@@ -179,6 +219,7 @@ impl AppState {
             region_select_active: false,
             region_select_draft: Vec::new(),
             translation_cache_len: 0,
+            next_history_id: 0,
         }
     }
 
@@ -204,14 +245,14 @@ impl AppState {
         }
     }
 
-    pub fn push_history(&mut self, source_text: String, translated_text: String) {
+    pub fn push_history(&mut self, source_text: String, translated_text: String, max_items: usize) {
+        let id = self.next_history_id;
+        self.next_history_id += 1;
         self.history.push_front(HistoryEntry {
+            id,
             source_text,
             translated_text,
         });
-        // Dashboard Recent pane shows 5 rows.
-        while self.history.len() > 5 {
-            self.history.pop_back();
-        }
+        self.history.truncate(max_items.max(1));
     }
 }

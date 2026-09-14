@@ -32,7 +32,6 @@ pub(crate) struct InflightTranslate {
     pub rx: mpsc::UnboundedReceiver<TranslateJobMsg>,
     pub fingerprint: OcrFingerprint,
     pub blocks: Vec<OcrBlock>,
-    pub source_text: String,
     pub content_width: u32,
     pub content_height: u32,
     /// Unique miss blocks actually sent to the model (ids preserved).
@@ -348,6 +347,7 @@ impl Pipeline {
                 self.conversation.clear();
                 self.client.reset_session();
                 self.last_translated_fp = None;
+                self.state.write().history.clear();
                 info!("LLM conversation reset");
                 // Leave Downloading/Loading alone while models are still loading.
                 if self.model_load.is_none() {

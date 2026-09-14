@@ -69,18 +69,9 @@ impl Pipeline {
         if resolved.misses.is_empty() {
             info!(hits = hit_count, blocks = page.blocks.len(), "translate cache — all hits, skipping API");
             let translated = TranslationCache::stitch(&page.blocks, &resolved.hits, &[]);
-            let translated_text = blocks_to_translated_text(&translated);
             self.last_translated_fp = Some(page.fingerprint);
             self.state.write().translation_cache_len = self.translation_cache.len();
-            apply_translated(
-                &self.state,
-                self.overlay.as_ref(),
-                page.source_text,
-                translated,
-                translated_text,
-                page.content_width,
-                page.content_height,
-            );
+            apply_translated(&self.state, self.overlay.as_ref(), translated, page.content_width, page.content_height);
             return;
         }
 
@@ -93,6 +84,7 @@ impl Pipeline {
         }
 
         let prepared = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
+        self.state.write().history.truncate(self.conversation.turn_count());
 
         let cancel = CancellationToken::new();
         let cancel_job = cancel.clone();
@@ -142,7 +134,6 @@ impl Pipeline {
             rx,
             fingerprint: page.fingerprint,
             blocks: page.blocks,
-            source_text: page.source_text,
             content_width: page.content_width,
             content_height: page.content_height,
             miss_blocks: resolved.misses,
@@ -160,7 +151,6 @@ impl Pipeline {
                     self.translation_cache
                         .store_model_pairs(&job.miss_blocks, &outcome.blocks, &outcome.model_ids, &tcfg);
                     let translated = TranslationCache::stitch(&job.blocks, &job.cached_hits, &outcome.blocks);
-                    let translated_text = blocks_to_translated_text(&translated);
                     info!(
                         blocks = translated.len(),
                         cached = job.cached_hits.iter().filter(|h| h.is_some()).count(),
@@ -168,16 +158,16 @@ impl Pipeline {
                         "translation complete"
                     );
                     self.last_translated_fp = Some(job.fingerprint);
-                    self.state.write().translation_cache_len = self.translation_cache.len();
-                    apply_translated(
-                        &self.state,
-                        self.overlay.as_ref(),
-                        job.source_text,
-                        translated,
-                        translated_text,
-                        job.content_width,
-                        job.content_height,
-                    );
+                    {
+                        let mut s = self.state.write();
+                        s.translation_cache_len = self.translation_cache.len();
+                        s.push_history(
+                            job.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"),
+                            blocks_to_translated_text(&translated),
+                            tcfg.conversation_max_turns,
+                        );
+                    }
+                    apply_translated(&self.state, self.overlay.as_ref(), translated, job.content_width, job.content_height);
                 }
                 Err(e) => {
                     error!(error = %e, "failed to merge translation");
@@ -257,9 +247,7 @@ fn apply_cached_preview(
 fn apply_translated(
     state: &SharedState,
     overlay: Option<&OverlayController>,
-    source_text: String,
     translated: Vec<TranslatedBlock>,
-    translated_text: String,
     content_width: u32,
     content_height: u32,
 ) {
@@ -278,7 +266,6 @@ fn apply_translated(
 
     let mut s = state.write();
     s.latest_translated_blocks = translated;
-    s.push_history(source_text, translated_text);
     s.translate_in_flight = false;
     s.last_error = None;
     s.status = PipelineStatus::OverlayActive;

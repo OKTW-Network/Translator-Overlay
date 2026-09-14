@@ -4,11 +4,11 @@ use std::{mem, sync::Arc};
 
 use parking_lot::Mutex;
 use translator_capture::list_windows;
-use translator_core::{NormRect, PreviewInfo, sanitize_regions};
+use translator_core::{HistoryEntry, NormRect, PreviewInfo, sanitize_regions};
 use windows_reactor::{
     Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontIcon, FontWeight, Grid,
-    GridChildExt, GridLength, HorizontalAlignment, LayoutControl, LocalSender, Orientation, ScrollViewer, StackPanel, TextBlock, TextBox,
-    TextWrapping, ThemeBrush, Thickness, TooltipExt, VerticalAlignment, View,
+    GridChildExt, GridLength, HorizontalAlignment, KeyedView, LayoutControl, LocalSender, Orientation, ScrollViewer, StackPanel, TextBlock,
+    TextBox, TextWrapping, ThemeBrush, Thickness, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
@@ -29,7 +29,7 @@ struct DashSnap {
     preview_regions: Vec<NormRect>,
     ocr_text: String,
     translation: String,
-    history_preview: String,
+    history: Vec<HistoryEntry>,
     selected_idx: Option<usize>,
     selected_hwnd: Option<isize>,
     target_hwnd: Option<isize>,
@@ -44,18 +44,6 @@ struct DashSnap {
 fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
     let ui = shared.lock();
     let s = ui.state.read();
-    let history_preview = s
-        .history
-        .iter()
-        .take(5)
-        .map(|h| format!("• {} → {}", h.source_text, h.translated_text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let history_preview = if history_preview.is_empty() {
-        "(no history yet)".into()
-    } else {
-        history_preview
-    };
     DashSnap {
         auto_running: s.auto_running,
         translate_in_flight: s.translate_in_flight,
@@ -67,20 +55,14 @@ fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
         } else {
             s.ocr_regions.clone()
         },
-        ocr_text: {
-            let t = s.latest_ocr_blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
-            if t.is_empty() { "(no OCR yet)".into() } else { t }
-        },
-        translation: {
-            let t = s
-                .latest_translated_blocks
-                .iter()
-                .map(|b| b.translation.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if t.is_empty() { "(no translation yet)".into() } else { t }
-        },
-        history_preview,
+        ocr_text: s.latest_ocr_blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"),
+        translation: s
+            .latest_translated_blocks
+            .iter()
+            .map(|b| b.translation.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        history: s.history.iter().cloned().collect(),
         selected_idx: ui.selected_idx.filter(|&i| i < ui.windows.len()),
         selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
         target_hwnd: s.target_hwnd,
@@ -93,13 +75,70 @@ fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
     }
 }
 
+fn results_pair(left: impl Into<View>, right: impl Into<View>) -> View {
+    StackPanel::new()
+        .spacing(8.0)
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .children((
+            Grid::new()
+                .columns([GridLength::Star(1.0), GridLength::Auto, GridLength::Star(1.0)])
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .children((
+                    Border::new()
+                        .grid_column(0)
+                        .horizontal_alignment(HorizontalAlignment::Stretch)
+                        .vertical_alignment(VerticalAlignment::Top)
+                        .margin(Thickness::new(0.0, 0.0, 8.0, 0.0))
+                        .content(left),
+                    Border::new()
+                        .background(ThemeBrush::CardStroke)
+                        .width(1.0)
+                        .horizontal_alignment(HorizontalAlignment::Center)
+                        .vertical_alignment(VerticalAlignment::Stretch)
+                        .grid_column(1),
+                    Border::new()
+                        .grid_column(2)
+                        .horizontal_alignment(HorizontalAlignment::Stretch)
+                        .vertical_alignment(VerticalAlignment::Top)
+                        .margin(Thickness::new(8.0, 0.0, 0.0, 0.0))
+                        .content(right),
+                )),
+            Border::new()
+                .background(ThemeBrush::CardStroke)
+                .height(1.0)
+                .horizontal_alignment(HorizontalAlignment::Stretch),
+        ))
+}
+
+fn results_table_row(source: String, translation: String, opacity: f64) -> View {
+    results_pair(
+        TextBlock::new()
+            .text(source)
+            .opacity(opacity)
+            .text_wrapping(TextWrapping::Wrap)
+            .is_text_selection_enabled(true),
+        TextBlock::new()
+            .text(translation)
+            .opacity(opacity)
+            .text_wrapping(TextWrapping::Wrap)
+            .is_text_selection_enabled(true),
+    )
+}
+
 pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let mut snap = take_dash(shared);
     let window_labels = mem::take(&mut snap.window_labels);
+    let mut history = mem::take(&mut snap.history);
     let in_flight = snap.translate_in_flight;
     let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
-    let ocr_desc = format!("Last OCR: {ocr_time}  ·  {} blocks", snap.last_ocr_block_count);
+    let ocr_desc = format!("{ocr_time} · {} blocks", snap.last_ocr_block_count);
+    let live_src = mem::take(&mut snap.ocr_text);
+    let live_dst = mem::take(&mut snap.translation);
+    let has_live = !live_src.is_empty() || !live_dst.is_empty();
+    if has_live && !in_flight && history.first().is_some_and(|h| h.covered_by(&live_src, &live_dst)) {
+        history.remove(0);
+    }
 
     let divider = Border::new()
         .background(ThemeBrush::CardStroke)
@@ -122,6 +161,47 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
             build_regions_pane(&cx, &snap),
             preset_confirm_dialog(&cx, &snap),
         ));
+
+    let results_empty = !has_live && history.is_empty();
+    let results_header: View = if results_empty {
+        View::empty()
+    } else {
+        results_pair(
+            TextBlock::new()
+                .text("Source")
+                .font_size(12.0)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(ThemeBrush::PrimaryText)
+                .opacity(0.72),
+            TextBlock::new()
+                .text("Translation")
+                .font_size(12.0)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(ThemeBrush::PrimaryText)
+                .opacity(0.72),
+        )
+    };
+    let results_rows: View = if results_empty {
+        TextBlock::new()
+            .text("(no history yet)")
+            .foreground(ThemeBrush::PrimaryText)
+            .opacity(0.72)
+            .into()
+    } else {
+        StackPanel::new()
+            .spacing(8.0)
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .keyed_children(
+                has_live
+                    .then(|| KeyedView::new("live", results_table_row(live_src, live_dst, 1.0)))
+                    .into_iter()
+                    .chain(
+                        history
+                            .into_iter()
+                            .map(|h| KeyedView::new(h.id, results_table_row(h.source_text, h.translated_text, 0.72))),
+                    ),
+            )
+    };
 
     let retry_tip = if in_flight {
         "Cancel the translation in progress first"
@@ -183,41 +263,48 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
             ),
         ));
 
-    let output = ScrollViewer::new()
+    let output = Grid::new()
+        .rows([GridLength::Auto, GridLength::Star(1.0)])
+        .columns([GridLength::Star(1.0)])
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .vertical_alignment(VerticalAlignment::Stretch)
         .grid_row(0)
         .grid_column(1)
-        .content(
+        .children((
             StackPanel::new()
-                .spacing(4.0)
+                .spacing(8.0)
                 .horizontal_alignment(HorizontalAlignment::Stretch)
+                .grid_row(0)
+                .grid_column(0)
                 .children((
-                    StackPanel::new().orientation(Orientation::Horizontal).spacing(12.0).children((
-                        TextBlock::new().text("OCR").font_weight(FontWeight::SEMI_BOLD),
-                        TextBlock::new()
-                            .text(ocr_desc)
-                            .font_size(12.0)
-                            .foreground(ThemeBrush::PrimaryText)
-                            .opacity(0.72)
-                            .vertical_alignment(VerticalAlignment::Center),
-                    )),
-                    TextBlock::new()
-                        .text(snap.ocr_text)
-                        .text_wrapping(TextWrapping::WrapWholeWords)
-                        .is_text_selection_enabled(true),
-                    TextBlock::new().text("Translation").font_weight(FontWeight::SEMI_BOLD),
-                    TextBlock::new()
-                        .text(snap.translation)
-                        .text_wrapping(TextWrapping::WrapWholeWords)
-                        .is_text_selection_enabled(true),
-                    TextBlock::new().text("Recent").font_weight(FontWeight::SEMI_BOLD),
-                    TextBlock::new()
-                        .text(snap.history_preview)
-                        .text_wrapping(TextWrapping::Wrap)
-                        .is_text_selection_enabled(true),
+                    Grid::new()
+                        .columns([GridLength::Star(1.0), GridLength::Auto])
+                        .horizontal_alignment(HorizontalAlignment::Stretch)
+                        .children((
+                            TextBlock::new()
+                                .text("OCR")
+                                .font_size(14.0)
+                                .font_weight(FontWeight::SEMI_BOLD)
+                                .vertical_alignment(VerticalAlignment::Center)
+                                .grid_column(0),
+                            TextBlock::new()
+                                .text(ocr_desc)
+                                .font_size(12.0)
+                                .foreground(ThemeBrush::PrimaryText)
+                                .opacity(0.72)
+                                .vertical_alignment(VerticalAlignment::Center)
+                                .grid_column(1),
+                        )),
+                    results_header,
                 )),
-        );
+            ScrollViewer::new()
+                .horizontal_alignment(HorizontalAlignment::Stretch)
+                .vertical_alignment(VerticalAlignment::Stretch)
+                .margin(Thickness::new(0.0, 8.0, 0.0, 0.0))
+                .grid_row(1)
+                .grid_column(0)
+                .content(results_rows),
+        ));
 
     let workspace = Grid::new()
         .rows([GridLength::Star(1.0)])
