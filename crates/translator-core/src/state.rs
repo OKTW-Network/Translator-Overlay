@@ -177,6 +177,8 @@ pub struct AppState {
     pub target_hwnd: Option<isize>,
     pub preview: PreviewInfo,
     pub auto_running: bool,
+    /// Start/Stop locked while Stop waits for CLI session close.
+    pub capture_busy: bool,
     /// True while an LLM request is in flight (cancellable).
     pub translate_in_flight: bool,
     /// Last error message (kept after status changes so the UI can show it).
@@ -212,6 +214,7 @@ impl AppState {
             target_hwnd: None,
             preview: PreviewInfo::default(),
             auto_running: false,
+            capture_busy: false,
             translate_in_flight: false,
             last_error: None,
             settings_message: None,

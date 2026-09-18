@@ -1,12 +1,18 @@
 //! Newline-delimited JSON-RPC over a child process stdio.
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use serde_json::{Map, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::mpsc,
+    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -44,21 +50,86 @@ pub fn classify_rpc(value: Value) -> Option<Incoming> {
     })
 }
 
+pub fn collect_acp_update(method: &str, params: &Value, text: &mut String, saw_tool: &mut bool) {
+    if method != "session/update" && method != "x.ai/session/update" {
+        return;
+    }
+    let update = params.get("update").unwrap_or(params);
+    let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "agent_message_chunk" => {
+            if let Some(chunk) = update.pointer("/content/text").and_then(Value::as_str) {
+                text.push_str(chunk);
+            } else if let Some(chunk) = update.get("content").and_then(Value::as_str) {
+                text.push_str(chunk);
+            }
+        }
+        "tool_call" | "tool_call_update" => *saw_tool = true,
+        _ => {}
+    }
+}
+
+pub fn acp_initialize_params() -> Value {
+    serde_json::json!({
+        "protocolVersion": 1,
+        "clientInfo": { "name": "translator-overlay", "version": env!("CARGO_PKG_VERSION") },
+        "clientCapabilities": {
+            "fs": { "readTextFile": false, "writeTextFile": false },
+            "terminal": false
+        }
+    })
+}
+
+pub fn is_auth_failure(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("auth_required")
+        || m.contains("providerautherror")
+        || m.contains("authentication")
+        || m.contains("unauthor")
+        || m.contains("not authenticated")
+        || (m.contains("login") && (m.contains("required") || m.contains("needed") || m.contains("run")))
+}
+
+pub fn map_auth_failure(err: TranslateError, hint: &str) -> TranslateError {
+    match err {
+        TranslateError::CliProtocol(msg) if is_auth_failure(&msg) => TranslateError::CliProtocol(format!("{hint} ({msg})")),
+        other => other,
+    }
+}
+
 pub fn is_permission_method(method: &str) -> bool {
     let m = method.to_ascii_lowercase();
     m.contains("permission") || m.contains("elicitation") || m.contains("requestapproval")
 }
 
-pub fn deny_permission_result(method: &str) -> Value {
+pub fn deny_permission_result(method: &str, params: &Value) -> Value {
     let m = method.to_ascii_lowercase();
     if m.contains("commandexecution") {
         // Interrupts the turn instead of letting the agent try another tool.
-        serde_json::json!({ "decision": "cancel" })
-    } else if m.contains("approval") || m.contains("permissions") {
-        serde_json::json!({ "decision": "abort" })
-    } else {
-        serde_json::json!({ "outcome": { "outcome": "cancelled" } })
+        return serde_json::json!({ "decision": "cancel" });
     }
+    if m.contains("approval") || m.contains("permissions") {
+        return serde_json::json!({ "decision": "abort" });
+    }
+    // ACP: reject the tool but keep the turn alive so the model can answer without executing.
+    if let Some(option_id) = reject_option_id(params) {
+        return serde_json::json!({
+            "outcome": { "outcome": "selected", "optionId": option_id }
+        });
+    }
+    serde_json::json!({ "outcome": { "outcome": "cancelled" } })
+}
+
+fn reject_option_id(params: &Value) -> Option<&str> {
+    let options = params.get("options")?.as_array()?;
+    let id_for = |kind: &str| {
+        options.iter().find_map(|option| {
+            (option.get("kind").and_then(Value::as_str) == Some(kind))
+                .then(|| option.get("optionId").and_then(Value::as_str))
+                .flatten()
+        })
+    };
+    id_for("reject_once").or_else(|| id_for("reject_always"))
 }
 
 pub struct JsonRpcChild {
@@ -221,7 +292,7 @@ impl JsonRpcChild {
         match incoming {
             Incoming::ServerRequest { id, method, params } => {
                 tracing::warn!(method, params = %params, "denying CLI server request");
-                let result = deny_permission_result(&method);
+                let result = deny_permission_result(&method, &params);
                 self.write_message(rpc_result(self.include_jsonrpc, id, result)).await
             }
             Incoming::Notification { method, params } => {
@@ -256,13 +327,156 @@ impl JsonRpcChild {
 
     pub async fn kill_and_wait(&mut self) {
         let _ = self.child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
+        let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
+    }
+
+    /// Wait for a graceful exit; kill only if the child is still alive.
+    pub async fn wait_or_kill(&mut self) {
+        if matches!(timeout(Duration::from_secs(2), self.child.wait()).await, Ok(Ok(_))) {
+            return;
+        }
+        self.kill_and_wait().await;
+    }
+
+    fn kill_and_wait_blocking(&mut self) {
+        let _ = self.child.start_kill();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) if Instant::now() >= deadline => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
     }
 }
 
 impl Drop for JsonRpcChild {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+    }
+}
+
+pub struct AcpSession {
+    rpc: JsonRpcChild,
+    session_id: String,
+    fail_on_tool: bool,
+    /// OpenCode: `session/close` detaches; `{bin} session delete {id}` after the child exits.
+    cli_session_delete: Option<(PathBuf, PathBuf)>,
+}
+
+impl AcpSession {
+    pub fn new(rpc: JsonRpcChild, session_id: String, fail_on_tool: bool, cli_session_delete: Option<(PathBuf, PathBuf)>) -> Self {
+        Self {
+            rpc,
+            session_id,
+            fail_on_tool,
+            cli_session_delete,
+        }
+    }
+
+    pub fn id_from(created: &Value) -> Result<String, TranslateError> {
+        created
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TranslateError::CliProtocol("session/new missing sessionId".into()))
+            .map(str::to_string)
+    }
+
+    pub async fn prompt(
+        &mut self,
+        user: &str,
+        cancel: &CancellationToken,
+        timeout: Duration,
+        on_text: &mut impl FnMut(&str),
+    ) -> Result<String, TranslateError> {
+        let mut text = String::new();
+        let mut saw_tool = false;
+        self.rpc
+            .request_with_notes(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": self.session_id,
+                    "prompt": [{ "type": "text", "text": user }]
+                }),
+                cancel,
+                timeout,
+                |method, params| {
+                    let before = text.len();
+                    collect_acp_update(method, params, &mut text, &mut saw_tool);
+                    if text.len() != before {
+                        on_text(&text);
+                    }
+                },
+            )
+            .await?;
+
+        if self.fail_on_tool && saw_tool {
+            return Err(TranslateError::CliProtocol("CLI session invoked a tool".into()));
+        }
+        if text.trim().is_empty() {
+            return Err(TranslateError::CliProtocol("CLI session produced no assistant text".into()));
+        }
+        Ok(text)
+    }
+
+    pub async fn cancel_turn(&mut self) {
+        let _ = self
+            .rpc
+            .notify("session/cancel", serde_json::json!({ "sessionId": self.session_id }))
+            .await;
+    }
+
+    pub async fn close(&mut self) {
+        let _ = self
+            .rpc
+            .request(
+                "session/close",
+                serde_json::json!({ "sessionId": self.session_id }),
+                &CancellationToken::new(),
+                Duration::from_secs(2),
+            )
+            .await;
+        self.rpc.wait_or_kill().await;
+        if let Some((p, cwd)) = self.cli_session_delete.take() {
+            best_effort_cli_session_delete(&p, &cwd, &self.session_id);
+        }
+    }
+
+    pub fn kill(&mut self) {
+        self.rpc.kill_and_wait_blocking();
+        if let Some((p, cwd)) = self.cli_session_delete.take() {
+            best_effort_cli_session_delete(&p, &cwd, &self.session_id);
+        }
+    }
+
+    pub async fn set_config_option(
+        &mut self,
+        config_id: &str,
+        value: &str,
+        cancel: &CancellationToken,
+        timeout: Duration,
+    ) -> Result<(), TranslateError> {
+        self.rpc
+            .request(
+                "session/set_config_option",
+                serde_json::json!({
+                    "sessionId": self.session_id,
+                    "configId": config_id,
+                    "value": value
+                }),
+                cancel,
+                timeout,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl Drop for AcpSession {
+    fn drop(&mut self) {
+        // session/new may have already persisted; kill() deletes the CLI row.
+        self.kill();
     }
 }
 
@@ -304,6 +518,57 @@ fn apply_no_window(cmd: &mut Command) {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let _ = cmd;
+}
+
+/// `{program} session delete {session_id}` — OpenCode persists ACP sessions in its DB.
+fn best_effort_cli_session_delete(program: &Path, cwd: &Path, session_id: &str) {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["session", "delete", session_id])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = match cmd.spawn() {
+        Err(e) => {
+            tracing::warn!(error = %e, "CLI session delete failed");
+            return;
+        }
+        Ok(c) => c,
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Err(e) => {
+                tracing::warn!(error = %e, "CLI session delete failed");
+                return;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("CLI session delete timed out");
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        tracing::warn!(
+            code = ?status.code(),
+            stderr = %stderr.trim(),
+            "CLI session delete failed"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -349,11 +614,22 @@ mod tests {
     fn deny_shapes_are_closed() {
         assert!(is_permission_method("session/request_permission"));
         assert!(is_permission_method("item/permissions/requestApproval"));
-        let acp = deny_permission_result("session/request_permission");
+        let acp = deny_permission_result("session/request_permission", &Value::Null);
         assert_eq!(acp["outcome"]["outcome"], "cancelled");
-        let cmd = deny_permission_result("item/commandExecution/requestApproval");
+        let rejected = deny_permission_result(
+            "session/request_permission",
+            &serde_json::json!({
+                "options": [
+                    { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+                    { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
+                ]
+            }),
+        );
+        assert_eq!(rejected["outcome"]["outcome"], "selected");
+        assert_eq!(rejected["outcome"]["optionId"], "reject-once");
+        let cmd = deny_permission_result("item/commandExecution/requestApproval", &Value::Null);
         assert_eq!(cmd["decision"], "cancel");
-        let patch = deny_permission_result("item/fileChange/requestApproval");
+        let patch = deny_permission_result("item/fileChange/requestApproval", &Value::Null);
         assert_eq!(patch["decision"], "abort");
     }
 
@@ -368,5 +644,48 @@ mod tests {
         assert_eq!(args.get(agent + 1).map(String::as_str), Some("stdio"));
         let args = codex::spawn_args();
         assert_eq!(args, ["app-server"]);
+    }
+
+    #[test]
+    fn acp_session_id_from_new() {
+        assert_eq!(AcpSession::id_from(&serde_json::json!({"sessionId": "ses_1"})).unwrap(), "ses_1");
+        assert!(AcpSession::id_from(&Value::Null).is_err());
+    }
+
+    #[test]
+    fn collects_agent_chunks_and_flags_tools() {
+        let mut text = String::new();
+        let mut saw_tool = false;
+        collect_acp_update(
+            "session/update",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "{\"b\"" }
+                }
+            }),
+            &mut text,
+            &mut saw_tool,
+        );
+        collect_acp_update(
+            "session/update",
+            &serde_json::json!({
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": ":[]}" }
+                }
+            }),
+            &mut text,
+            &mut saw_tool,
+        );
+        assert_eq!(text, "{\"b\":[]}");
+        assert!(!saw_tool);
+        collect_acp_update(
+            "session/update",
+            &serde_json::json!({ "update": { "sessionUpdate": "tool_call", "title": "Bash" } }),
+            &mut text,
+            &mut saw_tool,
+        );
+        assert!(saw_tool);
     }
 }

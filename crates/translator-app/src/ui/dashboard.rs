@@ -203,7 +203,9 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
             )
     };
 
-    let retry_tip = if in_flight {
+    let retry_tip = if chrome.capture_busy {
+        "Waiting for capture to stop"
+    } else if in_flight {
         "Cancel the translation in progress first"
     } else if snap.auto_running {
         "Capture now and run OCR + translation"
@@ -217,19 +219,21 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
         .horizontal_alignment(HorizontalAlignment::Left)
         .children((
             Button::new()
-                .is_enabled(in_flight)
+                .is_enabled(in_flight && !chrome.capture_busy)
                 .on_click({
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::CancelTranslate)
                 })
                 .content("Cancel")
-                .tooltip(if in_flight {
+                .tooltip(if chrome.capture_busy {
+                    "Waiting for capture to stop"
+                } else if in_flight {
                     "Cancel the translation in progress"
                 } else {
                     "No translation in progress"
                 }),
             Button::new()
-                .is_enabled(snap.auto_running && !in_flight)
+                .is_enabled(snap.auto_running && !in_flight && !chrome.capture_busy)
                 .on_click({
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::ManualCapture)

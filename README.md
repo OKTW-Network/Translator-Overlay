@@ -6,7 +6,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 - **視窗擷取**：Windows Graphics Capture。可在目標視窗上框選多個 OCR 區域，或辨識整窗；區域可存成具名 preset
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
-- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / Codex app-server（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
+- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / OpenCode ACP / Codex app-server（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
 - **顯示**：點穿 in-place overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂譯文窗（拖曳移動、邊緣縮放）
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名 profile（Save / Load，與區域 preset 相同）
@@ -23,7 +23,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 2. 雙擊 `translator-app.exe`
 3. **API** 頁選 Provider：
    - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
-   - **Grok CLI** / **Codex CLI**：本機 `grok` / `codex`
+   - **Grok CLI** / **OpenCode CLI** / **Codex CLI**：本機 `grok` / `opencode` / `codex`
    - **Profile**：把目前連線設定存成具名 profile（`api-profiles.toml`）。**Load** 填入表單，再按頁面 **Save** 套用
 4. **Save**
 5. **Dashboard** 選視窗 → 左側導覽底部 **Start**
@@ -89,5 +89,5 @@ crates/
   translator-core        # 設定、路徑、區域 preset、共用型別
   translator-ocr         # PP-OCRv6、下載、穩定閘門、過濾、合併
   translator-overlay     # 點穿覆蓋層、區域選取、譯文窗
-  translator-translate   # HTTP / Grok ACP / Codex app-server、session cache
+  translator-translate   # HTTP / Grok ACP / OpenCode ACP / Codex app-server、session cache
 ```

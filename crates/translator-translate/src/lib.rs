@@ -1,4 +1,4 @@
-//! Translation client: OpenAI-compatible HTTP or long-lived Grok/Codex CLI sessions.
+//! Translation client: OpenAI-compatible HTTP or long-lived Grok/OpenCode/Codex CLI sessions.
 
 mod cache;
 mod cli;
@@ -92,7 +92,7 @@ pub struct Completion {
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub items: Vec<ResponseItem>,
-    /// Client-generated id sent as `x-grok-conv-id` / `x-opencode-session` / `prompt_cache_key`.
+    /// Client-generated id sent as `x-grok-conv-id` / `prompt_cache_key`.
     /// Stable for the conversation lifetime; new id only on [`Self::clear`].
     pub session_id: String,
 }
@@ -633,12 +633,19 @@ impl TranslateClient {
         }
     }
 
-    /// Drop the long-lived Grok/Codex session (Reset / new capture target).
+    /// Drop the long-lived Grok/OpenCode/Codex session (Reset / new capture target).
     pub fn reset_session(&self) {
         self.cli.epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut backend) = self.cli.backend.try_lock() {
             backend.shutdown();
         }
+    }
+
+    /// Stop / app exit: wait for an in-flight turn, then close and delete persisted CLI state.
+    pub async fn close_session(&self) {
+        self.cli.epoch.fetch_add(1, Ordering::SeqCst);
+        let mut backend = self.cli.backend.lock().await;
+        backend.close().await;
     }
 
     pub fn config(&self) -> &ApiConfig {
@@ -701,7 +708,7 @@ impl TranslateClient {
 
         let mut req = self.http.post(url).bearer_auth(&self.config.api_key);
         if let Some(session_id) = session_id.filter(|s| !s.is_empty()) {
-            req = req.header("x-grok-conv-id", session_id).header("x-opencode-session", session_id);
+            req = req.header("x-grok-conv-id", session_id);
         }
         let send = req.json(body).send();
 
@@ -730,8 +737,9 @@ impl TranslateClient {
         };
         let epoch = self.cli.epoch.load(Ordering::SeqCst);
         let mut backend = self.cli.backend.lock().await;
-        if epoch != self.cli.epoch.load(Ordering::SeqCst) {
+        if cancel.is_cancelled() || epoch != self.cli.epoch.load(Ordering::SeqCst) {
             backend.close().await;
+            return Err(TranslateError::Cancelled);
         }
         backend.complete(&self.config, messages, cancel, timeout, epoch, on_text).await
     }
@@ -793,6 +801,14 @@ mod tests {
 
     use super::*;
     use crate::http::{completion_from_http_body, extract_responses_completion};
+
+    #[test]
+    fn http_complete_does_not_send_opencode_session_header() {
+        let src = include_str!("lib.rs");
+        let removed = ["x-", "opencode", "-session"].concat();
+        assert!(!src.contains(&removed));
+        assert!(src.contains("x-grok-conv-id"));
+    }
 
     #[test]
     fn request_omits_unset_params() {

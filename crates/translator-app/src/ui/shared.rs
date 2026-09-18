@@ -434,6 +434,7 @@ pub struct ChromeSnap {
     pub target: Option<String>,
     pub last_error: Option<String>,
     pub auto_running: bool,
+    pub capture_busy: bool,
     pub selected_hwnd: Option<isize>,
     pub settings_dirty: bool,
     pub form_error: Option<String>,
@@ -449,6 +450,7 @@ pub fn take_chrome(shared: &Arc<Mutex<UiShared>>) -> ChromeSnap {
         target: s.target_window_title.clone(),
         last_error: s.last_error.clone(),
         auto_running: s.auto_running,
+        capture_busy: s.capture_busy,
         selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
         // Use already-held `s.config` — do not call is_settings_dirty (nested read).
         settings_dirty: draft_differs_from(&ui, &s.config),

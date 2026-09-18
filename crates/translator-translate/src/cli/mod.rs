@@ -1,7 +1,8 @@
-//! Long-lived Grok ACP / Codex app-server translation sessions.
+//! Long-lived Grok ACP / OpenCode ACP / Codex app-server translation sessions.
 
 mod codex;
 mod grok;
+mod opencode;
 mod rpc;
 
 use std::{
@@ -14,7 +15,7 @@ use translator_core::{ApiConfig, ModelProvider, resolve_cli_binary};
 
 use crate::{
     ChatMessage, TranslateError,
-    cli::{codex::CodexSession, grok::GrokSession},
+    cli::{codex::CodexSession, rpc::AcpSession},
 };
 
 const UNTRUSTED_BEGIN: &str = "---BEGIN_UNTRUSTED_OCR---";
@@ -102,7 +103,7 @@ fn compose_user(bootstrap: Option<&str>, user: &str) -> String {
 }
 
 enum LiveSession {
-    Grok(GrokSession),
+    Acp(AcpSession),
     Codex(CodexSession),
 }
 
@@ -116,28 +117,28 @@ impl LiveSession {
         on_text: &mut impl FnMut(&str),
     ) -> Result<String, TranslateError> {
         match self {
-            Self::Grok(s) => s.prompt(user, cancel, timeout, on_text).await,
+            Self::Acp(s) => s.prompt(user, cancel, timeout, on_text).await,
             Self::Codex(s) => s.prompt(user, effort, cancel, timeout, on_text).await,
         }
     }
 
     async fn cancel_turn(&mut self) {
         match self {
-            Self::Grok(s) => s.cancel_turn().await,
+            Self::Acp(s) => s.cancel_turn().await,
             Self::Codex(s) => s.cancel_turn().await,
         }
     }
 
     async fn close(&mut self) {
         match self {
-            Self::Grok(s) => s.close().await,
+            Self::Acp(s) => s.close().await,
             Self::Codex(s) => s.close().await,
         }
     }
 
     fn kill(&mut self) {
         match self {
-            Self::Grok(s) => s.kill(),
+            Self::Acp(s) => s.kill(),
             Self::Codex(s) => s.kill(),
         }
     }
@@ -164,18 +165,17 @@ impl CliBackend {
         if let Some(mut live) = self.live.take() {
             live.kill();
         }
-        self.mirrored.clear();
-        if let Some(dir) = self.isolated_cwd.take()
-            && let Err(e) = remove_dir_all_once(&dir)
-        {
-            tracing::warn!(path = %dir.display(), %e, "failed to remove isolated CLI cwd");
-        }
+        self.drop_cwd();
     }
 
     pub async fn close(&mut self) {
         if let Some(mut live) = self.live.take() {
             live.close().await;
         }
+        self.drop_cwd();
+    }
+
+    fn drop_cwd(&mut self) {
         self.mirrored.clear();
         if let Some(dir) = self.isolated_cwd.take()
             && let Err(e) = remove_dir_all_once(&dir)
@@ -275,8 +275,11 @@ impl CliBackend {
         })?;
         let system = cli_system_prompt(system);
         let live = match api.provider {
-            ModelProvider::GrokCli => LiveSession::Grok(
-                GrokSession::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?,
+            ModelProvider::GrokCli => LiveSession::Acp(
+                grok::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?,
+            ),
+            ModelProvider::OpenCodeCli => LiveSession::Acp(
+                opencode::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?,
             ),
             ModelProvider::CodexCli => {
                 LiveSession::Codex(CodexSession::connect(&program, &api.model, api.service_tier, &cwd, &system, cancel, timeout).await?)

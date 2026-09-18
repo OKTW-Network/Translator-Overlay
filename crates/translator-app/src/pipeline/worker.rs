@@ -281,6 +281,8 @@ impl Pipeline {
                 self.cancel_inflight();
                 self.model_load = None;
                 self.session.stop();
+                self.conversation.clear();
+                self.client.close_session().await;
                 if let Some(mut o) = self.overlay.take() {
                     let _ = o.send(OverlayCommand::Clear);
                     o.shutdown().await;
@@ -297,14 +299,15 @@ impl Pipeline {
                     s.translate_in_flight = false;
                     if s.auto_running {
                         s.status = PipelineStatus::Capturing;
-                    } else {
+                    } else if s.status != PipelineStatus::Idle {
+                        // Stop already set Idle; a Cancel queued during close must not overwrite it.
                         s.status = PipelineStatus::Cancelled;
                     }
                 }
             }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg).await,
             PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
-            PipelineCommand::StopCapture => self.stop_capture(),
+            PipelineCommand::StopCapture => self.stop_capture().await,
             PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
             PipelineCommand::ConfirmRegionSelect => {
                 if let Some(o) = self.overlay.as_ref() {
@@ -437,19 +440,21 @@ impl Pipeline {
         }
     }
 
-    fn stop_capture(&mut self) {
+    async fn stop_capture(&mut self) {
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::CancelRegionSelect);
-        }
-        self.cancel_inflight();
-        self.session.stop();
-        self.reset_ocr_session(false);
-        if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::Detach);
             let _ = o.send(OverlayCommand::Clear);
         }
+        self.cancel_inflight();
+        self.state.write().translate_in_flight = false;
+        self.session.stop();
+        self.reset_ocr_session(false);
+        self.conversation.clear();
+        self.client.close_session().await;
         let mut s = self.state.write();
         s.auto_running = false;
+        s.capture_busy = false;
         s.target_hwnd = None;
         s.translate_in_flight = false;
         s.status = PipelineStatus::Idle;

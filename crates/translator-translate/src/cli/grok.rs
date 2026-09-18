@@ -2,10 +2,14 @@
 
 use std::{path::Path, time::Duration};
 
-use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{TranslateError, cli::rpc::JsonRpcChild};
+use crate::{
+    TranslateError,
+    cli::rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure},
+};
+
+const AUTH_HINT: &str = "Grok CLI is not authenticated. Run `grok login` or set XAI_API_KEY.";
 
 pub fn spawn_args(model: &str, reasoning_effort: Option<&str>, system: &str) -> Vec<String> {
     // Global flags first: `grok [flags] agent stdio`. Flags after `agent` are rejected.
@@ -35,170 +39,46 @@ pub fn spawn_args(model: &str, reasoning_effort: Option<&str>, system: &str) -> 
     args
 }
 
-fn auth_required_error(detail: &str) -> TranslateError {
-    TranslateError::CliProtocol(format!("Grok CLI is not authenticated. Run `grok login` or set XAI_API_KEY. ({detail})"))
-}
+pub async fn connect(
+    program: &Path,
+    model: &str,
+    reasoning_effort: Option<&str>,
+    cwd: &Path,
+    system: &str,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<AcpSession, TranslateError> {
+    let args = spawn_args(model, reasoning_effort, system);
+    let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[], true).await?;
 
-fn is_auth_failure(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("auth_required")
-        || m.contains("authentication")
-        || m.contains("unauthor")
-        || m.contains("not authenticated")
-        || (m.contains("login") && (m.contains("required") || m.contains("needed") || m.contains("run")))
-}
+    rpc.request("initialize", acp_initialize_params(), cancel, timeout)
+        .await
+        .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
 
-fn map_grok_rpc(err: TranslateError) -> TranslateError {
-    match err {
-        TranslateError::CliProtocol(msg) if is_auth_failure(&msg) => auth_required_error(&msg),
-        other => other,
-    }
-}
-
-pub struct GrokSession {
-    rpc: JsonRpcChild,
-    session_id: String,
-}
-
-impl GrokSession {
-    pub async fn connect(
-        program: &Path,
-        model: &str,
-        reasoning_effort: Option<&str>,
-        cwd: &Path,
-        system: &str,
-        cancel: &CancellationToken,
-        timeout: Duration,
-    ) -> Result<Self, TranslateError> {
-        let args = spawn_args(model, reasoning_effort, system);
-        let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[], true).await?;
-
-        rpc.request(
-            "initialize",
+    let created = rpc
+        .request(
+            "session/new",
             serde_json::json!({
-                "protocolVersion": 1,
-                "clientInfo": { "name": "translator-overlay", "version": env!("CARGO_PKG_VERSION") },
-                "clientCapabilities": {
-                    "fs": { "readTextFile": false, "writeTextFile": false },
-                    "terminal": false
+                "cwd": cwd.to_string_lossy(),
+                "mcpServers": [],
+                "_meta": {
+                    "systemPromptOverride": system,
+                    "yoloMode": false
                 }
             }),
             cancel,
             timeout,
         )
         .await
-        .map_err(map_grok_rpc)?;
+        .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
 
-        let created = rpc
-            .request(
-                "session/new",
-                serde_json::json!({
-                    "cwd": cwd.to_string_lossy(),
-                    "mcpServers": [],
-                    "_meta": {
-                        "systemPromptOverride": system,
-                        "yoloMode": false
-                    }
-                }),
-                cancel,
-                timeout,
-            )
-            .await
-            .map_err(map_grok_rpc)?;
-
-        let session_id = created
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TranslateError::CliProtocol("session/new missing sessionId".into()))?
-            .to_string();
-
-        Ok(Self { rpc, session_id })
-    }
-
-    pub async fn prompt(
-        &mut self,
-        user: &str,
-        cancel: &CancellationToken,
-        timeout: Duration,
-        on_text: &mut impl FnMut(&str),
-    ) -> Result<String, TranslateError> {
-        let mut text = String::new();
-        let mut saw_tool = false;
-        self.rpc
-            .request_with_notes(
-                "session/prompt",
-                serde_json::json!({
-                    "sessionId": self.session_id,
-                    "prompt": [{ "type": "text", "text": user }]
-                }),
-                cancel,
-                timeout,
-                |method, params| {
-                    let before = text.len();
-                    collect_acp_update(method, params, &mut text, &mut saw_tool);
-                    if text.len() != before {
-                        on_text(&text);
-                    }
-                },
-            )
-            .await?;
-
-        if saw_tool {
-            return Err(TranslateError::CliProtocol("Grok session invoked a tool".into()));
-        }
-        if text.trim().is_empty() {
-            return Err(TranslateError::CliProtocol("Grok session produced no assistant text".into()));
-        }
-        Ok(text)
-    }
-
-    pub async fn cancel_turn(&mut self) {
-        let _ = self
-            .rpc
-            .notify("session/cancel", serde_json::json!({ "sessionId": self.session_id }))
-            .await;
-    }
-
-    pub async fn close(&mut self) {
-        let _ = self
-            .rpc
-            .request(
-                "session/close",
-                serde_json::json!({ "sessionId": self.session_id }),
-                &CancellationToken::new(),
-                Duration::from_secs(2),
-            )
-            .await;
-        self.rpc.kill_and_wait().await;
-    }
-
-    pub fn kill(&mut self) {
-        self.rpc.shutdown();
-    }
-}
-
-fn collect_acp_update(method: &str, params: &Value, text: &mut String, saw_tool: &mut bool) {
-    if method != "session/update" && method != "x.ai/session/update" {
-        return;
-    }
-    let update = params.get("update").unwrap_or(params);
-    let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
-    match kind {
-        "agent_message_chunk" => {
-            if let Some(chunk) = update.pointer("/content/text").and_then(Value::as_str) {
-                text.push_str(chunk);
-            } else if let Some(chunk) = update.get("content").and_then(Value::as_str) {
-                text.push_str(chunk);
-            }
-        }
-        "tool_call" | "tool_call_update" => *saw_tool = true,
-        _ => {}
-    }
+    Ok(AcpSession::new(rpc, AcpSession::id_from(&created)?, true, None))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::rpc::is_auth_failure;
 
     #[test]
     fn spawn_args_are_global_then_agent_stdio() {
@@ -219,60 +99,10 @@ mod tests {
     fn auth_failures_map_to_login_hint() {
         assert!(is_auth_failure("ACP error: auth_required"));
         assert!(is_auth_failure("authentication required"));
-        let err = map_grok_rpc(TranslateError::CliProtocol("auth_required".into()));
+        let err = map_auth_failure(TranslateError::CliProtocol("auth_required".into()), AUTH_HINT);
         assert!(err.to_string().contains("grok login"));
         assert!(err.to_string().contains("XAI_API_KEY"));
-        let other = map_grok_rpc(TranslateError::CliProtocol("session/new missing sessionId".into()));
+        let other = map_auth_failure(TranslateError::CliProtocol("session/new missing sessionId".into()), AUTH_HINT);
         assert!(!other.to_string().contains("grok login"));
-    }
-
-    #[test]
-    fn session_new_override_is_in_params() {
-        let system = "You are a translation engine.";
-        let params = serde_json::json!({
-            "cwd": "C:/tmp/iso",
-            "mcpServers": [],
-            "_meta": { "systemPromptOverride": system, "yoloMode": false }
-        });
-        assert_eq!(params["_meta"]["systemPromptOverride"], system);
-        assert_eq!(params["_meta"]["yoloMode"], false);
-        assert!(params["mcpServers"].as_array().is_some_and(Vec::is_empty));
-    }
-
-    #[test]
-    fn collects_agent_chunks_and_flags_tools() {
-        let mut text = String::new();
-        let mut saw_tool = false;
-        collect_acp_update(
-            "session/update",
-            &serde_json::json!({
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": { "type": "text", "text": "{\"b\"" }
-                }
-            }),
-            &mut text,
-            &mut saw_tool,
-        );
-        collect_acp_update(
-            "session/update",
-            &serde_json::json!({
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": { "type": "text", "text": ":[]}" }
-                }
-            }),
-            &mut text,
-            &mut saw_tool,
-        );
-        assert_eq!(text, "{\"b\":[]}");
-        assert!(!saw_tool);
-        collect_acp_update(
-            "session/update",
-            &serde_json::json!({ "update": { "sessionUpdate": "tool_call", "title": "Bash" } }),
-            &mut text,
-            &mut saw_tool,
-        );
-        assert!(saw_tool);
     }
 }

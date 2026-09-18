@@ -153,6 +153,9 @@ pub enum ModelProvider {
     OpenaiCompatible,
     /// Local Grok Build CLI over ACP stdio (`grok agent stdio`).
     GrokCli,
+    /// Local OpenCode CLI over ACP stdio (`opencode acp`).
+    #[serde(rename = "opencode_cli")]
+    OpenCodeCli,
     /// Local Codex CLI over app-server stdio (`codex app-server`).
     CodexCli,
 }
@@ -177,7 +180,7 @@ pub enum ServiceTier {
 
 impl ModelProvider {
     pub fn is_cli(self) -> bool {
-        matches!(self, Self::GrokCli | Self::CodexCli)
+        matches!(self, Self::GrokCli | Self::OpenCodeCli | Self::CodexCli)
     }
 
     /// Default executable name when `cli_path` is empty.
@@ -185,6 +188,7 @@ impl ModelProvider {
         match self {
             Self::OpenaiCompatible => "",
             Self::GrokCli => "grok",
+            Self::OpenCodeCli => "opencode",
             Self::CodexCli => "codex",
         }
     }
@@ -243,7 +247,7 @@ pub struct ApiConfig {
     pub provider: ModelProvider,
     /// HTTP endpoint style. Ignored for CLI providers.
     pub http_api: HttpApi,
-    /// Absolute path or bare command. Empty = look up `grok` / `codex` on PATH.
+    /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` on PATH.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
     /// Preferred processing tier. Ignored by providers that do not support it.
@@ -664,6 +668,21 @@ model = "my-model"
     }
 
     #[test]
+    fn provider_opencode_cli_roundtrip() {
+        let mut config = AppConfig::default();
+        config.api.provider = ModelProvider::OpenCodeCli;
+        config.api.cli_path = r"C:\tools\opencode.exe".into();
+        config.api.model = "opencode/gpt-5".into();
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("provider = \"opencode_cli\""), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.api.provider, ModelProvider::OpenCodeCli);
+        assert_eq!(parsed.api.cli_path, r"C:\tools\opencode.exe");
+        assert_eq!(parsed.api.model, "opencode/gpt-5");
+        assert!(parsed.api.provider.is_cli());
+    }
+
+    #[test]
     fn priority_service_tier_roundtrip() {
         let mut config = AppConfig::default();
         config.api.provider = ModelProvider::CodexCli;
@@ -681,6 +700,7 @@ model = "my-model"
         assert!(resolve_cli_binary(ModelProvider::OpenaiCompatible, "").is_none());
         assert!(resolve_cli_binary(ModelProvider::GrokCli, r"C:\definitely-missing\grok.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
+        assert!(resolve_cli_binary(ModelProvider::OpenCodeCli, r"Z:\no-such-opencode.exe").is_none());
     }
 
     #[test]

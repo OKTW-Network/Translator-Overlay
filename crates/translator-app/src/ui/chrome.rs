@@ -173,10 +173,13 @@ pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSna
     let cx = UiCx::new(shared, bump);
     let has_window = snap.selected_hwnd.is_some();
     let running = snap.auto_running;
-    let enabled = running || has_window;
+    let busy = snap.capture_busy;
+    let enabled = !busy && (running || has_window);
     let label = if running { "Stop" } else { "Start" };
     let glyph = if running { "\u{EE95}" } else { "\u{F5B0}" };
-    let tip = if running {
+    let tip = if busy {
+        "Waiting for capture to stop"
+    } else if running {
         "Stop continuous capture"
     } else if has_window {
         "Start continuous capture of the selected window"
@@ -222,13 +225,21 @@ pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSna
             move || {
                 {
                     let ui = cx.shared.lock();
-                    if ui.state.read().auto_running {
-                        let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
-                    } else if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
-                        let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
-                            hwnd: w.hwnd,
-                            title: w.title,
-                        });
+                    let mut s = ui.state.write();
+                    if !s.capture_busy {
+                        if s.auto_running {
+                            s.capture_busy = true;
+                            drop(s);
+                            let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+                        } else {
+                            drop(s);
+                            if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
+                                let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
+                                    hwnd: w.hwnd,
+                                    title: w.title,
+                                });
+                            }
+                        }
                     }
                 }
                 cx.refresh();
