@@ -2,11 +2,15 @@
 
 use std::{path::Path, time::Duration};
 
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     TranslateError,
-    cli::rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure},
+    cli::{
+        TempCwd,
+        rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure, models_from_session_new},
+    },
 };
 
 const AUTH_HINT: &str = "Grok CLI is not authenticated. Run `grok login` or set XAI_API_KEY.";
@@ -47,16 +51,14 @@ pub async fn connect(
     system: &str,
     cancel: &CancellationToken,
     timeout: Duration,
-) -> Result<AcpSession, TranslateError> {
+) -> Result<(AcpSession, Value), TranslateError> {
     let args = spawn_args(model, reasoning_effort, system);
     let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[], true).await?;
-
-    rpc.request("initialize", acp_initialize_params(), cancel, timeout)
-        .await
-        .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
-
-    let created = rpc
-        .request(
+    let created = async {
+        rpc.request("initialize", acp_initialize_params(), cancel, timeout)
+            .await
+            .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
+        rpc.request(
             "session/new",
             serde_json::json!({
                 "cwd": cwd.to_string_lossy(),
@@ -70,9 +72,27 @@ pub async fn connect(
             timeout,
         )
         .await
-        .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
+        .map_err(|e| map_auth_failure(e, AUTH_HINT))
+    }
+    .await;
+    match created.and_then(|created| AcpSession::id_from(&created).map(|id| (id, created))) {
+        Ok((id, created)) => Ok((AcpSession::new(rpc, id, true, None), created)),
+        Err(e) => {
+            rpc.kill_and_wait().await;
+            Err(e)
+        }
+    }
+}
 
-    Ok(AcpSession::new(rpc, AcpSession::id_from(&created)?, true, None))
+pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
+    let cwd = TempCwd::create()?;
+    let (mut session, created) = connect(program, "", None, cwd.path(), "You are a translation engine.", cancel, timeout).await?;
+    let ids = models_from_session_new(&created);
+    session.close().await;
+    if ids.is_empty() {
+        return Err(TranslateError::CliProtocol("ACP session advertised no models".into()));
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]
@@ -93,6 +113,12 @@ mod tests {
                 .any(|w| w[0] == "--system-prompt-override" && w[1] == "You are a translation engine.")
         );
         assert!(args[agent + 1..].iter().all(|a| !a.starts_with("--")));
+    }
+
+    #[test]
+    fn spawn_args_omit_empty_model() {
+        let args = spawn_args("", None, "sys");
+        assert!(args.windows(2).all(|w| w[0] != "--model"));
     }
 
     #[test]

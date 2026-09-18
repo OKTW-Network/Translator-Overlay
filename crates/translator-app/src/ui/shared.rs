@@ -5,8 +5,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
-    ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, api_profiles_path, config_path,
-    format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
+    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, api_profiles_path,
+    config_path, format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
 };
 use windows_reactor::LocalSender;
 
@@ -32,6 +32,14 @@ pub enum AppMsg {
     SelectPage(String),
     PaneOpen(bool),
     TogglePane,
+    /// Load model ids for the current API draft (`debounce` waits 400ms first).
+    FetchModelList {
+        debounce: bool,
+    },
+    ModelListDone {
+        generation: u64,
+        ids: Vec<String>,
+    },
 }
 
 /// Shared UI handle for event closures. Clone once per handler (cheap Arc bumps).
@@ -125,6 +133,11 @@ pub struct UiShared {
     pub api_profile_selected_idx: i32,
     pub api_profile_name_draft: String,
     pub api_profile_dialog: PresetDialog,
+    /// Cached model ids for the API settings AutoSuggestBox.
+    pub model_catalog: Vec<String>,
+    pub model_list_loading: bool,
+    pub model_list_fp: String,
+    pub model_list_gen: u64,
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
@@ -165,11 +178,39 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         api_profile_selected_idx: -1,
         api_profile_name_draft: String::new(),
         api_profile_dialog: PresetDialog::None,
+        model_catalog: Vec::new(),
+        model_list_loading: false,
+        model_list_fp: String::new(),
+        model_list_gen: 0,
     }));
     if let Some(msg) = preset_load_error.or(api_profile_load_error) {
         shared.lock().state.write().set_error(msg);
     }
     shared
+}
+
+fn model_list_fingerprint(api: &ApiConfig) -> String {
+    format!("{:?}\0{}\0{}\0{}", api.provider, api.base_url.trim().trim_end_matches('/'), api.cli_path.trim(), api.api_key.trim())
+}
+
+fn start_model_list(ui: &mut UiShared, bump: &LocalSender<AppMsg>, fp: String, debounce: bool) {
+    ui.model_list_gen = ui.model_list_gen.saturating_add(1);
+    ui.model_list_fp = fp;
+    ui.model_catalog.clear();
+    ui.model_list_loading = true;
+    let _ = bump.send(AppMsg::FetchModelList { debounce });
+}
+
+pub fn schedule_model_list_if_needed(ui: &mut UiShared, bump: &LocalSender<AppMsg>) {
+    let fp = model_list_fingerprint(&ui.draft.api);
+    if ui.model_list_fp == fp {
+        return;
+    }
+    start_model_list(ui, bump, fp, true);
+}
+
+pub fn request_model_list(ui: &mut UiShared, bump: &LocalSender<AppMsg>) {
+    start_model_list(ui, bump, model_list_fingerprint(&ui.draft.api), false);
 }
 
 /// Selected Dashboard preset, if the combo index is in range.

@@ -39,6 +39,26 @@ pub fn fence_user_payload(payload: &str) -> String {
     format!("{UNTRUSTED_BEGIN}\n{}\n{UNTRUSTED_END}", payload.trim())
 }
 
+fn resolve_program(api: &ApiConfig) -> Result<PathBuf, TranslateError> {
+    resolve_cli_binary(api.provider, &api.cli_path).ok_or_else(|| {
+        TranslateError::CliNotFound(if api.cli_path.trim().is_empty() {
+            api.provider.default_bin().to_string()
+        } else {
+            api.cli_path.clone()
+        })
+    })
+}
+
+pub(crate) async fn list_models(api: &ApiConfig, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
+    let program = resolve_program(api)?;
+    match api.provider {
+        ModelProvider::GrokCli => grok::list_models(&program, cancel, timeout).await,
+        ModelProvider::OpenCodeCli => opencode::list_models(&program, cancel, timeout).await,
+        ModelProvider::CodexCli => codex::list_models(&program, cancel, timeout).await,
+        ModelProvider::OpenaiCompatible => Err(TranslateError::CliProtocol("CLI model list used with HTTP provider".into())),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionPlan {
     /// Remote history already matches `messages` minus the last user turn.
@@ -266,21 +286,19 @@ impl CliBackend {
         self.close().await;
         let cwd = make_isolated_cwd()?;
         self.isolated_cwd = Some(cwd.clone());
-        let program = resolve_cli_binary(api.provider, &api.cli_path).ok_or_else(|| {
-            TranslateError::CliNotFound(if api.cli_path.trim().is_empty() {
-                api.provider.default_bin().to_string()
-            } else {
-                api.cli_path.clone()
-            })
-        })?;
+        let program = resolve_program(api)?;
         let system = cli_system_prompt(system);
         let live = match api.provider {
-            ModelProvider::GrokCli => LiveSession::Acp(
-                grok::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?,
-            ),
-            ModelProvider::OpenCodeCli => LiveSession::Acp(
-                opencode::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?,
-            ),
+            ModelProvider::GrokCli => {
+                let (session, _) =
+                    grok::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?;
+                LiveSession::Acp(session)
+            }
+            ModelProvider::OpenCodeCli => {
+                let (session, _) =
+                    opencode::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system, cancel, timeout).await?;
+                LiveSession::Acp(session)
+            }
             ModelProvider::CodexCli => {
                 LiveSession::Codex(CodexSession::connect(&program, &api.model, api.service_tier, &cwd, &system, cancel, timeout).await?)
             }
@@ -300,6 +318,26 @@ pub(crate) fn remove_dir_all_once(dir: &Path) -> Result<(), std::io::Error> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+pub(crate) struct TempCwd(PathBuf);
+
+impl TempCwd {
+    pub(crate) fn create() -> Result<Self, TranslateError> {
+        Ok(Self(make_isolated_cwd()?))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempCwd {
+    fn drop(&mut self) {
+        if let Err(e) = remove_dir_all_once(&self.0) {
+            tracing::warn!(path = %self.0.display(), error = %e, "failed to remove isolated cwd");
+        }
     }
 }
 
@@ -387,6 +425,17 @@ mod tests {
         assert!(fenced.starts_with(UNTRUSTED_BEGIN));
         assert!(fenced.ends_with(UNTRUSTED_END));
         assert!(cli_system_prompt("base").contains(UNTRUSTED_BEGIN));
+    }
+
+    #[test]
+    fn remove_dir_all_once_deletes_and_ignores_missing() {
+        let dir = std::env::temp_dir()
+            .join("translator-overlay-cli")
+            .join(format!("rm-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        remove_dir_all_once(&dir).unwrap();
+        assert!(!dir.exists());
+        remove_dir_all_once(&dir).unwrap();
     }
 
     #[test]

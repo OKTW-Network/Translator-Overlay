@@ -18,12 +18,13 @@ use crate::{
     ui::{
         chrome::{section_header, settings_card, settings_card_stack, settings_page_shell, subsection_header},
         controls::{
-            ColorPopupParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_color_popup,
-            card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row,
+            ColorPopupParams, ModelSuggestParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams,
+            card_color_popup, card_model_suggest, card_password, card_slider_number, card_text, card_toggle, optional_number_row,
+            optional_slider_row, optional_text_row,
         },
         shared::{
-            AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_api_profile, load_api_profile, mark_dirty, save_api_profiles,
-            selected_api_profile, send_overlay_display,
+            AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_api_profile, load_api_profile, mark_dirty, request_model_list,
+            save_api_profiles, schedule_model_list_if_needed, selected_api_profile, send_overlay_display,
         },
     },
 };
@@ -270,14 +271,22 @@ fn api_profile_confirm_dialog(cx: &UiCx, snap: &ApiProfileSnap) -> View {
 
 pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
-    let (api, optional, api_key_revealed, profile_snap) = {
-        let ui = shared.lock();
-        (ui.draft.api.clone(), ui.optional.clone(), ui.api_key_revealed, ApiProfileSnap {
-            names: ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
-            selected_idx: ui.api_profile_selected_idx,
-            name_draft: ui.api_profile_name_draft.clone(),
-            dialog: ui.api_profile_dialog.clone(),
-        })
+    let (api, optional, api_key_revealed, profile_snap, model_catalog, model_list_loading) = {
+        let mut ui = shared.lock();
+        schedule_model_list_if_needed(&mut ui, bump);
+        (
+            ui.draft.api.clone(),
+            ui.optional.clone(),
+            ui.api_key_revealed,
+            ApiProfileSnap {
+                names: ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
+                selected_idx: ui.api_profile_selected_idx,
+                name_draft: ui.api_profile_name_draft.clone(),
+                dialog: ui.api_profile_dialog.clone(),
+            },
+            ui.model_catalog.clone(),
+            ui.model_list_loading,
+        )
     };
 
     let provider_card = settings_card("api-provider", "Provider", Some("HTTP endpoint or a local CLI."), {
@@ -356,15 +365,44 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         ModelProvider::OpenaiCompatible => "Model name, e.g. gpt-4o-mini.",
     };
 
-    let model_card = card_text("api-model", "Model", Some(model_hint), api.model.clone(), model_placeholder, {
-        let cx = cx.clone();
-        move |v| {
-            cx.with_mut(|ui| {
-                ui.draft.api.model = v;
-                mark_dirty(ui);
-            });
-        }
-    });
+    let model_card = card_model_suggest(
+        ModelSuggestParams {
+            key: "api-model",
+            header: "Model".into(),
+            description: model_hint.into(),
+            value: api.model.clone(),
+            placeholder: model_placeholder.into(),
+            suggestions: {
+                let q = api.model.trim().to_ascii_lowercase();
+                model_catalog
+                    .iter()
+                    .filter(|id| q.is_empty() || id.to_ascii_lowercase().contains(&q))
+                    .take(40)
+                    .cloned()
+                    .collect()
+            },
+            loading: model_list_loading,
+        },
+        {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    if ui.draft.api.model == v {
+                        return;
+                    }
+                    ui.draft.api.model = v;
+                    mark_dirty(ui);
+                });
+            }
+        },
+        {
+            let cx = cx.clone();
+            move || {
+                let bump = cx.bump.clone();
+                cx.with_mut(|ui| request_model_list(ui, &bump));
+            }
+        },
+    );
 
     let priority_tier_card: View = if api.provider == ModelProvider::CodexCli {
         card_toggle(

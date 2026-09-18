@@ -17,11 +17,13 @@ use std::{
     time::Duration,
 };
 
+use tracing::warn;
+use translator_translate::list_models;
 use windows_reactor::{
-    Border, ChildrenControl, Color, Component, ComponentContext, ContentControl, Grid, GridChildExt, GridLength, HorizontalAlignment,
-    LayoutControl, LocalSender, NavigationView, NavigationViewBackButtonVisible, NavigationViewItem, NavigationViewItemSlot,
-    NavigationViewPaneDisplayMode, NavigationViewSlot, ScrollViewer, SlotView, SlotsControl, Symbol, SymbolIcon, TitleBar, TitleBarSlot,
-    VerticalAlignment, View, ViewContext, WindowBackdrop, WindowTheme, WindowTitleBarHeight, WindowVisuals,
+    Border, ChildrenControl, Color, Component, ComponentContext, ComponentTask, ContentControl, Grid, GridChildExt, GridLength,
+    HorizontalAlignment, LayoutControl, LocalSender, NavigationView, NavigationViewBackButtonVisible, NavigationViewItem,
+    NavigationViewItemSlot, NavigationViewPaneDisplayMode, NavigationViewSlot, ScrollViewer, SlotView, SlotsControl, Symbol, SymbolIcon,
+    TitleBar, TitleBarSlot, VerticalAlignment, View, ViewContext, WindowBackdrop, WindowTheme, WindowTitleBarHeight, WindowVisuals,
 };
 
 use crate::{
@@ -31,17 +33,18 @@ use crate::{
         chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
         dashboard::dashboard_page,
         settings::{api_page, ocr_page, overlay_page, translation_page},
-        shared::{AppMsg, make_shared, take_chrome},
+        shared::{AppMsg, UiShared, make_shared, take_chrome},
     },
 };
 
 /// Root WinUI component for the control window.
 pub struct AppRoot {
-    shared: Arc<parking_lot::Mutex<shared::UiShared>>,
+    shared: Arc<parking_lot::Mutex<UiShared>>,
     ping: LocalSender<AppMsg>,
     ping_rx: Arc<Mutex<Receiver<()>>>,
     page_tag: String,
     is_pane_open: bool,
+    model_list_task: Option<ComponentTask>,
 }
 
 impl AppRoot {
@@ -66,6 +69,56 @@ impl AppRoot {
     }
 }
 
+async fn run_model_list_fetch(
+    shared: Arc<parking_lot::Mutex<UiShared>>,
+    generation: u64,
+    debounce: bool,
+    wr_cancel: windows_reactor::CancellationToken,
+) -> AppMsg {
+    if debounce {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+    if wr_cancel.is_cancelled() {
+        return AppMsg::Refresh;
+    }
+    let api = {
+        let ui = shared.lock();
+        if ui.model_list_gen != generation {
+            return AppMsg::Refresh;
+        }
+        ui.draft.api.clone()
+    };
+    let tok = tokio_util::sync::CancellationToken::new();
+    let fetch = list_models(&api, &tok);
+    tokio::pin!(fetch);
+    let result = tokio::select! {
+        biased;
+        result = &mut fetch => result,
+        () = async {
+            loop {
+                if wr_cancel.is_cancelled() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        } => {
+            tok.cancel();
+            fetch.await
+        }
+    };
+    match result {
+        Ok(ids) => AppMsg::ModelListDone { generation, ids },
+        Err(e) if e.is_cancelled() => AppMsg::Refresh,
+        Err(e) => {
+            warn!(error = %e, "model list fetch failed");
+            AppMsg::ModelListDone {
+                generation,
+                ids: Vec::new(),
+            }
+        }
+    }
+}
+
 impl Component for AppRoot {
     type Input = ();
     type Message = AppMsg;
@@ -83,6 +136,7 @@ impl Component for AppRoot {
             ping_rx: Arc::new(Mutex::new(rx)),
             page_tag: String::from("dashboard"),
             is_pane_open: true,
+            model_list_task: None,
         };
         root.arm_pipeline_ping(context);
         root
@@ -99,6 +153,25 @@ impl Component for AppRoot {
             }
             AppMsg::PaneOpen(open) => self.is_pane_open = open,
             AppMsg::TogglePane => self.is_pane_open = !self.is_pane_open,
+            AppMsg::FetchModelList { debounce } => {
+                if let Some(task) = self.model_list_task.take() {
+                    task.cancel();
+                }
+                let shared = self.shared.clone();
+                let generation = shared.lock().model_list_gen;
+                let handle = tokio::runtime::Handle::current();
+                self.model_list_task = Some(
+                    context
+                        .spawn_background(move |wr_cancel| handle.block_on(run_model_list_fetch(shared, generation, debounce, wr_cancel))),
+                );
+            }
+            AppMsg::ModelListDone { generation, ids } => {
+                let mut ui = self.shared.lock();
+                if generation == ui.model_list_gen {
+                    ui.model_catalog = ids;
+                    ui.model_list_loading = false;
+                }
+            }
         }
     }
 

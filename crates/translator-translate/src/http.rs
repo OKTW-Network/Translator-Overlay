@@ -1,6 +1,10 @@
 //! OpenAI-compatible HTTP request/response types and parsers.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use translator_core::{ApiConfig, HttpApi};
 
@@ -244,6 +248,64 @@ pub fn completion_from_http_body(http_api: HttpApi, body: &str) -> Result<Comple
 fn looks_like_sse(s: &str) -> bool {
     let t = s.trim_start();
     t.starts_with("data:") || t.starts_with("event:") || t.starts_with(':')
+}
+
+/// Parse OpenAI-compatible `GET /models` JSON (`data[].id`).
+pub(crate) fn parse_openai_model_ids(body: &str) -> Result<Vec<String>, TranslateError> {
+    let value: Value = serde_json::from_str(body).map_err(|e| TranslateError::Parse(e.to_string()))?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| TranslateError::Parse("models response missing data".into()))?;
+    let ids: Vec<String> = data
+        .iter()
+        .filter_map(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .collect();
+    if ids.is_empty() {
+        return Err(TranslateError::Parse("models list is empty".into()));
+    }
+    Ok(ids)
+}
+
+pub(crate) async fn list_http_models(
+    api: &ApiConfig,
+    cancel: &CancellationToken,
+    max_wait: Duration,
+) -> Result<Vec<String>, TranslateError> {
+    let base = api.base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err(TranslateError::Other("Base URL is empty".into()));
+    }
+    let url = format!("{base}/models");
+    let mut req = reqwest::Client::new().get(&url);
+    if !api.api_key.trim().is_empty() {
+        req = req.bearer_auth(api.api_key.trim());
+    }
+    let fetch = async {
+        let response = req.send().await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(TranslateError::ApiStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        parse_openai_model_ids(&body)
+    };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(TranslateError::Cancelled),
+        result = timeout(max_wait, fetch) => {
+            result.unwrap_or_else(|_| Err(TranslateError::Other("model list timed out".into())))
+        }
+    }
 }
 
 pub(crate) async fn consume_http_response(
@@ -1170,5 +1232,27 @@ mod tests {
         assert_eq!(input[1]["summary"][0]["text"], "t");
         assert_eq!(input[2]["id"], "msg_1");
         assert_eq!(input[3]["role"], "user");
+    }
+
+    #[test]
+    fn parse_openai_model_ids_keeps_order_and_skips_empty() {
+        let body = r#"{
+            "object": "list",
+            "data": [
+                { "id": "gpt-4o-mini", "object": "model" },
+                { "id": " gpt-4o ", "object": "model" },
+                { "id": "gpt-4o-mini", "object": "model" },
+                { "id": "", "object": "model" },
+                { "object": "model" }
+            ]
+        }"#;
+        assert_eq!(parse_openai_model_ids(body).unwrap(), ["gpt-4o-mini", "gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[test]
+    fn parse_openai_model_ids_rejects_empty_or_malformed() {
+        assert!(parse_openai_model_ids(r#"{"object":"list","data":[]}"#).is_err());
+        assert!(parse_openai_model_ids(r#"{"object":"list"}"#).is_err());
+        assert!(parse_openai_model_ids("not-json").is_err());
     }
 }

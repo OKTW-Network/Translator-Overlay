@@ -16,15 +16,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, HttpApi, OcrBlock, TranslatedBlock, TranslationConfig};
+use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrBlock, TranslatedBlock, TranslationConfig};
 
 pub use crate::{
     cache::{CacheResolve, TranslationCache},
     http::{ChatMessage, ResponseItem},
 };
 use crate::{
-    cli::CliBackend,
-    http::{chat_completion_body, responses_request_body},
+    cli::{CliBackend, list_models as list_cli_models},
+    http::{chat_completion_body, list_http_models, responses_request_body},
 };
 
 #[derive(Debug, Error)]
@@ -777,6 +777,21 @@ impl TranslateClient {
                 }
                 Err(e) => return Err(e),
             }
+        }
+    }
+}
+
+const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Fetch available model ids for the current provider (HTTP `/models` or a short-lived CLI session).
+pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<Vec<String>, TranslateError> {
+    if cancel.is_cancelled() {
+        return Err(TranslateError::Cancelled);
+    }
+    match api.provider {
+        ModelProvider::OpenaiCompatible => list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await,
+        ModelProvider::GrokCli | ModelProvider::OpenCodeCli | ModelProvider::CodexCli => {
+            list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
         }
     }
 }

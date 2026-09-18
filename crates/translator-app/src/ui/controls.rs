@@ -3,9 +3,9 @@
 use translator_core::{format_argb_hex, parse_argb_hex};
 use translator_overlay::argb_channels;
 use windows_reactor::{
-    Border, Button, ButtonStyle, ChildrenControl, Color, ColorPicker, ContentControl, FontIcon, HorizontalAlignment, LayoutControl,
-    NumberBox, Orientation, PasswordBox, PasswordRevealMode, Slider, StackPanel, TextBox, ThemeBrush, Thickness, ToggleSwitch, TooltipExt,
-    VerticalAlignment, View,
+    AutoSuggestBox, Border, Button, ButtonStyle, ChildrenControl, Color, ColorPicker, ContentControl, FontIcon, HorizontalAlignment,
+    LayoutControl, NumberBox, Orientation, PasswordBox, PasswordRevealMode, ProgressRing, Slider, StackPanel, TextBox, ThemeBrush,
+    Thickness, ToggleSwitch, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::ui::chrome::{settings_card, settings_card_with_below};
@@ -38,6 +38,61 @@ pub fn card_text(
         .width(280.0)
         .vertical_alignment(VerticalAlignment::Center);
     settings_card(key, header, description, tb)
+}
+
+pub struct ModelSuggestParams {
+    pub key: &'static str,
+    pub header: String,
+    pub description: String,
+    pub value: String,
+    pub placeholder: String,
+    pub suggestions: Vec<String>,
+    pub loading: bool,
+}
+
+/// Label + AutoSuggestBox + refresh as a settings card.
+pub fn card_model_suggest(p: ModelSuggestParams, on_changed: impl Fn(String) + Clone + 'static, on_refresh: impl Fn() + 'static) -> View {
+    let suggest = AutoSuggestBox::new()
+        .text(p.value)
+        .placeholder_text(p.placeholder)
+        .items_source(p.suggestions)
+        .on_text_changed(on_changed.clone())
+        .on_suggestion_chosen(on_changed)
+        .min_width(200.0)
+        .width(280.0)
+        .vertical_alignment(VerticalAlignment::Center);
+
+    let refresh_content: View = if p.loading {
+        ProgressRing::new()
+            .is_indeterminate(true)
+            .is_active(true)
+            .width(20.0)
+            .height(20.0)
+            .into()
+    } else {
+        FontIcon::new().glyph("\u{E72C}").into()
+    };
+    let refresh = Button::new()
+        .style(ButtonStyle::Subtle)
+        .min_width(36.0)
+        .min_height(36.0)
+        .horizontal_content_alignment(HorizontalAlignment::Center)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .vertical_alignment(VerticalAlignment::Center)
+        .is_enabled(!p.loading)
+        .on_click(on_refresh)
+        .content(refresh_content)
+        .tooltip(if p.loading { "Loading model list" } else { "Reload model list" });
+
+    settings_card(
+        p.key,
+        p.header,
+        Some(p.description.as_str()),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((suggest, refresh)),
+    )
 }
 
 /// Label + password box + show/hide toggle as a settings card.

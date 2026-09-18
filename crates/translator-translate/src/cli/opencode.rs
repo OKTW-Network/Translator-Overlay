@@ -2,11 +2,15 @@
 
 use std::{fs, path::Path, time::Duration};
 
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     TranslateError,
-    cli::rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure},
+    cli::{
+        TempCwd,
+        rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure, models_from_session_new},
+    },
 };
 
 const AUTH_HINT: &str = "OpenCode CLI is not authenticated. Run `opencode auth login`.";
@@ -22,18 +26,16 @@ pub async fn connect(
     system: &str,
     cancel: &CancellationToken,
     timeout: Duration,
-) -> Result<AcpSession, TranslateError> {
+) -> Result<(AcpSession, Value), TranslateError> {
     fs::write(cwd.join("AGENTS.md"), system).map_err(|e| TranslateError::CliProtocol(format!("write isolated AGENTS.md: {e}")))?;
     fs::write(cwd.join("opencode.json"), OPENCODE_JSON)
         .map_err(|e| TranslateError::CliProtocol(format!("write isolated opencode.json: {e}")))?;
     let mut rpc = JsonRpcChild::spawn(program, &["acp".into()], cwd, &[], true).await?;
-
-    rpc.request("initialize", acp_initialize_params(), cancel, timeout)
-        .await
-        .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
-
-    let created = rpc
-        .request(
+    let created = async {
+        rpc.request("initialize", acp_initialize_params(), cancel, timeout)
+            .await
+            .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
+        rpc.request(
             "session/new",
             serde_json::json!({
                 "cwd": cwd.to_string_lossy(),
@@ -43,9 +45,16 @@ pub async fn connect(
             timeout,
         )
         .await
-        .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
-
-    let session_id = AcpSession::id_from(&created)?;
+        .map_err(|e| map_auth_failure(e, AUTH_HINT))
+    }
+    .await;
+    let (session_id, created) = match created.and_then(|created| AcpSession::id_from(&created).map(|id| (id, created))) {
+        Ok(pair) => pair,
+        Err(e) => {
+            rpc.kill_and_wait().await;
+            return Err(e);
+        }
+    };
     let mut session = AcpSession::new(rpc, session_id, false, Some((program.to_path_buf(), cwd.to_path_buf())));
 
     if !model.trim().is_empty() {
@@ -58,7 +67,18 @@ pub async fn connect(
         tracing::warn!(error = %e, "OpenCode effort option rejected; using default");
     }
 
-    Ok(session)
+    Ok((session, created))
+}
+
+pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
+    let cwd = TempCwd::create()?;
+    let (mut session, created) = connect(program, "", None, cwd.path(), "You are a translation engine.", cancel, timeout).await?;
+    let ids = models_from_session_new(&created);
+    session.close().await;
+    if ids.is_empty() {
+        return Err(TranslateError::CliProtocol("ACP session advertised no models".into()));
+    }
+    Ok(ids)
 }
 
 #[cfg(test)]

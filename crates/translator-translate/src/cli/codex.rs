@@ -9,13 +9,73 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use translator_core::ServiceTier;
 
-use crate::{TranslateError, cli::rpc::JsonRpcChild, http::translation_json_schema};
+use crate::{
+    TranslateError,
+    cli::{TempCwd, rpc::JsonRpcChild},
+    http::translation_json_schema,
+};
 
 const THREAD_SANDBOX_MODE: &str = "read-only";
 const TURN_SANDBOX_POLICY_TYPE: &str = "readOnly";
 
 pub fn spawn_args() -> Vec<String> {
     vec!["app-server".into()]
+}
+
+async fn initialize_app_server(rpc: &mut JsonRpcChild, cancel: &CancellationToken, timeout: Duration) -> Result<(), TranslateError> {
+    rpc.request(
+        "initialize",
+        serde_json::json!({
+            "clientInfo": {
+                "name": "translator-overlay",
+                "title": "Translator Overlay",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }),
+        cancel,
+        timeout,
+    )
+    .await?;
+    rpc.notify("initialized", serde_json::json!({})).await?;
+    Ok(())
+}
+
+pub(crate) fn models_from_codex_list(value: &Value) -> Vec<String> {
+    let Some(data) = value.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(|item| {
+            item.get("id")
+                .or(item.get("model"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
+    let cwd = TempCwd::create()?;
+    let codex_home = prepare_isolated_codex_home(cwd.path())?;
+    let codex_home_text = codex_home.0.to_string_lossy();
+    let mut rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd.path(), &[("CODEX_HOME", codex_home_text.as_ref())], false).await?;
+    let result = async {
+        initialize_app_server(&mut rpc, cancel, timeout).await?;
+        let page = rpc
+            .request("model/list", serde_json::json!({ "limit": 100, "includeHidden": false }), cancel, timeout)
+            .await?;
+        let ids = models_from_codex_list(&page);
+        if ids.is_empty() {
+            Err(TranslateError::CliProtocol("model/list returned no models".into()))
+        } else {
+            Ok(ids)
+        }
+    }
+    .await;
+    rpc.wait_or_kill().await;
+    result
 }
 
 pub fn thread_start_params(model: &str, cwd: &Path, system: &str, service_tier: ServiceTier) -> Value {
@@ -100,21 +160,7 @@ impl CodexSession {
         let codex_home_text = codex_home.0.to_string_lossy();
         let args = spawn_args();
         let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[("CODEX_HOME", codex_home_text.as_ref())], false).await?;
-
-        rpc.request(
-            "initialize",
-            serde_json::json!({
-                "clientInfo": {
-                    "name": "translator-overlay",
-                    "title": "Translator Overlay",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }),
-            cancel,
-            timeout,
-        )
-        .await?;
-        rpc.notify("initialized", serde_json::json!({})).await?;
+        initialize_app_server(&mut rpc, cancel, timeout).await?;
 
         let created = rpc
             .request("thread/start", thread_start_params(model, cwd, system, service_tier), cancel, timeout)
@@ -240,7 +286,6 @@ struct IsolatedCodexHome(PathBuf);
 
 impl Drop for IsolatedCodexHome {
     fn drop(&mut self) {
-        // Single attempt, no sleep: this can run on a Tokio worker.
         if let Err(e) = crate::cli::remove_dir_all_once(&self.0) {
             tracing::warn!(path = %self.0.display(), %e, "failed to remove isolated Codex home");
         }
@@ -400,5 +445,18 @@ mod tests {
         assert_eq!(extract_turn_id(&serde_json::json!({ "turn": { "id": "turn_1" } })).as_deref(), Some("turn_1"));
         assert_eq!(extract_turn_id(&serde_json::json!({ "turnId": "turn_2", "threadId": "thr" })).as_deref(), Some("turn_2"));
         assert_eq!(extract_turn_id(&serde_json::json!({ "threadId": "thr" })), None);
+    }
+
+    #[test]
+    fn models_from_codex_list_reads_id_or_model() {
+        let page = serde_json::json!({
+            "data": [
+                { "id": "gpt-5.4", "displayName": "GPT-5.4" },
+                { "model": " gpt-5.6 " },
+                { "id": "" }
+            ]
+        });
+        assert_eq!(models_from_codex_list(&page), ["gpt-5.4", "gpt-5.6"]);
+        assert!(models_from_codex_list(&serde_json::json!({ "data": [] })).is_empty());
     }
 }

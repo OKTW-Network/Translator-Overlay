@@ -1,6 +1,7 @@
 //! Newline-delimited JSON-RPC over a child process stdio.
 
 use std::{
+    collections::HashSet,
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
@@ -88,6 +89,46 @@ pub fn is_auth_failure(message: &str) -> bool {
         || m.contains("unauthor")
         || m.contains("not authenticated")
         || (m.contains("login") && (m.contains("required") || m.contains("needed") || m.contains("run")))
+}
+
+pub fn models_from_session_new(value: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(opts) = value.get("configOptions").and_then(Value::as_array) {
+        for opt in opts {
+            let id = opt.get("id").and_then(Value::as_str).unwrap_or("");
+            let category = opt.get("category").and_then(Value::as_str).unwrap_or("");
+            if id != "model" && category != "model" {
+                continue;
+            }
+            collect_select_values(opt.get("options"), &mut ids, &mut seen);
+        }
+    }
+    ids
+}
+
+fn collect_select_values(options: Option<&Value>, ids: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let Some(arr) = options.and_then(Value::as_array) else {
+        return;
+    };
+    for item in arr {
+        if let Some(value) = item.get("value").and_then(Value::as_str) {
+            push_unique(ids, seen, value);
+        }
+        if item.get("group").is_some() || item.get("options").is_some() {
+            collect_select_values(item.get("options"), ids, seen);
+        }
+    }
+}
+
+fn push_unique(ids: &mut Vec<String>, seen: &mut HashSet<String>, raw: &str) {
+    let id = raw.trim();
+    if id.is_empty() {
+        return;
+    }
+    if seen.insert(id.to_string()) {
+        ids.push(id.to_string());
+    }
 }
 
 pub fn map_auth_failure(err: TranslateError, hint: &str) -> TranslateError {
@@ -650,6 +691,46 @@ mod tests {
     fn acp_session_id_from_new() {
         assert_eq!(AcpSession::id_from(&serde_json::json!({"sessionId": "ses_1"})).unwrap(), "ses_1");
         assert!(AcpSession::id_from(&Value::Null).is_err());
+    }
+
+    #[test]
+    fn models_from_session_new_reads_flat_and_grouped_config_options() {
+        let flat = serde_json::json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "mode",
+                    "category": "mode",
+                    "options": [{ "value": "ask", "name": "Ask" }]
+                },
+                {
+                    "id": "model",
+                    "category": "model",
+                    "options": [
+                        { "value": "grok-4.6", "name": "Grok 4.6" },
+                        { "value": " grok-4.5 ", "name": "Grok 4.5" },
+                        { "value": "grok-4.6", "name": "dup" }
+                    ]
+                }
+            ]
+        });
+        assert_eq!(models_from_session_new(&flat), ["grok-4.6", "grok-4.5"]);
+
+        let grouped = serde_json::json!({
+            "configOptions": [{
+                "id": "model",
+                "options": [{
+                    "group": "recommended",
+                    "name": "Recommended",
+                    "options": [
+                        { "value": "opencode/gpt-5", "name": "GPT-5" },
+                        { "value": "anthropic/claude-sonnet-4-5", "name": "Sonnet" }
+                    ]
+                }]
+            }]
+        });
+        assert_eq!(models_from_session_new(&grouped), ["opencode/gpt-5", "anthropic/claude-sonnet-4-5"]);
+        assert!(models_from_session_new(&serde_json::json!({"sessionId": "s"})).is_empty());
     }
 
     #[test]
