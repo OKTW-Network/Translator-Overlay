@@ -16,8 +16,9 @@ use crate::{
 const AUTH_HINT: &str = "OpenCode CLI is not authenticated. Run `opencode auth login`.";
 
 /// Isolated config must be `ask` (not `deny`) so tools stay advertised and ACP can reject.
-/// Skill is denied so `<available_skills>` is omitted. Build prompt is `TRANSLATE.md`, not `AGENTS.md`.
-const OPENCODE_JSON: &str = r#"{"tools":{"skill":false},"permission":{"*":"ask"},"agent":{"build":{"prompt":"{file:./TRANSLATE.md}","permission":{"*":"ask","skill":"deny"}},"plan":{"permission":{"*":"ask","skill":"deny"}},"explore":{"permission":{"*":"ask","skill":"deny"}},"general":{"permission":{"*":"ask","skill":"deny"}}},"experimental":{"continue_loop_on_deny":true}}"#;
+/// Skill is denied so `<available_skills>` is omitted. Title agent is disabled so OpenCode
+/// does not call `small_model` for session titles. Build prompt is `TRANSLATE.md`, not `AGENTS.md`.
+const OPENCODE_JSON: &str = r#"{"tools":{"skill":false},"permission":{"*":"ask"},"agent":{"build":{"prompt":"{file:./TRANSLATE.md}","permission":{"*":"ask","skill":"deny"}},"plan":{"permission":{"*":"ask","skill":"deny"}},"explore":{"permission":{"*":"ask","skill":"deny"}},"general":{"permission":{"*":"ask","skill":"deny"}},"title":{"disable":true}},"experimental":{"continue_loop_on_deny":true}}"#;
 
 pub async fn connect(
     program: &Path,
@@ -101,6 +102,7 @@ mod tests {
         assert_eq!(v["tools"]["skill"], false);
         assert_eq!(v["permission"]["*"], "ask");
         assert_eq!(v["agent"]["build"]["prompt"], "{file:./TRANSLATE.md}");
+        assert_eq!(v["agent"]["title"]["disable"], true);
         for name in ["build", "plan", "explore", "general"] {
             assert_eq!(v["agent"][name]["permission"]["*"], "ask");
             assert_eq!(v["agent"][name]["permission"]["skill"], "deny");
