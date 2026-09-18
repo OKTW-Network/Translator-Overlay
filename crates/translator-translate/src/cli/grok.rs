@@ -9,7 +9,7 @@ use crate::{
     TranslateError,
     cli::{
         TempCwd,
-        rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure, models_from_session_new},
+        rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure, models_after_connect},
     },
 };
 
@@ -86,13 +86,8 @@ pub async fn connect(
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
     let cwd = TempCwd::create()?;
-    let (mut session, created) = connect(program, "", None, cwd.path(), "You are a translation engine.", cancel, timeout).await?;
-    let ids = models_from_session_new(&created);
-    session.close().await;
-    if ids.is_empty() {
-        return Err(TranslateError::CliProtocol("ACP session advertised no models".into()));
-    }
-    Ok(ids)
+    let (session, created) = connect(program, "", None, cwd.path(), "You are a translation engine.", cancel, timeout).await?;
+    models_after_connect(session, created).await
 }
 
 #[cfg(test)]

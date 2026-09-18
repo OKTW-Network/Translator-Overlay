@@ -21,6 +21,7 @@ use crate::{
     filter::{filter_single_char_blocks, is_single_latin_or_digit},
     merge::merge_line_blocks_with,
     models::ModelPaths,
+    reindex,
 };
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
@@ -165,7 +166,7 @@ impl OcrEngine {
         if self.filter_single_char {
             filter_single_char_blocks(blocks)
         } else {
-            reindex_ids(blocks)
+            reindex(blocks)
         }
     }
 
@@ -206,7 +207,7 @@ impl OcrEngine {
             }
             all.extend(blocks);
         }
-        Ok(reindex_ids(all))
+        Ok(reindex(all))
     }
 
     /// Run OCR on RGBA pixel buffer (e.g. capture frame).
@@ -257,13 +258,6 @@ fn rgba_to_rgb8(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage, OcrErr
         rgb.extend_from_slice(&px[..3]);
     }
     RgbImage::from_raw(width, height, rgb).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))
-}
-
-fn reindex_ids(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    for (i, b) in blocks.iter_mut().enumerate() {
-        b.id = i as u32;
-    }
-    blocks
 }
 
 fn log_gpu_once() {

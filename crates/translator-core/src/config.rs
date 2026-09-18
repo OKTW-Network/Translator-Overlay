@@ -1,14 +1,11 @@
 //! Application configuration loaded from `config.toml` next to the executable.
 
 use std::{
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
-use serde::{
-    Deserialize, Serialize, Serializer,
-    de::{self, Deserializer, Visitor},
-};
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
@@ -414,13 +411,11 @@ pub struct LineMergeConfig {
     /// Join order inside a merged group.
     pub order: LineMergeOrder,
     /// Allowed `|vertical gap|` as a fraction of frame height (paragraph mode).
-    #[serde(alias = "max_gap_ratio")]
     pub gap_ratio: f32,
     /// Allowed `|horizontal gap|` as a fraction of frame width (paragraph mode).
     pub horizontal_gap_ratio: f32,
     /// Left- or center-edge delta ≤ this × frame width counts as column-aligned.
     /// Top- or center-edge delta ≤ this × frame height counts as row-aligned.
-    #[serde(alias = "left_align_ratio")]
     pub align_ratio: f32,
     /// Allowed `|h1 − h2| / larger(h)` to treat lines as the same size.
     pub height_delta_ratio: f32,
@@ -542,27 +537,10 @@ where
 
 fn deserialize_argb_hex<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
-    D: Deserializer<'de>,
+    D: serde::Deserializer<'de>,
 {
-    struct ArgbVisitor;
-
-    impl<'de> Visitor<'de> for ArgbVisitor {
-        type Value = u32;
-
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("ARGB color as \"#AARRGGBB\"")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
-            parse_argb_hex(v).ok_or_else(|| E::custom(format!("invalid ARGB color: {v:?}")))
-        }
-
-        fn visit_string<E: de::Error>(self, v: String) -> Result<u32, E> {
-            self.visit_str(&v)
-        }
-    }
-
-    deserializer.deserialize_any(ArgbVisitor)
+    let s = String::deserialize(deserializer)?;
+    parse_argb_hex(&s).ok_or_else(|| serde::de::Error::custom(format!("invalid ARGB color: {s:?}")))
 }
 
 #[cfg(test)]
@@ -765,19 +743,19 @@ left_align_ratio = 0.05
         assert!(config.ocr.line_merge.merge_whole_region);
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
         assert!((config.ocr.line_merge.gap_ratio - 0.015).abs() < 1e-6);
-        assert!((config.ocr.line_merge.align_ratio - 0.05).abs() < 1e-6);
+        assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
         assert!(config.ocr.line_merge.join_with_space);
         assert!(config.ocr.line_merge.reject_short_long);
     }
 
     #[test]
-    fn line_merge_max_gap_ratio_alias_fills_gap_ratio() {
+    fn line_merge_max_gap_ratio_legacy_key_ignored() {
         let text = r#"
 [ocr.line_merge]
 max_gap_ratio = 0.02
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
-        assert!((config.ocr.line_merge.gap_ratio - 0.02).abs() < 1e-6);
+        assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
     }
 
     #[test]

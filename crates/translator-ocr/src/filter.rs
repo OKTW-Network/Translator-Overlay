@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 use translator_core::{OcrBlock, OcrConfig, Rect, normalize_ocr_text};
 
+use crate::reindex;
+
 /// True when `text` is a single ASCII letter or digit (e.g. `"0"`, `"V"`, `"c"`).
 ///
 /// Icons and HUD glyphs are often misread as one Latin char; real words/CJK stay.
@@ -20,13 +22,6 @@ pub fn is_single_latin_or_digit(text: &str) -> bool {
 /// Drop blocks that are only one English letter or digit.
 pub fn filter_single_char_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
     reindex(blocks.into_iter().filter(|b| !is_single_latin_or_digit(&b.text)).collect())
-}
-
-fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    for (i, b) in blocks.iter_mut().enumerate() {
-        b.id = i as u32;
-    }
-    blocks
 }
 
 /// Swap a confirmed track to a new OCR reading (text + box together).

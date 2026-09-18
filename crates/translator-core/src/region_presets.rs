@@ -1,25 +1,19 @@
 //! Named OCR region presets stored next to the executable.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{paths::PathError, types::NormRect};
+use crate::{
+    toml_file::{TomlFileError, load_toml_or_empty, save_toml},
+    types::NormRect,
+};
 
 #[derive(Debug, Error)]
 pub enum RegionPresetsError {
-    #[error("path error: {0}")]
-    Path(#[from] PathError),
-    #[error("IO error for {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
-    #[error("failed to parse region presets TOML: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("failed to serialize region presets TOML: {0}")]
-    Serialize(#[from] toml::ser::Error),
+    #[error(transparent)]
+    Toml(#[from] TomlFileError),
     #[error("{0}")]
     Invalid(String),
 }
@@ -40,31 +34,13 @@ pub struct RegionPresetFile {
 
 impl RegionPresetFile {
     pub fn load_or_empty_at(path: &Path) -> Result<Self, RegionPresetsError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let text = fs::read_to_string(path).map_err(|source| RegionPresetsError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let mut file: Self = toml::from_str(&text)?;
+        let mut file: Self = load_toml_or_empty(path)?;
         file.sanitize_in_place();
         Ok(file)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), RegionPresetsError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| RegionPresetsError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let text = toml::to_string_pretty(self)?;
-        fs::write(path, text).map_err(|source| RegionPresetsError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+        Ok(save_toml(path, self)?)
     }
 
     /// Drop invalid rects; drop presets that end up with no regions or empty names.
@@ -105,7 +81,11 @@ pub fn sanitize_regions(regions: &[NormRect]) -> Vec<NormRect> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
 

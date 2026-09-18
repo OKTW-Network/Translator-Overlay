@@ -237,11 +237,16 @@ impl ChatMessage {
 
 pub fn completion_from_http_body(http_api: HttpApi, body: &str) -> Result<Completion, TranslateError> {
     let trimmed = body.trim();
-    match (http_api, looks_like_sse(trimmed)) {
-        (HttpApi::ChatCompletions, true) => completion_from_chat_sse(trimmed),
-        (HttpApi::Responses, true) => completion_from_responses_sse(trimmed),
-        (HttpApi::ChatCompletions, false) => extract_chat_completion(trimmed),
-        (HttpApi::Responses, false) => extract_responses_completion(trimmed),
+    if looks_like_sse(trimmed) {
+        let mut acc = SseAcc::new(http_api);
+        for ev in sse_events(trimmed) {
+            acc.push(&ev)?;
+        }
+        return acc.finish();
+    }
+    match http_api {
+        HttpApi::ChatCompletions => extract_chat_completion(trimmed),
+        HttpApi::Responses => extract_responses_completion(trimmed),
     }
 }
 
@@ -347,8 +352,7 @@ async fn consume_sse_response(
     let mut raw = Vec::new();
     let mut buf = String::new();
     let mut is_sse = false;
-    let mut chat = ChatSse::default();
-    let mut responses = ResponsesSse::default();
+    let mut acc = SseAcc::new(http_api);
 
     loop {
         let chunk = tokio::select! {
@@ -367,16 +371,13 @@ async fn consume_sse_response(
         buf.push_str(&text);
         if is_sse || looks_like_sse(&buf) {
             is_sse = true;
-            push_sse_events(&mut buf, http_api, &mut chat, &mut responses, on_text, false)?;
+            push_sse_events(&mut buf, &mut acc, on_text, false)?;
         }
     }
 
     if is_sse {
-        push_sse_events(&mut buf, http_api, &mut chat, &mut responses, on_text, true)?;
-        match http_api {
-            HttpApi::ChatCompletions => chat.finish(),
-            HttpApi::Responses => responses.finish(),
-        }
+        push_sse_events(&mut buf, &mut acc, on_text, true)?;
+        acc.finish()
     } else {
         completion_from_http_body(http_api, &buf)
     }
@@ -393,24 +394,10 @@ fn take_utf8_prefix(bytes: &mut Vec<u8>) -> String {
     String::from_utf8(bytes.drain(..n).collect()).unwrap_or_default()
 }
 
-fn push_sse_events(
-    buf: &mut String,
-    http_api: HttpApi,
-    chat: &mut ChatSse,
-    responses: &mut ResponsesSse,
-    on_text: &mut impl FnMut(&str),
-    flush: bool,
-) -> Result<(), TranslateError> {
+fn push_sse_events(buf: &mut String, acc: &mut SseAcc, on_text: &mut impl FnMut(&str), flush: bool) -> Result<(), TranslateError> {
     for ev in drain_sse_events(buf, flush) {
-        let grew = match http_api {
-            HttpApi::ChatCompletions => chat.push(&ev)?,
-            HttpApi::Responses => responses.push(&ev)?,
-        };
-        if grew {
-            match http_api {
-                HttpApi::ChatCompletions => on_text(&chat.text),
-                HttpApi::Responses => on_text(&responses.delta_text),
-            }
+        if acc.push(&ev)? {
+            on_text(acc.live_text());
         }
     }
     Ok(())
@@ -545,12 +532,39 @@ fn extract_responses_value(root: &serde_json::Value) -> Result<Completion, Trans
     Ok(Completion { text, replay_items })
 }
 
-fn completion_from_chat_sse(body: &str) -> Result<Completion, TranslateError> {
-    let mut acc = ChatSse::default();
-    for ev in sse_events(body) {
-        acc.push(&ev)?;
+enum SseAcc {
+    Chat(ChatSse),
+    Responses(ResponsesSse),
+}
+
+impl SseAcc {
+    fn new(http_api: HttpApi) -> Self {
+        match http_api {
+            HttpApi::ChatCompletions => Self::Chat(ChatSse::default()),
+            HttpApi::Responses => Self::Responses(ResponsesSse::default()),
+        }
     }
-    acc.finish()
+
+    fn push(&mut self, ev: &SseEvent) -> Result<bool, TranslateError> {
+        match self {
+            Self::Chat(acc) => acc.push(ev),
+            Self::Responses(acc) => acc.push(ev),
+        }
+    }
+
+    fn live_text(&self) -> &str {
+        match self {
+            Self::Chat(acc) => &acc.text,
+            Self::Responses(acc) => &acc.delta_text,
+        }
+    }
+
+    fn finish(self) -> Result<Completion, TranslateError> {
+        match self {
+            Self::Chat(acc) => acc.finish(),
+            Self::Responses(acc) => acc.finish(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -615,14 +629,6 @@ fn apply_chat_delta(v: &serde_json::Value, text: &mut String, refusal: &mut Opti
             reasoning.push_str(&piece);
         }
     }
-}
-
-fn completion_from_responses_sse(body: &str) -> Result<Completion, TranslateError> {
-    let mut acc = ResponsesSse::default();
-    for ev in sse_events(body) {
-        acc.push(&ev)?;
-    }
-    acc.finish()
 }
 
 #[derive(Default)]

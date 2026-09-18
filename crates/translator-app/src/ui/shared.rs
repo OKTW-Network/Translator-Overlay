@@ -435,16 +435,14 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
     };
     match AppConfig::load_or_create(&path) {
         Ok(cfg) => {
+            ui.draft = cfg.clone();
             let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
-            if let Ok(c) = AppConfig::load_or_create(&path) {
-                ui.draft = c;
-                apply_optional_from_config(ui);
-                let (ta, ba) = overlay_color_strings(&ui.draft);
-                ui.text_argb_str = ta;
-                ui.bg_argb_str = ba;
-                ui.form_error = None;
-                ui.confirm = ConfirmAction::None;
-            }
+            apply_optional_from_config(ui);
+            let (ta, ba) = overlay_color_strings(&ui.draft);
+            ui.text_argb_str = ta;
+            ui.bg_argb_str = ba;
+            ui.form_error = None;
+            ui.confirm = ConfirmAction::None;
         }
         Err(e) => {
             ui.state.write().set_error(format!("Could not reload config: {e}"));

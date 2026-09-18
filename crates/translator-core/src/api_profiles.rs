@@ -1,26 +1,13 @@
 //! Named API connection profiles stored next to the executable.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-use crate::{config::ApiConfig, paths::PathError};
-
-#[derive(Debug, Error)]
-pub enum ApiProfilesError {
-    #[error("path error: {0}")]
-    Path(#[from] PathError),
-    #[error("IO error for {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
-    #[error("failed to parse API profiles TOML: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("failed to serialize API profiles TOML: {0}")]
-    Serialize(#[from] toml::ser::Error),
-}
+use crate::{
+    config::ApiConfig,
+    toml_file::{TomlFileError, load_toml_or_empty, save_toml},
+};
 
 /// One named copy of [`ApiConfig`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,32 +25,14 @@ pub struct ApiProfileFile {
 }
 
 impl ApiProfileFile {
-    pub fn load_or_empty_at(path: &Path) -> Result<Self, ApiProfilesError> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let text = fs::read_to_string(path).map_err(|source| ApiProfilesError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let mut file: Self = toml::from_str(&text)?;
+    pub fn load_or_empty_at(path: &Path) -> Result<Self, TomlFileError> {
+        let mut file: Self = load_toml_or_empty(path)?;
         file.sanitize_in_place();
         Ok(file)
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), ApiProfilesError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ApiProfilesError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let text = toml::to_string_pretty(self)?;
-        fs::write(path, text).map_err(|source| ApiProfilesError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+    pub fn save(&self, path: &Path) -> Result<(), TomlFileError> {
+        save_toml(path, self)
     }
 
     /// Trim names and drop profiles whose name is empty after trim.
@@ -77,7 +46,11 @@ impl ApiProfileFile {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
     use crate::config::{HttpApi, ModelProvider, ServiceTier};

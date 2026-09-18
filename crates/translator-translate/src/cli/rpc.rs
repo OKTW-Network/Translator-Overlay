@@ -107,6 +107,15 @@ pub fn models_from_session_new(value: &Value) -> Vec<String> {
     ids
 }
 
+pub async fn models_after_connect(mut session: AcpSession, created: Value) -> Result<Vec<String>, TranslateError> {
+    let ids = models_from_session_new(&created);
+    session.close().await;
+    if ids.is_empty() {
+        return Err(TranslateError::CliProtocol("ACP session advertised no models".into()));
+    }
+    Ok(ids)
+}
+
 fn collect_select_values(options: Option<&Value>, ids: &mut Vec<String>, seen: &mut HashSet<String>) {
     let Some(arr) = options.and_then(Value::as_array) else {
         return;

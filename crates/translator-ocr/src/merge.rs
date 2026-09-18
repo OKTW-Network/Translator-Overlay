@@ -9,17 +9,10 @@
 
 use translator_core::{LineMergeConfig, LineMergeOrder, OcrBlock, Rect};
 
-/// Default test / simple-caller frame (1080p). Production always passes the capture size.
-const DEFAULT_FRAME_W: u32 = 1920;
-const DEFAULT_FRAME_H: u32 = 1080;
+use crate::reindex;
 
 /// Scale-free slack for ratio-space compares (`px / frame` or `|d| / larger`).
 const RATIO_EPS: f32 = 1e-5;
-
-/// Merge with default config and a 1080p frame (tests / simple callers).
-pub fn merge_line_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_W, DEFAULT_FRAME_H, false)
-}
 
 /// Merge consecutive line-level OCR boxes that belong to the same paragraph.
 ///
@@ -399,16 +392,17 @@ fn join_text(a: &str, b: &str, with_space: bool) -> String {
     if with_space { format!("{a} {b}") } else { format!("{a}{b}") }
 }
 
-fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-    for (i, b) in blocks.iter_mut().enumerate() {
-        b.id = i as u32;
-    }
-    blocks
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Default test frame (1080p). Production always passes the capture size.
+    const DEFAULT_FRAME_W: u32 = 1920;
+    const DEFAULT_FRAME_H: u32 = 1080;
+
+    fn merge_line_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+        merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_W, DEFAULT_FRAME_H, false)
+    }
 
     fn line(id: u32, text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrBlock {
         OcrBlock {

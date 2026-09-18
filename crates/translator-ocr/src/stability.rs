@@ -76,10 +76,6 @@ pub struct StabilityGate {
 }
 
 impl StabilityGate {
-    pub fn new(stable_duration_ms: u64) -> Self {
-        Self::with_max_unstable(stable_duration_ms, 2_000)
-    }
-
     pub fn with_max_unstable(stable_duration_ms: u64, max_unstable_ms: u64) -> Self {
         Self {
             stable_duration: Duration::from_millis(stable_duration_ms),

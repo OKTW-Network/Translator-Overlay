@@ -9,9 +9,16 @@ mod models;
 mod stability;
 
 use thiserror::Error;
-use translator_core::PathError;
+use translator_core::{OcrBlock, PathError};
 
 pub use crate::{crop::*, download::*, engine::*, filter::*, merge::*, models::*, stability::*};
+
+pub(crate) fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.id = i as u32;
+    }
+    blocks
+}
 
 #[derive(Debug, Error)]
 pub enum OcrError {
