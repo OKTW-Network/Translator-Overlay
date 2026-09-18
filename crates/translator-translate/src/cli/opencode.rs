@@ -16,7 +16,8 @@ use crate::{
 const AUTH_HINT: &str = "OpenCode CLI is not authenticated. Run `opencode auth login`.";
 
 /// Isolated config must be `ask` (not `deny`) so tools stay advertised and ACP can reject.
-const OPENCODE_JSON: &str = r#"{"permission":{"*":"ask"},"agent":{"build":{"permission":"ask"},"plan":{"permission":"ask"},"explore":{"permission":"ask"},"general":{"permission":"ask"}},"experimental":{"continue_loop_on_deny":true}}"#;
+/// Skill is denied so `<available_skills>` is omitted. Build prompt is `TRANSLATE.md`, not `AGENTS.md`.
+const OPENCODE_JSON: &str = r#"{"tools":{"skill":false},"permission":{"*":"ask"},"agent":{"build":{"prompt":"{file:./TRANSLATE.md}","permission":{"*":"ask","skill":"deny"}},"plan":{"permission":{"*":"ask","skill":"deny"}},"explore":{"permission":{"*":"ask","skill":"deny"}},"general":{"permission":{"*":"ask","skill":"deny"}}},"experimental":{"continue_loop_on_deny":true}}"#;
 
 pub async fn connect(
     program: &Path,
@@ -27,7 +28,7 @@ pub async fn connect(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<(AcpSession, Value), TranslateError> {
-    fs::write(cwd.join("AGENTS.md"), system).map_err(|e| TranslateError::CliProtocol(format!("write isolated AGENTS.md: {e}")))?;
+    fs::write(cwd.join("TRANSLATE.md"), system).map_err(|e| TranslateError::CliProtocol(format!("write isolated TRANSLATE.md: {e}")))?;
     fs::write(cwd.join("opencode.json"), OPENCODE_JSON)
         .map_err(|e| TranslateError::CliProtocol(format!("write isolated opencode.json: {e}")))?;
     let mut rpc = JsonRpcChild::spawn(program, &["acp".into()], cwd, &[], true).await?;
@@ -97,6 +98,13 @@ mod tests {
     #[test]
     fn isolated_config_is_json() {
         let v: Value = serde_json::from_str(OPENCODE_JSON).unwrap();
+        assert_eq!(v["tools"]["skill"], false);
         assert_eq!(v["permission"]["*"], "ask");
+        assert_eq!(v["agent"]["build"]["prompt"], "{file:./TRANSLATE.md}");
+        for name in ["build", "plan", "explore", "general"] {
+            assert_eq!(v["agent"][name]["permission"]["*"], "ask");
+            assert_eq!(v["agent"][name]["permission"]["skill"], "deny");
+        }
+        assert_eq!(v["experimental"]["continue_loop_on_deny"], true);
     }
 }
