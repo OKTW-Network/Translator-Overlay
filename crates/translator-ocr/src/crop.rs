@@ -41,7 +41,7 @@ pub fn crop_to_rgb8(width: u32, height: u32, rgba: &[u8], rect: Rect) -> Option<
     let row_w = width as usize;
     for y in y0..y1 {
         let row = &rgba[(y as usize * row_w + x0 as usize) * 4..(y as usize * row_w + x1 as usize) * 4];
-        for px in row.chunks_exact(4) {
+        for px in row.as_chunks::<4>().0 {
             out.extend_from_slice(&px[..3]);
         }
     }

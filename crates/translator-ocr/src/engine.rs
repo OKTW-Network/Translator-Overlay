@@ -254,7 +254,7 @@ fn rgba_to_rgb8(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage, OcrErr
         return Err(OcrError::Image(format!("buffer too small: {} < {}", rgba.len(), expected)));
     }
     let mut rgb = Vec::with_capacity(expected / 4 * 3);
-    for px in rgba[..expected].chunks_exact(4) {
+    for px in rgba[..expected].as_chunks::<4>().0 {
         rgb.extend_from_slice(&px[..3]);
     }
     RgbImage::from_raw(width, height, rgb).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))

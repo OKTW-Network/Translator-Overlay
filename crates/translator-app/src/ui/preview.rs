@@ -57,12 +57,13 @@ fn scale_cents(scale: f32) -> u32 {
 /// D2D `create_bitmap_with_alpha` expects premultiplied BGRA8.
 fn rgba_to_premul_bgra(rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
-    if rgba.chunks_exact(4).all(|px| px[3] == 255) {
-        for px in rgba.chunks_exact(4) {
+    let (pixels, _) = rgba.as_chunks::<4>();
+    if pixels.iter().all(|px| px[3] == 255) {
+        for px in pixels {
             out.extend_from_slice(&[px[2], px[1], px[0], 255]);
         }
     } else {
-        for px in rgba.chunks_exact(4) {
+        for px in pixels {
             let a = u16::from(px[3]);
             out.extend_from_slice(&[
                 ((u16::from(px[2]) * a) / 255) as u8,
@@ -252,7 +253,7 @@ mod tests {
 
     fn reference(rgba: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             out.push((u32::from(px[2]) * u32::from(px[3]) / 255) as u8);
             out.push((u32::from(px[1]) * u32::from(px[3]) / 255) as u8);
             out.push((u32::from(px[0]) * u32::from(px[3]) / 255) as u8);
