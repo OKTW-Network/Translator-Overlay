@@ -643,8 +643,10 @@ mod tests {
         assert_visible_topmost(w.overlay, w.target, "initial focus")?;
 
         // other precedes target → predecessor_hwnd(target) == other once other is FG.
-        let _ = unsafe { SetWindowPos(w.target, Some(w.other), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+        // SetForegroundWindow raises `other`; insert target under it afterwards so
+        // extra desktop windows on CI cannot sit between them.
         let _ = unsafe { SetForegroundWindow(w.other) };
+        let _ = unsafe { SetWindowPos(w.target, Some(w.other), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
         if target_is_foreground(w.other) && predecessor_hwnd(w.target) != Some(w.other) {
             return Err("failed to place FG immediately above target".into());
         }
