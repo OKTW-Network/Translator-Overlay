@@ -82,23 +82,6 @@ cargo +nightly fmt
 cargo clippy --all-targets -- -D warnings
 ```
 
-`main` 與 PR 會跑同一套檢查（nightly `cargo fmt --check`、Windows 上 `clippy -D warnings` 與 `cargo test --workspace`）。推到 `main` 時另外會 release 建置並把 `TranslatorOverlay-*-win-x64.zip` 上傳成 workflow artifact。
-
-## 發佈
-
-1. 把 `Cargo.toml` 的 `[workspace.package] version` 改成要發的版號（例如 `0.2.0`）
-2. 合併到 `main`，等 CI 通過
-3. 打與 version 相符的 tag 並推送：
-
-```powershell
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-4. GitHub Actions 會建 `TranslatorOverlay-<version>-win-x64.zip` 並開一份 **draft** Release；檢查後在 GitHub 按 Publish
-
-tag 必須是 `v` + `Cargo.toml` 的 version，否則 release job 會失敗。
-
 ## 專案結構
 
 ```
