@@ -1,3 +1,5 @@
+<img width="960" height="200" alt="AI Slop" src="https://github.com/user-attachments/assets/9d681a9b-7548-43e6-9cff-8d01d9f00f54" />
+
 # Translator Overlay
 
 Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以可點穿覆蓋層顯示譯文。
