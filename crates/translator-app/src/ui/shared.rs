@@ -190,7 +190,7 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
 }
 
 fn model_list_fingerprint(api: &ApiConfig) -> String {
-    format!("{:?}\0{}\0{}\0{}", api.provider, api.base_url.trim().trim_end_matches('/'), api.cli_path.trim(), api.api_key.trim())
+    format!("{:?}", api.provider)
 }
 
 fn start_model_list(ui: &mut UiShared, bump: &LocalSender<AppMsg>, fp: String, debounce: bool) {
