@@ -15,10 +15,11 @@ use crate::{
 
 const AUTH_HINT: &str = "OpenCode CLI is not authenticated. Run `opencode auth login`.";
 
-/// Isolated config must be `ask` (not `deny`) so tools stay advertised and ACP can reject.
-/// Skill is denied so `<available_skills>` is omitted. Title agent is disabled so OpenCode
-/// does not call `small_model` for session titles. Build prompt is `TRANSLATE.md`, not `AGENTS.md`.
-const OPENCODE_JSON: &str = r#"{"tools":{"skill":false},"permission":{"*":"ask"},"agent":{"build":{"prompt":"{file:./TRANSLATE.md}","permission":{"*":"ask","skill":"deny"}},"plan":{"permission":{"*":"ask","skill":"deny"}},"explore":{"permission":{"*":"ask","skill":"deny"}},"general":{"permission":{"*":"ask","skill":"deny"}},"title":{"disable":true}},"experimental":{"continue_loop_on_deny":true}}"#;
+/// Isolated config stays `ask` so tools stay advertised and ACP can reject.
+/// Skill and execute are denied: that drops `<available_skills>` and the Code Mode catalog.
+/// Title agent is disabled to skip `small_model`. Build prompt is `TRANSLATE.md`, not `AGENTS.md`.
+/// `plugin` is the V1 key (OpenCode 2 maps it to `plugins`); `"-opencode.tools"` unloads that builtin.
+const OPENCODE_JSON: &str = r#"{"tools":{"skill":false,"execute":false},"permission":{"*":"ask"},"plugin":["-opencode.tools"],"agent":{"build":{"prompt":"{file:./TRANSLATE.md}","permission":{"*":"ask","skill":"deny","execute":"deny"}},"plan":{"permission":{"*":"ask","skill":"deny","execute":"deny"}},"explore":{"permission":{"*":"ask","skill":"deny","execute":"deny"}},"general":{"permission":{"*":"ask","skill":"deny","execute":"deny"}},"title":{"disable":true}},"experimental":{"continue_loop_on_deny":true}}"#;
 
 pub async fn connect(
     program: &Path,
@@ -32,7 +33,8 @@ pub async fn connect(
     fs::write(cwd.join("TRANSLATE.md"), system).map_err(|e| TranslateError::CliProtocol(format!("write isolated TRANSLATE.md: {e}")))?;
     fs::write(cwd.join("opencode.json"), OPENCODE_JSON)
         .map_err(|e| TranslateError::CliProtocol(format!("write isolated opencode.json: {e}")))?;
-    let mut rpc = JsonRpcChild::spawn(program, &["acp".into()], cwd, &[], true).await?;
+    let extra_env = [("OPENCODE_DISABLE_CLAUDE_CODE", "1"), ("OPENCODE_PURE", "1")];
+    let mut rpc = JsonRpcChild::spawn(program, &["acp".into()], cwd, &extra_env, true).await?;
     let created = async {
         rpc.request("initialize", acp_initialize_params(), cancel, timeout)
             .await
@@ -100,12 +102,15 @@ mod tests {
     fn isolated_config_is_json() {
         let v: Value = serde_json::from_str(OPENCODE_JSON).unwrap();
         assert_eq!(v["tools"]["skill"], false);
+        assert_eq!(v["tools"]["execute"], false);
         assert_eq!(v["permission"]["*"], "ask");
+        assert_eq!(v["plugin"], serde_json::json!(["-opencode.tools"]));
         assert_eq!(v["agent"]["build"]["prompt"], "{file:./TRANSLATE.md}");
         assert_eq!(v["agent"]["title"]["disable"], true);
         for name in ["build", "plan", "explore", "general"] {
             assert_eq!(v["agent"][name]["permission"]["*"], "ask");
             assert_eq!(v["agent"][name]["permission"]["skill"], "deny");
+            assert_eq!(v["agent"][name]["permission"]["execute"], "deny");
         }
         assert_eq!(v["experimental"]["continue_loop_on_deny"], true);
     }
