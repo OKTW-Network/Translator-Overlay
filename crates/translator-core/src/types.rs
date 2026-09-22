@@ -1,6 +1,6 @@
 //! Shared domain types used across crates.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 /// Axis-aligned bounding box in capture-image pixel coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,10 +94,20 @@ impl Rect {
 /// also be stored in `region-presets.toml`. Empty list means “whole window”.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NormRect {
+    #[serde(serialize_with = "serialize_f32")]
     pub x: f32,
+    #[serde(serialize_with = "serialize_f32")]
     pub y: f32,
+    #[serde(serialize_with = "serialize_f32")]
     pub width: f32,
+    #[serde(serialize_with = "serialize_f32")]
     pub height: f32,
+}
+
+/// `toml_edit` prints `f32 as f64` with the full binary expansion (`0.02` → `0.01999…`).
+fn serialize_f32<S: Serializer>(value: &f32, serializer: S) -> Result<S::Ok, S::Error> {
+    let short = value.to_string().parse::<f64>().unwrap_or(*value as f64);
+    serializer.serialize_f64(short)
 }
 
 impl NormRect {

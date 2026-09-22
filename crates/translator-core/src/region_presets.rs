@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    toml_file::{TomlFileError, load_toml_or_empty, save_toml},
+    toml_file::{TomlFileError, load_toml_or_empty, write_toml_str},
     types::NormRect,
 };
 
@@ -40,7 +40,21 @@ impl RegionPresetFile {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), RegionPresetsError> {
-        Ok(save_toml(path, self)?)
+        let mut doc = toml_edit::ser::to_document(self).map_err(TomlFileError::from)?;
+        // `to_string` keeps every preset on one line. A standard table puts `name` and `regions` on their own lines.
+        if let Some(slot) = doc.get_mut("presets") {
+            let tables = slot.as_array().filter(|array| !array.is_empty()).map(|array| {
+                array
+                    .iter()
+                    .filter_map(toml_edit::Value::as_inline_table)
+                    .map(|preset| preset.clone().into_table())
+                    .collect()
+            });
+            if let Some(tables) = tables {
+                *slot = toml_edit::Item::ArrayOfTables(tables);
+            }
+        }
+        Ok(write_toml_str(path, &doc.to_string())?)
     }
 
     /// Drop invalid rects; drop presets that end up with no regions or empty names.
@@ -105,10 +119,62 @@ mod tests {
         let mut file = RegionPresetFile::default();
         file.upsert("HUD".into(), sample_regions());
         file.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[presets]]\n"), "{text}");
+        assert!(text.contains("name = \"HUD\"\n"), "{text}");
+        assert!(text.contains("x = 0.02"), "{text}");
+        assert!(!text.contains("[[presets.regions]]"), "{text}");
+        let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
+        assert_eq!(loaded.presets.len(), 1);
+        assert_eq!(loaded.presets[0].name, "HUD");
+        assert_eq!(loaded.presets[0].regions, sanitize_regions(&sample_regions()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_array_of_tables_still_loads() {
+        let path = temp_path("legacy");
+        let _ = fs::remove_file(&path);
+        fs::write(
+            &path,
+            r#"
+[[presets]]
+name = "HUD"
+
+[[presets.regions]]
+x = 0.02
+y = 0.8
+width = 0.4
+height = 0.18
+
+[[presets.regions]]
+x = 0.7
+y = 0.05
+width = 0.28
+height = 0.12
+"#,
+        )
+        .unwrap();
         let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
         assert_eq!(loaded.presets.len(), 1);
         assert_eq!(loaded.presets[0].name, "HUD");
         assert_eq!(loaded.presets[0].regions.len(), 2);
+        let region = loaded.presets[0].regions[1];
+        assert!((region.x - 0.7).abs() < 1e-5, "{region:?}");
+        assert!((region.y - 0.05).abs() < 1e-5, "{region:?}");
+        assert!((region.width - 0.28).abs() < 1e-5, "{region:?}");
+        assert!((region.height - 0.12).abs() < 1e-5, "{region:?}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_save_writes_empty_array() {
+        let path = temp_path("empty");
+        let _ = fs::remove_file(&path);
+        RegionPresetFile::default().save(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "presets = []\n");
+        let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
+        assert!(loaded.presets.is_empty());
         let _ = fs::remove_file(&path);
     }
 

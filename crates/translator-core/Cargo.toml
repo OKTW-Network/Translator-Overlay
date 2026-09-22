@@ -8,3 +8,4 @@ bytes = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = "1.1.4"
+toml_edit = { version = "0.25", default-features = false, features = ["display", "serde"] }
