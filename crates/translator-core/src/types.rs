@@ -169,6 +169,7 @@ impl NormRect {
 /// translation cache. Does not rewrite `OcrBlock.text` sent to the model.
 ///
 /// - Fullwidth `？` / `！` fold to ASCII `?` / `!`.
+/// - Wave dash `〜` and fullwidth tilde `～` fold to ASCII `~`.
 /// - Ellipsis-length thrash (`…` / `……` / `...` / `・・・`) collapses to one `…`.
 /// - A trailing collapsed `…` is dropped unless the whole line is only `…`.
 pub fn normalize_ocr_text(s: &str) -> String {
@@ -182,6 +183,7 @@ pub fn normalize_ocr_text(s: &str) -> String {
         let c = match c {
             '？' => '?',
             '！' => '!',
+            '〜' | '～' => '~',
             other => other,
         };
         if is_unit(c) {
@@ -272,6 +274,14 @@ mod tests {
         assert_eq!(normalize_ocr_text("何?"), "何?");
         assert_eq!(normalize_ocr_text("嘘！"), "嘘!");
         assert_eq!(normalize_ocr_text("嘘!"), "嘘!");
+    }
+
+    #[test]
+    fn normalize_folds_wave_dash_and_fullwidth_tilde() {
+        assert_eq!(normalize_ocr_text("そう〜"), "そう~");
+        assert_eq!(normalize_ocr_text("そう～"), "そう~");
+        assert_eq!(normalize_ocr_text("そう~"), "そう~");
+        assert_eq!(normalize_ocr_text("1〜10"), "1~10");
     }
 
     #[test]

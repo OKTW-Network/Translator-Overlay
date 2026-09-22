@@ -535,6 +535,23 @@ mod tests {
     }
 
     #[test]
+    fn persistence_wave_dash_is_same_text() {
+        let mut f = BlockPersistenceFilter::new(50, 300);
+        let origin = block_wh("そう〜", 100.0, 200.0, 80.0, 22.0);
+        let _ = f.filter(vec![origin.clone()]);
+        std::thread::sleep(Duration::from_millis(60));
+        let confirmed = f.filter(vec![origin.clone()]);
+        assert_eq!(confirmed.len(), 1);
+        let frozen = confirmed[0].bbox;
+
+        let ascii = block_wh("そう~", 102.0, 201.0, 76.0, 20.0);
+        let out = f.filter(vec![ascii]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "そう〜");
+        assert_eq!(out[0].bbox, frozen, "〜 vs ~ must keep frozen bbox");
+    }
+
+    #[test]
     fn stacked_unmerged_lines_do_not_share_a_track() {
         // Four overlapping dialogue lines (merge off). Matching must be 1:1 per
         // frame — otherwise later lines steal earlier tracks and only the last

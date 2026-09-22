@@ -449,6 +449,15 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_ignores_wave_dash() {
+        let wave = OcrFingerprint::from_blocks(&[block("そう〜")]);
+        let full = OcrFingerprint::from_blocks(&[block("そう～")]);
+        let ascii = OcrFingerprint::from_blocks(&[block("そう~")]);
+        assert_eq!(wave, ascii);
+        assert_eq!(full, ascii);
+    }
+
+    #[test]
     fn fingerprint_changes_with_text() {
         let a = OcrFingerprint::from_blocks(&[block("a")]);
         let b = OcrFingerprint::from_blocks(&[block("b")]);

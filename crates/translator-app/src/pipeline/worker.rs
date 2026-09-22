@@ -862,6 +862,18 @@ mod tests {
     }
 
     #[test]
+    fn remap_hits_across_wave_dash() {
+        let prev_box = Rect::new(100.0, 200.0, 80.0, 22.0);
+        let jitter = Rect::new(102.0, 201.0, 76.0, 20.0);
+        let prior = [remap_translated("そう〜", "是這樣〜", prev_box)];
+        let now = [remap_ocr("そう~", jitter)];
+        let out = remap_translations_to_ocr(&prior, &now, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bbox, prev_box);
+        assert!(!translated_geometry_changed(&prior, &out));
+    }
+
+    #[test]
     fn remap_adopts_ocr_box_after_content_resize() {
         let prev_box = Rect::new(50.0, 80.0, 100.0, 20.0);
         let scaled = Rect::new(75.0, 120.0, 150.0, 30.0);
