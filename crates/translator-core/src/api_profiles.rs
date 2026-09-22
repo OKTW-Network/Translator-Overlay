@@ -31,16 +31,20 @@ impl ApiProfileFile {
         Ok(file)
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), TomlFileError> {
+    pub fn save(&mut self, path: &Path) -> Result<(), TomlFileError> {
+        self.sanitize_in_place();
         save_toml(path, self)
     }
 
-    /// Trim names and drop profiles whose name is empty after trim.
+    /// Trim names, drop profiles whose name is empty after trim, and clear fields the provider does not use.
     pub fn sanitize_in_place(&mut self) {
         self.profiles.retain_mut(|p| {
             p.name = p.name.trim().to_string();
             !p.name.is_empty()
         });
+        for profile in &mut self.profiles {
+            profile.api.blank_inapplicable();
+        }
     }
 }
 
@@ -88,33 +92,105 @@ mod tests {
     fn flatten_roundtrip_http_and_cli() {
         let path = temp_path("roundtrip");
         let _ = fs::remove_file(&path);
-        let file = ApiProfileFile {
+        let mut http = sample_http();
+        http.cli_path = r"C:\tools\leftover.exe".into();
+        http.service_tier = ServiceTier::Priority;
+        let mut cli = sample_cli();
+        cli.base_url = "https://should-not-stick.example/v1".into();
+        cli.api_key = "sk-nope".into();
+        cli.http_api = HttpApi::Responses;
+        cli.structured_outputs = false;
+        cli.stream = false;
+        cli.send_reasoning_content = false;
+        cli.temperature = Some(0.2);
+        let mut file = ApiProfileFile {
             profiles: vec![
                 ApiProfile {
                     name: "OpenAI".into(),
-                    api: sample_http(),
+                    api: http,
                 },
                 ApiProfile {
                     name: "Grok".into(),
-                    api: sample_cli(),
+                    api: cli,
+                },
+                ApiProfile {
+                    name: "Codex".into(),
+                    api: ApiConfig {
+                        provider: ModelProvider::CodexCli,
+                        cli_path: r"C:\tools\codex.exe".into(),
+                        model: "gpt-5.6".into(),
+                        service_tier: ServiceTier::Priority,
+                        base_url: "https://should-not-stick.example/v1".into(),
+                        ..ApiConfig::default()
+                    },
                 },
             ],
         };
         file.save(&path).unwrap();
 
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("name = \"OpenAI\""), "got:\n{text}");
-        assert!(text.contains("provider = \"openai_compatible\""), "got:\n{text}");
-        assert!(text.contains("api_key = \"sk-test\""), "got:\n{text}");
-        assert!(text.contains("cli_path"), "got:\n{text}");
+        let mut sections = text.split("[[profiles]]").skip(1);
+        let http_section = sections.next().expect("http profile");
+        let cli_section = sections.next().expect("cli profile");
+        let codex_section = sections.next().expect("codex profile");
+        assert!(http_section.contains("name = \"OpenAI\""), "{http_section}");
+        assert!(http_section.contains("provider = \"openai_compatible\""), "{http_section}");
+        assert!(http_section.contains("base_url = \"https://api.openai.com/v1\""), "{http_section}");
+        assert!(http_section.contains("api_key = \"sk-test\""), "{http_section}");
+        assert!(!http_section.contains("cli_path"), "{http_section}");
+        assert!(!http_section.contains("service_tier"), "{http_section}");
+        assert!(cli_section.contains("cli_path"), "{cli_section}");
+        assert!(cli_section.contains("temperature"), "{cli_section}");
+        for key in [
+            "base_url",
+            "api_key",
+            "http_api",
+            "structured_outputs",
+            "stream",
+            "send_reasoning_content",
+        ] {
+            assert!(!cli_section.contains(key), "{key}");
+        }
+        assert!(codex_section.contains("service_tier = \"priority\""), "{codex_section}");
+        assert!(!codex_section.contains("base_url"), "{codex_section}");
         assert!(!text.contains("[profiles.api]"), "flatten should not nest api:\n{text}");
 
         let loaded = ApiProfileFile::load_or_empty_at(&path).unwrap();
-        assert_eq!(loaded.profiles.len(), 2);
+        assert_eq!(loaded.profiles.len(), 3);
         assert_eq!(loaded.profiles[0].name, "OpenAI");
         assert_eq!(loaded.profiles[0].api, sample_http());
+        let mut expected_cli = sample_cli();
+        expected_cli.blank_inapplicable();
+        expected_cli.temperature = Some(0.2);
         assert_eq!(loaded.profiles[1].name, "Grok");
-        assert_eq!(loaded.profiles[1].api, sample_cli());
+        assert_eq!(loaded.profiles[1].api, expected_cli);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_blanks_legacy_cli_url_and_key() {
+        let path = temp_path("legacy");
+        let _ = fs::remove_file(&path);
+        fs::write(
+            &path,
+            r#"
+[[profiles]]
+name = "Grok"
+provider = "grok_cli"
+base_url = "https://old.example/v1"
+api_key = "sk-old"
+model = "grok-4.5"
+cli_path = "C:\\tools\\grok.exe"
+"#,
+        )
+        .unwrap();
+
+        let loaded = ApiProfileFile::load_or_empty_at(&path).unwrap();
+        assert_eq!(loaded.profiles.len(), 1);
+        assert!(loaded.profiles[0].api.base_url.is_empty());
+        assert!(loaded.profiles[0].api.api_key.is_empty());
+        assert_eq!(loaded.profiles[0].api.model, "grok-4.5");
+        assert_eq!(loaded.profiles[0].api.cli_path, r"C:\tools\grok.exe");
         let _ = fs::remove_file(&path);
     }
 

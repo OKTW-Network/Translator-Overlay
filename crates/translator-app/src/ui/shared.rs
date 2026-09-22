@@ -261,11 +261,13 @@ pub fn selected_api_profile(ui: &UiShared) -> Option<&ApiProfile> {
 
 /// Persist current in-memory API profiles to `api-profiles.toml`.
 pub fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
-    let file = ApiProfileFile {
+    let mut file = ApiProfileFile {
         profiles: ui.api_profiles.clone(),
     };
     let path = api_profiles_path().map_err(|e| format!("Could not save API profiles: {e}"))?;
-    file.save(&path).map_err(|e| format!("Could not save API profiles: {e}"))
+    file.save(&path).map_err(|e| format!("Could not save API profiles: {e}"))?;
+    ui.api_profiles = file.profiles;
+    Ok(())
 }
 
 /// Write current form API settings under `name` (exact match overwrite).

@@ -234,6 +234,15 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
+}
+
+/// `ApiConfig` defaults these flags to `true`, which is not [`bool::default`].
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// OpenAI-compatible API settings.
 ///
 /// Optional sampling parameters use `Option` so they can be omitted from HTTP
@@ -243,13 +252,17 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
 pub struct ApiConfig {
     pub provider: ModelProvider,
     /// HTTP endpoint style. Ignored for CLI providers.
+    #[serde(skip_serializing_if = "is_default")]
     pub http_api: HttpApi,
     /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` on PATH.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
     /// Preferred processing tier. Ignored by providers that do not support it.
+    #[serde(skip_serializing_if = "is_default")]
     pub service_tier: ServiceTier,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,12 +275,15 @@ pub struct ApiConfig {
     pub reasoning_effort: Option<String>,
     /// Request JSON Schema Structured Outputs on HTTP OpenAI-compatible APIs.
     /// Ignored for CLI providers. Turn off if the endpoint rejects `json_schema`.
+    #[serde(skip_serializing_if = "is_true")]
     pub structured_outputs: bool,
     /// Request SSE streaming on HTTP OpenAI-compatible APIs.
     /// Ignored for CLI providers. Turn off if the endpoint rejects `stream`.
+    #[serde(skip_serializing_if = "is_true")]
     pub stream: bool,
     /// Replay assistant `reasoning_content` on follow-up Chat Completions turns.
     /// Ignored for Responses APIs and CLI providers. Turn off if the endpoint rejects `reasoning_content`.
+    #[serde(skip_serializing_if = "is_true")]
     pub send_reasoning_content: bool,
     /// Idle timeout for HTTP reads / CLI prompts (seconds). 0 = no limit.
     pub request_timeout_secs: u64,
@@ -297,6 +313,28 @@ impl Default for ApiConfig {
             request_timeout_secs: 60,
             max_retries: 2,
             retry_backoff_ms: 500,
+        }
+    }
+}
+
+impl ApiConfig {
+    /// Clear fields the selected provider does not store on an API profile.
+    ///
+    /// `base_url` is emptied, not replaced with the localhost default, so serialization omits it.
+    pub(crate) fn blank_inapplicable(&mut self) {
+        let defaults = Self::default();
+        if self.provider.is_cli() {
+            self.http_api = defaults.http_api;
+            self.base_url.clear();
+            self.api_key.clear();
+            self.structured_outputs = defaults.structured_outputs;
+            self.stream = defaults.stream;
+            self.send_reasoning_content = defaults.send_reasoning_content;
+        } else {
+            self.cli_path.clear();
+        }
+        if self.provider != ModelProvider::CodexCli {
+            self.service_tier = defaults.service_tier;
         }
     }
 }
