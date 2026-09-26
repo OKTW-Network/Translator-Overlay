@@ -387,6 +387,8 @@ impl TranslationConfig {
 pub struct OcrConfig {
     /// PP-OCRv6 tier: tiny | small | medium
     pub model_tier: ModelTier,
+    /// Skip DirectML and run the ONNX session on CPU only.
+    pub cpu_only: bool,
     /// Directory for model files (relative to exe dir unless absolute).
     pub models_dir: String,
     pub confidence_threshold: f32,
@@ -410,6 +412,7 @@ impl Default for OcrConfig {
     fn default() -> Self {
         Self {
             model_tier: ModelTier::Small,
+            cpu_only: false,
             models_dir: "models".to_string(),
             confidence_threshold: 0.8,
             stable_duration_ms: 500,
@@ -643,7 +646,21 @@ background_color_argb = "#c8000000"
         assert!(path.exists());
         assert_eq!(config.translation.target_lang, "zh-TW");
         assert_eq!(config.ocr.model_tier, ModelTier::Small);
+        assert!(!config.ocr.cpu_only);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ocr_cpu_only_defaults_false_and_roundtrips() {
+        let omitted: AppConfig = toml::from_str("[ocr]\nmodel_tier = \"small\"\n").unwrap();
+        assert!(!omitted.ocr.cpu_only);
+
+        let mut config = AppConfig::default();
+        config.ocr.cpu_only = true;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("cpu_only = true"), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert!(parsed.ocr.cpu_only);
     }
 
     #[test]

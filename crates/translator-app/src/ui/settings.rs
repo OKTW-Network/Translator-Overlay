@@ -807,6 +807,15 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                     radio("ocr-model-tier", "medium", Some(84.0), idx == 2, pick(2)),
                 ))
         }),
+        card_toggle("ocr-cpu-only", "CPU only", Some("Skip DirectML and run OCR on the CPU. Reloads on Save."), ocr.cpu_only, {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    ui.draft.ocr.cpu_only = v;
+                    mark_dirty(ui);
+                });
+            }
+        }),
     ));
 
     let timing = StackPanel::new().spacing(4.0).children((

@@ -48,7 +48,7 @@ impl Pipeline {
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
         // Threshold / filter / merge knobs change how raw blocks are derived.
         self.last_raw_ocr = None;
-        let engine_reload = self.ocr_tier != cfg.ocr.model_tier;
+        let engine_reload = self.ocr_tier != cfg.ocr.model_tier || self.ocr_cpu_only != cfg.ocr.cpu_only;
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         let identity_changed = {
@@ -89,6 +89,7 @@ impl Pipeline {
 
         if engine_reload {
             self.ocr_tier = cfg.ocr.model_tier;
+            self.ocr_cpu_only = cfg.ocr.cpu_only;
             self.engine = None;
             self.start_model_load();
         } else if let Some(eng) = self.engine.as_mut() {
@@ -116,32 +117,34 @@ impl Pipeline {
 
     /// Start a background OCR download/load if one is not already running.
     ///
-    /// Does not cancel or replace an in-flight job. If a job for another tier is
-    /// already running, it is left alone; [`sync_model_load`] starts the desired
-    /// tier once that job finishes.
+    /// Does not cancel or replace an in-flight job. If a job for another engine
+    /// identity is already running, it is left alone; [`sync_model_load`] starts
+    /// the desired load once that job finishes.
     pub(crate) fn start_model_load(&mut self) {
-        let desired = self.state.read().config.ocr.model_tier;
+        let desired = self.state.read().config.ocr.clone();
         if let Some(job) = self.model_load.as_ref() {
-            if job.tier == desired {
-                info!(tier = ?desired, "OCR model load already in progress");
+            if (job.tier, job.cpu_only) == (desired.model_tier, desired.cpu_only) {
+                info!(tier = ?desired.model_tier, cpu_only = desired.cpu_only, "OCR model load already in progress");
             } else {
                 info!(
-                    in_flight = ?job.tier,
-                    desired = ?desired,
-                    "OCR model load already in progress for another tier; will restart after it finishes"
+                    in_flight = ?(job.tier, job.cpu_only),
+                    desired = ?(desired.model_tier, desired.cpu_only),
+                    "OCR model load already in progress for another engine; will restart after it finishes"
                 );
             }
             self.sync_model_load();
             return;
         }
 
-        let task = OcrEngine::start_load(self.state.read().config.ocr.clone());
+        let task = OcrEngine::start_load(desired);
         self.ocr_tier = task.tier;
+        self.ocr_cpu_only = task.cpu_only;
         self.model_load = Some(InflightModelLoad {
             rx: task.rx,
             tier: task.tier,
+            cpu_only: task.cpu_only,
         });
-        info!(tier = ?task.tier, "OCR model load started");
+        info!(tier = ?task.tier, cpu_only = task.cpu_only, "OCR model load started");
         self.sync_model_load();
     }
 
@@ -153,18 +156,24 @@ impl Pipeline {
         let sender_gone = job.rx.has_changed().is_err();
         let update = job.rx.borrow_and_update().clone();
         let tier = job.tier;
-        let desired = self.state.read().config.ocr.model_tier;
+        let cpu_only = job.cpu_only;
+        let desired = self.state.read().config.ocr.clone();
 
         match update {
             ModelLoadUpdate::Ready(engine) => {
                 self.model_load = None;
-                if tier != desired {
-                    info!(finished = ?tier, desired = ?desired, "discarding OCR engine for stale tier");
+                if (tier, cpu_only) != (desired.model_tier, desired.cpu_only) {
+                    info!(
+                        finished = ?(tier, cpu_only),
+                        desired = ?(desired.model_tier, desired.cpu_only),
+                        "discarding OCR engine for stale identity"
+                    );
                     self.start_model_load();
                     return;
                 }
-                info!(?tier, "OCR engine ready");
+                info!(?tier, cpu_only, "OCR engine ready");
                 self.ocr_tier = tier;
+                self.ocr_cpu_only = cpu_only;
                 self.engine = Some(engine);
                 if let Some(eng) = self.engine.as_mut() {
                     eng.apply_runtime_config(&self.state.read().config.ocr);
@@ -173,27 +182,31 @@ impl Pipeline {
             }
             ModelLoadUpdate::Failed(message) => {
                 self.model_load = None;
-                if tier != desired {
+                if (tier, cpu_only) != (desired.model_tier, desired.cpu_only) {
                     info!(
-                        finished = ?tier,
-                        desired = ?desired,
+                        finished = ?(tier, cpu_only),
+                        desired = ?(desired.model_tier, desired.cpu_only),
                         error = %message,
-                        "stale-tier OCR load failed; starting desired tier"
+                        "stale OCR load failed; starting desired engine"
                     );
                     self.start_model_load();
                     return;
                 }
-                error!(error = %message, ?tier, "OCR model load failed");
+                error!(error = %message, ?tier, cpu_only, "OCR model load failed");
                 self.state.write().set_error(format!("models: {message}"));
             }
             progress if sender_gone => {
                 self.model_load = None;
-                if tier != desired {
-                    info!(finished = ?tier, desired = ?desired, "stale-tier OCR load ended unexpectedly; starting desired tier");
+                if (tier, cpu_only) != (desired.model_tier, desired.cpu_only) {
+                    info!(
+                        finished = ?(tier, cpu_only),
+                        desired = ?(desired.model_tier, desired.cpu_only),
+                        "stale OCR load ended unexpectedly; starting desired engine"
+                    );
                     self.start_model_load();
                     return;
                 }
-                error!(?tier, status = ?progress.to_status(), "OCR model load task ended unexpectedly");
+                error!(?tier, cpu_only, status = ?progress.to_status(), "OCR model load task ended unexpectedly");
                 self.state.write().set_error("models: load task ended unexpectedly");
             }
             progress => {

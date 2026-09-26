@@ -72,6 +72,7 @@ impl ModelLoadUpdate {
 pub struct ModelLoadTask {
     pub rx: watch::Receiver<ModelLoadUpdate>,
     pub tier: ModelTier,
+    pub cpu_only: bool,
 }
 
 impl OcrEngine {
@@ -81,6 +82,7 @@ impl OcrEngine {
     /// Dropping the receiver ignores the result; the task may still finish in the background.
     pub fn start_load(config: OcrConfig) -> ModelLoadTask {
         let tier = config.model_tier;
+        let cpu_only = config.cpu_only;
         let initial = match config.models_dir_path() {
             Ok(dir) => {
                 let missing = missing_artifacts(&dir, tier);
@@ -103,7 +105,7 @@ impl OcrEngine {
             run_download_and_load(config, tx).await;
         });
 
-        ModelLoadTask { rx, tier }
+        ModelLoadTask { rx, tier, cpu_only }
     }
 }
 

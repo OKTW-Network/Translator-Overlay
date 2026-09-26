@@ -1,9 +1,6 @@
 //! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + DirectML on Windows).
 
-use std::{
-    path::Path,
-    sync::{Arc, Once},
-};
+use std::{path::Path, sync::Arc};
 
 use image::RgbImage;
 use oar_ocr::{
@@ -73,7 +70,7 @@ impl OcrEngine {
         let det = paths.det.to_string_lossy().into_owned();
         let rec = paths.rec.to_string_lossy().into_owned();
         let dict = paths.dict.to_string_lossy().into_owned();
-        let ort = OrtSessionConfig::new().with_execution_providers(default_execution_providers());
+        let ort = OrtSessionConfig::new().with_execution_providers(execution_providers(config.cpu_only));
 
         let inner = tokio::task::spawn_blocking(move || {
             OAROCRBuilder::new(det, rec, dict)
@@ -86,13 +83,12 @@ impl OcrEngine {
         .await
         .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR load task: {e}"))))?;
 
-        log_gpu_once();
-
         info!(
             det = %paths.det.display(),
             rec = %paths.rec.display(),
             dict = %paths.dict.display(),
-            "PP-OCRv6 engine loaded (oar-ocr / ONNX Runtime, DirectML→CPU)"
+            cpu_only = config.cpu_only,
+            "PP-OCRv6 engine loaded (oar-ocr / ONNX Runtime)"
         );
 
         Ok(Self {
@@ -230,9 +226,13 @@ impl OcrEngine {
     }
 }
 
-fn default_execution_providers() -> Vec<OrtExecutionProvider> {
-    // Prefer DirectML GPU on Windows; always fall back to CPU.
-    vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]
+fn execution_providers(cpu_only: bool) -> Vec<OrtExecutionProvider> {
+    if cpu_only {
+        vec![OrtExecutionProvider::CPU]
+    } else {
+        // Prefer DirectML GPU on Windows; always fall back to CPU.
+        vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]
+    }
 }
 
 fn aabb_to_rect(bb: &BoundingBox) -> Rect {
@@ -258,13 +258,6 @@ fn rgba_to_rgb8(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage, OcrErr
         rgb.extend_from_slice(&px[..3]);
     }
     RgbImage::from_raw(width, height, rgb).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))
-}
-
-fn log_gpu_once() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        info!("OCR execution providers: DirectML (device 0) → CPU fallback");
-    });
 }
 
 #[cfg(test)]
@@ -294,5 +287,11 @@ mod tests {
     fn rgba_to_rgb8_rejects_short_buffers() {
         assert!(rgba_to_rgb8(2, 1, &[0u8; 7]).is_err());
         assert!(rgba_to_rgb8(2, 1, &[0u8; 8]).is_ok());
+    }
+
+    #[test]
+    fn execution_providers_cpu_only_skips_directml() {
+        assert_eq!(execution_providers(true), vec![OrtExecutionProvider::CPU]);
+        assert_eq!(execution_providers(false), vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]);
     }
 }
