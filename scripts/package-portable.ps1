@@ -10,7 +10,6 @@
     - webgpu_dawn.dll       (WebGPU EP / Dawn)
     - dxcompiler.dll        (Dawn D3D12 shader compiler)
     - dxil.dll              (DXIL validator used with dxcompiler)
-    - DirectML.dll          (PE import from pyke Windows ORT; System32 fallback)
 
   windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
   Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
@@ -100,14 +99,6 @@ foreach ($name in $WebGpuDlls) {
     }
 }
 
-$DirectMlPath = Join-Path $ReleaseDir "DirectML.dll"
-if (-not (Test-Path -LiteralPath $DirectMlPath)) {
-    $DirectMlPath = Join-Path $env:SystemRoot "System32\DirectML.dll"
-}
-if (-not (Test-Path -LiteralPath $DirectMlPath)) {
-    throw "Missing DirectML.dll (PE import from pyke Windows ORT). Rebuild, or copy it from System32."
-}
-
 # Clean stage
 if (Test-Path -LiteralPath $StageDir) {
     Remove-Item -LiteralPath $StageDir -Recurse -Force
@@ -117,7 +108,6 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host "==> Copying runtime files..."
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-app.exe")
-Copy-Item -LiteralPath $DirectMlPath -Destination (Join-Path $StageDir "DirectML.dll")
 foreach ($name in $WebGpuDlls) {
     Copy-Item -LiteralPath (Join-Path $ReleaseDir $name) -Destination (Join-Path $StageDir $name)
 }
@@ -148,14 +138,6 @@ Get-ChildItem -LiteralPath $StageDir -Recurse -File |
         $mb = [math]::Round($_.Length / 1MB, 2)
         "  $rel  ($mb MB)"
     }
-
-$requiredSidecars = @("translator-app.exe", "DirectML.dll") + $WebGpuDlls
-foreach ($name in $requiredSidecars) {
-    $p = Join-Path $StageDir $name
-    if (-not (Test-Path -LiteralPath $p)) {
-        throw "Staging incomplete: missing $name"
-    }
-}
 
 if (Test-Path -LiteralPath $ZipPath) {
     Remove-Item -LiteralPath $ZipPath -Force
