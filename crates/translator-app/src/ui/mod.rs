@@ -6,8 +6,10 @@ mod dashboard;
 mod mica;
 mod nav_header;
 mod preview;
+mod range_step;
 mod settings;
 mod shared;
+mod xaml;
 
 use std::{
     sync::{
@@ -126,7 +128,7 @@ impl Component for AppRoot {
     fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
         restore_taskbar_zorder();
         mica::apply();
-        nav_header::apply();
+        xaml::apply();
         let (tx, rx) = std::sync::mpsc::channel();
         install_ui_ping(tx);
         let ping = context.sender();
