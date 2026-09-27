@@ -212,6 +212,7 @@ impl TranslationCache {
                     confidence: src.confidence,
                     bbox: src.bbox,
                     source_lines: src.source_lines.max(1),
+                    source_height: src.source_height.max(src.bbox.height),
                 }
             })
             .collect()
@@ -231,6 +232,7 @@ impl TranslationCache {
                     confidence: src.confidence,
                     bbox: src.bbox,
                     source_lines: src.source_lines.max(1),
+                    source_height: src.source_height.max(src.bbox.height),
                 })
             })
             .collect()
@@ -282,6 +284,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
+            source_height: 10.0,
         }
     }
 
@@ -414,6 +417,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
+            source_height: 10.0,
         }];
         let out = TranslationCache::stitch(&source, &hits, &model);
         assert_eq!(out[0].translation, "名字");
@@ -446,6 +450,7 @@ mod tests {
                 confidence: 0.9,
                 bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
                 source_lines: 1,
+                source_height: 1.0,
             },
             TranslatedBlock {
                 id: 2,
@@ -454,6 +459,7 @@ mod tests {
                 confidence: 0.9,
                 bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
                 source_lines: 1,
+                source_height: 1.0,
             },
         ];
         let mut model_ids = HashSet::new();

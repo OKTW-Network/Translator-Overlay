@@ -152,6 +152,7 @@ impl OcrEngine {
                 confidence,
                 bbox,
                 source_lines: 1,
+                source_height: bbox.height,
             });
         }
 

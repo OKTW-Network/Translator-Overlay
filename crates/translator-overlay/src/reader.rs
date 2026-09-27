@@ -353,6 +353,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
+            source_height: 10.0,
         }
     }
 

@@ -219,6 +219,9 @@ pub struct OcrBlock {
     pub bbox: Rect,
     /// Detector lines merged into this block (`1` = single line).
     pub source_lines: u32,
+    /// Vertical span of original ink (union of merged line boxes).
+    /// Equals `bbox.height` for a single line; overlay uses this as min cover height.
+    pub source_height: f32,
 }
 
 /// OCR block after translation.
@@ -231,6 +234,8 @@ pub struct TranslatedBlock {
     pub bbox: Rect,
     /// Detector lines in the source (`1` = single line; overlay may widen/shrink).
     pub source_lines: u32,
+    /// Vertical span of original ink; overlay min cover height (see [`OcrBlock::source_height`]).
+    pub source_height: f32,
 }
 
 /// PP-OCRv6 model size tier.

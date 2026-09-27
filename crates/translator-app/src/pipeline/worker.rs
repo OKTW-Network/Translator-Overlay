@@ -680,6 +680,7 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
         used[ti] = true;
         let tb = &translated[ti];
         let bbox = if content_resized { ob.bbox } else { tb.bbox };
+        let source_height = if content_resized { ob.source_height } else { tb.source_height };
         out.push(TranslatedBlock {
             id: i as u32,
             source: tb.source.clone(),
@@ -687,6 +688,7 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
             confidence: ob.confidence,
             bbox,
             source_lines: tb.source_lines.max(1),
+            source_height: source_height.max(bbox.height),
         });
     }
     out
@@ -708,7 +710,7 @@ pub(crate) fn translated_geometry_changed(previous: &[TranslatedBlock], remapped
         else {
             return true;
         };
-        if a.bbox != b.bbox {
+        if a.bbox != b.bbox || a.source_height != b.source_height {
             return true;
         }
     }
@@ -793,6 +795,7 @@ mod tests {
             confidence: 0.9,
             bbox,
             source_lines: 1,
+            source_height: bbox.height,
         }
     }
 
@@ -804,6 +807,7 @@ mod tests {
             confidence: 0.9,
             bbox,
             source_lines: 1,
+            source_height: bbox.height,
         }
     }
 

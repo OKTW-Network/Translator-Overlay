@@ -624,6 +624,7 @@ mod tests {
                 confidence: 1.0,
                 bbox: Rect::new(20.0, 20.0, 200.0, 40.0),
                 source_lines: 1,
+                source_height: 40.0,
             }],
             content_width: 400,
             content_height: 300,

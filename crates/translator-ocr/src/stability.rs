@@ -308,6 +308,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
+            source_height: 10.0,
         }
     }
 
@@ -472,6 +473,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(10.0, 10.0, 100.0, 20.0),
             source_lines: 1,
+            source_height: 20.0,
         };
         let b = OcrBlock {
             id: 0,
@@ -479,6 +481,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(14.0, 18.0, 98.0, 22.0),
             source_lines: 1,
+            source_height: 22.0,
         };
         assert_eq!(OcrFingerprint::from_blocks(&[a]), OcrFingerprint::from_blocks(&[b]));
     }

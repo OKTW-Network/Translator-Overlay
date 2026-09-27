@@ -290,6 +290,7 @@ pub fn merge_translations_detailed(source: &[OcrBlock], response_json: &str) -> 
             confidence: src.confidence,
             bbox: src.bbox,
             source_lines: src.source_lines.max(1),
+            source_height: src.source_height.max(src.bbox.height),
         });
     }
     Ok(MergeOutcome { blocks, model_ids })
@@ -892,6 +893,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let json = r#"{"b":[[1,"T1"]]}"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
@@ -1152,6 +1154,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let json = "```json\n{\"b\":[[0,\"T2\"]]}\n```";
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
@@ -1166,6 +1169,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let json = r#"Here you go: {"b": [[0, "T3"]]} Hope that helps!"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
@@ -1183,6 +1187,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let json = r#"{"b":[["2","T4"]]}"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
@@ -1194,6 +1199,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let json = r#"{"b":[[1,120]]}"#;
         let out = merge_translations_detailed(&source, json).unwrap().blocks;
@@ -1212,6 +1218,7 @@ mod tests {
                 confidence: 1.0,
                 bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
                 source_lines: 1,
+                source_height: 1.0,
             },
             OcrBlock {
                 id: 2,
@@ -1219,6 +1226,7 @@ mod tests {
                 confidence: 1.0,
                 bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
                 source_lines: 1,
+                source_height: 1.0,
             },
         ];
         let json = r#"{"b":[[1,"T"]]}"#;
@@ -1236,6 +1244,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let json = r#"[[1,"T5"]]"#;
         assert!(merge_translations_detailed(&source, json).is_err());
@@ -1251,6 +1260,7 @@ mod tests {
             confidence: 1.0,
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
+            source_height: 1.0,
         }];
         let payload = user_payload_from_blocks(&source);
         assert_eq!(payload, r#"{"b":[[0,"Hi"]]}"#);

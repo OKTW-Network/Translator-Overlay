@@ -135,6 +135,7 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
     let mut x0 = f32::MAX;
     let mut y0 = f32::MAX;
     let mut x1 = f32::MIN;
+    let mut y1 = f32::MIN;
     let mut heights: Vec<f32> = Vec::with_capacity(members.len());
 
     for (k, &idx) in members.iter().enumerate() {
@@ -148,15 +149,17 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
         x0 = x0.min(b.bbox.x);
         y0 = y0.min(b.bbox.y);
         x1 = x1.max(b.bbox.x + b.bbox.width);
+        y1 = y1.max(b.bbox.y + b.source_height.max(b.bbox.height));
         heights.push(b.bbox.height.max(1.0));
     }
     conf /= members.len() as f32;
 
-    // One-line-tall anchor: full horizontal span, median line height.
-    // Overlay expands height from measured translation text, not OCR union.
+    // One-line-tall anchor so overlay font tracks a single glyph row.
+    // `source_height` is the ink union; overlay uses it as min cover height.
     let line_h = median_f32(heights);
     let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
     let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
+    let source_height = (y1 - y0).max(line_h);
 
     OcrBlock {
         id: 0,
@@ -164,6 +167,7 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
         confidence: conf,
         bbox,
         source_lines,
+        source_height,
     }
 }
 
@@ -411,6 +415,7 @@ mod tests {
             confidence: 0.9,
             bbox: Rect::new(x, y, w, h),
             source_lines: 1,
+            source_height: h,
         }
     }
 
@@ -426,6 +431,7 @@ mod tests {
         assert_eq!(merged[0].text, "Hello world");
         assert!(merged[0].bbox.height <= 22.0, "h={}", merged[0].bbox.height);
         assert_eq!(merged[0].source_lines, 2, "merged block tracks line count");
+        assert!((merged[0].source_height - 40.0).abs() < 0.5, "cover span should be the ink union, got {}", merged[0].source_height);
     }
 
     #[test]
@@ -822,6 +828,7 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Left Right");
         assert_eq!(merged[0].source_lines, 2);
+        assert!((merged[0].source_height - 20.0).abs() < 0.5, "same-row union is ~one line, got {}", merged[0].source_height);
     }
 
     #[test]
