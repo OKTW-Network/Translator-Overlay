@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use translator_core::{
-    HttpApi, LineMergeConfig, LineMergeOrder, ModelProvider, ModelTier, READER_FONT_PX_MAX, READER_FONT_PX_MIN, ServiceTier,
+    HttpApi, LineMergeConfig, LineMergeOrder, ModelProvider, ModelTier, OcrDevice, READER_FONT_PX_MAX, READER_FONT_PX_MIN, ServiceTier,
     TRANSLATION_CACHE_MAX_CAP, TRANSLATION_CACHE_MAX_MIN,
 };
 use windows_reactor::{
     Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontWeight,
     HorizontalAlignment, LayoutControl, LocalSender, Orientation, RadioButton, StackPanel, TextBlock, TextBox, TextWrapping, ThemeBrush,
-    Thickness, TooltipExt, VerticalAlignment, View,
+    Thickness, Tooltip, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
@@ -45,6 +45,15 @@ fn radio(group: &'static str, label: &str, width: Option<f64>, checked: bool, on
         rb = rb.horizontal_alignment(HorizontalAlignment::Left);
     }
     rb.content(label)
+}
+
+fn wrap_tooltip(text: &str) -> Tooltip {
+    Tooltip::rich(
+        TextBlock::new()
+            .text(text)
+            .text_wrapping(TextWrapping::WrapWholeWords)
+            .max_width(280.0),
+    )
 }
 
 fn note(text: &str) -> TextBlock {
@@ -807,14 +816,35 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                     radio("ocr-model-tier", "medium", Some(84.0), idx == 2, pick(2)),
                 ))
         }),
-        card_toggle("ocr-cpu-only", "CPU only", Some("Skip DirectML and run OCR on the CPU. Reloads on Save."), ocr.cpu_only, {
-            let cx = cx.clone();
-            move |v| {
-                cx.with_mut(|ui| {
-                    ui.draft.ocr.cpu_only = v;
-                    mark_dirty(ui);
-                });
-            }
+        settings_card("ocr-device", "Device", Some("WebGPU is faster; CPU is more compatible. Reloads on Save."), {
+            let idx = match ocr.device {
+                OcrDevice::Webgpu => 0,
+                OcrDevice::Cpu => 1,
+            };
+            let cx_device = cx.clone();
+            let pick = move |choice: i32| {
+                let cx = cx_device.clone();
+                move || {
+                    cx.with_mut(|ui| {
+                        ui.draft.ocr.device = match choice {
+                            1 => OcrDevice::Cpu,
+                            _ => OcrDevice::Webgpu,
+                        };
+                        mark_dirty(ui);
+                    });
+                }
+            };
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(12.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((
+                    radio("ocr-device", "WebGPU", Some(84.0), idx == 0, pick(0)).tooltip_with(wrap_tooltip(
+                        "OCR on the GPU via WebGPU (Dawn / D3D12).\nFaster than CPU.\nFalls back to CPU if WebGPU fails.",
+                    )),
+                    radio("ocr-device", "CPU", Some(64.0), idx == 1, pick(1))
+                        .tooltip_with(wrap_tooltip("OCR on the CPU only.\nSlower than WebGPU.\nMore compatible if WebGPU is unavailable.")),
+                ))
         }),
     ));
 

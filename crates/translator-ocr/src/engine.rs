@@ -1,4 +1,4 @@
-//! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + DirectML on Windows).
+//! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + WebGPU on Windows).
 
 use std::{path::Path, sync::Arc};
 
@@ -10,7 +10,7 @@ use oar_ocr::{
     processors::BoundingBox,
 };
 use tracing::info;
-use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, Rect};
+use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, OcrDevice, Rect};
 
 use crate::{
     OcrError,
@@ -70,7 +70,7 @@ impl OcrEngine {
         let det = paths.det.to_string_lossy().into_owned();
         let rec = paths.rec.to_string_lossy().into_owned();
         let dict = paths.dict.to_string_lossy().into_owned();
-        let ort = OrtSessionConfig::new().with_execution_providers(execution_providers(config.cpu_only));
+        let ort = OrtSessionConfig::new().with_execution_providers(execution_providers(config.device));
 
         let inner = tokio::task::spawn_blocking(move || {
             OAROCRBuilder::new(det, rec, dict)
@@ -87,7 +87,7 @@ impl OcrEngine {
             det = %paths.det.display(),
             rec = %paths.rec.display(),
             dict = %paths.dict.display(),
-            cpu_only = config.cpu_only,
+            device = ?config.device,
             "PP-OCRv6 engine loaded (oar-ocr / ONNX Runtime)"
         );
 
@@ -226,12 +226,10 @@ impl OcrEngine {
     }
 }
 
-fn execution_providers(cpu_only: bool) -> Vec<OrtExecutionProvider> {
-    if cpu_only {
-        vec![OrtExecutionProvider::CPU]
-    } else {
-        // Prefer DirectML GPU on Windows; always fall back to CPU.
-        vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]
+fn execution_providers(device: OcrDevice) -> Vec<OrtExecutionProvider> {
+    match device {
+        OcrDevice::Cpu => vec![OrtExecutionProvider::CPU],
+        OcrDevice::Webgpu => vec![OrtExecutionProvider::WebGPU, OrtExecutionProvider::CPU],
     }
 }
 
@@ -290,8 +288,8 @@ mod tests {
     }
 
     #[test]
-    fn execution_providers_cpu_only_skips_directml() {
-        assert_eq!(execution_providers(true), vec![OrtExecutionProvider::CPU]);
-        assert_eq!(execution_providers(false), vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU]);
+    fn execution_providers_match_device() {
+        assert_eq!(execution_providers(OcrDevice::Cpu), vec![OrtExecutionProvider::CPU]);
+        assert_eq!(execution_providers(OcrDevice::Webgpu), vec![OrtExecutionProvider::WebGPU, OrtExecutionProvider::CPU]);
     }
 }

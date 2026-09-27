@@ -7,7 +7,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 ## 功能
 
 - **視窗擷取**：Windows Graphics Capture。可在目標視窗上框選多個 OCR 區域，或辨識整窗；區域可存成具名 preset
-- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
+- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
 - **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / OpenCode ACP / Codex app-server（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
 - **顯示**：點穿 in-place overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂譯文窗（拖曳移動、邊緣縮放）
@@ -21,7 +21,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 ## 快速開始
 
-1. 解壓 `TranslatorOverlay-*-win-x64.zip`（`DirectML.dll` 須與 exe 同目錄）
+1. 解壓 `TranslatorOverlay-*-win-x64.zip`（`webgpu_dawn.dll`、`dxcompiler.dll`、`dxil.dll`、`DirectML.dll` 須與 exe 同目錄）
 2. 雙擊 `translator-app.exe`
 3. **API** 頁選 Provider：
    - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
@@ -45,7 +45,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 ```
 目標視窗
   → Windows Graphics Capture
-  → PP-OCRv6（oar-ocr / ONNX + DirectML，失敗回退 CPU）
+  → PP-OCRv6（oar-ocr / ONNX + WebGPU，失敗回退 CPU）
   → 信心過濾 / 單字元過濾 / 多行合併 / block 持續追蹤
   → 穩定閘門
   → LLM 翻譯（session cache + 多輪上下文；HTTP 可串流）
@@ -62,7 +62,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 | small（預設） | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` |
 | medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt`（與 small 共用） |
 
-較小較快，較大較準。換尺寸後 **Save** 會重新載入。
+較小較快，較大較準。換尺寸或裝置後 **Save** 會重新載入。
 
 ## 從原始碼建置
 
@@ -73,7 +73,7 @@ cargo build --release -p translator-app
 .\scripts\package-portable.ps1
 ```
 
-產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（內含 `translator-app.exe`、`DirectML.dll`）。目標機器仍需 Windows App Runtime 2.4。
+產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（內含 `translator-app.exe`、`webgpu_dawn.dll`、`dxcompiler.dll`、`dxil.dll`、`DirectML.dll`）。目標機器仍需 Windows App Runtime 2.4。
 
 開發時格式與 lint：
 

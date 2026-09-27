@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
-use translator_core::{AppState, ModelTier, OcrBlock, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
+use translator_core::{AppState, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
@@ -46,7 +46,7 @@ pub(crate) struct InflightTranslate {
 pub(crate) struct InflightModelLoad {
     pub rx: watch::Receiver<ModelLoadUpdate>,
     pub tier: ModelTier,
-    pub cpu_only: bool,
+    pub device: OcrDevice,
 }
 
 #[derive(Clone)]
@@ -152,7 +152,7 @@ pub(crate) struct Pipeline {
     pub inflight: Option<InflightTranslate>,
     pub model_load: Option<InflightModelLoad>,
     pub ocr_tier: ModelTier,
-    pub ocr_cpu_only: bool,
+    pub ocr_device: OcrDevice,
     pub last_raw_ocr: Option<LastRawOcr>,
     /// Raise-on-restart offset added to frame sequences in preview state, so a
     /// renumbered stream never reuses a sequence the preview skip / UI cache saw.
@@ -179,7 +179,7 @@ impl Pipeline {
     async fn new(state: SharedState) -> Self {
         let ocr_cfg = state.read().config.ocr.clone();
         let ocr_tier = ocr_cfg.model_tier;
-        let ocr_cpu_only = ocr_cfg.cpu_only;
+        let ocr_device = ocr_cfg.device;
         let client = TranslateClient::new(state.read().config.api.clone());
         let cache_max = state.read().config.translation.cache_max_entries_clamped();
         let overlay_cfg = state.read().config.overlay.clone();
@@ -205,7 +205,7 @@ impl Pipeline {
             inflight: None,
             model_load: None,
             ocr_tier,
-            ocr_cpu_only,
+            ocr_device,
             last_raw_ocr: None,
             preview_seq_bias: 0,
             raw_empty_since: None,

@@ -7,7 +7,10 @@
   required to run a framework-dependent windows-reactor 0.100 app:
 
     - translator-app.exe
-    - DirectML.dll          (ONNX Runtime GPU EP; PE import — required next to exe)
+    - webgpu_dawn.dll       (WebGPU EP / Dawn)
+    - dxcompiler.dll        (Dawn D3D12 shader compiler)
+    - dxil.dll              (DXIL validator used with dxcompiler)
+    - DirectML.dll          (PE import from pyke Windows ORT; System32 fallback)
 
   windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
   Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
@@ -89,13 +92,20 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Missing $ExePath — run without -SkipBuild or build first."
 }
 
+$WebGpuDlls = @("webgpu_dawn.dll", "dxcompiler.dll", "dxil.dll")
+foreach ($name in $WebGpuDlls) {
+    $src = Join-Path $ReleaseDir $name
+    if (-not (Test-Path -LiteralPath $src)) {
+        throw "Missing $name in $ReleaseDir (required by the ONNX Runtime WebGPU EP)."
+    }
+}
+
 $DirectMlPath = Join-Path $ReleaseDir "DirectML.dll"
 if (-not (Test-Path -LiteralPath $DirectMlPath)) {
-    throw @"
-Missing DirectML.dll in $ReleaseDir (required PE dependency for oar-ocr / DirectML).
-Rebuild: cargo build -p translator-app --release
-ort-sys should copy DirectML.dll next to the exe when the `directml` feature is on.
-"@
+    $DirectMlPath = Join-Path $env:SystemRoot "System32\DirectML.dll"
+}
+if (-not (Test-Path -LiteralPath $DirectMlPath)) {
+    throw "Missing DirectML.dll (PE import from pyke Windows ORT). Rebuild, or copy it from System32."
 }
 
 # Clean stage
@@ -108,6 +118,9 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Write-Host "==> Copying runtime files..."
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-app.exe")
 Copy-Item -LiteralPath $DirectMlPath -Destination (Join-Path $StageDir "DirectML.dll")
+foreach ($name in $WebGpuDlls) {
+    Copy-Item -LiteralPath (Join-Path $ReleaseDir $name) -Destination (Join-Path $StageDir $name)
+}
 
 $packReadme = @"
 # Translator Overlay $Version (portable)
@@ -136,10 +149,7 @@ Get-ChildItem -LiteralPath $StageDir -Recurse -File |
         "  $rel  ($mb MB)"
     }
 
-$requiredSidecars = @(
-    "translator-app.exe",
-    "DirectML.dll"
-)
+$requiredSidecars = @("translator-app.exe", "DirectML.dll") + $WebGpuDlls
 foreach ($name in $requiredSidecars) {
     $p = Join-Path $StageDir $name
     if (-not (Test-Path -LiteralPath $p)) {

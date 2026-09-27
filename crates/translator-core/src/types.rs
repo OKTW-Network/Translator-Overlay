@@ -243,6 +243,17 @@ pub enum ModelTier {
     Medium,
 }
 
+/// ONNX Runtime device for the OCR session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrDevice {
+    /// WebGPU execution provider (Dawn / D3D12 on Windows), with CPU fallback.
+    #[default]
+    Webgpu,
+    /// CPU execution provider only.
+    Cpu,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
