@@ -1,4 +1,4 @@
-//! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + WebGPU on Windows).
+//! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
 
 use std::{path::Path, sync::Arc};
 
@@ -230,6 +230,7 @@ fn execution_providers(device: OcrDevice) -> Vec<OrtExecutionProvider> {
     match device {
         OcrDevice::Cpu => vec![OrtExecutionProvider::CPU],
         OcrDevice::Webgpu => vec![OrtExecutionProvider::WebGPU, OrtExecutionProvider::CPU],
+        OcrDevice::Directml => vec![OrtExecutionProvider::DirectML { device_id: Some(0) }, OrtExecutionProvider::CPU],
     }
 }
 
@@ -291,5 +292,9 @@ mod tests {
     fn execution_providers_match_device() {
         assert_eq!(execution_providers(OcrDevice::Cpu), vec![OrtExecutionProvider::CPU]);
         assert_eq!(execution_providers(OcrDevice::Webgpu), vec![OrtExecutionProvider::WebGPU, OrtExecutionProvider::CPU]);
+        assert_eq!(execution_providers(OcrDevice::Directml), vec![
+            OrtExecutionProvider::DirectML { device_id: Some(0) },
+            OrtExecutionProvider::CPU
+        ]);
     }
 }

@@ -816,10 +816,11 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                     radio("ocr-model-tier", "medium", Some(84.0), idx == 2, pick(2)),
                 ))
         }),
-        settings_card("ocr-device", "Device", Some("WebGPU is faster; CPU is more compatible. Reloads on Save."), {
+        settings_card("ocr-device", "Device", Some("GPU (WebGPU or DirectML) is faster; CPU is more compatible. Reloads on Save."), {
             let idx = match ocr.device {
                 OcrDevice::Webgpu => 0,
-                OcrDevice::Cpu => 1,
+                OcrDevice::Directml => 1,
+                OcrDevice::Cpu => 2,
             };
             let cx_device = cx.clone();
             let pick = move |choice: i32| {
@@ -827,7 +828,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 move || {
                     cx.with_mut(|ui| {
                         ui.draft.ocr.device = match choice {
-                            1 => OcrDevice::Cpu,
+                            1 => OcrDevice::Directml,
+                            2 => OcrDevice::Cpu,
                             _ => OcrDevice::Webgpu,
                         };
                         mark_dirty(ui);
@@ -840,10 +842,14 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
                     radio("ocr-device", "WebGPU", Some(84.0), idx == 0, pick(0)).tooltip_with(wrap_tooltip(
-                        "OCR on the GPU via WebGPU (Dawn / D3D12).\nFaster than CPU.\nFalls back to CPU if WebGPU fails.",
+                        "OCR on the GPU via WebGPU (Dawn / D3D12).\nFaster than CPU; often faster than DirectML on Intel.\nFalls back to CPU if WebGPU fails.",
                     )),
-                    radio("ocr-device", "CPU", Some(64.0), idx == 1, pick(1))
-                        .tooltip_with(wrap_tooltip("OCR on the CPU only.\nSlower than WebGPU.\nMore compatible if WebGPU is unavailable.")),
+                    radio("ocr-device", "DirectML", Some(96.0), idx == 1, pick(1)).tooltip_with(wrap_tooltip(
+                        "OCR on the GPU via DirectML (D3D12).\nMay be faster than WebGPU on NVIDIA/AMD.\nFalls back to CPU if DirectML fails.",
+                    )),
+                    radio("ocr-device", "CPU", Some(64.0), idx == 2, pick(2)).tooltip_with(wrap_tooltip(
+                        "OCR on the CPU only.\nSlower than GPU.\nMore compatible if WebGPU and DirectML are unavailable.",
+                    )),
                 ))
         }),
     ));

@@ -250,6 +250,8 @@ pub enum OcrDevice {
     /// WebGPU execution provider (Dawn / D3D12 on Windows), with CPU fallback.
     #[default]
     Webgpu,
+    /// DirectML execution provider (D3D12), with CPU fallback.
+    Directml,
     /// CPU execution provider only.
     Cpu,
 }

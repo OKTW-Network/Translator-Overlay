@@ -662,6 +662,12 @@ background_color_argb = "#c8000000"
         assert!(!text.contains("cpu_only"), "got:\n{text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.ocr.device, OcrDevice::Cpu);
+
+        config.ocr.device = OcrDevice::Directml;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("device = \"directml\""), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.ocr.device, OcrDevice::Directml);
     }
 
     #[test]

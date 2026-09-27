@@ -10,8 +10,10 @@ models/
 Thumbs.db
 config.toml
 !crates/**/config.toml
+!.cargo/config.toml
 region-presets.toml
 api-profiles.toml
 .idea/
 .vscode/
 *.pdb
+/third_party/

@@ -7,6 +7,8 @@
   required to run a framework-dependent windows-reactor 0.100 app:
 
     - translator-app.exe
+    - onnxruntime.dll       (custom ORT with DirectML + WebGPU)
+    - DirectML.dll          (DirectML EP)
     - webgpu_dawn.dll       (WebGPU EP / Dawn)
     - dxcompiler.dll        (Dawn D3D12 shader compiler)
     - dxil.dll              (DXIL validator used with dxcompiler)
@@ -91,11 +93,11 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Missing $ExePath — run without -SkipBuild or build first."
 }
 
-$WebGpuDlls = @("webgpu_dawn.dll", "dxcompiler.dll", "dxil.dll")
-foreach ($name in $WebGpuDlls) {
+$SidecarDlls = @("onnxruntime.dll", "DirectML.dll", "webgpu_dawn.dll", "dxcompiler.dll", "dxil.dll")
+foreach ($name in $SidecarDlls) {
     $src = Join-Path $ReleaseDir $name
     if (-not (Test-Path -LiteralPath $src)) {
-        throw "Missing $name in $ReleaseDir (required by the ONNX Runtime WebGPU EP)."
+        throw "Missing $name in $ReleaseDir (required by the ONNX Runtime DirectML/WebGPU build)."
     }
 }
 
@@ -108,7 +110,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host "==> Copying runtime files..."
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-app.exe")
-foreach ($name in $WebGpuDlls) {
+foreach ($name in $SidecarDlls) {
     Copy-Item -LiteralPath (Join-Path $ReleaseDir $name) -Destination (Join-Path $StageDir $name)
 }
 

@@ -12,11 +12,34 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  ort:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v4
+        with:
+          path: third_party/onnxruntime-win-x64
+          key: ort-${{ hashFiles('scripts/build-onnxruntime.ps1') }}
+      - name: Build ONNX Runtime
+        shell: pwsh
+        run: .\scripts\build-onnxruntime.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: onnxruntime-win-x64
+          path: third_party/onnxruntime-win-x64
+          if-no-files-found: error
+
   release:
+    needs: ort
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: onnxruntime-win-x64
+          path: third_party/onnxruntime-win-x64
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
