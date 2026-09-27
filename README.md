@@ -66,7 +66,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 ## 從原始碼建置
 
-需要 Rust 1.95+（edition 2024）與 Visual Studio 2022 Build Tools。第一次先自建 ONNX Runtime 1.28（DirectML + WebGPU）：
+需要 Rust 1.95+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.28（DirectML + WebGPU）：
 
 ```powershell
 .\scripts\build-onnxruntime.ps1

@@ -105,7 +105,7 @@ try {
         "--build_shared_lib",
         "--client_package_build",
         "--compile_no_warning_as_error",
-        "--cmake_generator", "Visual Studio 17 2022",
+        "--cmake_generator", "Visual Studio 18 2026",
         "--build_dir", (Join-Path $SourceDir "build"),
         "--targets", "onnxruntime",
         "--cmake_extra_defines",
