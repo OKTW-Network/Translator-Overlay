@@ -5,20 +5,37 @@ mod pipeline;
 mod taskbar_guard;
 mod ui;
 
-use std::sync::{Arc, OnceLock};
+use std::{
+    env,
+    os::windows::ffi::OsStrExt,
+    process,
+    sync::{Arc, OnceLock},
+};
 
 use parking_lot::RwLock;
 use tracing::{error, info};
 use translator_core::{AppConfig, AppState, config_path};
+use windows::{
+    Win32::{
+        System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW},
+        UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
+    },
+    core::PCWSTR,
+};
 use windows_reactor::App;
 
-use crate::pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline};
+use crate::{
+    pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline},
+    ui::AppRoot,
+};
 
 /// Process-wide handles for the UI (set before `App::run_component`).
 pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
+    add_portable_lib_dir();
+
     // Must run before any HWND is created (pipeline spawns the overlay window).
     // Otherwise GetClientRect / ClientToScreen stay in a mismatched DPI space
     // vs Graphics Capture physical pixels → overlay position/size drift.
@@ -56,20 +73,34 @@ async fn main() {
     // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
     // `block_on`s this future on that thread — do not move render off-thread.
     // 0.100 inlines WASDK framework bootstrap (no Bootstrap.dll / setup crate).
-    let result = App::run_component::<crate::ui::AppRoot>(());
+    let result = App::run_component::<AppRoot>(());
 
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
     let _ = pipeline.await;
 
     if let Err(e) = result {
         error!(error = %e, "App::run_component failed");
-        std::process::exit(1);
+        process::exit(1);
     }
+}
+
+/// Load `lib/onnxruntime.dll` next to the exe (WinUI ships another copy).
+fn add_portable_lib_dir() {
+    let Some(lib) = env::current_exe().ok().and_then(|exe| {
+        let lib = exe.parent()?.join("lib");
+        lib.is_dir().then_some(lib)
+    }) else {
+        return;
+    };
+    let dir: Vec<u16> = lib.as_os_str().encode_wide().chain([0]).collect();
+    let dll: Vec<u16> = lib.join("onnxruntime.dll").as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: null-terminated paths; LoadLibrary handle leaked so ORT stays mapped.
+    let _ = unsafe { SetDllDirectoryW(PCWSTR(dir.as_ptr())) };
+    let _ = unsafe { LoadLibraryW(PCWSTR(dll.as_ptr())) };
 }
 
 /// Per-monitor DPI v2 so Win32 client rects match capture / overlay pixels.
 fn enable_per_monitor_dpi_v2() {
-    use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
     // SAFETY: process-wide, no windows yet; failure is non-fatal (already set).
     let ok = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     if ok.is_err() {

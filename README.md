@@ -21,7 +21,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 ## 快速開始
 
-1. 解壓 `TranslatorOverlay-*-win-x64.zip`（`onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`、`dxil.dll` 須與 exe 同目錄）
+1. 解壓 `TranslatorOverlay-*-win-x64.zip`（OCR 用的 DLL 在 `lib/`）
 2. 雙擊 `translator-app.exe`
 3. **API** 頁選 Provider：
    - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
@@ -74,7 +74,7 @@ cargo build --release -p translator-app
 .\scripts\package-portable.ps1
 ```
 
-產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（內含 `translator-app.exe`、`onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`、`dxil.dll`）。目標機器仍需 Windows App Runtime 2.4。
+產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（`translator-app.exe` 與 `lib/` 內的 `onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`、`dxil.dll`）。目標機器仍需 Windows App Runtime 2.4。
 
 開發時格式與 lint：
 

@@ -7,11 +7,11 @@
   required to run a framework-dependent windows-reactor 0.100 app:
 
     - translator-app.exe
-    - onnxruntime.dll       (custom ORT with DirectML + WebGPU)
-    - DirectML.dll          (DirectML EP)
-    - webgpu_dawn.dll       (WebGPU EP / Dawn)
-    - dxcompiler.dll        (Dawn D3D12 shader compiler)
-    - dxil.dll              (DXIL validator used with dxcompiler)
+    - lib/onnxruntime.dll       (custom ORT with DirectML + WebGPU)
+    - lib/DirectML.dll          (DirectML EP)
+    - lib/webgpu_dawn.dll       (WebGPU EP / Dawn)
+    - lib/dxcompiler.dll        (Dawn D3D12 shader compiler)
+    - lib/dxil.dll              (DXIL validator used with dxcompiler)
 
   windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
   Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
@@ -110,8 +110,10 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Host "==> Copying runtime files..."
 Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-app.exe")
+$LibDir = Join-Path $StageDir "lib"
+New-Item -ItemType Directory -Force -Path $LibDir | Out-Null
 foreach ($name in $SidecarDlls) {
-    Copy-Item -LiteralPath (Join-Path $ReleaseDir $name) -Destination (Join-Path $StageDir $name)
+    Copy-Item -LiteralPath (Join-Path $ReleaseDir $name) -Destination (Join-Path $LibDir $name)
 }
 
 $packReadme = @"
@@ -129,7 +131,7 @@ $packReadme = @"
 2. Double-click translator-app.exe
 3. Configure API key in the UI and Save.
 
-config.toml and models/ are created next to the executable on first run.
+OCR DLLs live in lib/. config.toml and models/ are created next to the executable on first run.
 "@
 Set-Content -LiteralPath (Join-Path $StageDir "README.txt") -Value $packReadme -Encoding utf8
 
