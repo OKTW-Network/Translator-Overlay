@@ -34,7 +34,7 @@ pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
-    add_portable_lib_dir();
+    load_onnxruntime();
 
     // Must run before any HWND is created (pipeline spawns the overlay window).
     // Otherwise GetClientRect / ClientToScreen stay in a mismatched DPI space
@@ -84,18 +84,25 @@ async fn main() {
     }
 }
 
-/// Load `lib/onnxruntime.dll` next to the exe (WinUI ships another copy).
-fn add_portable_lib_dir() {
-    let Some(lib) = env::current_exe().ok().and_then(|exe| {
-        let lib = exe.parent()?.join("lib");
-        lib.is_dir().then_some(lib)
+/// Load our ORT before WinUI maps Windows App Runtime's copy.
+fn load_onnxruntime() {
+    let Some(dir) = env::current_exe().ok().and_then(|exe| {
+        let dir = exe.parent()?;
+        let lib = dir.join("lib");
+        if lib.join("onnxruntime.dll").is_file() {
+            Some(lib)
+        } else if dir.join("onnxruntime.dll").is_file() {
+            Some(dir.to_path_buf())
+        } else {
+            None
+        }
     }) else {
         return;
     };
-    let dir: Vec<u16> = lib.as_os_str().encode_wide().chain([0]).collect();
-    let dll: Vec<u16> = lib.join("onnxruntime.dll").as_os_str().encode_wide().chain([0]).collect();
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let dll: Vec<u16> = dir.join("onnxruntime.dll").as_os_str().encode_wide().chain([0]).collect();
     // SAFETY: null-terminated paths; LoadLibrary handle leaked so ORT stays mapped.
-    let _ = unsafe { SetDllDirectoryW(PCWSTR(dir.as_ptr())) };
+    let _ = unsafe { SetDllDirectoryW(PCWSTR(wide.as_ptr())) };
     let _ = unsafe { LoadLibraryW(PCWSTR(dll.as_ptr())) };
 }
 
