@@ -341,18 +341,28 @@ impl JsonRpcChild {
     async fn auto_handle(&mut self, incoming: Incoming) -> Result<(), TranslateError> {
         match incoming {
             Incoming::ServerRequest { id, method, params } => {
-                tracing::warn!(method, params = %params, "denying CLI server request");
+                tracing::warn!(method, "denying CLI server request");
+                // Codex translation exposes no client tools or auth lifecycle. In particular,
+                // account/chatgptAuthTokens/refresh must never receive an ACP permission result.
+                if !self.include_jsonrpc {
+                    return self
+                        .write_message(serde_json::json!({
+                            "id": id,
+                            "error": { "code": -32601, "message": "Client method not supported" }
+                        }))
+                        .await;
+                }
                 let result = deny_permission_result(&method, &params);
                 self.write_message(rpc_result(self.include_jsonrpc, id, result)).await
             }
-            Incoming::Notification { method, params } => {
+            Incoming::Notification { method, .. } => {
                 if is_permission_method(&method) {
-                    tracing::warn!(method, params = %params, "ignoring CLI permission notification");
+                    tracing::warn!(method, "ignoring CLI permission notification");
                 }
                 Ok(())
             }
-            Incoming::Response { id, result } => {
-                tracing::debug!(%id, ?result, "dropped unmatched CLI response");
+            Incoming::Response { id, .. } => {
+                tracing::debug!(%id, "dropped unmatched CLI response");
                 Ok(())
             }
         }
@@ -693,7 +703,8 @@ mod tests {
         let agent = args.iter().position(|a| a == "agent").expect("agent");
         assert_eq!(args.get(agent + 1).map(String::as_str), Some("stdio"));
         let args = codex::spawn_args();
-        assert_eq!(args, ["app-server"]);
+        assert_eq!(args[0], "app-server");
+        assert!(args.contains(&"project_doc_max_bytes=0".into()));
     }
 
     #[test]
