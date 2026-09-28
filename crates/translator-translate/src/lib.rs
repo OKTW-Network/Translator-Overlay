@@ -1,4 +1,4 @@
-//! Translation client: OpenAI-compatible HTTP or long-lived Grok/OpenCode/Codex CLI sessions.
+//! Translation client: OpenAI-compatible HTTP or long-lived Grok/OpenCode/Codex/Claude Code CLI sessions.
 
 mod cache;
 mod cli;
@@ -791,7 +791,7 @@ pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<
     }
     match api.provider {
         ModelProvider::OpenaiCompatible => list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await,
-        ModelProvider::GrokCli | ModelProvider::OpenCodeCli | ModelProvider::CodexCli => {
+        ModelProvider::GrokCli | ModelProvider::OpenCodeCli | ModelProvider::CodexCli | ModelProvider::ClaudeCli => {
             list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
         }
     }

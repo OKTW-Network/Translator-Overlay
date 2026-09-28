@@ -8,7 +8,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 - **視窗擷取**：Windows Graphics Capture。可在目標視窗上框選多個 OCR 區域，或辨識整窗；區域可存成具名 preset
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU 或 DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
-- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / OpenCode ACP / Codex app-server（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
+- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / OpenCode ACP / Codex app-server / Claude Code stream-json（只 append 新 turn）。串流時 overlay 與譯文窗會隨每個 block 即時更新
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
 - **顯示**：點穿 in-place overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂譯文窗（拖曳移動、邊緣縮放）
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名 profile（Save / Load，與區域 preset 相同）
@@ -25,10 +25,11 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 2. 雙擊 `translator-app.exe`
 3. **API** 頁選 Provider：
    - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
-   - **Grok CLI** / **OpenCode CLI** / **Codex CLI**：本機 `grok` / `opencode` / `codex`
+   - **Grok CLI** / **OpenCode CLI** / **Codex CLI** / **Claude Code**：本機 `grok` / `opencode` / `codex` / `claude`
      - Codex CLI 需 **0.154.0 或更新版本**，使用你自己的既有 CLI 登入與方案額度。本程式不讀取、複製、保存、刷新或轉送原生登入 token；登入、token 儲存與更新完全由 Codex 管理。需要登入時請自行在終端執行 `codex login`。
      - Codex 翻譯停用專案 AGENTS、自訂 instructions、skills、memory、MCP、plugins 與 hooks，並使用暫存工作目錄、ephemeral thread 及 read-only sandbox。隔離檢查失敗就停止，不送出 OCR。
      - **全域 AGENTS 限制**：已驗證的 Codex 0.154.0 沒有關閉原生 home 中 `AGENTS.md`／`AGENTS.override.md` 的開關。載入 `AGENTS.override.md` 時只記 warning 並繼續翻譯，其內容仍會進入 context；一般 `AGENTS.md` 或其他非預期來源則會拒絕翻譯。本程式不改動你的文件或改用另一份登入憑證。較新版本也必須通過其餘隔離檢查。
+     - Claude Code 使用你自己的登入與方案額度（`claude auth login`），本程式不讀取、不保存、不轉送登入憑證。Reasoning effort 填 `none` 可關閉 thinking
    - **Profile**：把目前連線設定存成具名 profile（`api-profiles.toml`）。**Load** 填入表單，再按頁面 **Save** 套用
 4. **Save**
 5. **Dashboard** 選視窗 → 左側導覽底部 **Start**
@@ -95,5 +96,5 @@ crates/
   translator-core        # 設定、路徑、區域 preset、共用型別
   translator-ocr         # PP-OCRv6、下載、穩定閘門、過濾、合併
   translator-overlay     # 點穿覆蓋層、區域選取、譯文窗
-  translator-translate   # HTTP / Grok ACP / OpenCode ACP / Codex app-server、session cache
+  translator-translate   # HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code、session cache
 ```
