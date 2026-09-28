@@ -86,22 +86,6 @@ cargo +nightly fmt
 cargo clippy --all-targets -- -D warnings
 ```
 
-Codex 整合驗證（需已安裝 CLI；`codex_cli_smoke` 會使用既有登入與方案額度）：
-
-```powershell
-cargo test -p translator-translate
-cargo test -p translator-translate codex_context_isolation -- --ignored --nocapture
-cargo test -p translator-translate codex_cli_smoke -- --ignored --nocapture
-```
-
-`codex_context_isolation` 使用無憑證的合成 home 與無需驗證的 loopback provider，檢查實際模型輸入、一般全域 AGENTS 拒絕、override 例外可翻譯、MCP／hooks 未執行。`codex_cli_smoke` 經正式 backend 驗證模型清單、兩輪繁中串流、thread 重用與取消後重建；預設使用 CLI 清單的第一個模型，也可設定 `CODEX_SMOKE_MODEL`。
-
-驗證基準為 Codex 0.154.0。該版仍會宣告內建 `apply_patch`，因此 read-only sandbox 與工具事件拒絕不可移除。`AGENTS.override.md` 是明確允許的隔離例外，不能宣稱其內容已被排除。登入與協定依據：[App Server](https://learn.chatgpt.com/docs/app-server)、[config schema](https://developers.openai.com/codex/config-schema.json)、[0.154.0 全域 instructions loader](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/codex-home/src/instructions/mod.rs)；這些技術驗證不構成 ToS 合規判定。
-
-2026-09-28 Windows 本地驗證：Codex 0.154.0、`gpt-6-astra`、原生清單 6 個模型；兩輪繁中 JSON 的 block ID 與串流、同一 ephemeral thread 重用、取消後新 thread 翻譯均通過，未出現工具事件。合成環境的實際 HTTP 模型輸入確認一般個人標記被排除、允許的 override 標記保留，且 MCP／hooks 未執行。翻譯 crate 測試 94 passed／3 ignored；兩項需本地 CLI 的測試另外執行通過。
-
-同次 `cargo +nightly fmt` 及 `cargo clippy --all-targets -- -D warnings` 通過，Clippy 零警告。因本機缺少專案預設 ONNX Runtime SDK，Clippy 的程序環境使用 `ORT_LIB_PATH=target/codex-check-sdk/onnxruntime-win-x64-1.28.2/lib`（官方 CPU SDK，已核對 release SHA256）；僅供靜態檢查，未變更正式打包的 DirectML／WebGPU SDK 設定，也未驗證 OCR 執行。
-
 ## 專案結構
 
 ```
