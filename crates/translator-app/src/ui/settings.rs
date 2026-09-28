@@ -71,6 +71,7 @@ fn provider_label(provider: ModelProvider) -> &'static str {
         ModelProvider::GrokCli => "Grok CLI",
         ModelProvider::OpenCodeCli => "OpenCode CLI",
         ModelProvider::CodexCli => "Codex CLI",
+        ModelProvider::ClaudeCli => "Claude Code",
     }
 }
 
@@ -304,6 +305,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             ModelProvider::GrokCli => 1,
             ModelProvider::OpenCodeCli => 2,
             ModelProvider::CodexCli => 3,
+            ModelProvider::ClaudeCli => 4,
         };
         let cx_p = cx.clone();
         let pick = move |choice: i32| {
@@ -314,6 +316,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                         1 => ModelProvider::GrokCli,
                         2 => ModelProvider::OpenCodeCli,
                         3 => ModelProvider::CodexCli,
+                        4 => ModelProvider::ClaudeCli,
                         _ => ModelProvider::OpenaiCompatible,
                     };
                     mark_dirty(ui);
@@ -329,6 +332,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 radio("api-provider", provider_label(ModelProvider::GrokCli), Some(96.0), idx == 1, pick(1)),
                 radio("api-provider", provider_label(ModelProvider::OpenCodeCli), Some(128.0), idx == 2, pick(2)),
                 radio("api-provider", provider_label(ModelProvider::CodexCli), Some(104.0), idx == 3, pick(3)),
+                radio("api-provider", provider_label(ModelProvider::ClaudeCli), Some(120.0), idx == 4, pick(4)),
             ))
     });
 
@@ -366,10 +370,12 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         ModelProvider::GrokCli => "grok-4.5",
         ModelProvider::OpenCodeCli => "opencode/gpt-5",
         ModelProvider::CodexCli => "gpt-5.6",
+        ModelProvider::ClaudeCli => "sonnet",
         ModelProvider::OpenaiCompatible => "gpt-4o-mini",
     };
     let model_hint = match api.provider {
         ModelProvider::OpenCodeCli => "Model id as provider/model, e.g. opencode/gpt-5.",
+        ModelProvider::ClaudeCli => "Alias (sonnet, haiku, opus) or full model id. Empty = Claude Code default.",
         ModelProvider::GrokCli | ModelProvider::CodexCli => "Model id passed to the local CLI.",
         ModelProvider::OpenaiCompatible => "Model name, e.g. gpt-4o-mini.",
     };
@@ -440,7 +446,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             card_text(
                 "api-cli-path",
                 "CLI path",
-                Some("Leave empty to use grok / opencode / codex on PATH. Uses your existing CLI login."),
+                Some("Leave empty to use grok / opencode / codex / claude on PATH. Uses your existing CLI login."),
                 api.cli_path.clone(),
                 api.provider.default_bin(),
                 {
