@@ -26,6 +26,9 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 3. **API** 頁選 Provider：
    - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
    - **Grok CLI** / **OpenCode CLI** / **Codex CLI** / **Claude Code**：本機 `grok` / `opencode` / `codex` / `claude`
+     - Codex CLI 需 **0.154.0 或更新版本**，使用你自己的既有 CLI 登入與方案額度。本程式不讀取、複製、保存、刷新或轉送原生登入 token；登入、token 儲存與更新完全由 Codex 管理。需要登入時請自行在終端執行 `codex login`。
+     - Codex 翻譯停用專案 AGENTS、自訂 instructions、skills、memory、MCP、plugins 與 hooks，並使用暫存工作目錄、ephemeral thread 及 read-only sandbox。隔離檢查失敗就停止，不送出 OCR。
+     - **全域 AGENTS 限制**：已驗證的 Codex 0.154.0 沒有關閉原生 home 中 `AGENTS.md`／`AGENTS.override.md` 的開關。載入 `AGENTS.override.md` 時只記 warning 並繼續翻譯，其內容仍會進入 context；一般 `AGENTS.md` 或其他非預期來源則會拒絕翻譯。本程式不改動你的文件或改用另一份登入憑證。較新版本也必須通過其餘隔離檢查。
      - Claude Code 使用你自己的登入與方案額度（`claude auth login`），本程式不讀取、不保存、不轉送登入憑證。Reasoning effort 填 `none` 可關閉 thinking
    - **Profile**：把目前連線設定存成具名 profile（`api-profiles.toml`）。**Load** 填入表單，再按頁面 **Save** 套用
 4. **Save**

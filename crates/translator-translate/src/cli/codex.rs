@@ -1,9 +1,7 @@
-//! Codex app-server client (`codex app-server` over stdio).
+//! Codex owns its native login, storage and refresh. This client never handles credentials.
+//! Translation context is isolated through app-server settings, not a replacement CODEX_HOME.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -15,123 +13,164 @@ use crate::{
     http::translation_json_schema,
 };
 
-const THREAD_SANDBOX_MODE: &str = "read-only";
-const TURN_SANDBOX_POLICY_TYPE: &str = "readOnly";
+// Codex 0.154.0 config schema. Apply before app-server startup as well as thread creation:
+// disabling a hook after SessionStart, or only asking the model to ignore it, is too late.
+const ISOLATION_CONFIG: &[(&str, &str)] = &[
+    ("project_doc_max_bytes", "0"),
+    ("skills.include_instructions", "false"),
+    ("skills.bundled.enabled", "false"),
+    ("features.skip_host_skill_discovery", "true"),
+    ("features.skill_search", "false"),
+    ("features.skill_mcp_dependency_install", "false"),
+    ("features.hooks", "false"),
+    ("features.plugins", "false"),
+    ("features.remote_plugin", "false"),
+    ("features.apps", "false"),
+    ("features.memories", "false"),
+    ("features.memory_tool", "false"),
+    ("memories.use_memories", "false"),
+    ("memories.generate_memories", "false"),
+    ("features.shell_tool", "false"),
+    ("features.shell_snapshot", "false"),
+    ("features.unified_exec", "false"),
+    ("features.browser_use", "false"),
+    ("features.computer_use", "false"),
+    ("features.in_app_browser", "false"),
+    ("features.code_mode", "false"),
+    ("features.js_repl", "false"),
+    ("features.image_generation", "false"),
+    ("features.multi_agent", "false"),
+    ("features.request_permissions_tool", "false"),
+    ("features.standalone_web_search", "false"),
+    ("features.tool_suggest", "false"),
+    ("features.view_image", "false"),
+    ("features.workspace_dependencies", "false"),
+    ("features.sleep_tool", "false"),
+    ("features.goals", "false"),
+    ("tools.update_plan.enabled", "false"),
+    ("tools.experimental_request_user_input.enabled", "false"),
+    ("web_search", "\"disabled\""),
+    ("include_apps_instructions", "false"),
+    ("include_collaboration_mode_instructions", "false"),
+    ("notify", "[]"),
+];
 
 pub fn spawn_args() -> Vec<String> {
-    vec!["app-server".into()]
+    let mut args = vec!["app-server".into()];
+    for (key, value) in ISOLATION_CONFIG {
+        args.extend(["-c".into(), format!("{key}={value}")]);
+    }
+    args
+}
+
+fn isolation_error(reason: &str) -> TranslateError {
+    TranslateError::CliProtocol(format!(
+        "Cannot verify Codex translation isolation ({reason}); no OCR was sent. Codex 0.154.0+ is required. Global AGENTS.md cannot be suppressed in 0.154.0; this integration will not modify it. AGENTS.override.md is allowed with a warning. Check managed policy for other conflicts."
+    ))
 }
 
 async fn initialize_app_server(rpc: &mut JsonRpcChild, cancel: &CancellationToken, timeout: Duration) -> Result<(), TranslateError> {
-    rpc.request(
-        "initialize",
-        serde_json::json!({
-            "clientInfo": {
-                "name": "translator-overlay",
-                "title": "Translator Overlay",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        }),
-        cancel,
-        timeout,
-    )
-    .await?;
-    rpc.notify("initialized", serde_json::json!({})).await?;
-    Ok(())
+    let initialized = rpc
+        .request(
+            "initialize",
+            serde_json::json!({
+                "clientInfo": {
+                    "name": "translator-overlay",
+                    "title": "Translator Overlay",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+            cancel,
+            timeout,
+        )
+        .await?;
+    let version = initialized["userAgent"]
+        .as_str()
+        .and_then(|s| s.split_once('/'))
+        .and_then(|(_, s)| s.split_whitespace().next())
+        .map(|version| version.split('.').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>());
+    if !matches!(version, Some(Ok(ref parts)) if parts.len() == 3 && parts.as_slice() >= [0, 154, 0].as_slice()) {
+        return Err(isolation_error("unsupported version"));
+    }
+    rpc.notify("initialized", serde_json::json!({})).await
 }
 
-pub(crate) fn models_from_codex_list(value: &Value) -> Vec<String> {
-    let Some(data) = value.get("data").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    data.iter()
-        .filter_map(|item| {
-            item.get("id")
-                .or(item.get("model"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
-        .collect()
+// Both catalog APIs paginate. A repeated cursor is a protocol error, not an endless loop.
+async fn read_list(
+    rpc: &mut JsonRpcChild,
+    method: &str,
+    mut params: Value,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<Vec<Value>, TranslateError> {
+    let mut items = Vec::new();
+    let mut cursors = HashSet::new();
+    loop {
+        let page = rpc.request(method, params.clone(), cancel, timeout).await?;
+        let data = page["data"].as_array().ok_or_else(|| isolation_error("missing catalog data"))?;
+        items.extend(data.iter().cloned());
+        match page.get("nextCursor") {
+            Some(Value::Null) => return Ok(items),
+            Some(Value::String(cursor)) if !cursor.is_empty() && cursors.insert(cursor.clone()) => {
+                params["cursor"] = Value::from(cursor.as_str());
+            }
+            _ => return Err(isolation_error("invalid catalog cursor")),
+        }
+    }
 }
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
     let cwd = TempCwd::create()?;
-    let codex_home = prepare_isolated_codex_home(cwd.path())?;
-    let codex_home_text = codex_home.0.to_string_lossy();
-    let mut rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd.path(), &[("CODEX_HOME", codex_home_text.as_ref())], false).await?;
+    let mut rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd.path(), &[], false).await?;
     let result = async {
         initialize_app_server(&mut rpc, cancel, timeout).await?;
-        let page = rpc
-            .request("model/list", serde_json::json!({ "limit": 100, "includeHidden": false }), cancel, timeout)
-            .await?;
-        let ids = models_from_codex_list(&page);
+        let items = read_list(&mut rpc, "model/list", serde_json::json!({ "limit": 100, "includeHidden": false }), cancel, timeout).await?;
+        let mut ids = Vec::new();
+        for item in items {
+            if let Some(id) = item.get("model").or(item.get("id")).and_then(Value::as_str).map(str::trim)
+                && !id.is_empty()
+                && !ids.iter().any(|s| s == id)
+            {
+                ids.push(id.to_string());
+            }
+        }
         if ids.is_empty() {
-            Err(TranslateError::CliProtocol("model/list returned no models".into()))
+            Err(TranslateError::CliProtocol("model/list returned no models; check your Codex login in the CLI".into()))
         } else {
             Ok(ids)
         }
     }
     .await;
-    rpc.wait_or_kill().await;
+    rpc.kill_and_wait().await;
     result
 }
 
-pub fn thread_start_params(model: &str, cwd: &Path, system: &str, service_tier: ServiceTier) -> Value {
-    let mut params = serde_json::json!({
+fn thread_start_params(model: &str, cwd: &Path, system: &str, service_tier: ServiceTier) -> Value {
+    let config: serde_json::Map<String, Value> = ISOLATION_CONFIG
+        .iter()
+        .map(|(key, value)| ((*key).into(), serde_json::from_str(value).expect("constant isolation value")))
+        .collect();
+    serde_json::json!({
         "model": model,
         "cwd": cwd.to_string_lossy(),
-        "sandbox": THREAD_SANDBOX_MODE,
+        "sandbox": "read-only",
         "approvalPolicy": "never",
         "ephemeral": true,
-        "developerInstructions": system,
+        "developerInstructions": "",
         "baseInstructions": system,
         "serviceName": "translator-overlay",
+        "serviceTier": if service_tier == ServiceTier::Priority { "fast" } else { "default" },
         "personality": "none",
-        "config": {
-            "web_search": "disabled",
-            "features.apps": false,
-            "features.apply_patch_freeform": false,
-            "features.browser_use": false,
-            "features.code_mode": false,
-            "features.computer_use": false,
-            "features.image_generation": false,
-            "features.in_app_browser": false,
-            "features.js_repl": false,
-            "features.memory_tool": false,
-            "features.multi_agent": false,
-            "features.plugins": false,
-            "features.request_permissions_tool": false,
-            "features.shell_tool": false,
-            "features.standalone_web_search": false,
-            "features.tool_search": false,
-            "features.tool_suggest": false,
-            "features.unified_exec": false,
-            "features.view_image": false,
-            "features.web_search": false,
-            "features.web_search_request": false,
-            "features.workspace_dependencies": false,
-            "include_apps_instructions": false,
-            "include_collaboration_mode_instructions": false,
-        },
-    });
-    if service_tier == ServiceTier::Priority {
-        params["config"]["service_tier"] = Value::from("fast");
-        params["config"]["features.fast_mode"] = Value::from(true);
-    }
-    params
+        "config": config,
+    })
 }
 
-pub fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> Value {
+fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> Value {
     let mut params = serde_json::json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": user }],
         "outputSchema": translation_json_schema(),
-        "sandboxPolicy": {
-            "type": TURN_SANDBOX_POLICY_TYPE,
-            "networkAccess": false,
-        },
+        "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
     });
     if let Some(effort) = effort.map(str::trim).filter(|s| !s.is_empty()) {
         params["effort"] = Value::from(effort);
@@ -143,7 +182,6 @@ pub struct CodexSession {
     rpc: JsonRpcChild,
     thread_id: String,
     turn_id: Option<String>,
-    _codex_home: IsolatedCodexHome,
 }
 
 impl CodexSession {
@@ -156,26 +194,88 @@ impl CodexSession {
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<Self, TranslateError> {
-        let codex_home = prepare_isolated_codex_home(cwd)?;
-        let codex_home_text = codex_home.0.to_string_lossy();
-        let args = spawn_args();
-        let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[("CODEX_HOME", codex_home_text.as_ref())], false).await?;
-        initialize_app_server(&mut rpc, cancel, timeout).await?;
+        let rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd, &[], false).await?;
+        Self::from_rpc(rpc, thread_start_params(model, cwd, system, service_tier), cancel, timeout).await
+    }
 
-        let created = rpc
-            .request("thread/start", thread_start_params(model, cwd, system, service_tier), cancel, timeout)
+    async fn from_rpc(
+        mut rpc: JsonRpcChild,
+        mut params: Value,
+        cancel: &CancellationToken,
+        timeout: Duration,
+    ) -> Result<Self, TranslateError> {
+        let initialized = async {
+            initialize_app_server(&mut rpc, cancel, timeout).await?;
+            let servers = read_list(
+                &mut rpc,
+                "mcpServerStatus/list",
+                serde_json::json!({ "limit": 100, "detail": "toolsAndAuthOnly" }),
+                cancel,
+                timeout,
+            )
             .await?;
-        let thread_id = created
-            .pointer("/thread/id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TranslateError::CliProtocol("thread/start missing thread.id".into()))?
-            .to_string();
-
+            let mut disabled = serde_json::Map::new();
+            for server in servers {
+                let name = server["name"].as_str().ok_or_else(|| isolation_error("missing MCP name"))?;
+                disabled.insert(name.to_string(), serde_json::json!({ "enabled": false }));
+            }
+            // An empty map does NOT clear inherited MCP config. Override every discovered name.
+            params["config"]["mcp_servers"] = Value::Object(disabled);
+            let created = rpc.request("thread/start", params, cancel, timeout).await?;
+            // 0.154.0 unconditionally loads global AGENTS through its home provider.
+            // The user explicitly permits override files; they remain in model context.
+            let sources = created["instructionSources"]
+                .as_array()
+                .ok_or_else(|| isolation_error("unknown instruction sources"))?;
+            for source in sources {
+                let is_override = source
+                    .as_str()
+                    .and_then(|path| path.rsplit(['/', '\\']).next())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("AGENTS.override.md"));
+                if !is_override {
+                    return Err(isolation_error("unexpected instruction sources"));
+                }
+                tracing::warn!(
+                    "Codex loaded AGENTS.override.md; continuing with user instructions in context (explicit isolation exception)"
+                );
+            }
+            if created.pointer("/sandbox/type").and_then(Value::as_str) != Some("readOnly")
+                || created.pointer("/thread/ephemeral").and_then(Value::as_bool) != Some(true)
+                || created["approvalPolicy"] != "never"
+            {
+                return Err(isolation_error("thread permissions or persistence differ"));
+            }
+            let thread_id = created
+                .pointer("/thread/id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| isolation_error("missing thread id"))?
+                .to_string();
+            let servers = read_list(
+                &mut rpc,
+                "mcpServerStatus/list",
+                serde_json::json!({ "threadId": thread_id, "limit": 100, "detail": "toolsAndAuthOnly" }),
+                cancel,
+                timeout,
+            )
+            .await?;
+            if servers.iter().any(|server| server["runtimeStatus"] != "disabled") {
+                return Err(isolation_error("MCP runtime is not disabled"));
+            }
+            Ok(thread_id)
+        }
+        .await;
+        let thread_id = match initialized {
+            Ok(id) => id,
+            Err(error) => {
+                rpc.kill_and_wait().await;
+                return Err(error);
+            }
+        };
         Ok(Self {
             rpc,
             thread_id,
             turn_id: None,
-            _codex_home: codex_home,
         })
     }
 
@@ -187,90 +287,73 @@ impl CodexSession {
         timeout: Duration,
         on_text: &mut impl FnMut(&str),
     ) -> Result<String, TranslateError> {
-        let mut text = String::new();
-        let mut saw_tool = false;
-        let mut completed = None;
-        let mut seen_turn_id = None;
-
-        let started = self
-            .rpc
-            .request_with_notes("turn/start", turn_start_params(&self.thread_id, user, effort), cancel, timeout, |method, params| {
-                let before = text.len();
-                collect_codex_event(method, params, &mut text, &mut saw_tool);
-                if text.len() != before {
-                    on_text(&text);
-                }
-                if let Some(id) = extract_turn_id(params) {
-                    seen_turn_id = Some(id);
-                }
-                if method == "turn/completed" {
-                    completed = Some(params.clone());
-                }
-            })
-            .await?;
-
-        if let Some(id) = extract_turn_id(&started) {
-            seen_turn_id = Some(id);
-        }
-        self.turn_id = seen_turn_id;
-
-        let completed = match completed {
-            Some(params) => params,
-            None => {
-                let mut later_turn_id = None;
-                let params = self
-                    .rpc
-                    .wait_notification(
-                        cancel,
-                        timeout,
-                        |method, _| method == "turn/completed",
-                        |method, params| {
-                            let before = text.len();
-                            collect_codex_event(method, params, &mut text, &mut saw_tool);
-                            if text.len() != before {
-                                on_text(&text);
-                            }
-                            if let Some(id) = extract_turn_id(params) {
-                                later_turn_id = Some(id);
-                            }
-                        },
-                    )
-                    .await?;
-                if later_turn_id.is_some() {
-                    self.turn_id = later_turn_id;
-                }
-                params
+        self.turn_id = None;
+        let mut output = TurnOutput::default();
+        let turn_id = &mut self.turn_id;
+        let thread_id = &self.thread_id;
+        let mut on_note = |method: &str, params: &Value| {
+            if output.apply(method, params, thread_id, turn_id) {
+                on_text(&output.text);
             }
         };
-
-        if saw_tool {
+        let started = self
+            .rpc
+            .request_with_notes("turn/start", turn_start_params(thread_id, user, effort), cancel, timeout, &mut on_note)
+            .await?;
+        let started_id = started
+            .pointer("/turn/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TranslateError::CliProtocol("turn/start missing turn.id".into()))?;
+        if self.turn_id.as_deref().is_some_and(|id| id != started_id) {
+            return Err(TranslateError::CliProtocol("Codex turn id mismatch".into()));
+        }
+        self.turn_id = Some(started_id.to_string());
+        if output.completed.is_none() {
+            let turn_id = &mut self.turn_id;
+            self.rpc
+                .wait_notification(
+                    cancel,
+                    timeout,
+                    |method, params| {
+                        method == "turn/completed"
+                            && params["threadId"] == *thread_id
+                            && params.pointer("/turn/id").and_then(Value::as_str) == Some(started_id)
+                    },
+                    |method, params| {
+                        if output.apply(method, params, thread_id, turn_id) {
+                            on_text(&output.text);
+                        }
+                    },
+                )
+                .await?;
+        }
+        if output.saw_tool {
             return Err(TranslateError::CliProtocol("Codex session invoked a tool".into()));
         }
-
-        let status = completed
-            .pointer("/turn/status")
-            .and_then(Value::as_str)
-            .or_else(|| completed.get("status").and_then(Value::as_str))
-            .unwrap_or("completed");
-        if matches!(status, "interrupted" | "failed" | "error") {
-            return Err(TranslateError::CliProtocol(format!("Codex turn {status}")));
+        if output.completed.as_deref() != Some("completed") {
+            return Err(TranslateError::CliProtocol(format!(
+                "Codex turn {} (check Codex CLI login if authentication failed)",
+                output.completed.as_deref().unwrap_or("missing status")
+            )));
         }
-
-        if text.trim().is_empty() {
+        if output.text.trim().is_empty() {
             return Err(TranslateError::CliProtocol("Codex turn produced no assistant text".into()));
         }
-        Ok(text)
+        Ok(output.text)
     }
 
     pub async fn cancel_turn(&mut self) {
-        let mut params = serde_json::json!({ "threadId": self.thread_id });
         if let Some(turn_id) = &self.turn_id {
-            params["turnId"] = Value::from(turn_id.as_str());
+            let _ = self
+                .rpc
+                .request(
+                    "turn/interrupt",
+                    serde_json::json!({ "threadId": self.thread_id, "turnId": turn_id }),
+                    &CancellationToken::new(),
+                    Duration::from_secs(2),
+                )
+                .await;
         }
-        let _ = self
-            .rpc
-            .request("turn/interrupt", params, &CancellationToken::new(), Duration::from_secs(2))
-            .await;
     }
 
     pub async fn close(&mut self) {
@@ -282,181 +365,71 @@ impl CodexSession {
     }
 }
 
-struct IsolatedCodexHome(PathBuf);
+#[derive(Default)]
+struct TurnOutput {
+    item_id: Option<String>,
+    text: String,
+    completed: Option<String>,
+    saw_tool: bool,
+}
 
-impl Drop for IsolatedCodexHome {
-    fn drop(&mut self) {
-        if let Err(e) = crate::cli::remove_dir_all_once(&self.0) {
-            tracing::warn!(path = %self.0.display(), %e, "failed to remove isolated Codex home");
+impl TurnOutput {
+    // Used both while awaiting turn/start's response and while streaming afterwards.
+    fn apply(&mut self, method: &str, params: &Value, thread_id: &str, turn_id: &mut Option<String>) -> bool {
+        if params["threadId"] != thread_id {
+            return false;
         }
-    }
-}
-
-fn prepare_isolated_codex_home(cwd: &Path) -> Result<IsolatedCodexHome, TranslateError> {
-    let codex_home = IsolatedCodexHome(cwd.with_extension("codex-home"));
-    std::fs::create_dir_all(&codex_home.0).map_err(|error| TranslateError::CliProtocol(format!("create isolated Codex home: {error}")))?;
-
-    if let Some(source_home) = source_codex_home() {
-        let source_auth = source_home.join("auth.json");
-        if source_auth.is_file()
-            && let Err(error) = std::fs::copy(&source_auth, codex_home.0.join("auth.json"))
-        {
-            return Err(TranslateError::CliProtocol(format!("copy Codex authentication: {error}")));
+        let Some(id) = params.get("turnId").or_else(|| params.pointer("/turn/id")).and_then(Value::as_str) else {
+            return false;
+        };
+        if turn_id.as_deref().is_some_and(|current| current != id) {
+            return false;
         }
-    }
-    Ok(codex_home)
-}
-
-fn source_codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .map(PathBuf::from)
-            .map(|home| home.join(".codex"))
-    })
-}
-
-fn extract_turn_id(value: &Value) -> Option<String> {
-    value
-        .pointer("/turn/id")
-        .and_then(Value::as_str)
-        .or_else(|| value.get("turnId").and_then(Value::as_str))
-        .map(str::to_string)
-}
-
-fn collect_codex_event(method: &str, params: &Value, text: &mut String, saw_tool: &mut bool) {
-    match method {
-        "item/agentMessage/delta" => {
-            if let Some(chunk) = params.pointer("/delta/text").and_then(Value::as_str) {
-                text.push_str(chunk);
-            } else if let Some(chunk) = params.get("delta").and_then(Value::as_str) {
-                text.push_str(chunk);
-            } else if let Some(chunk) = params.get("text").and_then(Value::as_str) {
-                text.push_str(chunk);
-            }
+        if turn_id.is_none() {
+            *turn_id = Some(id.to_string());
         }
-        "item/completed" | "item/started" => {
-            let item = params.get("item").unwrap_or(params);
-            let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
-            match kind {
-                "agentMessage" => {
-                    if let Some(full) = item.get("text").and_then(Value::as_str)
-                        && text.is_empty()
-                    {
-                        text.push_str(full);
+        match method {
+            "item/started" | "item/completed" => {
+                let item = &params["item"];
+                match item["type"].as_str() {
+                    Some("agentMessage") if item["phase"] != "commentary" => {
+                        let Some(id) = item["id"].as_str() else {
+                            return false;
+                        };
+                        let old = self.text.clone();
+                        if self.item_id.as_deref() != Some(id) {
+                            self.item_id = Some(id.to_string());
+                            self.text.clear();
+                        }
+                        if let Some(text) = item["text"].as_str() {
+                            self.text = text.to_string();
+                        }
+                        return self.text != old;
                     }
+                    Some("agentMessage" | "reasoning" | "plan" | "userMessage" | "contextCompaction") => {}
+                    _ => self.saw_tool = true,
                 }
-                kind if is_active_codex_item(kind) => *saw_tool = true,
-                _ => {}
             }
+            "item/agentMessage/delta" if params["itemId"].as_str() == self.item_id.as_deref() && self.item_id.is_some() => {
+                if let Some(delta) = params["delta"].as_str() {
+                    self.text.push_str(delta);
+                    return !delta.is_empty();
+                }
+            }
+            "turn/completed" => {
+                self.completed = Some(
+                    params
+                        .pointer("/turn/status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("missing status")
+                        .to_string(),
+                );
+            }
+            _ => {}
         }
-        _ => {}
+        false
     }
-}
-
-fn is_active_codex_item(kind: &str) -> bool {
-    !kind.is_empty() && !matches!(kind, "agentMessage" | "reasoning" | "plan" | "userMessage" | "contextCompaction")
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::*;
-
-    #[test]
-    fn thread_start_is_read_only_and_ephemeral() {
-        let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys", ServiceTier::Standard);
-        assert_eq!(params["sandbox"], THREAD_SANDBOX_MODE);
-        assert_eq!(params["ephemeral"], true);
-        assert_eq!(params["approvalPolicy"], "never");
-        assert_eq!(params["developerInstructions"], "sys");
-        assert_eq!(params["config"]["web_search"], "disabled");
-        assert_eq!(params["config"]["features.shell_tool"], false);
-        assert_eq!(params["config"]["features.plugins"], false);
-        assert!(params["config"].get("service_tier").is_none());
-        assert!(params["config"].get("features.fast_mode").is_none());
-        assert_ne!(params["sandbox"], "danger-full-access");
-    }
-
-    #[test]
-    fn thread_start_enables_fast_service_tier() {
-        let params = thread_start_params("gpt-5.6", Path::new("C:/tmp/iso"), "sys", ServiceTier::Priority);
-        assert_eq!(params["config"]["service_tier"], "fast");
-        assert_eq!(params["config"]["features.fast_mode"], true);
-    }
-
-    #[test]
-    fn turn_start_sends_only_user_text() {
-        let params = turn_start_params("thr_1", "---BEGIN_UNTRUSTED_OCR---\n{}\n---END_UNTRUSTED_OCR---", Some("low"));
-        assert_eq!(params["threadId"], "thr_1");
-        assert_eq!(params["input"].as_array().map(Vec::len), Some(1));
-        assert_eq!(params["input"][0]["type"], "text");
-        assert!(params["outputSchema"].is_object());
-        assert_eq!(params["effort"], "low");
-        assert_eq!(params["sandboxPolicy"]["type"], TURN_SANDBOX_POLICY_TYPE);
-        assert_eq!(params["sandboxPolicy"]["networkAccess"], false);
-    }
-
-    #[test]
-    fn collects_agent_message_without_history() {
-        let mut text = String::new();
-        let mut saw_tool = false;
-        collect_codex_event(
-            "item/completed",
-            &serde_json::json!({
-                "item": { "id": "item_3", "type": "agentMessage", "text": "{\"b\":[]}" }
-            }),
-            &mut text,
-            &mut saw_tool,
-        );
-        assert_eq!(text, "{\"b\":[]}");
-        assert!(!saw_tool);
-    }
-
-    #[test]
-    fn rejects_current_and_future_active_item_types() {
-        for kind in [
-            "commandExecution",
-            "fileChange",
-            "mcpToolCall",
-            "dynamicToolCall",
-            "collabAgentToolCall",
-            "subAgentActivity",
-            "webSearch",
-            "imageView",
-            "sleep",
-            "imageGeneration",
-            "hookPrompt",
-            "futureToolType",
-        ] {
-            assert!(is_active_codex_item(kind), "missed active item {kind}");
-        }
-    }
-
-    #[test]
-    fn allows_only_passive_conversation_items() {
-        for kind in ["agentMessage", "reasoning", "plan", "userMessage", "contextCompaction"] {
-            assert!(!is_active_codex_item(kind), "rejected passive item {kind}");
-        }
-    }
-
-    #[test]
-    fn extracts_turn_id_from_result_and_notification() {
-        assert_eq!(extract_turn_id(&serde_json::json!({ "turn": { "id": "turn_1" } })).as_deref(), Some("turn_1"));
-        assert_eq!(extract_turn_id(&serde_json::json!({ "turnId": "turn_2", "threadId": "thr" })).as_deref(), Some("turn_2"));
-        assert_eq!(extract_turn_id(&serde_json::json!({ "threadId": "thr" })), None);
-    }
-
-    #[test]
-    fn models_from_codex_list_reads_id_or_model() {
-        let page = serde_json::json!({
-            "data": [
-                { "id": "gpt-5.4", "displayName": "GPT-5.4" },
-                { "model": " gpt-5.6 " },
-                { "id": "" }
-            ]
-        });
-        assert_eq!(models_from_codex_list(&page), ["gpt-5.4", "gpt-5.6"]);
-        assert!(models_from_codex_list(&serde_json::json!({ "data": [] })).is_empty());
-    }
-}
+mod tests;
