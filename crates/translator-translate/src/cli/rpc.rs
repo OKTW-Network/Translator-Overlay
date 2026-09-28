@@ -1,17 +1,18 @@
 //! Newline-delimited JSON-RPC over a child process stdio.
 
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
 use serde_json::{Map, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::mpsc,
     time::timeout,
 };
@@ -199,47 +200,9 @@ impl JsonRpcChild {
         extra_env: &[(&str, &str)],
         include_jsonrpc: bool,
     ) -> Result<Self, TranslateError> {
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .env("GROK_DISABLE_AUTOUPDATER", "1");
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
-        apply_no_window(&mut cmd);
-
-        let mut child = cmd.spawn().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                TranslateError::CliNotFound(program.display().to_string())
-            } else {
-                TranslateError::CliProtocol(format!("spawn {}: {e}", program.display()))
-            }
-        })?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| TranslateError::CliProtocol("child stdin missing".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| TranslateError::CliProtocol("child stdout missing".into()))?;
-        let stderr = child.stderr.take();
-
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if !line.trim().is_empty() {
-                        tracing::debug!(target: "translator_translate::cli", "{line}");
-                    }
-                }
-            });
-        }
+        let mut env = vec![("GROK_DISABLE_AUTOUPDATER", "1")];
+        env.extend_from_slice(extra_env);
+        let StdioChild { child, stdin, stdout, .. } = spawn_stdio(program, args, cwd, &env)?;
 
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -559,6 +522,87 @@ fn rpc_result(include_jsonrpc: bool, id: Value, result: Value) -> Value {
     map.insert("id".into(), id);
     map.insert("result".into(), result);
     Value::Object(map)
+}
+
+const STDERR_TAIL_LINES: usize = 20;
+
+/// Last few non-empty stderr lines, for error messages when the child dies.
+#[derive(Clone, Default)]
+pub struct StderrTail(Arc<Mutex<VecDeque<String>>>);
+
+impl StderrTail {
+    fn push(&self, line: String) {
+        let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if lines.len() == STDERR_TAIL_LINES {
+            lines.pop_front();
+        }
+        lines.push_back(line);
+    }
+
+    pub fn joined(&self) -> String {
+        let lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        lines.iter().map(String::as_str).collect::<Vec<_>>().join(" | ")
+    }
+}
+
+pub struct StdioChild {
+    pub child: Child,
+    pub stdin: ChildStdin,
+    pub stdout: ChildStdout,
+    pub stderr_tail: StderrTail,
+}
+
+/// Spawn `program` with piped stdio and no console window. Stderr is drained to `tracing::debug`.
+pub fn spawn_stdio(program: &Path, args: &[String], cwd: &Path, env: &[(&str, &str)]) -> Result<StdioChild, TranslateError> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    apply_no_window(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            TranslateError::CliNotFound(program.display().to_string())
+        } else {
+            TranslateError::CliProtocol(format!("spawn {}: {e}", program.display()))
+        }
+    })?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| TranslateError::CliProtocol("child stdin missing".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| TranslateError::CliProtocol("child stdout missing".into()))?;
+
+    let stderr_tail = StderrTail::default();
+    if let Some(stderr) = child.stderr.take() {
+        let tail = stderr_tail.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    tracing::debug!(target: "translator_translate::cli", "{line}");
+                    tail.push(line);
+                }
+            }
+        });
+    }
+
+    Ok(StdioChild {
+        child,
+        stdin,
+        stdout,
+        stderr_tail,
+    })
 }
 
 fn apply_no_window(cmd: &mut Command) {

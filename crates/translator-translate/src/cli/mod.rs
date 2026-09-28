@@ -1,5 +1,6 @@
-//! Long-lived Grok ACP / OpenCode ACP / Codex app-server translation sessions.
+//! Long-lived Grok ACP / OpenCode ACP / Codex app-server / Claude Code stream-json translation sessions.
 
+mod claude;
 mod codex;
 mod grok;
 mod opencode;
@@ -15,7 +16,7 @@ use translator_core::{ApiConfig, ModelProvider, resolve_cli_binary};
 
 use crate::{
     ChatMessage, TranslateError,
-    cli::{codex::CodexSession, rpc::AcpSession},
+    cli::{claude::ClaudeSession, codex::CodexSession, rpc::AcpSession},
 };
 
 const UNTRUSTED_BEGIN: &str = "---BEGIN_UNTRUSTED_OCR---";
@@ -55,6 +56,7 @@ pub(crate) async fn list_models(api: &ApiConfig, cancel: &CancellationToken, tim
         ModelProvider::GrokCli => grok::list_models(&program, cancel, timeout).await,
         ModelProvider::OpenCodeCli => opencode::list_models(&program, cancel, timeout).await,
         ModelProvider::CodexCli => codex::list_models(&program, cancel, timeout).await,
+        ModelProvider::ClaudeCli => claude::list_models(&program, cancel, timeout).await,
         ModelProvider::OpenaiCompatible => Err(TranslateError::CliProtocol("CLI model list used with HTTP provider".into())),
     }
 }
@@ -125,6 +127,7 @@ fn compose_user(bootstrap: Option<&str>, user: &str) -> String {
 enum LiveSession {
     Acp(AcpSession),
     Codex(CodexSession),
+    Claude(ClaudeSession),
 }
 
 impl LiveSession {
@@ -139,6 +142,7 @@ impl LiveSession {
         match self {
             Self::Acp(s) => s.prompt(user, cancel, timeout, on_text).await,
             Self::Codex(s) => s.prompt(user, effort, cancel, timeout, on_text).await,
+            Self::Claude(s) => s.prompt(user, cancel, timeout, on_text).await,
         }
     }
 
@@ -146,6 +150,7 @@ impl LiveSession {
         match self {
             Self::Acp(s) => s.cancel_turn().await,
             Self::Codex(s) => s.cancel_turn().await,
+            Self::Claude(s) => s.cancel_turn(),
         }
     }
 
@@ -153,6 +158,7 @@ impl LiveSession {
         match self {
             Self::Acp(s) => s.close().await,
             Self::Codex(s) => s.close().await,
+            Self::Claude(s) => s.close().await,
         }
     }
 
@@ -160,6 +166,7 @@ impl LiveSession {
         match self {
             Self::Acp(s) => s.kill(),
             Self::Codex(s) => s.kill(),
+            Self::Claude(s) => s.kill(),
         }
     }
 }
@@ -301,6 +308,9 @@ impl CliBackend {
             }
             ModelProvider::CodexCli => {
                 LiveSession::Codex(CodexSession::connect(&program, &api.model, api.service_tier, &cwd, &system, cancel, timeout).await?)
+            }
+            ModelProvider::ClaudeCli => {
+                LiveSession::Claude(ClaudeSession::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system)?)
             }
             ModelProvider::OpenaiCompatible => {
                 return Err(TranslateError::CliProtocol("CLI session used with HTTP provider".into()));

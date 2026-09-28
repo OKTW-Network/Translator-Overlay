@@ -155,6 +155,8 @@ pub enum ModelProvider {
     OpenCodeCli,
     /// Local Codex CLI over app-server stdio (`codex app-server`).
     CodexCli,
+    /// Local Claude Code CLI over stream-json stdio (`claude -p --input-format stream-json`).
+    ClaudeCli,
 }
 
 /// HTTP wire format when [`ModelProvider::OpenaiCompatible`] is selected.
@@ -177,7 +179,7 @@ pub enum ServiceTier {
 
 impl ModelProvider {
     pub fn is_cli(self) -> bool {
-        matches!(self, Self::GrokCli | Self::OpenCodeCli | Self::CodexCli)
+        matches!(self, Self::GrokCli | Self::OpenCodeCli | Self::CodexCli | Self::ClaudeCli)
     }
 
     /// Default executable name when `cli_path` is empty.
@@ -187,11 +189,15 @@ impl ModelProvider {
             Self::GrokCli => "grok",
             Self::OpenCodeCli => "opencode",
             Self::CodexCli => "codex",
+            Self::ClaudeCli => "claude",
         }
     }
 }
 
 /// Locate `cli_path` or the provider default on `PATH`.
+///
+/// Claude Code's native installer puts `claude.exe` in `%USERPROFILE%\.local\bin`, which is
+/// not always on `PATH` for GUI processes, so that location is tried last.
 pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<std::path::PathBuf> {
     if !provider.is_cli() {
         return None;
@@ -208,7 +214,15 @@ pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<std
         }
         return None;
     }
-    find_on_path(provider.default_bin())
+    find_on_path(provider.default_bin()).or_else(|| {
+        if provider != ModelProvider::ClaudeCli {
+            return None;
+        }
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+        let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+        let path = std::path::PathBuf::from(home).join(".local").join("bin").join(exe);
+        path.is_file().then_some(path)
+    })
 }
 
 fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
@@ -254,7 +268,7 @@ pub struct ApiConfig {
     /// HTTP endpoint style. Ignored for CLI providers.
     #[serde(skip_serializing_if = "is_default")]
     pub http_api: HttpApi,
-    /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` on PATH.
+    /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` / `claude` on PATH.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
     /// Preferred processing tier. Ignored by providers that do not support it.
@@ -723,6 +737,20 @@ model = "my-model"
     }
 
     #[test]
+    fn provider_claude_cli_roundtrip() {
+        let mut config = AppConfig::default();
+        config.api.provider = ModelProvider::ClaudeCli;
+        config.api.model = "sonnet".into();
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("provider = \"claude_cli\""), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.api.provider, ModelProvider::ClaudeCli);
+        assert_eq!(parsed.api.model, "sonnet");
+        assert!(parsed.api.provider.is_cli());
+        assert_eq!(parsed.api.provider.default_bin(), "claude");
+    }
+
+    #[test]
     fn priority_service_tier_roundtrip() {
         let mut config = AppConfig::default();
         config.api.provider = ModelProvider::CodexCli;
@@ -741,6 +769,7 @@ model = "my-model"
         assert!(resolve_cli_binary(ModelProvider::GrokCli, r"C:\definitely-missing\grok.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::OpenCodeCli, r"Z:\no-such-opencode.exe").is_none());
+        assert!(resolve_cli_binary(ModelProvider::ClaudeCli, r"Z:\no-such-claude.exe").is_none());
     }
 
     #[test]
