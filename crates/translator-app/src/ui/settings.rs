@@ -300,40 +300,32 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     };
 
     let provider_card = settings_card("api-provider", "Provider", Some("HTTP endpoint or a local CLI."), {
-        let idx = match api.provider {
-            ModelProvider::OpenaiCompatible => 0,
-            ModelProvider::GrokCli => 1,
-            ModelProvider::OpenCodeCli => 2,
-            ModelProvider::CodexCli => 3,
-            ModelProvider::ClaudeCli => 4,
-        };
-        let cx_p = cx.clone();
-        let pick = move |choice: i32| {
-            let cx = cx_p.clone();
-            move || {
-                cx.with_mut(|ui| {
-                    ui.draft.api.provider = match choice {
-                        1 => ModelProvider::GrokCli,
-                        2 => ModelProvider::OpenCodeCli,
-                        3 => ModelProvider::CodexCli,
-                        4 => ModelProvider::ClaudeCli,
-                        _ => ModelProvider::OpenaiCompatible,
+        const PROVIDERS: [ModelProvider; 5] = [
+            ModelProvider::OpenaiCompatible,
+            ModelProvider::GrokCli,
+            ModelProvider::OpenCodeCli,
+            ModelProvider::CodexCli,
+            ModelProvider::ClaudeCli,
+        ];
+        ComboBox::new()
+            .items_source(PROVIDERS.iter().map(|&p| provider_label(p).to_string()).collect::<Vec<_>>())
+            .selected_index(PROVIDERS.iter().position(|&p| p == api.provider))
+            .on_selection_changed({
+                let cx = cx.clone();
+                move |idx: Option<usize>| {
+                    let Some(&provider) = idx.and_then(|i| PROVIDERS.get(i)) else {
+                        return;
                     };
-                    mark_dirty(ui);
-                });
-            }
-        };
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(12.0)
+                    cx.with_mut(|ui| {
+                        if ui.draft.api.provider != provider {
+                            ui.draft.api.provider = provider;
+                            mark_dirty(ui);
+                        }
+                    });
+                }
+            })
+            .width(200.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .children((
-                radio("api-provider", provider_label(ModelProvider::OpenaiCompatible), Some(168.0), idx == 0, pick(0)),
-                radio("api-provider", provider_label(ModelProvider::GrokCli), Some(96.0), idx == 1, pick(1)),
-                radio("api-provider", provider_label(ModelProvider::OpenCodeCli), Some(128.0), idx == 2, pick(2)),
-                radio("api-provider", provider_label(ModelProvider::CodexCli), Some(104.0), idx == 3, pick(3)),
-                radio("api-provider", provider_label(ModelProvider::ClaudeCli), Some(120.0), idx == 4, pick(4)),
-            ))
     });
 
     let http_api_card =
