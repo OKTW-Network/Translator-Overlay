@@ -2,7 +2,7 @@ param([switch]$Force)
 
 $ErrorActionPreference = "Stop"
 
-$OrtTag = "v1.28.2"
+$OrtTag = "v1.30.0"
 $RequiredNames = @(
     "onnxruntime.dll",
     "onnxruntime.lib",
@@ -89,13 +89,19 @@ try {
         }
     }
 
-    if ($Force -or $switchTag) {
-        Get-ChildItem -LiteralPath (Join-Path $SourceDir "build") -Recurse -Filter CMakeCache.txt -ErrorAction SilentlyContinue |
-            Remove-Item -Force
+    $stagedVersion = Get-Content -LiteralPath (Join-Path $OutDir "VERSION") -ErrorAction SilentlyContinue
+    $versionChanged = $switchTag -or (($null -ne $stagedVersion) -and ($stagedVersion -ne $OrtTag))
+    if ($Force -or $versionChanged) {
+        # Leftover CMake/Dawn files from another ORT tag (or generator) misconfigure the next build.
+        $buildRoot = Join-Path $SourceDir "build"
+        if (Test-Path -LiteralPath $buildRoot) {
+            Write-Host "==> Cleaning $buildRoot"
+            Remove-Item -LiteralPath $buildRoot -Recurse -Force
+        }
     }
 
     Write-Host "==> Building ONNX Runtime (DirectML + WebGPU)..."
-    # Flags match pykeio/ort-artifacts Windows WebGPU (ORT 1.28 option names).
+    # Flags match pykeio/ort-artifacts Windows WebGPU (ORT 1.30 option names).
     $buildArgs = @(
         "--config", "Release",
         "--parallel",
