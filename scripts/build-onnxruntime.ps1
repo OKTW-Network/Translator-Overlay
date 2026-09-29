@@ -29,6 +29,16 @@ function Test-Staged {
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $OutDir = Join-Path $Root "third_party\onnxruntime-win-x64"
 $SourceDir = Join-Path $Root "third_party\onnxruntime-src"
+# ORT 1.30 Dawn checks DXC out at third_party/directx-shader-compiler/src
+# (1.28 used third_party/dxc). That extra path under GHA
+# D:\a\Translator-Overlay\Translator-Overlay\... overflows MAX_PATH, so
+# utils/llvm-build/llvm-build is missing and CMake reports ENOENT.
+# RUNNER_TEMP is D:\a\_temp on GHA; local keeps the in-tree build dir.
+if ($env:RUNNER_TEMP) {
+    $BuildDir = Join-Path $env:RUNNER_TEMP "ort-build"
+} else {
+    $BuildDir = Join-Path $SourceDir "build"
+}
 
 if (-not $Force -and (Test-Staged $OutDir)) {
     Write-Host "Already staged at $OutDir"
@@ -37,6 +47,7 @@ if (-not $Force -and (Test-Staged $OutDir)) {
 
 Write-Host "==> Repo:   $Root"
 Write-Host "==> Source: $SourceDir"
+Write-Host "==> Build:  $BuildDir"
 Write-Host "==> Out:    $OutDir"
 Write-Host "==> Tag:    $OrtTag"
 
@@ -52,6 +63,10 @@ if (-not (Test-Path -LiteralPath $SourceDir)) {
 Push-Location -LiteralPath $SourceDir
 try {
     git config core.longpaths true
+    # Dawn's nested DXC clone is a separate repo; inherit longpaths via env.
+    $env:GIT_CONFIG_COUNT = "1"
+    $env:GIT_CONFIG_KEY_0 = "core.longpaths"
+    $env:GIT_CONFIG_VALUE_0 = "true"
     $head = (git describe --tags --exact-match HEAD 2>$null)
     $switchTag = $head -ne $OrtTag
     if ($switchTag) {
@@ -93,10 +108,11 @@ try {
     $versionChanged = $switchTag -or (($null -ne $stagedVersion) -and ($stagedVersion -ne $OrtTag))
     if ($Force -or $versionChanged) {
         # Leftover CMake/Dawn files from another ORT tag (or generator) misconfigure the next build.
-        $buildRoot = Join-Path $SourceDir "build"
-        if (Test-Path -LiteralPath $buildRoot) {
-            Write-Host "==> Cleaning $buildRoot"
-            Remove-Item -LiteralPath $buildRoot -Recurse -Force
+        foreach ($buildRoot in @($BuildDir, (Join-Path $SourceDir "build"))) {
+            if (Test-Path -LiteralPath $buildRoot) {
+                Write-Host "==> Cleaning $buildRoot"
+                Remove-Item -LiteralPath $buildRoot -Recurse -Force
+            }
         }
     }
 
@@ -112,7 +128,7 @@ try {
         "--client_package_build",
         "--compile_no_warning_as_error",
         "--cmake_generator", "Visual Studio 18 2026",
-        "--build_dir", (Join-Path $SourceDir "build"),
+        "--build_dir", $BuildDir,
         "--targets", "onnxruntime",
         "--cmake_extra_defines",
         "onnxruntime_BUILD_DAWN_SHARED_LIBRARY=ON",
@@ -130,7 +146,7 @@ try {
     Pop-Location
 }
 
-$bin = Join-Path $SourceDir "build\Release\Release"
+$bin = Join-Path $BuildDir "Release\Release"
 if (-not (Test-Path -LiteralPath $bin)) {
     throw "No onnxruntime build output at $bin"
 }
