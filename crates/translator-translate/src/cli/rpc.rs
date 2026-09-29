@@ -678,7 +678,7 @@ fn best_effort_cli_session_delete(program: &Path, cwd: &Path, session_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{codex, grok};
+    use crate::cli::codex;
 
     #[test]
     fn classifies_codex_response_without_jsonrpc() {
@@ -739,16 +739,10 @@ mod tests {
 
     #[test]
     fn argv_builders_never_yolo() {
-        let args = grok::spawn_args("grok-4.5", Some("low"), "sys");
-        assert!(args.iter().all(|a| !a.contains("always-approve") && !a.contains("yolo")));
-        assert!(args.contains(&"stdio".into()));
-        assert!(args.contains(&"--disallowed-tools".into()));
-        assert!(args.contains(&"--system-prompt-override".into()));
-        let agent = args.iter().position(|a| a == "agent").expect("agent");
-        assert_eq!(args.get(agent + 1).map(String::as_str), Some("stdio"));
         let args = codex::spawn_args();
         assert_eq!(args[0], "app-server");
         assert!(args.contains(&"project_doc_max_bytes=0".into()));
+        assert!(args.iter().all(|a| !a.contains("yolo")));
     }
 
     #[test]

@@ -845,40 +845,21 @@ mod tests {
     }
 
     #[test]
-    fn remap_hits_across_ellipsis_length() {
-        let prev_box = Rect::new(100.0, 200.0, 80.0, 22.0);
-        let wider = Rect::new(96.0, 198.0, 170.0, 26.0);
-        let prior = [remap_translated("待って…", "等等", prev_box)];
-        let now = [remap_ocr("待って………", wider)];
-        let out = remap_translations_to_ocr(&prior, &now, false);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].translation, "等等");
-        assert_eq!(out[0].bbox, prev_box);
-        assert!(!translated_geometry_changed(&prior, &out));
-    }
-
-    #[test]
-    fn remap_hits_across_fullwidth_question() {
+    fn remap_hits_across_ocr_punct_fold() {
         let prev_box = Rect::new(100.0, 200.0, 80.0, 22.0);
         let jitter = Rect::new(102.0, 201.0, 76.0, 20.0);
-        let prior = [remap_translated("何？", "什麼？", prev_box)];
-        let now = [remap_ocr("何?", jitter)];
-        let out = remap_translations_to_ocr(&prior, &now, false);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].bbox, prev_box);
-        assert!(!translated_geometry_changed(&prior, &out));
-    }
-
-    #[test]
-    fn remap_hits_across_wave_dash() {
-        let prev_box = Rect::new(100.0, 200.0, 80.0, 22.0);
-        let jitter = Rect::new(102.0, 201.0, 76.0, 20.0);
-        let prior = [remap_translated("そう〜", "是這樣〜", prev_box)];
-        let now = [remap_ocr("そう~", jitter)];
-        let out = remap_translations_to_ocr(&prior, &now, false);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].bbox, prev_box);
-        assert!(!translated_geometry_changed(&prior, &out));
+        for (source, translation, now_text) in [
+            ("待って…", "等等", "待って………"),
+            ("何？", "什麼？", "何?"),
+            ("そう〜", "是這樣〜", "そう~"),
+        ] {
+            let prior = [remap_translated(source, translation, prev_box)];
+            let now = [remap_ocr(now_text, jitter)];
+            let out = remap_translations_to_ocr(&prior, &now, false);
+            assert_eq!(out.len(), 1, "{source}");
+            assert_eq!(out[0].bbox, prev_box);
+            assert!(!translated_geometry_changed(&prior, &out));
+        }
     }
 
     #[test]

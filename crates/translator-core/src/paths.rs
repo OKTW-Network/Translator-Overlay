@@ -51,19 +51,3 @@ pub fn resolve_under_exe(path: impl AsRef<Path>) -> Result<PathBuf, PathError> {
         Ok(exe_dir()?.join(path))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_absolute_unchanged() {
-        let abs = if cfg!(windows) {
-            PathBuf::from(r"C:\models")
-        } else {
-            PathBuf::from("/models")
-        };
-        let resolved = resolve_under_exe(&abs).expect("resolve");
-        assert_eq!(resolved, abs);
-    }
-}

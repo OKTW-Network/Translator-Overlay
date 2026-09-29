@@ -108,6 +108,8 @@ mod tests {
                 .any(|w| w[0] == "--system-prompt-override" && w[1] == "You are a translation engine.")
         );
         assert!(args[agent + 1..].iter().all(|a| !a.starts_with("--")));
+        assert!(args.contains(&"--disallowed-tools".into()));
+        assert!(args.iter().all(|a| !a.contains("always-approve") && !a.contains("yolo")));
     }
 
     #[test]

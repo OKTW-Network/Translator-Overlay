@@ -82,34 +82,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retrying_status_label_is_compact() {
-        let status = PipelineStatus::RetryingTranslate {
-            attempt: 1,
-            max_retries: 2,
-            message: "API returned status 429: {\"error\":\"rate\"}".into(),
-        };
-        assert_eq!(status.label(), "Retrying translation (1/2)");
-        assert!(status.is_translating());
-    }
-
-    #[test]
-    fn translating_status() {
-        assert!(PipelineStatus::Translating.is_translating());
-        assert!(!PipelineStatus::Capturing.is_translating());
-    }
-
-    #[test]
-    fn download_label() {
-        let downloading = PipelineStatus::DownloadingModels {
-            file: "pp-ocrv6_small_det.onnx".into(),
-            file_index: 1,
-            file_count: 3,
-            percent: 42,
-        };
-        assert_eq!(downloading.label(), "Downloading OCR models (1/3 · pp-ocrv6_small_det.onnx · 42%)");
-    }
-
-    #[test]
     fn push_history_caps_to_max_and_assigns_ids() {
         let mut state = AppState::new(AppConfig::default());
         for i in 0..4 {

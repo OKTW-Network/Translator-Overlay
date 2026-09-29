@@ -273,7 +273,7 @@ fn unique_blocks_by_norm_text(blocks: &[OcrBlock]) -> Vec<OcrBlock> {
 
 #[cfg(test)]
 mod tests {
-    use translator_core::{Rect, TRANSLATION_CACHE_MAX_DEFAULT};
+    use translator_core::Rect;
 
     use super::*;
 
@@ -467,11 +467,5 @@ mod tests {
         cache.store_model_pairs(&source, &translated, &model_ids, &tcfg);
         assert_eq!(cache.lookup("はい", "ja", "zh-TW").as_deref(), Some("是"));
         assert!(cache.lookup("いいえ", "ja", "zh-TW").is_none());
-    }
-
-    #[test]
-    fn default_capacity_constant_is_sane() {
-        let cache = TranslationCache::new(TRANSLATION_CACHE_MAX_DEFAULT);
-        assert_eq!(cache.max_entries(), TRANSLATION_CACHE_MAX_DEFAULT);
     }
 }

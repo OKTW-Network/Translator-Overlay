@@ -432,43 +432,23 @@ mod tests {
     const RECT: ClientRect = (10, 20, 800, 600);
 
     #[test]
-    fn first_frame_and_content_changes_require_a_full_present() {
+    fn presentation_action_picks_full_move_or_restack() {
         assert_eq!(presentation_action(None, RECT, false), PresentationAction::FullPresent);
         assert_eq!(presentation_action(Some(RECT), RECT, true), PresentationAction::FullPresent);
-    }
-
-    #[test]
-    fn destination_resize_requires_a_full_present() {
         assert_eq!(presentation_action(Some(RECT), (10, 20, 900, 600), false), PresentationAction::FullPresent);
-    }
-
-    #[test]
-    fn pure_position_change_moves_without_representing_the_bitmap() {
         assert_eq!(presentation_action(Some(RECT), (30, 40, 800, 600), false), PresentationAction::MoveOnly);
-    }
-
-    #[test]
-    fn unchanged_geometry_only_needs_restacking() {
         assert_eq!(presentation_action(Some(RECT), RECT, false), PresentationAction::RestackOnly);
     }
 
     #[test]
-    fn movesize_notices_bookend_interactive_follow() {
+    fn follow_notice_classifies_movesize_reorder_and_location() {
+        use windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_LOCATIONCHANGE;
+
         assert_eq!(classify_follow_notice(EVENT_SYSTEM_MOVESIZESTART, false), FollowNotice::BeginMoveSize);
         assert_eq!(classify_follow_notice(EVENT_SYSTEM_MOVESIZEEND, true), FollowNotice::EndMoveSize);
-    }
-
-    #[test]
-    fn reorder_is_dropped_only_during_movesize() {
         assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, true), FollowNotice::Drop);
         assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, false), FollowNotice::Apply);
         assert_eq!(classify_follow_notice(EVENT_OBJECT_DESTROY, true), FollowNotice::Apply);
-    }
-
-    #[test]
-    fn location_change_applies_even_during_movesize() {
-        use windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_LOCATIONCHANGE;
-
         assert_eq!(classify_follow_notice(EVENT_OBJECT_LOCATIONCHANGE, false), FollowNotice::Apply);
         assert_eq!(classify_follow_notice(EVENT_OBJECT_LOCATIONCHANGE, true), FollowNotice::Apply);
     }

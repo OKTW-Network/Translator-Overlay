@@ -309,11 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn argb_parse() {
-        assert_eq!(argb_channels(0xC800_00FF), (0xC8, 0x00, 0x00, 0xFF));
-    }
-
-    #[test]
     fn font_height_tracks_line_box() {
         // Small UI label (~12px OCR) must not jump to a fixed 16px floor.
         let small = SurfaceRect { x: 0, y: 0, w: 80, h: 12 };

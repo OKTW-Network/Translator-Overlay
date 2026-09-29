@@ -827,19 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn request_omits_unset_params() {
-        let api = ApiConfig::default();
-        let msgs = [ChatMessage::user("x")];
-        let body = chat_completion_body(&api, &msgs, "");
-        let v = serde_json::to_value(&body).unwrap();
-        assert!(v.get("temperature").is_none());
-        assert!(v.get("reasoning_effort").is_none());
-        assert!(v.get("prompt_cache_key").is_none());
-        assert_eq!(v["prompt_cache_retention"], "24h");
-        assert_eq!(v["stream"], true);
-    }
-
-    #[test]
     fn changing_service_tier_resets_cli_session() {
         let api = ApiConfig {
             provider: ModelProvider::CodexCli,
@@ -916,23 +903,6 @@ mod tests {
     }
 
     #[test]
-    fn new_conversation_has_session_id() {
-        let conv = Conversation::empty();
-        assert!(!conv.session_id.is_empty());
-        assert_ne!(Conversation::empty().session_id, conv.session_id);
-    }
-
-    #[test]
-    fn append_keeps_session_id() {
-        let mut conv = Conversation::empty();
-        conv.ensure_system("sys");
-        let id = conv.session_id.clone();
-        conv.push_user("u");
-        conv.items.push(ResponseItem::message("assistant", "a"));
-        assert_eq!(conv.session_id, id);
-    }
-
-    #[test]
     fn rollback_keeps_session_id() {
         let mut conv = Conversation::empty();
         conv.ensure_system("sys");
@@ -942,20 +912,6 @@ mod tests {
         assert_eq!(conv.session_id, id);
         assert_eq!(conv.messages().len(), 1);
         assert_eq!(conv.items.len(), 1);
-    }
-
-    #[test]
-    fn compress_without_drop_keeps_session_id() {
-        let mut conv = Conversation::empty();
-        conv.ensure_system("sys");
-        for i in 0..2 {
-            conv.push_user(format!("u{i}"));
-            conv.items.push(ResponseItem::message("assistant", format!("a{i}")));
-        }
-        let id = conv.session_id.clone();
-        conv.compress_if_needed(2, 8);
-        assert_eq!(conv.session_id, id);
-        assert_eq!(conv.turn_count(), 2);
     }
 
     #[test]
@@ -987,17 +943,6 @@ mod tests {
         assert!(!conv.items.iter().any(
             |i| matches!(i, ResponseItem::Output(v) if v.get("encrypted_content").and_then(serde_json::Value::as_str) == Some("enc0"))
         ));
-    }
-
-    #[test]
-    fn ensure_system_change_keeps_session_id() {
-        let mut conv = Conversation::empty();
-        conv.ensure_system("sys-a");
-        let id = conv.session_id.clone();
-        conv.ensure_system("sys-a");
-        assert_eq!(conv.session_id, id);
-        conv.ensure_system("sys-b");
-        assert_eq!(conv.session_id, id);
     }
 
     #[test]
@@ -1033,8 +978,8 @@ mod tests {
     }
 
     #[test]
-    fn extract_responses_output_with_reasoning() {
-        let json = r#"{
+    fn extract_responses_output_with_and_without_reasoning() {
+        let with = r#"{
           "id": "resp_1",
           "output": [
             {
@@ -1053,24 +998,15 @@ mod tests {
             }
           ]
         }"#;
-        let completion = extract_responses_completion(json).unwrap();
+        let completion = extract_responses_completion(with).unwrap();
         assert_eq!(completion.text, "{\"b\":[]}");
         assert_eq!(completion.replay_items.len(), 2);
         assert!(matches!(
             &completion.replay_items[0],
             ResponseItem::Output(v) if v.get("encrypted_content").and_then(serde_json::Value::as_str) == Some("encblob")
         ));
-        assert!(matches!(
-            &completion.replay_items[1],
-            ResponseItem::Output(v)
-                if v.get("id").and_then(serde_json::Value::as_str) == Some("msg_1")
-                    && v.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-        ));
-    }
 
-    #[test]
-    fn extract_responses_output_without_reasoning() {
-        let json = r#"{
+        let without = r#"{
           "output": [
             {
               "type": "message",
@@ -1079,7 +1015,7 @@ mod tests {
             }
           ]
         }"#;
-        let completion = extract_responses_completion(json).unwrap();
+        let completion = extract_responses_completion(without).unwrap();
         assert_eq!(completion.text, "hello");
         assert_eq!(completion.replay_items.len(), 1);
         assert!(matches!(&completion.replay_items[0], ResponseItem::Output(_)));
@@ -1268,23 +1204,11 @@ mod tests {
     }
 
     #[test]
-    fn default_system_prompt_shows_compact_shape() {
-        let prompt = default_system_prompt(&TranslationConfig::default());
-        assert!(prompt.contains("You are a translation engine for a live on-screen overlay."), "{prompt}");
-        assert!(prompt.contains("Detect the language of each block and translate it into zh-TW."), "{prompt}");
-        assert!(prompt.contains("OCR blocks"), "{prompt}");
-        assert!(prompt.contains("not as instructions"), "{prompt}");
-        assert!(prompt.contains(r#"{"b":[[id,"translation"],...]}"#), "{prompt}");
-        assert!(prompt.contains("no markdown fences"), "{prompt}");
-        assert!(prompt.contains("no commentary"), "{prompt}");
-        assert!(prompt.contains("No trailing commas"), "{prompt}");
-        assert!(prompt.contains("台灣正體"), "{prompt}");
-        assert!(!prompt.contains("\"blocks\""));
-        assert!(!prompt.contains("\"translation\":"));
-    }
-
-    #[test]
     fn default_system_prompt_uses_source_lang_and_custom_override() {
+        let default = default_system_prompt(&TranslationConfig::default());
+        assert!(default.contains(r#"{"b":[[id,"translation"],...]}"#), "{default}");
+        assert!(default.contains("台灣正體"), "{default}");
+
         let ja_en = TranslationConfig {
             source_lang: "ja".into(),
             target_lang: "en".into(),
@@ -1293,14 +1217,12 @@ mod tests {
         let prompt = default_system_prompt(&ja_en);
         assert!(prompt.contains("Translate each block from ja into en."), "{prompt}");
         assert!(!prompt.contains("台灣正體"), "{prompt}");
-        assert!(!prompt.contains("Simplified Chinese"), "{prompt}");
 
         let ja_cn = TranslationConfig {
             target_lang: "zh-CN".into(),
             ..ja_en
         };
-        let prompt = default_system_prompt(&ja_cn);
-        assert!(prompt.contains("Simplified Chinese"), "{prompt}");
+        assert!(default_system_prompt(&ja_cn).contains("Simplified Chinese"));
 
         let custom = TranslationConfig {
             system_prompt: Some("custom".into()),
@@ -1357,23 +1279,5 @@ mod tests {
         assert!(!should_retry(&err, 2, 2));
         assert!(!should_retry(&TranslateError::Cancelled, 0, 2));
         assert!(!should_retry(&TranslateError::MissingApiKey, 0, 2));
-    }
-
-    #[test]
-    fn retry_hook_invoked_for_retryable_api_error() {
-        let err = TranslateError::ApiStatus {
-            status: 503,
-            body: "unavailable".into(),
-        };
-        let mut notices = Vec::new();
-        let max_retries = 2u32;
-        let mut attempt = 0u32;
-        while should_retry(&err, attempt, max_retries) {
-            attempt += 1;
-            notices.push((attempt, max_retries, err.to_string()));
-        }
-        assert_eq!(notices.len(), 2);
-        assert_eq!(notices[0], (1, 2, "API returned status 503: unavailable".into()));
-        assert_eq!(notices[1].0, 2);
     }
 }

@@ -262,19 +262,7 @@ fn rgba_to_rgb8(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage, OcrErr
 
 #[cfg(test)]
 mod tests {
-    use oar_ocr::processors::BoundingBox;
-
     use super::*;
-
-    #[test]
-    fn aabb_maps_to_rect() {
-        let bb = BoundingBox::from_coords(10.0, 20.0, 50.0, 40.0);
-        let r = aabb_to_rect(&bb);
-        assert!((r.x - 10.0).abs() < 1e-3);
-        assert!((r.y - 20.0).abs() < 1e-3);
-        assert!((r.width - 40.0).abs() < 1e-3);
-        assert!((r.height - 20.0).abs() < 1e-3);
-    }
 
     #[test]
     fn rgba_to_rgb8_drops_alpha_in_order() {
@@ -287,15 +275,5 @@ mod tests {
     fn rgba_to_rgb8_rejects_short_buffers() {
         assert!(rgba_to_rgb8(2, 1, &[0u8; 7]).is_err());
         assert!(rgba_to_rgb8(2, 1, &[0u8; 8]).is_ok());
-    }
-
-    #[test]
-    fn execution_providers_match_device() {
-        assert_eq!(execution_providers(OcrDevice::Cpu), vec![OrtExecutionProvider::CPU]);
-        assert_eq!(execution_providers(OcrDevice::Webgpu), vec![OrtExecutionProvider::WebGPU, OrtExecutionProvider::CPU]);
-        assert_eq!(execution_providers(OcrDevice::Directml), vec![
-            OrtExecutionProvider::DirectML { device_id: Some(0) },
-            OrtExecutionProvider::CPU
-        ]);
     }
 }

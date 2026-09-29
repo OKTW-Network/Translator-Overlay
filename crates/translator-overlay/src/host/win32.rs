@@ -397,34 +397,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn z_order_preserves_when_overlay_is_already_above_target() {
+    fn z_order_anchor_and_topmost_band() {
         assert_eq!(choose_z_order_anchor(20, Some(20), false), ZOrderAnchor::Preserve);
-    }
-
-    #[test]
-    fn z_order_inserts_after_existing_predecessor() {
         assert_eq!(choose_z_order_anchor(20, Some(30), false), ZOrderAnchor::After(30));
-    }
-
-    #[test]
-    fn z_order_uses_top_for_normal_target_at_front() {
         assert_eq!(choose_z_order_anchor(20, None, false), ZOrderAnchor::Top);
-    }
-
-    #[test]
-    fn z_order_uses_topmost_only_for_topmost_target_at_front() {
         assert_eq!(choose_z_order_anchor(20, None, true), ZOrderAnchor::Topmost);
-    }
-
-    #[test]
-    fn unowned_picker_is_topmost_only_while_the_target_is_foreground() {
         assert!(overlay_wants_topmost(OverlayOwnership::Unowned, false, true));
         assert!(!overlay_wants_topmost(OverlayOwnership::Unowned, false, false));
         assert!(overlay_wants_topmost(OverlayOwnership::Unowned, true, false));
-    }
-
-    #[test]
-    fn owned_captions_follow_the_target_topmost_band_only() {
         assert!(!overlay_wants_topmost(OverlayOwnership::OwnedByTarget, false, true));
         assert!(overlay_wants_topmost(OverlayOwnership::OwnedByTarget, true, false));
     }

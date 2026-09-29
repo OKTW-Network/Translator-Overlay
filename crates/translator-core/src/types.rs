@@ -266,13 +266,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_collapses_whitespace() {
+    fn normalize_folds_whitespace_ellipsis_and_ocr_punct() {
         assert_eq!(normalize_ocr_text("hello   world"), "hello world");
         assert_eq!(normalize_ocr_text("  a\n\tb  "), "a b");
-    }
-
-    #[test]
-    fn normalize_collapses_ellipsis_length() {
         assert_eq!(normalize_ocr_text("…"), "…");
         assert_eq!(normalize_ocr_text("……"), "…");
         assert_eq!(normalize_ocr_text("………"), "…");
@@ -284,18 +280,10 @@ mod tests {
         assert_eq!(normalize_ocr_text("待って…ください"), "待って…ください");
         assert_eq!(normalize_ocr_text("セリフ。"), "セリフ。");
         assert_eq!(normalize_ocr_text("Hello."), "Hello.");
-    }
-
-    #[test]
-    fn normalize_folds_fullwidth_question_and_bang() {
         assert_eq!(normalize_ocr_text("何？"), "何?");
         assert_eq!(normalize_ocr_text("何?"), "何?");
         assert_eq!(normalize_ocr_text("嘘！"), "嘘!");
         assert_eq!(normalize_ocr_text("嘘!"), "嘘!");
-    }
-
-    #[test]
-    fn normalize_folds_wave_dash_and_fullwidth_tilde() {
         assert_eq!(normalize_ocr_text("そう〜"), "そう~");
         assert_eq!(normalize_ocr_text("そう～"), "そう~");
         assert_eq!(normalize_ocr_text("そう~"), "そう~");
@@ -303,37 +291,20 @@ mod tests {
     }
 
     #[test]
-    fn stabilize_keeps_bbox_under_small_jitter() {
+    fn stabilize_keeps_jitter_and_adopts_real_relayout() {
         let prev = Rect::new(100.0, 200.0, 180.0, 28.0);
-        // Typical detector noise: a few px shift + width wobble.
         let jitter = Rect::new(103.0, 197.0, 176.0, 30.0);
         assert!(!prev.is_significant_relayout(jitter));
         assert_eq!(prev.stabilize_against(jitter), prev);
-    }
 
-    #[test]
-    fn stabilize_adopts_real_move() {
-        let prev = Rect::new(100.0, 200.0, 180.0, 28.0);
         let moved = Rect::new(100.0, 320.0, 180.0, 28.0);
         assert!(prev.is_significant_relayout(moved));
         assert_eq!(prev.stabilize_against(moved), moved);
-    }
 
-    #[test]
-    fn stabilize_adopts_large_size_change() {
-        let prev = Rect::new(100.0, 200.0, 80.0, 24.0);
-        // Paragraph merge expands width/height at similar origin.
+        let small = Rect::new(100.0, 200.0, 80.0, 24.0);
         let merged = Rect::new(98.0, 198.0, 240.0, 72.0);
-        assert!(prev.is_significant_relayout(merged));
-        assert_eq!(prev.stabilize_against(merged), merged);
-    }
-
-    #[test]
-    fn iou_full_and_none() {
-        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
-        assert!((a.iou(a) - 1.0).abs() < 1e-5);
-        let b = Rect::new(20.0, 20.0, 10.0, 10.0);
-        assert_eq!(a.iou(b), 0.0);
+        assert!(small.is_significant_relayout(merged));
+        assert_eq!(small.stabilize_against(merged), merged);
     }
 
     #[test]

@@ -449,42 +449,33 @@ mod tests {
     }
 
     #[test]
-    fn resize_east_past_client_keeps_left_edge() {
+    fn resize_past_client_keeps_opposite_edge() {
         let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
-        let mut p = picker_with(&[n]);
         let pr = PixelRect::from_norm(n, 200, 200);
-        p.on_left_down(pr.x + pr.w, pr.y + pr.h / 2);
-        p.on_move(800, pr.y + pr.h / 2);
-        let _ = p.on_left_up(800, pr.y + pr.h / 2);
-        let out = PixelRect::from_norm(p.regions[0], 200, 200);
+
+        let mut east = picker_with(&[n]);
+        east.on_left_down(pr.x + pr.w, pr.y + pr.h / 2);
+        east.on_move(800, pr.y + pr.h / 2);
+        let _ = east.on_left_up(800, pr.y + pr.h / 2);
+        let out = PixelRect::from_norm(east.regions[0], 200, 200);
         assert_eq!(out.x, pr.x);
         assert_eq!(out.x + out.w, 200);
         assert_eq!(out.y, pr.y);
         assert_eq!(out.h, pr.h);
-    }
 
-    #[test]
-    fn resize_west_past_client_keeps_right_edge() {
-        let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
-        let mut p = picker_with(&[n]);
-        let pr = PixelRect::from_norm(n, 200, 200);
-        p.on_left_down(pr.x, pr.y + pr.h / 2);
-        p.on_move(-400, pr.y + pr.h / 2);
-        let _ = p.on_left_up(-400, pr.y + pr.h / 2);
-        let out = PixelRect::from_norm(p.regions[0], 200, 200);
+        let mut west = picker_with(&[n]);
+        west.on_left_down(pr.x, pr.y + pr.h / 2);
+        west.on_move(-400, pr.y + pr.h / 2);
+        let _ = west.on_left_up(-400, pr.y + pr.h / 2);
+        let out = PixelRect::from_norm(west.regions[0], 200, 200);
         assert_eq!(out.x, 0);
         assert_eq!(out.x + out.w, pr.x + pr.w);
-    }
 
-    #[test]
-    fn resize_south_past_client_keeps_top_edge() {
-        let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
-        let mut p = picker_with(&[n]);
-        let pr = PixelRect::from_norm(n, 200, 200);
-        p.on_left_down(pr.x + pr.w / 2, pr.y + pr.h);
-        p.on_move(pr.x + pr.w / 2, 900);
-        let _ = p.on_left_up(pr.x + pr.w / 2, 900);
-        let out = PixelRect::from_norm(p.regions[0], 200, 200);
+        let mut south = picker_with(&[n]);
+        south.on_left_down(pr.x + pr.w / 2, pr.y + pr.h);
+        south.on_move(pr.x + pr.w / 2, 900);
+        let _ = south.on_left_up(pr.x + pr.w / 2, 900);
+        let out = PixelRect::from_norm(south.regions[0], 200, 200);
         assert_eq!(out.y, pr.y);
         assert_eq!(out.y + out.h, 200);
         assert_eq!(out.x, pr.x);

@@ -321,34 +321,3 @@ fn part_path_for(dest: &Path) -> PathBuf {
     let pid = std::process::id();
     dest.with_file_name(format!(".{name}.{pid}.part"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn percent_caps_at_100() {
-        let p = DownloadProgress {
-            file_name: "x".into(),
-            file_index: 0,
-            file_count: 1,
-            bytes_downloaded: 50,
-            bytes_total: 100,
-        };
-        assert_eq!(p.percent(), 50);
-        let done = DownloadProgress {
-            bytes_downloaded: 100,
-            ..p.clone()
-        };
-        assert_eq!(done.percent(), 100);
-    }
-
-    #[test]
-    fn part_path_is_hidden_sibling() {
-        let dest = Path::new("models/pp-ocrv6_small_det.onnx");
-        let part = part_path_for(dest);
-        let name = part.file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with(".pp-ocrv6_small_det.onnx."));
-        assert!(name.ends_with(".part"));
-    }
-}

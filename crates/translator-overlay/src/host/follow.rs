@@ -127,29 +127,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn move_events_only_forward_the_target_window() {
+    fn should_forward_filters_by_hwnd_and_event() {
         assert!(should_forward(EVENT_SYSTEM_MOVESIZESTART, true, false, true));
         assert!(should_forward(EVENT_SYSTEM_MOVESIZEEND, true, false, true));
         assert!(!should_forward(EVENT_SYSTEM_MOVESIZESTART, false, false, true));
         assert!(!should_forward(EVENT_SYSTEM_MOVESIZESTART, true, false, false));
-    }
-
-    #[test]
-    fn location_and_foreground_events_are_forwarded() {
         assert!(should_forward(EVENT_OBJECT_LOCATIONCHANGE, true, false, true));
         assert!(!should_forward(EVENT_OBJECT_LOCATIONCHANGE, false, false, true));
         assert!(should_forward(EVENT_SYSTEM_FOREGROUND, false, false, false));
-    }
-
-    #[test]
-    fn window_reorder_forwards_for_the_parent_container() {
         assert!(should_forward(EVENT_OBJECT_REORDER, false, false, true));
         assert!(should_forward(EVENT_OBJECT_REORDER, true, false, true));
         assert!(!should_forward(EVENT_OBJECT_REORDER, false, false, false));
-    }
-
-    #[test]
-    fn destroy_forwards_target_and_overlay_windows() {
         assert!(should_forward(EVENT_OBJECT_DESTROY, true, false, true));
         assert!(should_forward(EVENT_OBJECT_DESTROY, false, true, true));
         assert!(!should_forward(EVENT_OBJECT_DESTROY, false, false, true));

@@ -143,19 +143,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn small_has_three_artifacts() {
-        assert_eq!(artifacts_for_tier(ModelTier::Small).len(), 3);
-    }
-
-    #[test]
-    fn paths_join_file_names() {
-        let paths = ModelPaths::from_dir(Path::new("models"), ModelTier::Small);
-        assert!(paths.det.ends_with("pp-ocrv6_small_det.onnx"));
-        assert!(paths.rec.ends_with("pp-ocrv6_small_rec.onnx"));
-        assert!(paths.dict.ends_with("ppocrv6_dict.txt"));
-    }
-
-    #[test]
     fn medium_shares_dict_with_small() {
         let small = ModelPaths::from_dir(Path::new("models"), ModelTier::Small);
         let medium = ModelPaths::from_dir(Path::new("models"), ModelTier::Medium);

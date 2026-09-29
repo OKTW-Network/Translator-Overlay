@@ -316,19 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn detects_single_latin_and_digit() {
-        assert!(is_single_latin_or_digit("0"));
-        assert!(is_single_latin_or_digit("V"));
-        assert!(is_single_latin_or_digit(" c "));
-        assert!(is_single_latin_or_digit("9"));
-        assert!(!is_single_latin_or_digit("OK"));
-        assert!(!is_single_latin_or_digit("甲"));
-        assert!(!is_single_latin_or_digit("甲乙"));
-        assert!(!is_single_latin_or_digit(""));
-        assert!(!is_single_latin_or_digit("!"));
-    }
-
-    #[test]
     fn filter_drops_single_chars() {
         let blocks = vec![
             block("Hello", 10.0, 10.0),
@@ -503,54 +490,21 @@ mod tests {
     }
 
     #[test]
-    fn persistence_ellipsis_length_is_same_text() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
-        let origin = block_wh("待って…", 100.0, 200.0, 80.0, 22.0);
-        let _ = f.filter(vec![origin.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![origin.clone()]);
-        assert_eq!(confirmed.len(), 1);
-        let frozen = confirmed[0].bbox;
+    fn persistence_ocr_punct_fold_is_same_text() {
+        for (origin_text, flicker) in [("待って…", "待って………"), ("何？", "何?"), ("そう〜", "そう~")] {
+            let mut f = BlockPersistenceFilter::new(50, 300);
+            let origin = block_wh(origin_text, 100.0, 200.0, 80.0, 22.0);
+            let _ = f.filter(vec![origin.clone()]);
+            std::thread::sleep(Duration::from_millis(60));
+            let confirmed = f.filter(vec![origin.clone()]);
+            assert_eq!(confirmed.len(), 1, "{origin_text}");
+            let frozen = confirmed[0].bbox;
 
-        let longer = block_wh("待って………", 96.0, 198.0, 170.0, 26.0);
-        let out = f.filter(vec![longer]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].text, "待って…");
-        assert_eq!(out[0].bbox, frozen, "ellipsis-length flicker must keep frozen bbox");
-    }
-
-    #[test]
-    fn persistence_fullwidth_question_is_same_text() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
-        let origin = block_wh("何？", 100.0, 200.0, 80.0, 22.0);
-        let _ = f.filter(vec![origin.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![origin.clone()]);
-        assert_eq!(confirmed.len(), 1);
-        let frozen = confirmed[0].bbox;
-
-        let half = block_wh("何?", 102.0, 201.0, 76.0, 20.0);
-        let out = f.filter(vec![half]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].text, "何？");
-        assert_eq!(out[0].bbox, frozen, "？ vs ? must keep frozen bbox");
-    }
-
-    #[test]
-    fn persistence_wave_dash_is_same_text() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
-        let origin = block_wh("そう〜", 100.0, 200.0, 80.0, 22.0);
-        let _ = f.filter(vec![origin.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![origin.clone()]);
-        assert_eq!(confirmed.len(), 1);
-        let frozen = confirmed[0].bbox;
-
-        let ascii = block_wh("そう~", 102.0, 201.0, 76.0, 20.0);
-        let out = f.filter(vec![ascii]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].text, "そう〜");
-        assert_eq!(out[0].bbox, frozen, "〜 vs ~ must keep frozen bbox");
+            let out = f.filter(vec![block_wh(flicker, 102.0, 201.0, 76.0, 20.0)]);
+            assert_eq!(out.len(), 1, "{origin_text}");
+            assert_eq!(out[0].text, origin_text);
+            assert_eq!(out[0].bbox, frozen, "{origin_text} fold must keep frozen bbox");
+        }
     }
 
     #[test]

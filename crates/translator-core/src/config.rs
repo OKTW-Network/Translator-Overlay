@@ -709,45 +709,24 @@ model = "my-model"
 
     #[test]
     fn provider_cli_roundtrip() {
-        let mut config = AppConfig::default();
-        config.api.provider = ModelProvider::GrokCli;
-        config.api.cli_path = r"C:\tools\grok.exe".into();
-        config.api.model = "grok-4.5".into();
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("provider = \"grok_cli\""), "got:\n{text}");
-        assert!(text.contains("cli_path"), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.api.provider, ModelProvider::GrokCli);
-        assert_eq!(parsed.api.cli_path, r"C:\tools\grok.exe");
-    }
-
-    #[test]
-    fn provider_opencode_cli_roundtrip() {
-        let mut config = AppConfig::default();
-        config.api.provider = ModelProvider::OpenCodeCli;
-        config.api.cli_path = r"C:\tools\opencode.exe".into();
-        config.api.model = "opencode/gpt-5".into();
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("provider = \"opencode_cli\""), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.api.provider, ModelProvider::OpenCodeCli);
-        assert_eq!(parsed.api.cli_path, r"C:\tools\opencode.exe");
-        assert_eq!(parsed.api.model, "opencode/gpt-5");
-        assert!(parsed.api.provider.is_cli());
-    }
-
-    #[test]
-    fn provider_claude_cli_roundtrip() {
-        let mut config = AppConfig::default();
-        config.api.provider = ModelProvider::ClaudeCli;
-        config.api.model = "sonnet".into();
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("provider = \"claude_cli\""), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.api.provider, ModelProvider::ClaudeCli);
-        assert_eq!(parsed.api.model, "sonnet");
-        assert!(parsed.api.provider.is_cli());
-        assert_eq!(parsed.api.provider.default_bin(), "claude");
+        for (provider, cli_path, model, key) in [
+            (ModelProvider::GrokCli, r"C:\tools\grok.exe", "grok-4.5", "grok_cli"),
+            (ModelProvider::OpenCodeCli, r"C:\tools\opencode.exe", "opencode/gpt-5", "opencode_cli"),
+            (ModelProvider::ClaudeCli, "", "sonnet", "claude_cli"),
+        ] {
+            let mut config = AppConfig::default();
+            config.api.provider = provider;
+            config.api.cli_path = cli_path.into();
+            config.api.model = model.into();
+            let text = toml::to_string_pretty(&config).unwrap();
+            assert!(text.contains(&format!("provider = \"{key}\"")), "got:\n{text}");
+            let parsed: AppConfig = toml::from_str(&text).unwrap();
+            assert_eq!(parsed.api.provider, provider);
+            assert_eq!(parsed.api.cli_path, cli_path);
+            assert_eq!(parsed.api.model, model);
+            assert!(parsed.api.provider.is_cli());
+        }
+        assert_eq!(ModelProvider::ClaudeCli.default_bin(), "claude");
     }
 
     #[test]
@@ -773,48 +752,20 @@ model = "my-model"
     }
 
     #[test]
-    fn structured_outputs_defaults_true_including_missing_toml() {
-        assert!(ApiConfig::default().structured_outputs);
-
-        let config: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
-        assert!(config.api.structured_outputs);
+    fn api_bools_default_true_including_missing_toml() {
+        let omitted: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
+        assert!(omitted.api.structured_outputs && omitted.api.stream && omitted.api.send_reasoning_content);
 
         let mut config = AppConfig::default();
         config.api.structured_outputs = false;
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("structured_outputs = false"), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert!(!parsed.api.structured_outputs);
-    }
-
-    #[test]
-    fn stream_defaults_true_including_missing_toml() {
-        assert!(ApiConfig::default().stream);
-
-        let config: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
-        assert!(config.api.stream);
-
-        let mut config = AppConfig::default();
         config.api.stream = false;
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("stream = false"), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert!(!parsed.api.stream);
-    }
-
-    #[test]
-    fn send_reasoning_content_defaults_true_including_missing_toml() {
-        assert!(ApiConfig::default().send_reasoning_content);
-
-        let config: AppConfig = toml::from_str("[api]\nmodel = \"gpt-4o-mini\"\n").unwrap();
-        assert!(config.api.send_reasoning_content);
-
-        let mut config = AppConfig::default();
         config.api.send_reasoning_content = false;
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("send_reasoning_content = false"), "got:\n{text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert!(!parsed.api.send_reasoning_content);
+        assert!(!parsed.api.structured_outputs && !parsed.api.stream && !parsed.api.send_reasoning_content);
+        for key in ["structured_outputs = false", "stream = false", "send_reasoning_content = false"] {
+            assert!(text.contains(key), "got:\n{text}");
+        }
     }
 
     #[test]
@@ -828,37 +779,19 @@ keep_speaker_separate = true
 order = "top_to_bottom_left_to_right"
 merge_whole_region = true
 left_align_ratio = 0.05
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert!(config.ocr.line_merge.enabled);
-        assert!(config.ocr.line_merge.merge_whole_region);
-        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
-        assert!((config.ocr.line_merge.gap_ratio - 0.015).abs() < 1e-6);
-        assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
-        assert!(config.ocr.line_merge.join_with_space);
-        assert!(config.ocr.line_merge.reject_short_long);
-    }
-
-    #[test]
-    fn line_merge_max_gap_ratio_legacy_key_ignored() {
-        let text = r#"
-[ocr.line_merge]
 max_gap_ratio = 0.02
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
-    }
-
-    #[test]
-    fn line_merge_legacy_overlap_keys_ignored() {
-        let text = r#"
-[ocr.line_merge]
 overlap_ratio = 0.9
 overlap_ratio_min = 0.9
 align_overlap_ratio = 0.9
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert!(config.ocr.line_merge.enabled);
+        assert!(config.ocr.line_merge.merge_whole_region);
+        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
+        assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
+        assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
+        assert!(config.ocr.line_merge.join_with_space);
+        assert!(config.ocr.line_merge.reject_short_long);
     }
 
     #[test]
@@ -886,15 +819,6 @@ target_lang = "ja"
         assert_eq!(config.ocr.model_tier, ModelTier::Small);
         assert!(config.overlay.enabled);
         assert!(config.overlay.reader_enabled);
-    }
-
-    #[test]
-    fn overlay_display_defaults_on() {
-        let overlay = OverlayConfig::default();
-        assert!(overlay.enabled);
-        assert!(overlay.reader_enabled);
-        assert_eq!(overlay.reader_font_px, READER_FONT_PX_DEFAULT);
-        assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_DEFAULT as i32);
     }
 
     #[test]

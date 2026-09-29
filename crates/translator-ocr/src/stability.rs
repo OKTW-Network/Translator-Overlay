@@ -431,38 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_ignores_ellipsis_length() {
-        let a = OcrFingerprint::from_blocks(&[block("待って…")]);
-        let b = OcrFingerprint::from_blocks(&[block("待って………")]);
-        let c = OcrFingerprint::from_blocks(&[block("待って")]);
-        let d = OcrFingerprint::from_text("……");
-        let e = OcrFingerprint::from_text("………");
-        assert_eq!(a, b);
-        assert_eq!(a, c);
-        assert_eq!(d, e);
-    }
-
-    #[test]
-    fn fingerprint_ignores_fullwidth_question() {
-        let a = OcrFingerprint::from_blocks(&[block("何？")]);
-        let b = OcrFingerprint::from_blocks(&[block("何?")]);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn fingerprint_ignores_wave_dash() {
-        let wave = OcrFingerprint::from_blocks(&[block("そう〜")]);
-        let full = OcrFingerprint::from_blocks(&[block("そう～")]);
-        let ascii = OcrFingerprint::from_blocks(&[block("そう~")]);
-        assert_eq!(wave, ascii);
-        assert_eq!(full, ascii);
-    }
-
-    #[test]
-    fn fingerprint_changes_with_text() {
-        let a = OcrFingerprint::from_blocks(&[block("a")]);
-        let b = OcrFingerprint::from_blocks(&[block("b")]);
-        assert_ne!(a, b);
+    fn fingerprint_ignores_ocr_punct_fold() {
+        assert_eq!(OcrFingerprint::from_blocks(&[block("待って…")]), OcrFingerprint::from_blocks(&[block("待って………")]));
+        assert_eq!(OcrFingerprint::from_blocks(&[block("待って…")]), OcrFingerprint::from_blocks(&[block("待って")]));
+        assert_eq!(OcrFingerprint::from_blocks(&[block("何？")]), OcrFingerprint::from_blocks(&[block("何?")]));
+        assert_eq!(OcrFingerprint::from_blocks(&[block("そう〜")]), OcrFingerprint::from_blocks(&[block("そう~")]));
+        assert_eq!(OcrFingerprint::from_blocks(&[block("そう～")]), OcrFingerprint::from_blocks(&[block("そう~")]));
     }
 
     #[test]

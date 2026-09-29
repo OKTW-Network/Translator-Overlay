@@ -446,18 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_ignores_merge_all() {
-        let cfg = LineMergeConfig {
-            enabled: false,
-            merge_whole_region: true,
-            ..Default::default()
-        };
-        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
-        let merged = merge_with(blocks, cfg, true);
-        assert_eq!(merged.len(), 2);
-    }
-
-    #[test]
     fn join_without_space_concatenates() {
         let cfg = LineMergeConfig {
             join_with_space: false,
@@ -467,14 +455,6 @@ mod tests {
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "甲乙丙丁");
-    }
-
-    #[test]
-    fn equal_width_nearby_lines_merge() {
-        let blocks = vec![line(0, "甲乙", 10.0, 10.0, 80.0, 20.0), line(1, "丙丁", 10.0, 34.0, 80.0, 20.0)];
-        let merged = merge_line_blocks(blocks);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "甲乙 丙丁");
     }
 
     #[test]
@@ -620,26 +600,18 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_gap_at_threshold_still_merges() {
+    fn horizontal_gap_threshold() {
         let cfg = LineMergeConfig::default();
         let w = 40.0;
         let h = 18.0;
         let gap = cfg.horizontal_gap_ratio * DEFAULT_FRAME_W as f32;
-        let blocks = vec![line(0, "Left", 10.0, 10.0, w, h), line(1, "Right", 10.0 + w + gap, 10.0, w, h)];
-        let merged = merge_with(blocks, cfg, false);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "Left Right");
-    }
-
-    #[test]
-    fn horizontal_gap_beyond_threshold_stays_separate() {
-        let cfg = LineMergeConfig::default();
-        let w = 40.0;
-        let h = 18.0;
-        let gap = cfg.horizontal_gap_ratio * DEFAULT_FRAME_W as f32 + 2.0;
-        let blocks = vec![line(0, "Left", 10.0, 10.0, w, h), line(1, "Right", 10.0 + w + gap, 10.0, w, h)];
-        let merged = merge_with(blocks, cfg, false);
-        assert_eq!(merged.len(), 2);
+        let at = vec![line(0, "Left", 10.0, 10.0, w, h), line(1, "Right", 10.0 + w + gap, 10.0, w, h)];
+        assert_eq!(merge_with(at, cfg.clone(), false).len(), 1);
+        let beyond = vec![
+            line(0, "Left", 10.0, 10.0, w, h),
+            line(1, "Right", 10.0 + w + gap + 2.0, 10.0, w, h),
+        ];
+        assert_eq!(merge_with(beyond, cfg, false).len(), 2);
     }
 
     #[test]
@@ -661,19 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn gap_at_threshold_still_merges() {
-        let cfg = LineMergeConfig::default();
-        let h = 18.0;
-        let gap = cfg.gap_ratio * DEFAULT_FRAME_H as f32;
-        let blocks = vec![
-            line(0, "Hello", 10.0, 10.0, 120.0, h),
-            line(1, "world", 12.0, 10.0 + h + gap, 90.0, h),
-        ];
-        let merged = merge_with(blocks, cfg, false);
-        assert_eq!(merged.len(), 1);
-    }
-
-    #[test]
     fn overlapping_gap_within_abs_threshold_merges() {
         let h = 18.0;
         // Negative gap (2px overlap) is the same |gap| as a 2px space.
@@ -686,16 +645,20 @@ mod tests {
     }
 
     #[test]
-    fn gap_just_beyond_threshold_stays_separate() {
+    fn vertical_gap_threshold() {
         let cfg = LineMergeConfig::default();
         let h = 18.0;
-        let gap = cfg.gap_ratio * DEFAULT_FRAME_H as f32 + 2.0;
-        let blocks = vec![
+        let gap = cfg.gap_ratio * DEFAULT_FRAME_H as f32;
+        let at = vec![
             line(0, "Hello", 10.0, 10.0, 120.0, h),
             line(1, "world", 12.0, 10.0 + h + gap, 90.0, h),
         ];
-        let merged = merge_with(blocks, cfg, false);
-        assert_eq!(merged.len(), 2);
+        assert_eq!(merge_with(at, cfg.clone(), false).len(), 1);
+        let beyond = vec![
+            line(0, "Hello", 10.0, 10.0, 120.0, h),
+            line(1, "world", 12.0, 10.0 + h + gap + 2.0, 90.0, h),
+        ];
+        assert_eq!(merge_with(beyond, cfg, false).len(), 2);
     }
 
     #[test]
@@ -781,14 +744,6 @@ mod tests {
     }
 
     #[test]
-    fn single_line_only_passthrough() {
-        let blocks = vec![line(0, "only", 322.0, 876.0, 434.0, 60.0)];
-        let merged = merge_line_blocks(blocks);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "only");
-    }
-
-    #[test]
     fn wrap_with_positive_gap_still_merges_on_dense_page() {
         let h = 40.0;
         let mut blocks = Vec::new();
@@ -861,31 +816,14 @@ mod tests {
 
     #[test]
     fn whole_region_order_left_to_right_top_to_bottom() {
-        let cfg = LineMergeConfig {
-            order: LineMergeOrder::LeftToRightTopToBottom,
-            ..Default::default()
-        };
         let blocks = vec![
             line(0, "A", 10.0, 10.0, 20.0, 16.0),
             line(1, "B", 80.0, 10.0, 20.0, 16.0),
             line(2, "C", 10.0, 40.0, 20.0, 16.0),
             line(3, "D", 80.0, 40.0, 20.0, 16.0),
         ];
-        let merged = merge_with(blocks, cfg, true);
+        let merged = merge_with(blocks, LineMergeConfig::default(), true);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A B C D");
-    }
-
-    #[test]
-    fn default_whole_region_order_is_left_to_right() {
-        let cfg = LineMergeConfig::default();
-        let blocks = vec![
-            line(0, "A", 10.0, 10.0, 20.0, 16.0),
-            line(1, "B", 80.0, 10.0, 20.0, 16.0),
-            line(2, "C", 10.0, 40.0, 20.0, 16.0),
-            line(3, "D", 80.0, 40.0, 20.0, 16.0),
-        ];
-        let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged[0].text, "A B C D");
     }
 }

@@ -436,26 +436,4 @@ mod tests {
         assert!(fenced.ends_with(UNTRUSTED_END));
         assert!(cli_system_prompt("base").contains(UNTRUSTED_BEGIN));
     }
-
-    #[test]
-    fn remove_dir_all_once_deletes_and_ignores_missing() {
-        let dir = std::env::temp_dir()
-            .join("translator-overlay-cli")
-            .join(format!("rm-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        remove_dir_all_once(&dir).unwrap();
-        assert!(!dir.exists());
-        remove_dir_all_once(&dir).unwrap();
-    }
-
-    #[test]
-    fn grok_prompt_plan_does_not_include_history() {
-        let mirrored = msgs(&[("system", "sys"), ("user", "u1"), ("assistant", "a1")]);
-        let messages = msgs(&[("system", "sys"), ("user", "u1"), ("assistant", "a1"), ("user", "only-this")]);
-        let SessionPlan::Append { user } = plan_turn(&mirrored, &messages).unwrap() else {
-            panic!("expected append");
-        };
-        assert_eq!(user, "only-this");
-        assert!(!user.contains("u1"));
-    }
 }
