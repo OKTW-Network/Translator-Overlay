@@ -1,7 +1,7 @@
 //! PP-OCRv6 ONNX artifacts (file names + GitHub release sizes/URLs).
 //!
-//! Missing or wrong-sized files are fetched by the app into `models_dir`
-//! (see [`crate::download`]). `oar-ocr` loads only local absolute paths.
+//! Missing files are fetched by the app into `models_dir` (see [`crate::download`]).
+//! Load only checks that the files exist; download verifies byte length.
 
 use std::path::{Path, PathBuf};
 
@@ -114,27 +114,9 @@ impl ModelPaths {
         Self { tier, det, rec, dict }
     }
 
-    /// True when every artifact exists and matches its expected byte length.
+    /// True when every artifact exists as a regular file. Size is not checked.
     pub fn all_present(&self) -> bool {
-        for a in artifacts_for_tier(self.tier) {
-            let path = match a.role {
-                ModelRole::Detection => &self.det,
-                ModelRole::Recognition => &self.rec,
-                ModelRole::Dictionary => &self.dict,
-            };
-            if !file_has_expected_size(path, a.expected_bytes) {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-/// Whether `path` is a regular file whose length equals `expected_bytes`.
-pub fn file_has_expected_size(path: &Path, expected_bytes: u64) -> bool {
-    match std::fs::metadata(path) {
-        Ok(meta) => meta.is_file() && meta.len() == expected_bytes,
-        Err(_) => false,
+        self.det.is_file() && self.rec.is_file() && self.dict.is_file()
     }
 }
 
@@ -181,5 +163,18 @@ mod tests {
     fn missing_file_is_not_present() {
         let paths = ModelPaths::from_dir(Path::new("definitely-missing-models-dir"), ModelTier::Tiny);
         assert!(!paths.all_present());
+    }
+
+    #[test]
+    fn existing_files_count_as_present_regardless_of_size() {
+        let dir = std::env::temp_dir().join(format!("translator-ocr-present-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = ModelPaths::from_dir(&dir, ModelTier::Tiny);
+        for p in [&paths.det, &paths.rec, &paths.dict] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert!(paths.all_present());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

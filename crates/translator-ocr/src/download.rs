@@ -3,12 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use tokio::{fs, io::AsyncWriteExt, sync::watch};
-use tracing::{info, warn};
+use tracing::info;
 use translator_core::{ModelTier, OcrConfig, OcrDevice, PipelineStatus};
 
 use crate::{
     OcrEngine, OcrError,
-    models::{ModelArtifact, ModelPaths, artifacts_for_tier, file_has_expected_size},
+    models::{ModelArtifact, ModelPaths, artifacts_for_tier},
 };
 
 /// Progress for one file in an `ensure_models` run.
@@ -156,17 +156,14 @@ async fn run_download_and_load(config: OcrConfig, tx: watch::Sender<ModelLoadUpd
 fn missing_artifacts(models_dir: &Path, tier: ModelTier) -> Vec<&'static ModelArtifact> {
     artifacts_for_tier(tier)
         .iter()
-        .filter(|a| {
-            let path = models_dir.join(a.file_name);
-            !file_has_expected_size(&path, a.expected_bytes)
-        })
+        .filter(|a| !models_dir.join(a.file_name).is_file())
         .collect()
 }
 
-/// Ensure all artifacts for `tier` exist under `models_dir` with the expected size.
+/// Ensure all artifacts for `tier` exist under `models_dir`.
 ///
-/// Existing files with the correct byte length are skipped. Truncated / wrong-sized
-/// files are re-downloaded. HTTPS + exact size is the integrity check (no hash).
+/// Files that already exist are skipped (size is not checked on load).
+/// HTTPS + exact size is the integrity check during download (no hash).
 pub async fn ensure_models(
     models_dir: &Path,
     tier: ModelTier,
@@ -208,18 +205,6 @@ async fn download_one(
     file_count: u32,
     on_progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<(), OcrError> {
-    if file_has_expected_size(dest, art.expected_bytes) {
-        return Ok(());
-    }
-    if fs::try_exists(dest).await.unwrap_or(false) {
-        warn!(
-            path = %dest.display(),
-            expected = art.expected_bytes,
-            "removing wrong-sized OCR model before re-download"
-        );
-        let _ = fs::remove_file(dest).await;
-    }
-
     let url = art.download_url();
     info!(file = art.file_name, %url, expected = art.expected_bytes, "downloading OCR model");
 
@@ -307,7 +292,7 @@ async fn write_download_part(
         .await
         .map_err(|e| OcrError::Download(format!("rename {} → {}: {e}", part_path.display(), dest.display())))?;
 
-    if !file_has_expected_size(dest, art.expected_bytes) {
+    if !std::fs::metadata(dest).is_ok_and(|m| m.is_file() && m.len() == art.expected_bytes) {
         let _ = fs::remove_file(dest).await;
         return Err(OcrError::Download(format!("{}: size check failed after rename", art.file_name)));
     }

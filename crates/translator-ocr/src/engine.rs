@@ -54,17 +54,14 @@ impl OcrEngine {
     /// Load ONNX models from local paths under `models_dir`.
     ///
     /// Prefer [`Self::start_load`] when files may still need downloading.
-    /// This only opens existing files that already match the expected sizes.
+    /// This only requires the files to exist; download verifies sizes.
     pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
         Self::ensure_models_dir(&models_dir)?;
 
         let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
         if !paths.all_present() {
-            return Err(OcrError::Other(format!(
-                "OCR models missing or wrong size under {} (run ensure_models first)",
-                models_dir.display()
-            )));
+            return Err(OcrError::Other(format!("OCR models missing under {} (run ensure_models first)", models_dir.display())));
         }
 
         let det = paths.det.to_string_lossy().into_owned();
