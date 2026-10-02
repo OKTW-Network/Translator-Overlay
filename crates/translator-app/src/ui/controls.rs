@@ -46,9 +46,10 @@ pub fn note(text: &str) -> TextBlock {
         .text_wrapping(TextWrapping::WrapWholeWords)
 }
 
-fn compact_toggle(is_on: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
+fn compact_toggle(is_on: bool, enabled: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
     ToggleSwitch::new()
         .is_on(is_on)
+        .is_enabled(enabled)
         .on_toggled(on_toggled)
         .width(40.0)
         .min_width(40.0)
@@ -183,7 +184,7 @@ pub fn card_toggle(
     is_on: bool,
     on_toggled: impl Fn(bool) + 'static,
 ) -> View {
-    settings_card(key, header, description, compact_toggle(is_on, on_toggled))
+    settings_card(key, header, description, compact_toggle(is_on, true, on_toggled))
 }
 
 /// Params for [`card_slider_number`] (keeps call sites clippy-clean).
@@ -267,6 +268,7 @@ pub struct OptionalSliderParams {
     pub description: String,
     pub value: f64,
     pub enabled: bool,
+    pub applicable: bool,
     pub min: f64,
     pub max: f64,
     pub step: f64,
@@ -282,6 +284,7 @@ pub fn optional_slider_row(
     let max = p.max;
     let step = p.step;
     let enabled = p.enabled;
+    let applicable = p.applicable;
     let value = quantize_to_step(p.value, min, max, step);
 
     let on_slider = {
@@ -312,7 +315,7 @@ pub fn optional_slider_row(
                     .minimum(min)
                     .maximum(max)
                     .step_frequency(step)
-                    .is_enabled(enabled)
+                    .is_enabled(applicable && enabled)
                     .on_value_changed(on_slider)
                     .width(160.0)
                     .min_width(120.0)
@@ -321,11 +324,11 @@ pub fn optional_slider_row(
                     .value(value)
                     .minimum(min)
                     .maximum(max)
-                    .is_enabled(enabled)
+                    .is_enabled(applicable && enabled)
                     .on_value_changed(on_box)
                     .width(88.0)
                     .vertical_alignment(VerticalAlignment::Center),
-                compact_toggle(enabled, on_enabled),
+                compact_toggle(enabled, applicable, on_enabled),
             )),
     )
 }
@@ -337,6 +340,7 @@ pub struct OptionalNumberParams {
     pub description: Option<String>,
     pub value: f64,
     pub enabled: bool,
+    pub applicable: bool,
     pub min: f64,
     pub max: f64,
     pub step: f64,
@@ -362,7 +366,7 @@ pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'st
                     .value(value)
                     .minimum(min)
                     .maximum(max)
-                    .is_enabled(p.enabled)
+                    .is_enabled(p.applicable && p.enabled)
                     .on_value_changed(move |v: Option<f64>| {
                         if let Some(v) = v {
                             on_value(quantize_to_step(v, min, max, step));
@@ -370,7 +374,7 @@ pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'st
                     })
                     .width(120.0)
                     .vertical_alignment(VerticalAlignment::Center),
-                compact_toggle(p.enabled, on_enabled),
+                compact_toggle(p.enabled, p.applicable, on_enabled),
             )),
     )
 }
@@ -405,7 +409,7 @@ pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'stat
                     .min_width(140.0)
                     .width(180.0)
                     .vertical_alignment(VerticalAlignment::Center),
-                compact_toggle(p.enabled, on_enabled),
+                compact_toggle(p.enabled, true, on_enabled),
             )),
     )
 }

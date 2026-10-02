@@ -15,8 +15,7 @@ use crate::ui::{
     chrome::settings_page_shell,
     controls::{
         ModelSuggestParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_model_suggest,
-        card_password, card_slider_number, card_text, card_toggle, note, optional_number_row, optional_slider_row, optional_text_row,
-        radio,
+        card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row, radio,
     },
     shared::{
         AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_api_profile, load_api_profile, mark_dirty, request_model_list,
@@ -411,7 +410,6 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 },
             ),
             priority_tier_card,
-            note("A local agent session stays open and only the new turn is sent. Tools are denied."),
             model_card,
         ))
     } else {
@@ -511,13 +509,9 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             ))
     };
 
+    let http_sampling = !api.provider.is_cli();
     let sampling = StackPanel::new().spacing(4.0).children((
         section_header("Optional parameters"),
-        note(if api.provider.is_cli() {
-            "Turn On to include. Temperature, Top P, and Max tokens apply to HTTP only. Reasoning effort is sent to the CLI."
-        } else {
-            "Turn On to include in the request. Off = omit."
-        }),
         optional_slider_row(
             OptionalSliderParams {
                 key: "api-temperature",
@@ -525,6 +519,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 description: "Higher = more random (0–2).".into(),
                 value: optional.temp_val,
                 enabled: optional.temp_enabled,
+                applicable: http_sampling,
                 min: 0.0,
                 max: 2.0,
                 step: 0.05,
@@ -555,6 +550,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 description: "Nucleus sampling limit (0–1).".into(),
                 value: optional.top_p_val,
                 enabled: optional.top_p_enabled,
+                applicable: http_sampling,
                 min: 0.0,
                 max: 1.0,
                 step: 0.01,
@@ -585,6 +581,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 description: Some("Max reply length. Limit depends on the model.".into()),
                 value: optional.max_tokens_val,
                 enabled: optional.max_tokens_enabled,
+                applicable: http_sampling,
                 min: 1.0,
                 max: 1_000_000.0,
                 step: 1.0,
