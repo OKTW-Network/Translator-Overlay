@@ -285,7 +285,7 @@ pub(crate) async fn list_http_models(
 ) -> Result<Vec<String>, TranslateError> {
     let base = api.base_url.trim().trim_end_matches('/');
     if base.is_empty() {
-        return Err(TranslateError::Other("Base URL is empty".into()));
+        return Err(TranslateError::MissingBaseUrl);
     }
     let url = format!("{base}/models");
     let mut req = reqwest::Client::new().get(&url);

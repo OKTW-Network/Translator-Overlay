@@ -405,12 +405,6 @@ pub fn mark_dirty(ui: &mut UiShared) {
 
 /// Soft validation issues that should block Save.
 pub fn form_validation_error(ui: &UiShared) -> Option<String> {
-    if ui.draft.api.model.trim().is_empty() {
-        return Some("Model name is required.".into());
-    }
-    if !ui.draft.api.provider.is_cli() && ui.draft.api.base_url.trim().is_empty() {
-        return Some("Base URL is required.".into());
-    }
     // Optional numbers always have a value; toggle off = omit. No empty checks.
     if ui.optional.reasoning_enabled && ui.optional.reasoning_str.trim().is_empty() {
         return Some("Reasoning effort is on but empty.".into());

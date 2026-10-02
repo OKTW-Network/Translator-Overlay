@@ -316,13 +316,6 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 ))
         });
 
-    let model_placeholder = match api.provider {
-        ModelProvider::GrokCli => "grok-4.5",
-        ModelProvider::OpenCodeCli => "opencode/gpt-5",
-        ModelProvider::CodexCli => "gpt-5.6",
-        ModelProvider::ClaudeCli => "sonnet",
-        ModelProvider::OpenaiCompatible => "gpt-4o-mini",
-    };
     let model_hint = match api.provider {
         ModelProvider::OpenCodeCli => "Model id as provider/model, e.g. opencode/gpt-5.",
         ModelProvider::ClaudeCli => "Alias (sonnet, haiku, opus) or full model id. Empty = Claude Code default.",
@@ -336,7 +329,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             header: "Model".into(),
             description: model_hint.into(),
             value: api.model.clone(),
-            placeholder: model_placeholder.into(),
+            placeholder: String::new(),
             suggestions: {
                 let q = api.model.trim().to_ascii_lowercase();
                 model_catalog
@@ -398,7 +391,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 "CLI path",
                 Some("Leave empty to use grok / opencode / codex / claude on PATH. Uses your existing CLI login."),
                 api.cli_path.clone(),
-                api.provider.default_bin(),
+                "",
                 {
                     let cx = cx.clone();
                     move |v| {
@@ -424,7 +417,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                     "Base URL",
                     Some("OpenAI-compatible API endpoint."),
                     api.base_url.clone(),
-                    "https://api.openai.com/v1",
+                    "",
                     {
                         let cx = cx.clone();
                         move |v| {

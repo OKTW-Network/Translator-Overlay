@@ -35,8 +35,8 @@ pub enum TranslateError {
     ApiStatus { status: u16, body: String },
     #[error("failed to parse API response: {0}")]
     Parse(String),
-    #[error("API key is empty")]
-    MissingApiKey,
+    #[error("Base URL is empty")]
+    MissingBaseUrl,
     #[error("CLI not found: {0}")]
     CliNotFound(String),
     #[error("CLI exited: {0}")]
@@ -61,7 +61,7 @@ impl TranslateError {
             Self::ApiStatus { status, .. } => *status >= 500 || *status == 429,
             Self::CliExit(_) => true,
             Self::CliProtocol(msg) => msg.contains("timed out") || msg.contains("closed stdout"),
-            Self::Cancelled | Self::MissingApiKey | Self::CliNotFound(_) | Self::Parse(_) | Self::Other(_) => false,
+            Self::Cancelled | Self::MissingBaseUrl | Self::CliNotFound(_) | Self::Parse(_) | Self::Other(_) => false,
         }
     }
 }
@@ -700,14 +700,17 @@ impl TranslateClient {
         cancel: &CancellationToken,
         on_text: &mut impl FnMut(&str),
     ) -> Result<Completion, TranslateError> {
-        if self.config.api_key.trim().is_empty() {
-            return Err(TranslateError::MissingApiKey);
+        if self.config.base_url.trim().is_empty() {
+            return Err(TranslateError::MissingBaseUrl);
         }
         if cancel.is_cancelled() {
             return Err(TranslateError::Cancelled);
         }
 
-        let mut req = self.http.post(url).bearer_auth(&self.config.api_key);
+        let mut req = self.http.post(url);
+        if !self.config.api_key.trim().is_empty() {
+            req = req.bearer_auth(self.config.api_key.trim());
+        }
         if let Some(session_id) = session_id.filter(|s| !s.is_empty()) {
             req = req.header("x-grok-conv-id", session_id);
         }
@@ -813,6 +816,7 @@ pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
     use translator_core::{ApiConfig, ModelProvider, Rect, ServiceTier, TranslationConfig};
 
     use super::*;
@@ -1261,7 +1265,7 @@ mod tests {
             }
             .is_retryable()
         );
-        assert!(!TranslateError::MissingApiKey.is_retryable());
+        assert!(!TranslateError::MissingBaseUrl.is_retryable());
         assert!(!TranslateError::CliNotFound("grok".into()).is_retryable());
         assert!(TranslateError::CliExit("closed stdout".into()).is_retryable());
         assert!(TranslateError::CliProtocol("CLI turn timed out".into()).is_retryable());
@@ -1278,6 +1282,18 @@ mod tests {
         assert!(should_retry(&err, 1, 2));
         assert!(!should_retry(&err, 2, 2));
         assert!(!should_retry(&TranslateError::Cancelled, 0, 2));
-        assert!(!should_retry(&TranslateError::MissingApiKey, 0, 2));
+        assert!(!should_retry(&TranslateError::MissingBaseUrl, 0, 2));
+    }
+
+    #[tokio::test]
+    async fn empty_base_url_fails_before_http() {
+        let client = TranslateClient::new(ApiConfig::default());
+        let conv = Conversation::empty();
+        let err = client
+            .complete_cancellable(&conv, &CancellationToken::new(), &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TranslateError::MissingBaseUrl));
+        assert_eq!(err.to_string(), "Base URL is empty");
     }
 }

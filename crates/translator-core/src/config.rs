@@ -278,6 +278,7 @@ pub struct ApiConfig {
     pub base_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub api_key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -314,9 +315,9 @@ impl Default for ApiConfig {
             http_api: HttpApi::ChatCompletions,
             cli_path: String::new(),
             service_tier: ServiceTier::Standard,
-            base_url: "https://localhost/v1".to_string(),
+            base_url: String::new(),
             api_key: String::new(),
-            model: "gptoss".to_string(),
+            model: String::new(),
             temperature: None,
             top_p: None,
             max_tokens: None,
@@ -334,7 +335,7 @@ impl Default for ApiConfig {
 impl ApiConfig {
     /// Clear fields the selected provider does not store on an API profile.
     ///
-    /// `base_url` is emptied, not replaced with the localhost default, so serialization omits it.
+    /// HTTP-only strings are emptied so serialization omits them.
     pub(crate) fn blank_inapplicable(&mut self) {
         let defaults = Self::default();
         if self.provider.is_cli() {
@@ -612,6 +613,9 @@ mod tests {
     #[test]
     fn default_roundtrip_toml() {
         let config = AppConfig::default();
+        assert!(config.api.base_url.is_empty());
+        assert!(config.api.api_key.is_empty());
+        assert!(config.api.model.is_empty());
         let text = toml::to_string_pretty(&config).unwrap();
         assert!(text.contains("text_color_argb = \"#FFFFFFFF\""), "expected hex string in TOML, got:\n{text}");
         assert!(text.contains("background_color_argb = \"#C8000000\""), "expected hex string in TOML, got:\n{text}");
