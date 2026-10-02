@@ -1,9 +1,13 @@
-//! Shared WinUI `GotFocus` + `Rendering` hook.
+//! Shared WinUI `GotFocus` + `Rendering` hook, plus COM patches (Mica, nav header, slider step).
 //!
 //! Cached COM pointers are forgotten on TLS drop — WinRT `Release` during thread
 //! teardown aborts WinUI (`0xC0000409`).
 
 #![allow(non_snake_case)]
+
+mod mica;
+mod nav_header;
+mod range_step;
 
 use std::{
     cell::RefCell,
@@ -19,8 +23,6 @@ use windows_core::{
     RuntimeType,
     imp::{AbiType, ConstBuffer, DelegateBox, box_new},
 };
-
-use crate::ui::{nav_header, range_step};
 
 windows_core::imp::define_interface!(IFocusManagerStatics, IFocusManagerStatics_Vtbl, 0xe73dce04_e23a_5fb3_96ab_7df04c51dff2);
 #[repr(C)]
@@ -279,6 +281,7 @@ fn subscribe_rendering() -> Result<()> {
 
 /// Subscribe once; Settings header and slider steps both run from this hook.
 pub fn apply() {
+    mica::apply();
     if let Err(e) = subscribe_got_focus() {
         warn!(error = %e, "xaml: GotFocus subscribe failed");
     }

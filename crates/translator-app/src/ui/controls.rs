@@ -4,11 +4,47 @@ use translator_core::{format_argb_hex, parse_argb_hex};
 use translator_overlay::argb_channels;
 use windows_reactor::{
     AutoSuggestBox, Border, Button, ButtonStyle, ChildrenControl, Color, ColorPicker, ContentControl, FontIcon, HorizontalAlignment,
-    LayoutControl, NumberBox, Orientation, PasswordBox, PasswordRevealMode, ProgressRing, Slider, StackPanel, TextBox, ThemeBrush,
-    Thickness, ToggleSwitch, TooltipExt, VerticalAlignment, View,
+    LayoutControl, NumberBox, Orientation, PasswordBox, PasswordRevealMode, ProgressRing, RadioButton, Slider, StackPanel, TextBlock,
+    TextBox, TextWrapping, ThemeBrush, Thickness, ToggleSwitch, Tooltip, TooltipExt, VerticalAlignment, View,
 };
 
-use crate::ui::chrome::{settings_card, settings_card_with_below};
+use crate::ui::cards::{settings_card, settings_card_with_below};
+
+pub fn radio(group: &'static str, label: &str, width: Option<f64>, checked: bool, on: impl Fn() + 'static) -> View {
+    let mut rb = RadioButton::new()
+        .group_name(group)
+        .is_checked(checked)
+        .on_checked(move |is_checked: bool| {
+            if is_checked {
+                on();
+            }
+        })
+        .vertical_alignment(VerticalAlignment::Center);
+    if let Some(w) = width {
+        rb = rb.min_width(w).width(w);
+    } else {
+        rb = rb.horizontal_alignment(HorizontalAlignment::Left);
+    }
+    rb.content(label)
+}
+
+pub fn wrap_tooltip(text: &str) -> Tooltip {
+    Tooltip::rich(
+        TextBlock::new()
+            .text(text)
+            .text_wrapping(TextWrapping::WrapWholeWords)
+            .max_width(280.0),
+    )
+}
+
+pub fn note(text: &str) -> TextBlock {
+    TextBlock::new()
+        .text(text)
+        .font_size(12.0)
+        .foreground(ThemeBrush::PrimaryText)
+        .opacity(0.72)
+        .text_wrapping(TextWrapping::WrapWholeWords)
+}
 
 fn compact_toggle(is_on: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
     ToggleSwitch::new()
