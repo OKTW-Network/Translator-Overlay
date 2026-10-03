@@ -45,6 +45,7 @@ jobs:
           pattern: TranslatorOverlay-*-win-x64.zip
           merge-multiple: true
           path: dist
+          skip-decompress: true
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,6 +54,9 @@ jobs:
         run: |
           $zip = "dist/TranslatorOverlay-$env:VERSION-win-x64.zip"
           if (-not (Test-Path -LiteralPath $zip)) {
+            if (Test-Path -LiteralPath dist) {
+              Get-ChildItem -LiteralPath dist -Recurse | ForEach-Object { $_.FullName }
+            }
             throw "Missing $zip"
           }
           gh release create $env:GITHUB_REF_NAME $zip --draft --generate-notes --title "Translator Overlay $env:VERSION"
