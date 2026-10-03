@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use rust_i18n::t;
 use tracing::warn;
 use translator_translate::list_models;
 use windows_reactor::{
@@ -21,7 +22,7 @@ use crate::{
     pipeline::install_ui_ping,
     taskbar_guard::restore_taskbar_zorder,
     ui::{
-        chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome},
+        chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome, ui_language_combo},
         pages::{api_page, dashboard_page, ocr_page, overlay_page, translation_page},
         shared::{AppMsg, UiShared, make_shared, take_chrome},
         xaml,
@@ -178,6 +179,7 @@ impl Component for AppRoot {
             None
         });
 
+        xaml::refresh_nav_header();
         let chrome = take_chrome(&self.shared);
         let bump = &self.ping;
         let page_tag = self.page_tag.as_str();
@@ -191,17 +193,17 @@ impl Component for AppRoot {
             _ => dashboard_page(&self.shared, &chrome, bump),
         };
 
-        let settings_meta: Option<&str> = match page_tag {
-            "api" => Some("API"),
-            "translation" => Some("Translation"),
-            "ocr" => Some("OCR"),
-            "overlay" => Some("Overlay"),
+        let settings_title = match page_tag {
+            "api" => Some(t!("nav.api")),
+            "translation" => Some(t!("nav.translation")),
+            "ocr" => Some(t!("nav.ocr")),
+            "overlay" => Some(t!("nav.overlay")),
             _ => None,
         };
 
-        let page_padding = windows_reactor::Thickness::new(24.0, if settings_meta.is_some() { 8.0 } else { 16.0 }, 24.0, 24.0);
+        let page_padding = windows_reactor::Thickness::new(24.0, if settings_title.is_some() { 8.0 } else { 16.0 }, 24.0, 24.0);
 
-        let content: View = if let Some(title) = settings_meta {
+        let content: View = if let Some(title) = settings_title {
             let scrolled = ScrollViewer::new()
                 .horizontal_alignment(HorizontalAlignment::Stretch)
                 .vertical_alignment(VerticalAlignment::Stretch)
@@ -223,7 +225,7 @@ impl Component for AppRoot {
                         .grid_row(0)
                         .grid_column(0)
                         .horizontal_alignment(HorizontalAlignment::Stretch)
-                        .content(settings_sticky_chrome(title, &self.shared, &chrome, bump)),
+                        .content(settings_sticky_chrome(&title, &self.shared, &chrome, bump)),
                     scrolled,
                 ))
         } else {
@@ -235,11 +237,11 @@ impl Component for AppRoot {
         };
 
         let nav_items = [
-            ("nav-dashboard", nav_item("dashboard", "Dashboard", Symbol::Home, page_tag == "dashboard")),
-            ("nav-api", nav_item("api", "API", Symbol::Link, page_tag == "api")),
-            ("nav-translation", nav_item("translation", "Translation", Symbol::Globe, page_tag == "translation")),
-            ("nav-ocr", nav_item("ocr", "OCR", Symbol::Camera, page_tag == "ocr")),
-            ("nav-overlay", nav_item("overlay", "Overlay", Symbol::ViewAll, page_tag == "overlay")),
+            ("nav-dashboard", nav_item("dashboard", &t!("nav.dashboard"), Symbol::Home, page_tag == "dashboard")),
+            ("nav-api", nav_item("api", &t!("nav.api"), Symbol::Link, page_tag == "api")),
+            ("nav-translation", nav_item("translation", &t!("nav.translation"), Symbol::Globe, page_tag == "translation")),
+            ("nav-ocr", nav_item("ocr", &t!("nav.ocr"), Symbol::Camera, page_tag == "ocr")),
+            ("nav-overlay", nav_item("overlay", &t!("nav.overlay"), Symbol::ViewAll, page_tag == "overlay")),
         ];
 
         let nav = NavigationView::new()
@@ -270,7 +272,10 @@ impl Component for AppRoot {
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .grid_row(0)
             .grid_column(0)
-            .slot(TitleBarSlot::Content, app_status_strip(&chrome));
+            .slots([
+                SlotView::new(TitleBarSlot::Content, app_status_strip(&chrome)),
+                SlotView::new(TitleBarSlot::RightHeader, ui_language_combo(&self.shared, bump)),
+            ]);
 
         Grid::new()
             .rows([GridLength::Auto, GridLength::Star(1.0)])

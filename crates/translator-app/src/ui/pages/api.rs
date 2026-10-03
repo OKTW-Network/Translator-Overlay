@@ -1,8 +1,9 @@
 //! API settings: provider, connection, sampling, and named profiles.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use parking_lot::Mutex;
+use rust_i18n::t;
 use translator_core::{HttpApi, ModelProvider, ServiceTier};
 use windows_reactor::{
     Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontWeight,
@@ -48,7 +49,7 @@ fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
     let combo = ComboBox::new()
         .items_source(snap.names.clone())
         .selected_index(profile_idx)
-        .placeholder_text("Select profile…")
+        .placeholder_text(t!("api.select_profile"))
         .is_enabled(has_profiles)
         .on_selection_changed({
             let cx = cx.clone();
@@ -81,8 +82,8 @@ fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                         });
                     }
                 })
-                .content("Save")
-                .tooltip("Save current API settings as a named profile"),
+                .content(t!("action.save").as_ref())
+                .tooltip(t!("api.save_profile_tip")),
             Button::new()
                 .is_enabled(profile_selected)
                 .on_click({
@@ -95,8 +96,8 @@ fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                         });
                     }
                 })
-                .content("Load")
-                .tooltip("Copy the selected profile into the form"),
+                .content(t!("action.load").as_ref())
+                .tooltip(t!("api.load_profile_tip")),
             Button::new()
                 .is_enabled(profile_selected)
                 .on_click({
@@ -110,12 +111,12 @@ fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                         });
                     }
                 })
-                .content("Delete")
-                .tooltip("Delete the selected profile"),
+                .content(t!("action.delete").as_ref())
+                .tooltip(t!("api.delete_profile_tip")),
         ));
 
     StackPanel::new().spacing(4.0).children((
-        section_header("Profiles"),
+        section_header(t!("api.profiles")),
         toolbar,
         api_profile_name_row(cx, snap),
         api_profile_confirm_dialog(cx, snap),
@@ -148,7 +149,7 @@ fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
         .content(
             StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
                 TextBlock::new()
-                    .text("Name")
+                    .text(t!("action.name"))
                     .font_weight(FontWeight::SEMI_BOLD)
                     .vertical_alignment(VerticalAlignment::Center),
                 name_tb,
@@ -160,7 +161,7 @@ fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                             cx.with_mut(|ui| {
                                 let name = ui.api_profile_name_draft.trim().to_string();
                                 if name.is_empty() {
-                                    ui.state.write().set_error("Profile name is required.");
+                                    ui.state.write().set_error(t!("err.profile_name_required"));
                                     return;
                                 }
                                 if ui.api_profiles.iter().any(|p| p.name == name) {
@@ -173,7 +174,7 @@ fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                             });
                         }
                     })
-                    .content("Save"),
+                    .content(t!("action.save").as_ref()),
                 Button::new()
                     .on_click({
                         let cx = cx.clone();
@@ -184,7 +185,7 @@ fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                             });
                         }
                     })
-                    .content("Cancel"),
+                    .content(t!("action.cancel").as_ref()),
             )),
         )
 }
@@ -192,16 +193,16 @@ fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
 fn api_profile_confirm_dialog(cx: &UiCx, snap: &ApiProfileSnap) -> View {
     let (open, title, body, primary) = match &snap.dialog {
         PresetDialog::Overwrite { name } => {
-            (true, "Overwrite profile?", format!("Replace the API settings saved in \"{name}\"?"), "Overwrite")
+            (true, t!("api.overwrite_title"), t!("api.overwrite_body", name = name), t!("action.overwrite"))
         }
-        PresetDialog::Delete { name } => (true, "Delete profile?", format!("Delete profile \"{name}\"? This cannot be undone."), "Delete"),
-        PresetDialog::None | PresetDialog::SaveName => (false, "", String::new(), "OK"),
+        PresetDialog::Delete { name } => (true, t!("api.delete_title"), t!("api.delete_body", name = name), t!("action.delete")),
+        PresetDialog::None | PresetDialog::SaveName => (false, Cow::Borrowed(""), Cow::Borrowed(""), t!("action.ok")),
     };
 
     ContentDialog::new()
         .title(title)
         .primary_button_text(primary)
-        .close_button_text("Cancel")
+        .close_button_text(t!("action.cancel"))
         .is_open(open)
         .on_closed({
             let cx = cx.clone();
@@ -234,7 +235,7 @@ fn api_profile_confirm_dialog(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                 });
             }
         })
-        .content(body)
+        .content(body.as_ref())
 }
 
 pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
@@ -257,7 +258,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         )
     };
 
-    let provider_card = settings_card("api-provider", "Provider", Some("HTTP endpoint or a local CLI."), {
+    let provider_desc = t!("api.provider_desc");
+    let provider_card = settings_card("api-provider", t!("api.provider"), Some(&provider_desc), {
         const PROVIDERS: [ModelProvider; 5] = [
             ModelProvider::OpenaiCompatible,
             ModelProvider::GrokCli,
@@ -286,50 +288,50 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             .vertical_alignment(VerticalAlignment::Center)
     });
 
-    let http_api_card =
-        settings_card("api-http-api", "API type", Some("Select standard /chat/completions or newer /responses endpoint."), {
-            let idx = match api.http_api {
-                HttpApi::ChatCompletions => 0,
-                HttpApi::Responses => 1,
-            };
-            let cx_h = cx.clone();
-            let pick = move |choice: i32| {
-                let cx = cx_h.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.http_api = if choice == 1 {
-                            HttpApi::Responses
-                        } else {
-                            HttpApi::ChatCompletions
-                        };
-                        mark_dirty(ui);
-                    });
-                }
-            };
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(12.0)
-                .vertical_alignment(VerticalAlignment::Center)
-                .children((
-                    radio("api-http-api", "Chat Completions", Some(168.0), idx == 0, pick(0)),
-                    radio("api-http-api", "Responses", Some(120.0), idx == 1, pick(1)),
-                ))
-        });
+    let http_api_desc = t!("api.http_api_desc");
+    let http_api_card = settings_card("api-http-api", t!("api.http_api"), Some(&http_api_desc), {
+        let idx = match api.http_api {
+            HttpApi::ChatCompletions => 0,
+            HttpApi::Responses => 1,
+        };
+        let cx_h = cx.clone();
+        let pick = move |choice: i32| {
+            let cx = cx_h.clone();
+            move || {
+                cx.with_mut(|ui| {
+                    ui.draft.api.http_api = if choice == 1 {
+                        HttpApi::Responses
+                    } else {
+                        HttpApi::ChatCompletions
+                    };
+                    mark_dirty(ui);
+                });
+            }
+        };
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(12.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .children((
+                radio("api-http-api", &t!("api.chat_completions"), Some(168.0), idx == 0, pick(0)),
+                radio("api-http-api", &t!("api.responses"), Some(120.0), idx == 1, pick(1)),
+            ))
+    });
 
     let model_hint = match api.provider {
-        ModelProvider::OpenCodeCli => "Model id as provider/model, e.g. opencode/gpt-5.",
-        ModelProvider::ClaudeCli => "Alias (sonnet, haiku, opus) or full model id. Empty = Claude Code default.",
-        ModelProvider::GrokCli | ModelProvider::CodexCli => "Model id passed to the local CLI.",
-        ModelProvider::OpenaiCompatible => "Model name, e.g. gpt-4o-mini.",
+        ModelProvider::OpenCodeCli => t!("api.model_opencode"),
+        ModelProvider::ClaudeCli => t!("api.model_claude"),
+        ModelProvider::GrokCli | ModelProvider::CodexCli => t!("api.model_cli"),
+        ModelProvider::OpenaiCompatible => t!("api.model_http"),
     };
 
     let model_card = card_model_suggest(
         ModelSuggestParams {
             key: "api-model",
-            header: "Model".into(),
-            description: model_hint.into(),
+            header: t!("api.model"),
+            description: model_hint,
             value: api.model.clone(),
-            placeholder: String::new(),
+            placeholder: Cow::Borrowed(""),
             suggestions: {
                 let q = api.model.trim().to_ascii_lowercase();
                 model_catalog
@@ -363,153 +365,119 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     );
 
     let priority_tier_card: View = if api.provider == ModelProvider::CodexCli {
-        card_toggle(
-            "api-priority-mode",
-            "Priority mode",
-            Some("Request the provider's faster processing tier. May consume more credits."),
-            api.service_tier == ServiceTier::Priority,
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.service_tier = if on { ServiceTier::Priority } else { ServiceTier::Standard };
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        )
+        card_toggle("api-priority-mode", t!("api.priority"), Some(&t!("api.priority_desc")), api.service_tier == ServiceTier::Priority, {
+            let cx = cx.clone();
+            move |on| {
+                cx.with_mut(|ui| {
+                    ui.draft.api.service_tier = if on { ServiceTier::Priority } else { ServiceTier::Standard };
+                    mark_dirty(ui);
+                });
+            }
+        })
     } else {
         View::empty()
     };
 
     let connection = if api.provider.is_cli() {
         StackPanel::new().spacing(4.0).children((
-            section_header("Connection"),
+            section_header(t!("api.connection")),
             provider_card,
-            card_text(
-                "api-cli-path",
-                "CLI path",
-                Some("Leave empty to use grok / opencode / codex / claude on PATH. Uses your existing CLI login."),
-                api.cli_path.clone(),
-                "",
+            card_text("api-cli-path", t!("api.cli_path"), Some(&t!("api.cli_path_desc")), api.cli_path.clone(), "", {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.cli_path = v;
+                        mark_dirty(ui);
+                    });
+                }
+            }),
+            priority_tier_card,
+            model_card,
+        ))
+    } else {
+        StackPanel::new().spacing(4.0).children((
+            section_header(t!("api.connection")),
+            provider_card,
+            http_api_card,
+            card_text("api-base-url", t!("api.base_url"), Some(&t!("api.base_url_desc")), api.base_url.clone(), "", {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.base_url = v;
+                        mark_dirty(ui);
+                    });
+                }
+            }),
+            card_password(
+                "api-key",
+                t!("api.key"),
+                Some(&t!("api.key_desc")),
+                api.api_key.clone(),
+                api_key_revealed,
                 {
                     let cx = cx.clone();
                     move |v| {
                         cx.with_mut(|ui| {
-                            ui.draft.api.cli_path = v;
+                            ui.draft.api.api_key = v;
                             mark_dirty(ui);
+                        });
+                    }
+                },
+                {
+                    let cx = cx.clone();
+                    move || {
+                        cx.with_mut(|ui| {
+                            ui.api_key_revealed = !ui.api_key_revealed;
                         });
                     }
                 },
             ),
             priority_tier_card,
             model_card,
+            card_toggle("api-structured-outputs", t!("api.structured"), Some(&t!("api.structured_desc")), api.structured_outputs, {
+                let cx = cx.clone();
+                move |on| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.structured_outputs = on;
+                        mark_dirty(ui);
+                    });
+                }
+            }),
+            card_toggle("api-stream", t!("api.stream"), Some(&t!("api.stream_desc")), api.stream, {
+                let cx = cx.clone();
+                move |on| {
+                    cx.with_mut(|ui| {
+                        ui.draft.api.stream = on;
+                        mark_dirty(ui);
+                    });
+                }
+            }),
+            card_toggle(
+                "api-send-reasoning-content",
+                t!("api.send_reasoning"),
+                Some(&t!("api.send_reasoning_desc")),
+                api.send_reasoning_content,
+                {
+                    let cx = cx.clone();
+                    move |on| {
+                        cx.with_mut(|ui| {
+                            ui.draft.api.send_reasoning_content = on;
+                            mark_dirty(ui);
+                        });
+                    }
+                },
+            ),
         ))
-    } else {
-        StackPanel::new()
-            .spacing(4.0)
-            .children((
-                section_header("Connection"),
-                provider_card,
-                http_api_card,
-                card_text(
-                    "api-base-url",
-                    "Base URL",
-                    Some("OpenAI-compatible API endpoint."),
-                    api.base_url.clone(),
-                    "",
-                    {
-                        let cx = cx.clone();
-                        move |v| {
-                            cx.with_mut(|ui| {
-                                ui.draft.api.base_url = v;
-                                mark_dirty(ui);
-                            });
-                        }
-                    },
-                ),
-                card_password(
-                    "api-key",
-                    "API key",
-                    Some("Stored only on this PC."),
-                    api.api_key.clone(),
-                    api_key_revealed,
-                    {
-                        let cx = cx.clone();
-                        move |v| {
-                            cx.with_mut(|ui| {
-                                ui.draft.api.api_key = v;
-                                mark_dirty(ui);
-                            });
-                        }
-                    },
-                    {
-                        let cx = cx.clone();
-                        move || {
-                            cx.with_mut(|ui| {
-                                ui.api_key_revealed = !ui.api_key_revealed;
-                            });
-                        }
-                    },
-                ),
-                priority_tier_card,
-                model_card,
-                card_toggle(
-                    "api-structured-outputs",
-                    "Structured outputs",
-                    Some("Ask the model to return JSON matching the translation schema. Turn off if the endpoint rejects json_schema."),
-                    api.structured_outputs,
-                    {
-                        let cx = cx.clone();
-                        move |on| {
-                            cx.with_mut(|ui| {
-                                ui.draft.api.structured_outputs = on;
-                                mark_dirty(ui);
-                            });
-                        }
-                    },
-                ),
-                card_toggle(
-                    "api-stream",
-                    "Stream",
-                    Some("Receive the response as it is generated. Turn off if the endpoint rejects stream."),
-                    api.stream,
-                    {
-                        let cx = cx.clone();
-                        move |on| {
-                            cx.with_mut(|ui| {
-                                ui.draft.api.stream = on;
-                                mark_dirty(ui);
-                            });
-                        }
-                    },
-                ),
-                card_toggle(
-                    "api-send-reasoning-content",
-                    "Send reasoning",
-                    Some("Replay the model's reasoning with assistant messages on follow-up turns. Turn off if the endpoint rejects reasoning_content."),
-                    api.send_reasoning_content,
-                    {
-                        let cx = cx.clone();
-                        move |on| {
-                            cx.with_mut(|ui| {
-                                ui.draft.api.send_reasoning_content = on;
-                                mark_dirty(ui);
-                            });
-                        }
-                    },
-                ),
-            ))
     };
 
     let http_sampling = !api.provider.is_cli();
     let sampling = StackPanel::new().spacing(4.0).children((
-        section_header("Optional parameters"),
+        section_header(t!("api.optional")),
         optional_slider_row(
             OptionalSliderParams {
                 key: "api-temperature",
-                header: "Temperature".into(),
-                description: "Higher = more random (0–2).".into(),
+                header: t!("api.temperature"),
+                description: t!("api.temperature_desc"),
                 value: optional.temp_val,
                 enabled: optional.temp_enabled,
                 applicable: http_sampling,
@@ -539,8 +507,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         optional_slider_row(
             OptionalSliderParams {
                 key: "api-top-p",
-                header: "Top P".into(),
-                description: "Nucleus sampling limit (0–1).".into(),
+                header: t!("api.top_p"),
+                description: t!("api.top_p_desc"),
                 value: optional.top_p_val,
                 enabled: optional.top_p_enabled,
                 applicable: http_sampling,
@@ -570,8 +538,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         optional_number_row(
             OptionalNumberParams {
                 key: "api-max-tokens",
-                header: "Max tokens".into(),
-                description: Some("Max reply length. Limit depends on the model.".into()),
+                header: t!("api.max_tokens"),
+                description: Some(t!("api.max_tokens_desc")),
                 value: optional.max_tokens_val,
                 enabled: optional.max_tokens_enabled,
                 applicable: http_sampling,
@@ -601,11 +569,11 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         optional_text_row(
             OptionalTextParams {
                 key: "api-reasoning",
-                header: "Reasoning effort".into(),
-                description: Some("For models that support it: none, minimal, low, medium, high, xhigh, or max.".into()),
+                header: t!("api.reasoning"),
+                description: Some(t!("api.reasoning_desc")),
                 text: optional.reasoning_str.clone(),
                 enabled: optional.reasoning_enabled,
-                placeholder: "none | minimal | low | medium | high | xhigh | max".into(),
+                placeholder: t!("api.reasoning_placeholder"),
             },
             {
                 let cx = cx.clone();
@@ -629,17 +597,17 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     ));
 
     let reliability = StackPanel::new().spacing(4.0).children((
-        section_header("Reliability"),
+        section_header(t!("api.reliability")),
         card_slider_number(
             SliderNumberParams {
                 key: "api-timeout",
-                header: "Timeout (seconds)".into(),
+                header: t!("api.timeout"),
                 description: Some(if api.provider.is_cli() {
-                    "Idle timeout between CLI events. 0 = wait up to 1 hour.".into()
+                    t!("api.timeout_cli")
                 } else if api.stream {
-                    "Idle timeout between stream chunks. 0 = wait forever.".into()
+                    t!("api.timeout_stream")
                 } else {
-                    "Max wait for the HTTP response. 0 = wait forever.".into()
+                    t!("api.timeout_http")
                 }),
                 value: api.request_timeout_secs as f64,
                 min: 0.0,
@@ -659,8 +627,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_slider_number(
             SliderNumberParams {
                 key: "api-retries",
-                header: "Retries".into(),
-                description: Some("Extra attempts after a failed request.".into()),
+                header: t!("api.retries"),
+                description: Some(t!("api.retries_desc")),
                 value: f64::from(api.max_retries),
                 min: 0.0,
                 max: 10.0,
@@ -679,8 +647,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_slider_number(
             SliderNumberParams {
                 key: "api-backoff",
-                header: "Retry delay (ms)".into(),
-                description: Some("Wait before retry; doubles each attempt.".into()),
+                header: t!("api.backoff"),
+                description: Some(t!("api.backoff_desc")),
                 value: api.retry_backoff_ms as f64,
                 min: 50.0,
                 max: 30_000.0,

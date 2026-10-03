@@ -5,6 +5,8 @@ mod pipeline;
 mod taskbar_guard;
 mod ui;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 use std::{
     env,
     os::windows::ffi::OsStrExt,
@@ -14,7 +16,7 @@ use std::{
 
 use parking_lot::RwLock;
 use tracing::{error, info};
-use translator_core::{AppConfig, AppState, config_path};
+use translator_core::{AppConfig, AppState, UiLanguage, config_path};
 use windows::{
     Win32::{
         System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW},
@@ -50,20 +52,35 @@ async fn main() {
 
     info!("Translator Overlay starting");
 
-    let config = match config_path() {
+    let config_file = match config_path() {
         Ok(path) => {
             info!(path = %path.display(), "config path");
-            AppConfig::load_or_create(&path).map_err(|e| e.to_string())
+            Some(path)
         }
-        Err(e) => Err(e.to_string()),
-    };
-    let config = match config {
-        Ok(c) => c,
         Err(e) => {
-            error!("failed to load config: {e}");
-            AppConfig::default()
+            error!("failed to resolve config path: {e}");
+            None
         }
     };
+    let mut config = match &config_file {
+        Some(path) => match AppConfig::load_or_create(path) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("failed to load config: {e}");
+                AppConfig::default()
+            }
+        },
+        None => AppConfig::default(),
+    };
+    if config.ui.language.is_none() {
+        config.ui.language = Some(UiLanguage::from_locale_name(&ui::system_locale_name()));
+        if let Some(path) = &config_file
+            && let Err(e) = config.save(path)
+        {
+            error!("failed to save initial ui language: {e}");
+        }
+    }
+    ui::apply_ui_locale(config.ui.language);
 
     let state: SharedState = Arc::new(RwLock::new(AppState::new(config)));
     let (cmd_tx, pipeline) = spawn_pipeline(state.clone());

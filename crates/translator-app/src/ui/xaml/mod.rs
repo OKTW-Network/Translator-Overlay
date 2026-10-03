@@ -231,6 +231,14 @@ pub(crate) fn visual_tree() -> Result<IVisualTreeHelperStatics> {
     windows_core::factory::<VisualTreeHelperName, IVisualTreeHelperStatics>()
 }
 
+pub(crate) fn refresh_nav_header() {
+    NAV_VIEW.with(|slot| {
+        if let Some(nav) = slot.borrow().0.clone() {
+            nav_header::sync(&nav);
+        }
+    });
+}
+
 fn on_tree(nav: &IInspectable) {
     nav_header::sync(nav);
     range_step::sync(nav);

@@ -1,5 +1,8 @@
 //! Reusable setting-row controls (text, toggle, slider, optional toggle+slider).
 
+use std::borrow::Cow;
+
+use rust_i18n::t;
 use translator_core::{format_argb_hex, parse_argb_hex};
 use translator_overlay::argb_channels;
 use windows_reactor::{
@@ -79,10 +82,10 @@ pub fn card_text(
 
 pub struct ModelSuggestParams {
     pub key: &'static str,
-    pub header: String,
-    pub description: String,
+    pub header: Cow<'static, str>,
+    pub description: Cow<'static, str>,
     pub value: String,
-    pub placeholder: String,
+    pub placeholder: Cow<'static, str>,
     pub suggestions: Vec<String>,
     pub loading: bool,
 }
@@ -119,12 +122,16 @@ pub fn card_model_suggest(p: ModelSuggestParams, on_changed: impl Fn(String) + C
         .is_enabled(!p.loading)
         .on_click(on_refresh)
         .content(refresh_content)
-        .tooltip(if p.loading { "Loading model list" } else { "Reload model list" });
+        .tooltip(if p.loading {
+            t!("api.loading_models")
+        } else {
+            t!("api.reload_models")
+        });
 
     settings_card(
         p.key,
         p.header,
-        Some(p.description.as_str()),
+        Some(p.description.as_ref()),
         StackPanel::new()
             .orientation(Orientation::Horizontal)
             .spacing(8.0)
@@ -155,7 +162,7 @@ pub fn card_password(
         .vertical_alignment(VerticalAlignment::Center);
 
     let glyph = if revealed { "\u{E7B3}" } else { "\u{E890}" };
-    let tip = if revealed { "Hide key" } else { "Show key" };
+    let tip = if revealed { t!("api.hide_key") } else { t!("api.show_key") };
     let reveal = Button::new()
         .style(ButtonStyle::Subtle)
         .min_width(36.0)
@@ -190,8 +197,8 @@ pub fn card_toggle(
 /// Params for [`card_slider_number`] (keeps call sites clippy-clean).
 pub struct SliderNumberParams {
     pub key: &'static str,
-    pub header: String,
-    pub description: Option<String>,
+    pub header: Cow<'static, str>,
+    pub description: Option<Cow<'static, str>>,
     pub value: f64,
     pub min: f64,
     pub max: f64,
@@ -264,8 +271,8 @@ pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clon
 /// Params for optional numeric rows (toggle + slider + NumberBox).
 pub struct OptionalSliderParams {
     pub key: &'static str,
-    pub header: String,
-    pub description: String,
+    pub header: Cow<'static, str>,
+    pub description: Cow<'static, str>,
     pub value: f64,
     pub enabled: bool,
     pub applicable: bool,
@@ -303,7 +310,7 @@ pub fn optional_slider_row(
     settings_card(
         p.key,
         p.header,
-        Some(p.description.as_str()),
+        Some(p.description.as_ref()),
         StackPanel::new()
             .orientation(Orientation::Horizontal)
             .spacing(12.0)
@@ -336,8 +343,8 @@ pub fn optional_slider_row(
 /// Params for [`optional_number_row`] (NumberBox only, no slider).
 pub struct OptionalNumberParams {
     pub key: &'static str,
-    pub header: String,
-    pub description: Option<String>,
+    pub header: Cow<'static, str>,
+    pub description: Option<Cow<'static, str>>,
     pub value: f64,
     pub enabled: bool,
     pub applicable: bool,
@@ -382,11 +389,11 @@ pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'st
 /// Params for [`optional_text_row`].
 pub struct OptionalTextParams {
     pub key: &'static str,
-    pub header: String,
-    pub description: Option<String>,
+    pub header: Cow<'static, str>,
+    pub description: Option<Cow<'static, str>>,
     pub text: String,
     pub enabled: bool,
-    pub placeholder: String,
+    pub placeholder: Cow<'static, str>,
 }
 
 /// Optional string field with master toggle (e.g. reasoning_effort).
@@ -417,10 +424,10 @@ pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'stat
 /// Params for [`card_color_popup`].
 pub struct ColorPopupParams {
     pub key: &'static str,
-    pub header: String,
+    pub header: Cow<'static, str>,
     pub hex: String,
     pub open: bool,
-    pub placeholder: String,
+    pub placeholder: Cow<'static, str>,
 }
 
 /// Compact color row: swatch + hex; ColorPicker expands under the same header row.
@@ -451,7 +458,11 @@ pub fn card_color_popup(
                 .border_brush(ThemeBrush::CardStroke)
                 .border_thickness(Thickness::uniform(1.0)),
         )
-        .tooltip(if p.open { "Close color picker" } else { "Open color picker" });
+        .tooltip(if p.open {
+            t!("overlay.close_picker")
+        } else {
+            t!("overlay.open_picker")
+        });
 
     let hex_tb = TextBox::new()
         .text(p.hex)
@@ -478,5 +489,6 @@ pub fn card_color_popup(
             .into()
     });
 
-    settings_card_with_below(p.key, p.header, Some("Click the swatch to pick colour and opacity, or type #AARRGGBB hex."), row, below)
+    let swatch_desc = t!("overlay.color_swatch_desc");
+    settings_card_with_below(p.key, p.header, Some(&swatch_desc), row, below)
 }

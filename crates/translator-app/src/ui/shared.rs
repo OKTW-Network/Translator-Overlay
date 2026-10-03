@@ -1,18 +1,20 @@
 //! Shared UI state, ChromeSnap, and config draft helpers.
 
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 use parking_lot::Mutex;
+use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
-    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, api_profiles_path,
-    config_path, format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
+    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage,
+    api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
 };
 use windows_reactor::LocalSender;
 
 use crate::{
     APP_HANDLES,
     pipeline::{CmdTx, PipelineCommand, SharedState},
+    ui::locale::apply_ui_locale,
 };
 
 /// Apply overlay / reader visibility immediately (live config + disk), and keep the draft in sync.
@@ -20,6 +22,14 @@ pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bo
     ui.draft.overlay.enabled = enabled;
     ui.draft.overlay.reader_enabled = reader_enabled;
     let _ = ui.cmd_tx.send(PipelineCommand::SetOverlayDisplay { enabled, reader_enabled });
+}
+
+/// Apply the control-window language immediately and persist it on the live config.
+pub fn send_ui_language(ui: &mut UiShared, language: UiLanguage) {
+    ui.draft.ui.language = Some(language);
+    ui.state.write().config.ui.language = Some(language);
+    apply_ui_locale(Some(language));
+    let _ = ui.cmd_tx.send(PipelineCommand::SetUiLanguage { language });
 }
 
 /// Messages the root `AppRoot` component accepts.
@@ -119,7 +129,7 @@ pub struct UiShared {
     /// Pending Reload / Discard confirmation dialog.
     pub confirm: ConfirmAction,
     /// Inline form validation message (blocks Save until fixed).
-    pub form_error: Option<String>,
+    pub form_error: Option<Cow<'static, str>>,
     /// Named OCR region presets (`region-presets.toml`).
     pub region_presets: Vec<RegionPreset>,
     /// Selected preset in the Dashboard combo (`-1` = none).
@@ -146,13 +156,13 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
     let optional = optional_api_state(&draft);
     let (text_argb_str, bg_argb_str) = overlay_color_strings(&draft);
     let (region_presets, preset_load_error) = region_presets_path()
-        .map_err(|e| format!("Could not load region presets: {e}"))
-        .and_then(|path| RegionPresetFile::load_or_empty_at(&path).map_err(|e| format!("Could not load region presets: {e}")))
+        .map_err(|e| t!("err.load_region_presets", error = e.to_string()))
+        .and_then(|path| RegionPresetFile::load_or_empty_at(&path).map_err(|e| t!("err.load_region_presets", error = e.to_string())))
         .map(|file| file.presets)
         .map_or_else(|message| (Vec::new(), Some(message)), |presets| (presets, None));
     let (api_profiles, api_profile_load_error) = api_profiles_path()
-        .map_err(|e| format!("Could not load API profiles: {e}"))
-        .and_then(|path| ApiProfileFile::load_or_empty_at(&path).map_err(|e| format!("Could not load API profiles: {e}")))
+        .map_err(|e| t!("err.load_api_profiles", error = e.to_string()))
+        .and_then(|path| ApiProfileFile::load_or_empty_at(&path).map_err(|e| t!("err.load_api_profiles", error = e.to_string())))
         .map(|file| file.profiles)
         .map_or_else(|message| (Vec::new(), Some(message)), |profiles| (profiles, None));
     let shared = Arc::new(Mutex::new(UiShared {
@@ -223,8 +233,9 @@ pub fn save_region_presets(ui: &mut UiShared) -> Result<(), String> {
     let file = RegionPresetFile {
         presets: ui.region_presets.clone(),
     };
-    let path = region_presets_path().map_err(|e| format!("Could not save region presets: {e}"))?;
-    file.save(&path).map_err(|e| format!("Could not save region presets: {e}"))
+    let path = region_presets_path().map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())?;
+    file.save(&path)
+        .map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())
 }
 
 /// Write `pending_save_regions` under `name` (exact match overwrite).
@@ -264,8 +275,9 @@ pub fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
     let mut file = ApiProfileFile {
         profiles: ui.api_profiles.clone(),
     };
-    let path = api_profiles_path().map_err(|e| format!("Could not save API profiles: {e}"))?;
-    file.save(&path).map_err(|e| format!("Could not save API profiles: {e}"))?;
+    let path = api_profiles_path().map_err(|e| t!("err.save_api_profiles", error = e.to_string()).into_owned())?;
+    file.save(&path)
+        .map_err(|e| t!("err.save_api_profiles", error = e.to_string()).into_owned())?;
     ui.api_profiles = file.profiles;
     Ok(())
 }
@@ -274,7 +286,7 @@ pub fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
 pub fn commit_api_profile(ui: &mut UiShared, name: String) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
-        return Err("Profile name is required.".into());
+        return Err(t!("err.profile_name_required").into_owned());
     }
     let api = effective_draft(ui).api;
     if let Some(p) = ui.api_profiles.iter_mut().find(|p| p.name == name) {
@@ -292,7 +304,7 @@ pub fn commit_api_profile(ui: &mut UiShared, name: String) -> Result<(), String>
 pub fn load_api_profile(ui: &mut UiShared) -> Result<(), String> {
     let profile = selected_api_profile(ui)
         .cloned()
-        .ok_or_else(|| "Select a profile to load.".to_string())?;
+        .ok_or_else(|| t!("err.select_profile").into_owned())?;
     ui.draft.api = profile.api;
     apply_optional_from_config(ui);
     ui.api_profile_dialog = PresetDialog::None;
@@ -404,18 +416,18 @@ pub fn mark_dirty(ui: &mut UiShared) {
 }
 
 /// Soft validation issues that should block Save.
-pub fn form_validation_error(ui: &UiShared) -> Option<String> {
+pub fn form_validation_error(ui: &UiShared) -> Option<Cow<'static, str>> {
     // Optional numbers always have a value; toggle off = omit. No empty checks.
     if ui.optional.reasoning_enabled && ui.optional.reasoning_str.trim().is_empty() {
-        return Some("Reasoning effort is on but empty.".into());
+        return Some(t!("err.reasoning_empty"));
     }
     let text = ui.text_argb_str.trim();
     if !text.is_empty() && parse_argb_hex(text).is_none() {
-        return Some("Text color must be #AARRGGBB hex (e.g. #FFFFFFFF).".into());
+        return Some(t!("err.text_color"));
     }
     let bg = ui.bg_argb_str.trim();
     if !bg.is_empty() && parse_argb_hex(bg).is_none() {
-        return Some("Background color must be #AARRGGBB hex (e.g. #C8000000).".into());
+        return Some(t!("err.bg_color"));
     }
     None
 }
@@ -424,13 +436,17 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
     let path = match config_path() {
         Ok(p) => p,
         Err(e) => {
-            ui.state.write().set_error(format!("Could not reload config: {e}"));
+            ui.state.write().set_error(t!("err.reload_config", error = e.to_string()));
             ui.confirm = ConfirmAction::None;
             return;
         }
     };
     match AppConfig::load_or_create(&path) {
-        Ok(cfg) => {
+        Ok(mut cfg) => {
+            if cfg.ui.language.is_none() {
+                cfg.ui.language = Some(UiLanguage::from_locale_name(&crate::ui::system_locale_name()));
+            }
+            apply_ui_locale(cfg.ui.language);
             ui.draft = cfg.clone();
             let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
             apply_optional_from_config(ui);
@@ -441,7 +457,7 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
             ui.confirm = ConfirmAction::None;
         }
         Err(e) => {
-            ui.state.write().set_error(format!("Could not reload config: {e}"));
+            ui.state.write().set_error(t!("err.reload_config", error = e.to_string()));
             ui.confirm = ConfirmAction::None;
         }
     }
@@ -449,6 +465,7 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
 
 pub fn do_discard(ui: &mut UiShared) {
     reload_draft_from_state(ui);
+    apply_ui_locale(ui.draft.ui.language);
     ui.form_error = None;
     ui.confirm = ConfirmAction::None;
 }
@@ -472,7 +489,7 @@ pub struct ChromeSnap {
     pub capture_busy: bool,
     pub selected_hwnd: Option<isize>,
     pub settings_dirty: bool,
-    pub form_error: Option<String>,
+    pub form_error: Option<Cow<'static, str>>,
     pub settings_message: Option<String>,
     pub confirm: ConfirmAction,
 }

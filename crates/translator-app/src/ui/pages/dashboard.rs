@@ -1,8 +1,9 @@
 //! Operator workspace: session settings above a divider, then preview | results.
 
-use std::{mem, sync::Arc};
+use std::{borrow::Cow, mem, sync::Arc};
 
 use parking_lot::Mutex;
+use rust_i18n::t;
 use translator_capture::list_windows;
 use translator_core::{HistoryEntry, NormRect, PreviewInfo, sanitize_regions};
 use windows_reactor::{
@@ -132,7 +133,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
     let mut history = mem::take(&mut snap.history);
     let in_flight = snap.translate_in_flight;
     let ocr_time = snap.last_ocr_ms.map(|ms| format!("{ms} ms")).unwrap_or_else(|| "—".into());
-    let ocr_desc = format!("{ocr_time} · {} blocks", snap.last_ocr_block_count);
+    let ocr_desc = t!("dash.ocr_blocks", time = ocr_time, count = snap.last_ocr_block_count);
     let live_src = mem::take(&mut snap.ocr_text);
     let live_dst = mem::take(&mut snap.translation);
     let has_live = !live_src.is_empty() || !live_dst.is_empty();
@@ -155,7 +156,10 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
         .grid_column(0)
         .vertical_alignment(VerticalAlignment::Top)
         .children((
-            TextBlock::new().text("Dashboard").font_size(28.0).font_weight(FontWeight::BOLD),
+            TextBlock::new()
+                .text(t!("nav.dashboard"))
+                .font_size(28.0)
+                .font_weight(FontWeight::BOLD),
             status_infobar(chrome),
             build_window_row(&cx, &snap, window_labels),
             build_regions_pane(&cx, &snap),
@@ -168,13 +172,13 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
     } else {
         results_pair(
             TextBlock::new()
-                .text("Source")
+                .text(t!("dash.source"))
                 .font_size(12.0)
                 .font_weight(FontWeight::SEMI_BOLD)
                 .foreground(ThemeBrush::PrimaryText)
                 .opacity(0.72),
             TextBlock::new()
-                .text("Translation")
+                .text(t!("dash.translation"))
                 .font_size(12.0)
                 .font_weight(FontWeight::SEMI_BOLD)
                 .foreground(ThemeBrush::PrimaryText)
@@ -183,7 +187,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
     };
     let results_rows: View = if results_empty {
         TextBlock::new()
-            .text("(no history yet)")
+            .text(t!("dash.no_history"))
             .foreground(ThemeBrush::PrimaryText)
             .opacity(0.72)
             .into()
@@ -204,13 +208,13 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
     };
 
     let retry_tip = if chrome.capture_busy {
-        "Waiting for capture to stop"
+        t!("capture.waiting_stop")
     } else if in_flight {
-        "Cancel the translation in progress first"
+        t!("dash.cancel_first")
     } else if snap.auto_running {
-        "Capture now and run OCR + translation"
+        t!("dash.capture_now")
     } else {
-        "Start capture first"
+        t!("dash.start_first")
     };
 
     let actions = StackPanel::new()
@@ -224,13 +228,13 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::CancelTranslate)
                 })
-                .content("Cancel")
+                .content(t!("action.cancel").as_ref())
                 .tooltip(if chrome.capture_busy {
-                    "Waiting for capture to stop"
+                    t!("capture.waiting_stop")
                 } else if in_flight {
-                    "Cancel the translation in progress"
+                    t!("dash.cancel_progress")
                 } else {
-                    "No translation in progress"
+                    t!("dash.cancel_idle")
                 }),
             Button::new()
                 .is_enabled(snap.auto_running && !in_flight && !chrome.capture_busy)
@@ -238,15 +242,15 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::ManualCapture)
                 })
-                .content("Retry")
+                .content(t!("action.retry").as_ref())
                 .tooltip(retry_tip),
             Button::new()
                 .on_click({
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::ResetConversation)
                 })
-                .content("Clear chat")
-                .tooltip("Clear the translation model conversation history"),
+                .content(t!("dash.clear_chat").as_ref())
+                .tooltip(t!("dash.clear_chat_tip")),
         ));
 
     let preview_pane = StackPanel::new()
@@ -286,7 +290,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
                         .horizontal_alignment(HorizontalAlignment::Stretch)
                         .children((
                             TextBlock::new()
-                                .text("OCR")
+                                .text(t!("dash.ocr"))
                                 .font_size(14.0)
                                 .font_weight(FontWeight::SEMI_BOLD)
                                 .vertical_alignment(VerticalAlignment::Center)
@@ -330,7 +334,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
 fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> View {
     let window_empty = window_labels.is_empty();
     let window_items: Vec<String> = if window_empty {
-        vec!["(no windows — refresh)".into()]
+        vec![t!("dash.no_windows").into_owned()]
     } else {
         window_labels
     };
@@ -338,7 +342,7 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> V
     let picker = ComboBox::new()
         .items_source(window_items)
         .selected_index(snap.selected_idx)
-        .placeholder_text("Select window…")
+        .placeholder_text(t!("dash.select_window"))
         .is_enabled(!window_empty && !snap.auto_running)
         .on_selection_changed({
             let cx = cx.clone();
@@ -385,9 +389,9 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> V
         })
         .content(FontIcon::new().glyph("\u{E72C}"))
         .tooltip(if snap.auto_running {
-            "Stop capture to change window"
+            t!("dash.stop_to_change_window")
         } else {
-            "Refresh window list"
+            t!("dash.refresh_windows")
         });
 
     StackPanel::new()
@@ -397,7 +401,7 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> V
         .horizontal_alignment(HorizontalAlignment::Left)
         .children((
             TextBlock::new()
-                .text("Window")
+                .text(t!("dash.window"))
                 .font_weight(FontWeight::SEMI_BOLD)
                 .vertical_alignment(VerticalAlignment::Center),
             picker,
@@ -411,23 +415,23 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
     let selecting = snap.region_select_active;
     let region_count = snap.preview_regions.len();
     let regions_label = if selecting {
-        "Selecting…".to_string()
+        t!("dash.selecting")
     } else if region_count == 0 {
-        "Whole window".into()
+        t!("dash.whole_window")
     } else {
-        format!("{region_count} selected")
+        t!("dash.regions_selected", count = region_count)
     };
     let has_presets = !snap.preset_names.is_empty();
     let preset_selected = has_presets && snap.preset_selected_idx >= 0;
     let can_save = !snap.region_select_active && region_count > 0;
 
-    let select_label = if selecting { "Done" } else { "Select regions" };
+    let select_label = if selecting { t!("action.done") } else { t!("dash.select_regions") };
     let select_tip = if selecting {
-        "Use the selected areas"
+        t!("dash.use_areas")
     } else if can_select {
-        "Only recognize text in the areas you select on the window"
+        t!("dash.only_recognize")
     } else {
-        "Select a window first"
+        t!("capture.select_window_first")
     };
     let mut select_btn = Button::new().is_enabled(selecting || can_select);
     if selecting {
@@ -445,7 +449,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                 }
             }
         })
-        .content(select_label)
+        .content(select_label.as_ref())
         .tooltip(select_tip);
 
     let preset_idx = if has_presets && snap.preset_selected_idx >= 0 {
@@ -456,7 +460,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
     let preset_combo = ComboBox::new()
         .items_source(snap.preset_names.clone())
         .selected_index(preset_idx)
-        .placeholder_text("Select preset…")
+        .placeholder_text(t!("dash.select_preset"))
         .is_enabled(has_presets)
         .on_selection_changed({
             let cx = cx.clone();
@@ -491,7 +495,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                         cx.with_mut(|ui| {
                             let regions = sanitize_regions(&ui.state.read().ocr_regions);
                             if regions.is_empty() {
-                                ui.state.write().set_error("Nothing to save: select at least one OCR region.");
+                                ui.state.write().set_error(t!("err.regions_required"));
                                 return;
                             }
                             ui.pending_save_regions = regions;
@@ -500,13 +504,13 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                         });
                     }
                 })
-                .content("Save")
+                .content(t!("action.save").as_ref())
                 .tooltip(if snap.region_select_active {
-                    "Finish region select (Done) before saving a preset"
+                    t!("dash.finish_select")
                 } else if region_count == 0 {
-                    "Select OCR regions first"
+                    t!("dash.select_regions_first")
                 } else {
-                    "Save current OCR regions as a named preset"
+                    t!("dash.save_preset_tip")
                 }),
             Button::new()
                 .is_enabled(preset_selected)
@@ -519,8 +523,8 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                         }
                     }
                 })
-                .content("Load")
-                .tooltip("Apply the selected preset to the current window"),
+                .content(t!("action.load").as_ref())
+                .tooltip(t!("dash.load_preset_tip")),
             Button::new()
                 .is_enabled(preset_selected)
                 .on_click({
@@ -534,8 +538,8 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                         });
                     }
                 })
-                .content("Delete")
-                .tooltip("Delete the selected preset"),
+                .content(t!("action.delete").as_ref())
+                .tooltip(t!("dash.delete_preset_tip")),
             sep,
             select_btn,
             Button::new()
@@ -550,8 +554,8 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                         }
                     }
                 })
-                .content("Clear")
-                .tooltip("Recognize text on the whole window"),
+                .content(t!("action.clear").as_ref())
+                .tooltip(t!("dash.clear_regions_tip")),
             TextBlock::new()
                 .text(regions_label)
                 .font_size(12.0)
@@ -564,11 +568,11 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
         .spacing(8.0)
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .children((
-            TextBlock::new().text("Regions").font_weight(FontWeight::SEMI_BOLD),
+            TextBlock::new().text(t!("dash.regions")).font_weight(FontWeight::SEMI_BOLD),
             toolbar,
             preset_name_row(cx, snap),
             TextBlock::new()
-                .text("Drag on the selected window to choose what to translate — drag to move or resize, right-click to remove.")
+                .text(t!("dash.regions_help"))
                 .font_size(12.0)
                 .foreground(ThemeBrush::PrimaryText)
                 .opacity(0.72)
@@ -602,7 +606,7 @@ fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> View {
         .content(
             StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
                 TextBlock::new()
-                    .text("Name")
+                    .text(t!("action.name"))
                     .font_weight(FontWeight::SEMI_BOLD)
                     .vertical_alignment(VerticalAlignment::Center),
                 name_tb,
@@ -614,7 +618,7 @@ fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> View {
                             cx.with_mut(|ui| {
                                 let name = ui.preset_name_draft.trim().to_string();
                                 if name.is_empty() {
-                                    ui.state.write().set_error("Preset name is required.");
+                                    ui.state.write().set_error(t!("err.preset_name_required"));
                                     return;
                                 }
                                 if ui.region_presets.iter().any(|p| p.name == name) {
@@ -627,7 +631,7 @@ fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> View {
                             });
                         }
                     })
-                    .content("Save"),
+                    .content(t!("action.save").as_ref()),
                 Button::new()
                     .on_click({
                         let cx = cx.clone();
@@ -639,22 +643,26 @@ fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> View {
                             });
                         }
                     })
-                    .content("Cancel"),
+                    .content(t!("action.cancel").as_ref()),
             )),
         )
 }
 
 fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> View {
     let (open, title, body, primary) = match &snap.preset_dialog {
-        PresetDialog::Overwrite { name } => (true, "Overwrite preset?", format!("Replace the regions saved in \"{name}\"?"), "Overwrite"),
-        PresetDialog::Delete { name } => (true, "Delete preset?", format!("Delete preset \"{name}\"? This cannot be undone."), "Delete"),
-        PresetDialog::None | PresetDialog::SaveName => (false, "", String::new(), "OK"),
+        PresetDialog::Overwrite { name } => {
+            (true, t!("dash.overwrite_preset_title"), t!("dash.overwrite_preset_body", name = name), t!("action.overwrite"))
+        }
+        PresetDialog::Delete { name } => {
+            (true, t!("dash.delete_preset_title"), t!("dash.delete_preset_body", name = name), t!("action.delete"))
+        }
+        PresetDialog::None | PresetDialog::SaveName => (false, Cow::Borrowed(""), Cow::Borrowed(""), t!("action.ok")),
     };
 
     ContentDialog::new()
         .title(title)
         .primary_button_text(primary)
-        .close_button_text("Cancel")
+        .close_button_text(t!("action.cancel"))
         .is_open(open)
         .on_closed({
             let cx = cx.clone();
@@ -687,5 +695,5 @@ fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> View {
                 });
             }
         })
-        .content(body)
+        .content(body.as_ref())
 }

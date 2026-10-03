@@ -311,6 +311,7 @@ impl Pipeline {
             }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg).await,
             PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
+            PipelineCommand::SetUiLanguage { language } => self.set_ui_language(language),
             PipelineCommand::StopCapture => self.stop_capture().await,
             PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
             PipelineCommand::ConfirmRegionSelect => {

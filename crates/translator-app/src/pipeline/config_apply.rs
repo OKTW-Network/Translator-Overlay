@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use tracing::{error, info};
-use translator_core::{AppConfig, PipelineStatus, config_path};
+use translator_core::{AppConfig, PipelineStatus, UiLanguage, config_path};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, StabilityGate};
 use translator_overlay::OverlayCommand;
 
@@ -33,16 +33,32 @@ impl Pipeline {
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::UpdateConfig(overlay));
         }
-        let save = self.state.read().config.clone();
-        let Some(path) = self.default_config_path() else {
-            return;
-        };
-        if let Err(e) = save.save(&path) {
-            error!(error = %e, "failed to save overlay display flags");
-            self.state.write().set_error(format!("save config: {e}"));
+        if !self.persist_live_config() {
             return;
         }
         info!(enabled, reader_enabled, "overlay display updated");
+    }
+
+    /// Persist only the control-window language on the live config.
+    pub(crate) fn set_ui_language(&mut self, language: UiLanguage) {
+        self.state.write().config.ui.language = Some(language);
+        if !self.persist_live_config() {
+            return;
+        }
+        info!(language = language.as_str(), "ui language updated");
+    }
+
+    fn persist_live_config(&mut self) -> bool {
+        let save = self.state.read().config.clone();
+        let Some(path) = self.default_config_path() else {
+            return false;
+        };
+        if let Err(e) = save.save(&path) {
+            error!(error = %e, "failed to save live config");
+            self.state.write().set_error(format!("save config: {e}"));
+            return false;
+        }
+        true
     }
 
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
@@ -82,7 +98,7 @@ impl Pipeline {
             let mut s = self.state.write();
             s.config = cfg.clone();
             s.translation_cache_len = self.translation_cache.len();
-            s.settings_message = Some("Saved".into());
+            s.settings_message = Some(translator_core::SETTINGS_SAVED.into());
             s.last_error = None;
         }
         info!("config applied and saved");

@@ -1,5 +1,5 @@
 //! NavigationView has no `resource_overrides` in reactor 0.100, so patch
-//! `Application.Current.Resources` (content fill + border) to transparent.
+//! `Application.Current.Resources` (content fill + border, title-bar drag strip).
 
 #![allow(non_snake_case)]
 
@@ -78,6 +78,10 @@ fn apply_inner() -> Result<()> {
         let boxed: IInspectable = IReference::<HSTRING>::from(HSTRING::from(key)).into();
         map.Insert(&boxed, &brush)?;
     }
+    // WinUI default is 48; keep a sliver so the caption buttons are not flush against the combo.
+    let drag_key: IInspectable = IReference::<HSTRING>::from(HSTRING::from("TitleBarMinDragRegionWidth")).into();
+    let drag_width: IInspectable = IReference::<f64>::from(8.0).into();
+    map.Insert(&drag_key, &drag_width)?;
     Ok(())
 }
 

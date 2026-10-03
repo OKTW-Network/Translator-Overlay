@@ -46,32 +46,11 @@ pub enum PipelineStatus {
     },
 }
 
-impl PipelineStatus {
-    pub fn label(&self) -> String {
-        match self {
-            Self::Idle => "Idle".to_string(),
-            Self::Capturing => "Capturing".to_string(),
-            Self::RunningOcr => "Running OCR".to_string(),
-            Self::WaitingForStable { elapsed_ms } => {
-                format!("Waiting for stable text ({elapsed_ms} ms)")
-            }
-            Self::DownloadingModels {
-                file,
-                file_index,
-                file_count,
-                percent,
-            } => format!("Downloading OCR models ({file_index}/{file_count} · {file} · {percent}%)"),
-            Self::LoadingModels => "Loading OCR models".to_string(),
-            Self::Translating => "Translating".to_string(),
-            Self::RetryingTranslate { attempt, max_retries, .. } => {
-                format!("Retrying translation ({attempt}/{max_retries})")
-            }
-            Self::Cancelled => "Cancelled".to_string(),
-            Self::OverlayActive => "Overlay active".to_string(),
-            Self::Error { message } => format!("Error: {message}"),
-        }
-    }
+/// Token stored in [`AppState::settings_message`] after a successful save.
+/// The control window translates it; do not localize this value.
+pub const SETTINGS_SAVED: &str = "Saved";
 
+impl PipelineStatus {
     pub fn is_translating(&self) -> bool {
         matches!(self, Self::Translating | Self::RetryingTranslate { .. })
     }

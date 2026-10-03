@@ -6,6 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use rust_i18n::t;
 use translator_core::NormRect;
 use windows_canvas::{AlphaMode, CanvasImageSource, ColorF, GpuDevice, Rect};
 use windows_reactor::{
@@ -173,7 +174,7 @@ impl Component for CapturePreview {
     fn view(&self, input: &PreviewInput, context: &mut ViewContext<Self>) -> View {
         let Some(rgba) = input.rgba.as_ref().filter(|b| !b.is_empty() && input.width > 0 && input.height > 0) else {
             return TextBlock::new()
-                .text("No capture yet")
+                .text(t!("preview.none"))
                 .font_size(12.0)
                 .horizontal_alignment(HorizontalAlignment::Stretch)
                 .into();
@@ -229,7 +230,7 @@ impl Component for CapturePreview {
                     .into()
             }
             None => TextBlock::new()
-                .text("Preview unavailable")
+                .text(t!("preview.unavailable"))
                 .font_size(12.0)
                 .horizontal_alignment(HorizontalAlignment::Stretch)
                 .into(),

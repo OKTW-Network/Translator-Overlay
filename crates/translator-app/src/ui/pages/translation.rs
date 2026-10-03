@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use rust_i18n::t;
 use translator_core::{TRANSLATION_CACHE_MAX_CAP, TRANSLATION_CACHE_MAX_MIN};
 use windows_reactor::{
     Button, ChildrenControl, ContentControl, LayoutControl, LocalSender, StackPanel, TextBox, TextWrapping, TooltipExt, View,
@@ -26,9 +27,11 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         (ui.draft.translation.clone(), cache_len)
     };
 
+    let source_desc = t!("tr.source_desc");
+    let target_desc = t!("tr.target_desc");
     let languages = StackPanel::new().spacing(4.0).children((
-        section_header("Languages"),
-        card_text("tr-source-lang", "Source language", Some("Language on screen, or auto."), translation.source_lang.clone(), "auto", {
+        section_header(t!("tr.languages")),
+        card_text("tr-source-lang", t!("tr.source"), Some(&source_desc), translation.source_lang.clone(), t!("tr.source_placeholder"), {
             let cx = cx.clone();
             move |v| {
                 cx.with_mut(|ui| {
@@ -37,31 +40,24 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
                 });
             }
         }),
-        card_text(
-            "tr-target-lang",
-            "Target language",
-            Some("Language for the translation."),
-            translation.target_lang.clone(),
-            "e.g. zh-TW",
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.translation.target_lang = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+        card_text("tr-target-lang", t!("tr.target"), Some(&target_desc), translation.target_lang.clone(), t!("tr.target_placeholder"), {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    ui.draft.translation.target_lang = v;
+                    mark_dirty(ui);
+                });
+            }
+        }),
     ));
 
     let context = StackPanel::new().spacing(4.0).children((
-        section_header("History"),
+        section_header(t!("tr.history")),
         card_slider_number(
             SliderNumberParams {
                 key: "tr-history-max",
-                header: "Recent translations".into(),
-                description: Some("How many past translations to keep.".into()),
+                header: t!("tr.history_max"),
+                description: Some(t!("tr.history_max_desc")),
                 value: translation.history_max_items as f64,
                 min: 1.0,
                 max: 100.0,
@@ -80,8 +76,8 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         card_slider_number(
             SliderNumberParams {
                 key: "tr-conv-max",
-                header: "Chat context turns".into(),
-                description: Some("How much conversation history the model sees.".into()),
+                header: t!("tr.conv_max"),
+                description: Some(t!("tr.conv_max_desc")),
                 value: translation.conversation_max_turns as f64,
                 min: 1.0,
                 max: 200.0,
@@ -100,27 +96,21 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
     ));
 
     let cache = StackPanel::new().spacing(4.0).children((
-        section_header("Cache"),
-        card_toggle(
-            "tr-cache-enabled",
-            "Enable translation cache",
-            Some("Reuse translations for source text already seen this session. Skips the API for repeats."),
-            translation.cache_enabled,
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.draft.translation.cache_enabled = on;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+        section_header(t!("tr.cache")),
+        card_toggle("tr-cache-enabled", t!("tr.cache_enabled"), Some(&t!("tr.cache_enabled_desc")), translation.cache_enabled, {
+            let cx = cx.clone();
+            move |on| {
+                cx.with_mut(|ui| {
+                    ui.draft.translation.cache_enabled = on;
+                    mark_dirty(ui);
+                });
+            }
+        }),
         card_slider_number(
             SliderNumberParams {
                 key: "tr-cache-max",
-                header: "Cache size".into(),
-                description: Some("Max unique phrases kept in memory. Full cache evicts the least-used first.".into()),
+                header: t!("tr.cache_size"),
+                description: Some(t!("tr.cache_size_desc")),
                 value: translation.cache_max_entries as f64,
                 min: TRANSLATION_CACHE_MAX_MIN as f64,
                 max: TRANSLATION_CACHE_MAX_CAP as f64,
@@ -139,34 +129,31 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         ),
         settings_card(
             "tr-cache-clear",
-            "Clear cache",
-            Some(&format!(
-                "{} of {} phrases cached this session. Closing the app also clears it.",
-                cache_len, translation.cache_max_entries
-            )),
+            t!("tr.clear_cache"),
+            Some(&t!("tr.cache_usage", cached = cache_len, max = translation.cache_max_entries)),
             Button::new()
                 .is_enabled(cache_len > 0)
                 .on_click({
                     let cx = cx.clone();
                     move || cx.send_cmd(PipelineCommand::ClearTranslationCache)
                 })
-                .content("Clear cache")
-                .tooltip("Drop all cached translations. Does not clear chat history."),
+                .content(t!("tr.clear_cache").as_ref())
+                .tooltip(t!("tr.clear_cache_tip")),
         ),
     ));
 
     let prompt = StackPanel::new().spacing(4.0).children((
-        section_header("Prompt"),
+        section_header(t!("tr.prompt")),
         settings_card_stack(
             "tr-system-prompt",
-            "System prompt",
-            Some("Leave empty for the built-in prompt. Custom text must reply {\"b\":[[id,\"translation\"],...]}."),
+            t!("tr.system_prompt"),
+            Some(&t!("tr.system_prompt_desc")),
             TextBox::new()
                 .text(translation.system_prompt.clone().unwrap_or_default())
                 .accepts_return(true)
                 .text_wrapping(TextWrapping::Wrap)
                 .height(120.0)
-                .placeholder_text("Built-in prompt")
+                .placeholder_text(t!("tr.prompt_placeholder"))
                 .on_text_changed({
                     let cx = cx.clone();
                     move |v: String| {

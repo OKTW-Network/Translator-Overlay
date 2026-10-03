@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use rust_i18n::t;
 use translator_core::{LineMergeConfig, LineMergeOrder, ModelTier, OcrDevice};
 use windows_reactor::{
     ChildrenControl, HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel, TooltipExt, VerticalAlignment, View,
@@ -39,8 +40,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     };
 
     let model = StackPanel::new().spacing(4.0).children((
-        section_header("Model"),
-        settings_card("ocr-tier", "Model size", Some("Smaller is faster; larger is more accurate. Reloads on Save."), {
+        section_header(t!("ocr.model")),
+        settings_card("ocr-tier", t!("ocr.model_size"), Some(&t!("ocr.model_size_desc")), {
             let idx = match ocr.model_tier {
                 ModelTier::Tiny => 0,
                 ModelTier::Small => 1,
@@ -65,12 +66,12 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .spacing(12.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
-                    radio("ocr-model-tier", "tiny", Some(64.0), idx == 0, pick(0)),
-                    radio("ocr-model-tier", "small", Some(72.0), idx == 1, pick(1)),
-                    radio("ocr-model-tier", "medium", Some(84.0), idx == 2, pick(2)),
+                    radio("ocr-model-tier", &t!("ocr.tiny"), Some(64.0), idx == 0, pick(0)),
+                    radio("ocr-model-tier", &t!("ocr.small"), Some(72.0), idx == 1, pick(1)),
+                    radio("ocr-model-tier", &t!("ocr.medium"), Some(84.0), idx == 2, pick(2)),
                 ))
         }),
-        settings_card("ocr-device", "Device", Some("GPU (WebGPU or DirectML) is faster; CPU is more compatible. Reloads on Save."), {
+        settings_card("ocr-device", t!("ocr.device"), Some(&t!("ocr.device_desc")), {
             let idx = match ocr.device {
                 OcrDevice::Webgpu => 0,
                 OcrDevice::Directml => 1,
@@ -95,26 +96,21 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .spacing(12.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
-                    radio("ocr-device", "WebGPU", Some(84.0), idx == 0, pick(0)).tooltip_with(wrap_tooltip(
-                        "OCR on the GPU via WebGPU (Dawn / D3D12).\nFaster than CPU; often faster than DirectML on Intel.\nFalls back to CPU if WebGPU fails.",
-                    )),
-                    radio("ocr-device", "DirectML", Some(96.0), idx == 1, pick(1)).tooltip_with(wrap_tooltip(
-                        "OCR on the GPU via DirectML (D3D12).\nMay be faster than WebGPU on NVIDIA/AMD.\nFalls back to CPU if DirectML fails.",
-                    )),
-                    radio("ocr-device", "CPU", Some(64.0), idx == 2, pick(2)).tooltip_with(wrap_tooltip(
-                        "OCR on the CPU only.\nSlower than GPU.\nMore compatible if WebGPU and DirectML are unavailable.",
-                    )),
+                    radio("ocr-device", &t!("ocr.webgpu"), Some(84.0), idx == 0, pick(0)).tooltip_with(wrap_tooltip(&t!("ocr.webgpu_tip"))),
+                    radio("ocr-device", &t!("ocr.directml"), Some(96.0), idx == 1, pick(1))
+                        .tooltip_with(wrap_tooltip(&t!("ocr.directml_tip"))),
+                    radio("ocr-device", &t!("ocr.cpu"), Some(64.0), idx == 2, pick(2)).tooltip_with(wrap_tooltip(&t!("ocr.cpu_tip"))),
                 ))
         }),
     ));
 
     let timing = StackPanel::new().spacing(4.0).children((
-        section_header("Timing"),
+        section_header(t!("ocr.timing")),
         card_slider_number(
             SliderNumberParams {
                 key: "ocr-interval-ms",
-                header: "Capture interval (ms)".into(),
-                description: Some("How often to grab a new frame.".into()),
+                header: t!("ocr.interval"),
+                description: Some(t!("ocr.interval_desc")),
                 value: capture.min_interval_ms as f64,
                 min: 50.0,
                 max: 5_000.0,
@@ -133,8 +129,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_slider_number(
             SliderNumberParams {
                 key: "ocr-stable-ms",
-                header: "Stable wait (ms)".into(),
-                description: Some("Wait until text stops changing, then translate.".into()),
+                header: t!("ocr.stable"),
+                description: Some(t!("ocr.stable_desc")),
                 value: ocr.stable_duration_ms as f64,
                 min: 0.0,
                 max: 10_000.0,
@@ -153,8 +149,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_slider_number(
             SliderNumberParams {
                 key: "ocr-max-unstable-ms",
-                header: "Force translate (ms)".into(),
-                description: Some("If OCR keeps changing, translate anyway after this long. 0 = off.".into()),
+                header: t!("ocr.force"),
+                description: Some(t!("ocr.force_desc")),
                 value: ocr.max_unstable_ms as f64,
                 min: 0.0,
                 max: 15_000.0,
@@ -173,8 +169,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_slider_number(
             SliderNumberParams {
                 key: "ocr-persist-ms",
-                header: "Keep after gone (ms)".into(),
-                description: Some("Keep text on overlay after it disappears. 0 = off.".into()),
+                header: t!("ocr.keep"),
+                description: Some(t!("ocr.keep_desc")),
                 value: ocr.block_persist_ms as f64,
                 min: 0.0,
                 max: 5_000.0,
@@ -193,8 +189,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_slider_number(
             SliderNumberParams {
                 key: "ocr-miss-ms",
-                header: "Drop after miss (ms)".into(),
-                description: Some("Remove text if not seen again within this time.".into()),
+                header: t!("ocr.drop"),
+                description: Some(t!("ocr.drop_desc")),
                 value: ocr.block_max_miss_ms as f64,
                 min: 0.0,
                 max: 10_000.0,
@@ -230,12 +226,12 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         }
     };
     let detection = StackPanel::new().spacing(4.0).children((
-        section_header("Detection"),
+        section_header(t!("ocr.detection")),
         card_slider_number(
             SliderNumberParams {
                 key: "ocr-confidence",
-                header: "Min confidence".into(),
-                description: Some("Ignore text below this score (0–1).".into()),
+                header: t!("ocr.confidence"),
+                description: Some(t!("ocr.confidence_desc")),
                 value: f64::from(ocr.confidence_threshold),
                 min: 0.0,
                 max: 1.0,
@@ -251,44 +247,32 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 }
             },
         ),
-        card_toggle(
-            "ocr-filter-single",
-            "Ignore single characters",
-            Some("Drop lone single-character detections."),
-            ocr.filter_single_char,
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.ocr.filter_single_char = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+        card_toggle("ocr-filter-single", t!("ocr.filter_single"), Some(&t!("ocr.filter_single_desc")), ocr.filter_single_char, {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    ui.draft.ocr.filter_single_char = v;
+                    mark_dirty(ui);
+                });
+            }
+        }),
     ));
 
     let merge_join = StackPanel::new().spacing(4.0).children((
-        section_header("Line merge"),
-        card_toggle(
-            "ocr-line-merge",
-            "Merge lines",
-            Some("Join nearby lines that share a column or row, similar height, and a small gap."),
-            ocr.line_merge.enabled,
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.ocr.line_merge.enabled = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+        section_header(t!("ocr.line_merge")),
+        card_toggle("ocr-line-merge", t!("ocr.merge_lines"), Some(&t!("ocr.merge_lines_desc")), ocr.line_merge.enabled, {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    ui.draft.ocr.line_merge.enabled = v;
+                    mark_dirty(ui);
+                });
+            }
+        }),
         card_toggle(
             "ocr-merge-whole-region",
-            "Merge entire selected region",
-            Some("Join every line in each drawn OCR region. Ignored for whole-window capture."),
+            t!("ocr.merge_region"),
+            Some(&t!("ocr.merge_region_desc")),
             ocr.line_merge.merge_whole_region,
             {
                 let cx = cx.clone();
@@ -300,43 +284,37 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 }
             },
         ),
-        card_toggle(
-            "ocr-merge-join-space",
-            "Join with space",
-            Some("On: space between joined lines. Off: glue them (typical for CJK)."),
-            ocr.line_merge.join_with_space,
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.ocr.line_merge.join_with_space = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+        card_toggle("ocr-merge-join-space", t!("ocr.join_space"), Some(&t!("ocr.join_space_desc")), ocr.line_merge.join_with_space, {
+            let cx = cx.clone();
+            move |v| {
+                cx.with_mut(|ui| {
+                    ui.draft.ocr.line_merge.join_with_space = v;
+                    mark_dirty(ui);
+                });
+            }
+        }),
     ));
 
     let merge_order = StackPanel::new().spacing(4.0).children((
-        subsection_header("Reading order"),
+        subsection_header(t!("ocr.reading_order")),
         settings_card(
             "ocr-merge-order",
-            "Reading order",
-            Some("Order for joining lines and listing the blocks."),
+            t!("ocr.reading_order"),
+            Some(&t!("ocr.reading_order_desc")),
             StackPanel::new()
                 .spacing(4.0)
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .children((
-                    radio("ocr-merge-order", "Left to right, then top to bottom (rows)", None, order_idx == 1, pick_order(1)),
-                    radio("ocr-merge-order", "Top to bottom, then left to right (columns)", None, order_idx == 0, pick_order(0)),
+                    radio("ocr-merge-order", &t!("ocr.order_rows"), None, order_idx == 1, pick_order(1)),
+                    radio("ocr-merge-order", &t!("ocr.order_cols"), None, order_idx == 0, pick_order(0)),
                 )),
         ),
         card_merge_pct(
             &cx,
             SliderNumberParams {
                 key: "merge-order-band",
-                header: "Row/column band (% of window)".into(),
-                description: Some("How close lines must be to count as the same row or column. Default 1.2.".into()),
+                header: t!("ocr.order_band"),
+                description: Some(t!("ocr.order_band_desc")),
                 value: f64::from(ocr.line_merge.order_band_ratio) * 100.0,
                 min: 0.1,
                 max: 5.0,
@@ -347,13 +325,13 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     ));
 
     let merge_stacking = StackPanel::new().spacing(4.0).children((
-        subsection_header("Vertical"),
+        subsection_header(t!("ocr.vertical")),
         card_merge_pct(
             &cx,
             SliderNumberParams {
                 key: "merge-gap",
-                header: "Gap (% of window height)".into(),
-                description: Some("Max distance between stacked lines. A small overlap counts as a small gap. Default 1.5.".into()),
+                header: t!("ocr.gap_h"),
+                description: Some(t!("ocr.gap_h_desc")),
                 value: f64::from(ocr.line_merge.gap_ratio) * 100.0,
                 min: 0.0,
                 max: 8.0,
@@ -365,10 +343,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-below-mid",
-                header: "Midpoint slack (% of line size)".into(),
-                description: Some(
-                    "How far a line may sit past the previous midpoint and still count as below or to the right. Default 25.".into(),
-                ),
+                header: t!("ocr.mid"),
+                description: Some(t!("ocr.mid_desc")),
                 value: f64::from(ocr.line_merge.below_mid_ratio) * 100.0,
                 min: 0.0,
                 max: 50.0,
@@ -380,8 +356,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-height-delta",
-                header: "Height difference (%)".into(),
-                description: Some("Max height difference vs the taller line. Default 45.".into()),
+                header: t!("ocr.height_delta"),
+                description: Some(t!("ocr.height_delta_desc")),
                 value: f64::from(ocr.line_merge.height_delta_ratio) * 100.0,
                 min: 0.0,
                 max: 90.0,
@@ -392,16 +368,13 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     ));
 
     let merge_column = StackPanel::new().spacing(4.0).children((
-        subsection_header("Horizontal"),
+        subsection_header(t!("ocr.horizontal")),
         card_merge_pct(
             &cx,
             SliderNumberParams {
                 key: "merge-horizontal-gap",
-                header: "Gap (% of window width)".into(),
-                description: Some(
-                    "Max distance between side-by-side lines. A small overlap counts as a small gap. 0 = only if they touch. Default 1.5."
-                        .into(),
-                ),
+                header: t!("ocr.gap_w"),
+                description: Some(t!("ocr.gap_w_desc")),
                 value: f64::from(ocr.line_merge.horizontal_gap_ratio) * 100.0,
                 min: 0.0,
                 max: 8.0,
@@ -413,8 +386,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-align",
-                header: "Align tolerance (%)".into(),
-                description: Some("Max left/center drift for one column, or top/center for one row. Default 1.2.".into()),
+                header: t!("ocr.align"),
+                description: Some(t!("ocr.align_desc")),
                 value: f64::from(ocr.line_merge.align_ratio) * 100.0,
                 min: 0.0,
                 max: 5.0,
@@ -425,11 +398,11 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     ));
 
     let merge_short = StackPanel::new().spacing(4.0).children((
-        subsection_header("Short into long"),
+        subsection_header(t!("ocr.short")),
         card_toggle(
             "ocr-merge-reject-short",
-            "Don't merge short into long",
-            Some("Keep a short line separate from a much wider line below."),
+            t!("ocr.reject_short"),
+            Some(&t!("ocr.reject_short_desc")),
             ocr.line_merge.reject_short_long,
             {
                 let cx = cx.clone();
@@ -445,8 +418,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             &cx,
             SliderNumberParams {
                 key: "merge-width-delta",
-                header: "Width difference (%)".into(),
-                description: Some("If the lower line is at least this much wider, keep the short line separate. Default 25.".into()),
+                header: t!("ocr.width_delta"),
+                description: Some(t!("ocr.width_delta_desc")),
                 value: f64::from(ocr.line_merge.width_delta_ratio) * 100.0,
                 min: 0.0,
                 max: 90.0,

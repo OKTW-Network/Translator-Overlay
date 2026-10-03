@@ -25,6 +25,53 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
 }
 
+/// Control-window language stored in `config.toml` as `en`, `zh-Hant`, or `zh-Hans`.
+///
+/// A missing or invalid value stays [`None`](UiConfig::language). The app then picks
+/// from the system locale once and writes a concrete value. There is no follow-system option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiLanguage {
+    #[serde(rename = "en")]
+    En,
+    #[serde(rename = "zh-Hant")]
+    ZhHant,
+    #[serde(rename = "zh-Hans")]
+    ZhHans,
+}
+
+impl UiLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::ZhHant => "zh-Hant",
+            Self::ZhHans => "zh-Hans",
+        }
+    }
+
+    /// Map a Windows locale name (`zh-TW`, `zh-Hans-CN`, `en-US`) to a UI language.
+    ///
+    /// Traditional: `zh-TW`, `zh-HK`, `zh-MO`, or a `Hant` script tag.
+    /// Simplified: `zh-CN`, `zh-SG`, or a `Hans` script tag.
+    /// Anything else, including bare `zh` and `ja-JP`, is English.
+    pub fn from_locale_name(name: &str) -> Self {
+        let lower = name.trim().replace('_', "-").to_ascii_lowercase();
+        if lower.contains("hant") || lower.starts_with("zh-tw") || lower.starts_with("zh-hk") || lower.starts_with("zh-mo") {
+            Self::ZhHant
+        } else if lower.contains("hans") || lower.starts_with("zh-cn") || lower.starts_with("zh-sg") {
+            Self::ZhHans
+        } else {
+            Self::En
+        }
+    }
+}
+
+/// Interface preferences. Missing `language` stays `None` so the first launch can fill it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct UiConfig {
+    pub language: Option<UiLanguage>,
+}
+
 /// Root application configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -34,6 +81,7 @@ pub struct AppConfig {
     pub ocr: OcrConfig,
     pub capture: CaptureConfig,
     pub overlay: OverlayConfig,
+    pub ui: UiConfig,
 }
 
 impl AppConfig {
@@ -608,6 +656,49 @@ mod tests {
     fn temp_config_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("translator_overlay_{name}_{nanos}.toml"))
+    }
+
+    #[test]
+    fn ui_language_missing_is_none_and_roundtrips() {
+        let omitted: AppConfig = toml::from_str("[api]\nmodel = \"x\"\n").unwrap();
+        assert_eq!(omitted.ui.language, None);
+        let dumped = toml::to_string(&AppConfig::default()).unwrap();
+        assert!(!dumped.contains("language"), "unset language must be omitted, got:\n{dumped}");
+
+        for (raw, lang) in [
+            ("en", UiLanguage::En),
+            ("zh-Hant", UiLanguage::ZhHant),
+            ("zh-Hans", UiLanguage::ZhHans),
+        ] {
+            let config: AppConfig = toml::from_str(&format!("[ui]\nlanguage = \"{raw}\"\n")).unwrap();
+            assert_eq!(config.ui.language, Some(lang));
+            let mut stored = AppConfig::default();
+            stored.ui.language = Some(lang);
+            let text = toml::to_string(&stored).unwrap();
+            assert!(text.contains(&format!("language = \"{raw}\"")), "got:\n{text}");
+            assert!(!text.contains("language = \"auto\""), "got:\n{text}");
+        }
+    }
+
+    #[test]
+    fn ui_language_bad_value_is_dropped() {
+        let config = AppConfig::from_toml_lenient("[ui]\nlanguage = \"ja\"\n[overlay]\nenabled = false\n").unwrap();
+        assert_eq!(config.ui.language, None);
+        assert!(!config.overlay.enabled);
+    }
+
+    #[test]
+    fn ui_language_from_locale_name() {
+        assert_eq!(UiLanguage::from_locale_name("zh-TW"), UiLanguage::ZhHant);
+        assert_eq!(UiLanguage::from_locale_name("zh-HK"), UiLanguage::ZhHant);
+        assert_eq!(UiLanguage::from_locale_name("zh-MO"), UiLanguage::ZhHant);
+        assert_eq!(UiLanguage::from_locale_name("zh-Hant-TW"), UiLanguage::ZhHant);
+        assert_eq!(UiLanguage::from_locale_name("zh-CN"), UiLanguage::ZhHans);
+        assert_eq!(UiLanguage::from_locale_name("zh-SG"), UiLanguage::ZhHans);
+        assert_eq!(UiLanguage::from_locale_name("zh-Hans-CN"), UiLanguage::ZhHans);
+        assert_eq!(UiLanguage::from_locale_name("en-US"), UiLanguage::En);
+        assert_eq!(UiLanguage::from_locale_name("ja-JP"), UiLanguage::En);
+        assert_eq!(UiLanguage::from_locale_name("zh"), UiLanguage::En);
     }
 
     #[test]

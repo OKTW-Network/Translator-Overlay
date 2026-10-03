@@ -7,7 +7,7 @@ mod worker;
 
 use std::sync::OnceLock;
 
-use translator_core::{AppConfig, NormRect};
+use translator_core::{AppConfig, NormRect, UiLanguage};
 
 pub use crate::pipeline::worker::{CmdTx, SharedState, spawn_pipeline};
 
@@ -46,6 +46,10 @@ pub enum PipelineCommand {
     SetOverlayDisplay {
         enabled: bool,
         reader_enabled: bool,
+    },
+    /// Persist the control-window language without saving the rest of the draft.
+    SetUiLanguage {
+        language: UiLanguage,
     },
     /// Cancel the in-flight translation request (if any).
     CancelTranslate,

@@ -8,6 +8,7 @@
 
 use std::{ffi::c_void, mem::zeroed, ptr::null_mut};
 
+use rust_i18n::t;
 use tracing::{debug, warn};
 use windows_collections::IVector;
 use windows_core::{HRESULT, HSTRING, IInspectable, IInspectable_Vtbl, Interface, Result, RuntimeName};
@@ -91,6 +92,7 @@ fn ensure_settings_header(nav: &IInspectable) -> Result<()> {
         return Ok(());
     }
     if items.GetAt(1)?.cast::<INavigationViewItemHeader>().is_ok() {
+        set_settings_label(&items.GetAt(1)?)?;
         return Ok(());
     }
     let header_factory: INavigationViewItemHeaderFactory =
@@ -101,14 +103,20 @@ fn ensure_settings_header(nav: &IInspectable) -> Result<()> {
         (Interface::vtable(&header_factory).CreateInstance)(Interface::as_raw(&header_factory), null_mut(), null_mut(), &mut result)
             .and_then(|| inspectable(result))?
     };
+    set_settings_label(&header)?;
+    items.InsertAt(1, &header)?;
+    debug!("nav-header: inserted Settings header");
+    Ok(())
+}
+
+fn set_settings_label(header: &IInspectable) -> Result<()> {
     let content: IContentControl = header.cast()?;
-    let boxed: IInspectable = IReference::<HSTRING>::from(HSTRING::from("Settings")).into();
+    let label = t!("nav.settings");
+    let boxed: IInspectable = IReference::<HSTRING>::from(HSTRING::from(&*label)).into();
     unsafe {
         // SAFETY: `boxed` is a boxed `HSTRING` matching `ContentControl.Content`.
         (Interface::vtable(&content).SetContent)(Interface::as_raw(&content), Interface::as_raw(&boxed)).ok()?;
     }
-    items.InsertAt(1, &header)?;
-    debug!("nav-header: inserted Settings header");
     Ok(())
 }
 
