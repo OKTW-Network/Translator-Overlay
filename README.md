@@ -2,15 +2,15 @@
 
 # Translator Overlay
 
-Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以點擊可穿透的覆蓋層顯示譯文。
+Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以點擊可穿透的 Overlay 顯示譯文。
 
 ## 功能
 
 - **視窗擷取**：Windows Graphics Capture。可在目標視窗上框選多個 OCR 區域，或辨識整窗；區域可存成具名設定集
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU 或 DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
-- **LLM 翻譯**：OpenAI 相容 Chat Completions 或 Responses API（可選 JSON Schema Structured Outputs 與串流），或本機長駐 Grok ACP / OpenCode ACP / Codex app-server / Claude Code stream-json（只 append 新 turn）。串流時覆蓋層與翻譯視窗會隨每個 block 即時更新
+- **LLM 翻譯**：OpenAI 相容 API，或本機 Grok / OpenCode / Codex / Claude Code。串流時 Overlay 與翻譯視窗會隨譯文即時更新
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
-- **顯示**：點擊可穿透的原位覆蓋層（跟隨目標視窗，僅前景時顯示）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）
+- **顯示**：點擊可穿透的 Overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名設定檔（Save / Load，與區域設定集相同）
 
 ## 系統需求
@@ -24,13 +24,8 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 1. 解壓 `TranslatorOverlay-*-win-x64.zip`（OCR 用的 DLL 在 `lib/`）
 2. 雙擊 `translator-app.exe`
 3. **API** 頁選 Provider：
-   - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`，可選 Chat Completions 或 Responses
-   - **Grok CLI** / **OpenCode CLI** / **Codex CLI** / **Claude Code**：本機 `grok` / `opencode` / `codex` / `claude`
-     - Codex CLI 需 **0.154.0 或更新版本**，使用你自己的既有 CLI 登入與方案額度。本程式不讀取、複製、保存、刷新或轉送原生登入 token；登入、token 儲存與更新完全由 Codex 管理。需要登入時請自行在終端執行 `codex login`。
-     - Codex 翻譯停用專案 AGENTS、自訂 instructions、skills、memory、MCP、plugins 與 hooks，並使用暫存工作目錄、ephemeral thread 及 read-only sandbox。隔離檢查失敗就停止，不送出 OCR。
-     - **全域 AGENTS 限制**：已驗證的 Codex 0.154.0 沒有關閉原生 home 中 `AGENTS.md`／`AGENTS.override.md` 的開關。載入 `AGENTS.override.md` 時只記 warning 並繼續翻譯，其內容仍會進入 context；一般 `AGENTS.md` 或其他非預期來源則會拒絕翻譯。本程式不改動你的文件或改用另一份登入憑證。較新版本也必須通過其餘隔離檢查。
-     - Claude Code 使用你自己的登入與方案額度（`claude auth login`），本程式不讀取、不保存、不轉送登入憑證。Reasoning effort 填 `none` 可關閉 thinking
-   - **Profile**：把目前連線設定存成具名設定檔（`api-profiles.toml`）。**Load** 填入表單，再按頁面 **Save** 套用
+   - **OpenAI-compatible**：填 `base_url` / `api_key` / `model`
+   - **Grok CLI** / **OpenCode CLI** / **Codex CLI** / **Claude Code**：本機 `grok` / `opencode` / `codex` / `claude`，沿用既有登入（Codex 需 0.154.0 或更新）
 4. **Save**
 5. **Dashboard** 選視窗 → 左側導覽底部 **Start**
 
@@ -40,7 +35,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
 
 **Dashboard** 選目標視窗。可選 **Select regions** 在該視窗上框選辨識範圍（目標前景時才看得到區域選取）；空區域 = 整窗。框選結果可存成設定集再 **Load**。擷取中可 **Capture now** 立刻 OCR + 翻譯（略過穩定等待），或 **Cancel** 取消進行中的翻譯。
 
-**Overlay** 頁開關原位覆蓋層與獨立翻譯視窗（即時生效）。其餘選項改完需 **Save**。
+**Overlay** 頁開關 Overlay 與獨立翻譯視窗（即時生效）。其餘選項改完需 **Save**。
 
 **OBS：** Window Capture 選 `Translator Overlay Captions`，不要選控制視窗 `Translator Overlay`。Game Capture 只抓得到遊戲本身，需再加一層 Window Capture 疊譯文。
 
@@ -53,7 +48,7 @@ Windows 桌面即時翻譯覆蓋層：選取目標視窗 → 擷取畫面 → PP
   → 信心過濾 / 單字元過濾 / 多行合併 / block 持續追蹤
   → 穩定閘門
   → LLM 翻譯（session cache + 多輪上下文；HTTP 可串流）
-  → 點擊可穿透的覆蓋層（跟隨前景視窗）+ 獨立翻譯視窗
+  → 點擊可穿透的 Overlay（跟隨前景視窗）+ 獨立翻譯視窗
 ```
 
 ## OCR 模型
@@ -95,6 +90,6 @@ crates/
   translator-capture     # Windows Graphics Capture
   translator-core        # 設定、路徑、區域設定集、共用型別
   translator-ocr         # PP-OCRv6、下載、穩定閘門、過濾、合併
-  translator-overlay     # 點擊可穿透的覆蓋層、區域選取、翻譯視窗
+  translator-overlay     # 點擊可穿透的 Overlay、區域選取、翻譯視窗
   translator-translate   # HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code、session cache
 ```
