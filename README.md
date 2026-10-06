@@ -13,6 +13,10 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 - **顯示**：點擊可穿透的 Overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名設定檔（Save / Load，與區域設定集相同）
 
+## 截圖
+<img width="960" alt="TranslatorOverlay Screenshot UI" src="https://github.com/user-attachments/assets/4a03a129-3a99-4ab2-8b64-89591473f5ce" />
+<img width="480" alt="TranslatorOverlay Screenshot Overlay" src="https://github.com/user-attachments/assets/e4b389af-857e-4761-a517-478343672db7" /><img width="480" alt="TranslatorOverlay Screenshot Overlay Select" src="https://github.com/user-attachments/assets/f53b6f66-d529-4d56-ad84-df72749d4fd2" />
+
 ## 系統需求
 
 - Windows 11 **x64**（build 22000 以上）
