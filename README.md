@@ -15,7 +15,10 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 ## 截圖
 <img width="100%" alt="TranslatorOverlay Screenshot UI" src="https://github.com/user-attachments/assets/4a03a129-3a99-4ab2-8b64-89591473f5ce" />
-<img width="50%" alt="TranslatorOverlay Screenshot Overlay" src="https://github.com/user-attachments/assets/e4b389af-857e-4761-a517-478343672db7" /><img width="50%" alt="TranslatorOverlay Screenshot Overlay Select" src="https://github.com/user-attachments/assets/f53b6f66-d529-4d56-ad84-df72749d4fd2" />
+<div align="center">
+   <img width="49%" alt="TranslatorOverlay Screenshot Overlay" src="https://github.com/user-attachments/assets/e4b389af-857e-4761-a517-478343672db7" />
+   <img width="49%" alt="TranslatorOverlay Screenshot Overlay Select" src="https://github.com/user-attachments/assets/f53b6f66-d529-4d56-ad84-df72749d4fd2" />
+</div>
 
 ## 系統需求
 
