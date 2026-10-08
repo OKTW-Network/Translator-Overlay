@@ -66,6 +66,6 @@ pub fn list_windows() -> Result<Vec<WindowInfo>, CaptureError> {
             hwnd: w.as_raw_hwnd() as isize,
         });
     }
-    out.sort_by_key(|a| a.title.to_lowercase());
+    out.sort_by_cached_key(|a| a.title.to_lowercase());
     Ok(out)
 }

@@ -255,50 +255,27 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_caption_and_top_safety() {
-        let mut m = metrics(800, 600, 800, 600, 0, 0);
-        m.offset_y = 31;
+    fn clamp_fits_the_client_under_an_inset() {
+        // A collapsed client (client == window) that gets a 31 px caption shrinks to fit below it.
+        let mut m = metrics(800, 600, 800, 600, 0, 31);
         m.clamp();
         assert_eq!(m.client_height, 569);
         assert_eq!(m.screen_rect(), (0, 31, 800, 569));
-
-        // Already-inset client is left alone by the collapsed path.
-        let inset = metrics(800, 600, 784, 553, 8, 31);
-        assert_ne!(inset.client_height, inset.window_height);
-
-        // Top safety bumps an existing inset.
-        let mut m = metrics(800, 600, 784, 553, 8, 31);
-        m.offset_y = m.offset_y.saturating_add(1);
-        m.client_height = m.client_height.saturating_sub(1).max(1);
-        m.clamp();
-        assert_eq!(m.offset_y, 32);
-        assert_eq!(m.client_height, 552);
-
-        let mut flush = metrics(800, 600, 800, 600, 0, 0);
-        if flush.offset_y > 0 {
-            flush.offset_y = flush.offset_y.saturating_add(1);
-        }
-        assert_eq!(flush.offset_y, 0);
     }
 
     #[test]
-    fn remap_onto_dwm_ceils_title() {
-        let mut m = metrics(800, 600, 784, 553, 8, 31);
-        let num_w = 1200u32;
-        let num_h = 900u32;
-        m.offset_x = scale_ceil(m.offset_x, num_w, m.window_width);
-        m.offset_y = scale_ceil(m.offset_y, num_h, m.window_height);
-        m.client_width = scale_floor(m.client_width, num_w, m.window_width);
-        m.client_height = scale_floor(m.client_height, num_h, m.window_height);
-        m.window_width = num_w;
-        m.window_height = num_h;
-        m.frame_left = 10;
-        m.frame_top = 20;
-        m.clamp();
-        assert_eq!(m.offset_x, 12);
-        assert_eq!(m.offset_y, 47);
-        assert_eq!(m.client_width, 1176);
-        assert_eq!(m.client_height, 829);
+    fn scaling_ceils_insets_and_floors_sizes() {
+        // 800x600 window metrics mapped onto a 1200x900 DWM frame.
+        assert_eq!(scale_ceil(8, 1200, 800), 12);
+        assert_eq!(scale_ceil(31, 900, 600), 47);
+        assert_eq!(scale_floor(784, 1200, 800), 1176);
+        assert_eq!(scale_floor(553, 900, 600), 829);
+        assert_eq!(scale_ceil(31, 900, 0), 31, "a zero denominator keeps the value");
+        let m = ClientAreaMetrics {
+            frame_left: 10,
+            frame_top: 20,
+            ..metrics(1200, 900, 1176, 829, 12, 47)
+        };
         assert_eq!(m.screen_rect(), (22, 67, 1176, 829));
     }
 }
