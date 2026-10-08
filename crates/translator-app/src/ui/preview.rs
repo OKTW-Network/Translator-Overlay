@@ -1,4 +1,4 @@
-//! Capture preview → WinUI `Image` via D2D (`CanvasImageSource`).
+//! Draws the capture preview into a WinUI `Image` through D2D (`CanvasImageSource`).
 
 use std::cell::{Cell, RefCell};
 

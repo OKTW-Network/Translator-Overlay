@@ -1,4 +1,4 @@
-//! Overlay appearance: display toggles, colours, translation-window font.
+//! Overlay appearance settings, covering the display toggles, colours, and the translation-window font.
 
 use std::sync::Arc;
 

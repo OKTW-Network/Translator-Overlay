@@ -162,7 +162,7 @@ pub fn deny_permission_result(method: &str, params: &Value) -> Value {
     if m.contains("approval") || m.contains("permissions") {
         return serde_json::json!({ "decision": "abort" });
     }
-    // ACP: reject the tool but keep the turn alive so the model can answer without executing.
+    // For ACP, reject the tool but keep the turn alive so the model can answer without running it.
     if let Some(option_id) = reject_option_id(params) {
         return serde_json::json!({
             "outcome": { "outcome": "selected", "optionId": option_id }
@@ -188,7 +188,7 @@ pub struct JsonRpcChild {
     stdin: ChildStdin,
     rx: mpsc::UnboundedReceiver<Incoming>,
     next_id: i64,
-    /// Grok ACP includes `"jsonrpc":"2.0"`; Codex app-server omits it.
+    /// Grok ACP includes `"jsonrpc":"2.0"`, and Codex app-server leaves it out.
     include_jsonrpc: bool,
 }
 
@@ -339,7 +339,7 @@ pub struct AcpSession {
     rpc: JsonRpcChild,
     session_id: String,
     fail_on_tool: bool,
-    /// OpenCode: `session/close` detaches; `{bin} session delete {id}` after the child exits.
+    /// For OpenCode, `session/close` only detaches, so `{bin} session delete {id}` runs after the child exits.
     cli_session_delete: Option<(PathBuf, PathBuf)>,
 }
 
@@ -417,7 +417,7 @@ impl AcpSession {
             .await;
         wait_or_kill(&mut self.rpc.child).await;
         if let Some((program, cwd)) = self.cli_session_delete.take() {
-            // The delete spawns a process and polls it with `thread::sleep`; keep it off the async worker.
+            // The delete spawns a process and polls it with `thread::sleep`, so keep it off the async worker.
             let session_id = self.session_id.clone();
             let _ = tokio::task::spawn_blocking(move || best_effort_cli_session_delete(&program, &cwd, &session_id)).await;
         }
@@ -455,12 +455,12 @@ impl AcpSession {
 
 impl Drop for AcpSession {
     fn drop(&mut self) {
-        // session/new may have already persisted; kill() deletes the CLI row.
+        // session/new may have saved the session already, and kill() deletes that CLI row.
         self.kill();
     }
 }
 
-/// `CREATE_NO_WINDOW`: keep CLI children from opening console windows.
+/// `CREATE_NO_WINDOW` keeps CLI children from opening console windows.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -618,7 +618,7 @@ pub fn spawn_stdio(program: &Path, args: &[String], cwd: &Path, env: &[(&str, &s
     })
 }
 
-/// `{program} session delete {session_id}` — OpenCode persists ACP sessions in its DB.
+/// Run `{program} session delete {session_id}`, because OpenCode saves ACP sessions in its database.
 fn best_effort_cli_session_delete(program: &Path, cwd: &Path, session_id: &str) {
     let mut cmd = std::process::Command::new(program);
     cmd.args(["session", "delete", session_id])

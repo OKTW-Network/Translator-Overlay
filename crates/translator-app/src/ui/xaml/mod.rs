@@ -1,7 +1,7 @@
-//! Shared WinUI `GotFocus` + `Rendering` hook, plus COM patches (Mica, nav header, slider step).
+//! Shared WinUI `GotFocus` and `Rendering` hooks, plus COM patches for Mica, the nav header, and the slider step.
 //!
-//! Cached COM pointers are forgotten on TLS drop — WinRT `Release` during thread
-//! teardown aborts WinUI (`0xC0000409`).
+//! Cached COM pointers are forgotten when the thread-local slot drops, because a WinRT
+//! `Release` during thread teardown aborts WinUI with `0xC0000409`.
 
 #![allow(non_snake_case)]
 
@@ -179,7 +179,7 @@ where
 
     unsafe extern "system" fn Invoke(this: *mut c_void, sender: *mut c_void, args: AbiType<T>) -> HRESULT {
         // SAFETY: `this` is a `DelegateBox<EventHandler<T>, F>` from `EventHandler::new`.
-        // `sender` / `args` are WinRT in-pointers for this invoke; `transmute_copy` borrows them.
+        // `sender` and `args` are WinRT in-pointers for this call, and `transmute_copy` borrows them.
         unsafe {
             let this = &mut *(this as *mut *mut c_void as *mut DelegateBox<EventHandler<T>, F>);
             (this.invoke)(transmute_copy(&sender), transmute_copy(&args));
@@ -203,7 +203,7 @@ impl RuntimeName for VisualTreeHelperName {
     const NAME: &'static str = "Microsoft.UI.Xaml.Media.VisualTreeHelper";
 }
 
-/// Cached `NavigationView`. Drop must not `Release` (WinUI aborts in TLS teardown).
+/// Cached `NavigationView`. Its drop must not call `Release`, because WinUI aborts during TLS teardown.
 struct CachedNavView(Option<IInspectable>);
 
 impl Drop for CachedNavView {
@@ -268,7 +268,7 @@ fn subscribe_got_focus() -> Result<()> {
     });
     unsafe {
         let mut token = 0i64;
-        // SAFETY: `GotFocus` writes the registration token; `EventRevoker` takes it and is forgotten for process lifetime.
+        // SAFETY: `GotFocus` writes the registration token. `EventRevoker` takes it and is forgotten for the process lifetime.
         (Interface::vtable(&statics).GotFocus)(Interface::as_raw(&statics), Interface::as_raw(&handler), &mut token).ok()?;
         let remove = Interface::vtable(&statics).RemoveGotFocus;
         EventRevoker::new(statics, token, remove).forget();
@@ -279,7 +279,7 @@ fn subscribe_got_focus() -> Result<()> {
 fn subscribe_rendering() -> Result<()> {
     let statics: ICompositionTargetStatics = windows_core::factory::<CompositionTargetName, ICompositionTargetStatics>()?;
     let handler = EventHandler::<IInspectable>::new(|_, _| {
-        // Walking the tree every frame burns CPU while idle; only run after a rebuild.
+        // Walking the tree every frame burns CPU while idle, so run only after a rebuild.
         let left = PENDING_FRAMES.get();
         if left == 0 {
             return;
@@ -292,7 +292,7 @@ fn subscribe_rendering() -> Result<()> {
     });
     unsafe {
         let mut token = 0i64;
-        // SAFETY: `Rendering` writes the registration token; `EventRevoker` takes it and is forgotten for process lifetime.
+        // SAFETY: `Rendering` writes the registration token. `EventRevoker` takes it and is forgotten for the process lifetime.
         (Interface::vtable(&statics).Rendering)(Interface::as_raw(&statics), Interface::as_raw(&handler), &mut token).ok()?;
         let remove = Interface::vtable(&statics).RemoveRendering;
         EventRevoker::new(statics, token, remove).forget();
@@ -300,7 +300,7 @@ fn subscribe_rendering() -> Result<()> {
     Ok(())
 }
 
-/// Subscribe once; Settings header and slider steps both run from this hook.
+/// Subscribe once. The Settings header and the slider steps both run from this hook.
 pub fn apply() {
     if let Err(e) = mica::apply() {
         warn!(error = %e, "xaml: Mica resource override failed");

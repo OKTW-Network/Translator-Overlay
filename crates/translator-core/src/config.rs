@@ -88,7 +88,7 @@ impl AppConfig {
 
     /// Load from `path`.
     ///
-    /// Each TOML field is applied independently: a value that fails to parse is
+    /// Each TOML field is applied on its own. A value that fails to parse is
     /// skipped and that field keeps its default. IO errors and TOML syntax
     /// errors still fail the whole load.
     pub fn load(path: &Path) -> Result<Self, TomlFileError> {
@@ -286,7 +286,8 @@ pub struct ApiConfig {
     /// HTTP endpoint style. Ignored for CLI providers.
     #[serde(skip_serializing_if = "is_default")]
     pub http_api: HttpApi,
-    /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` / `claude` on PATH.
+    /// Absolute path or bare command. When empty, the provider's default (`grok`, `opencode`,
+    /// `codex`, or `claude`) is looked up on PATH.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
     /// Preferred processing tier. Ignored by providers that do not support it.
@@ -318,9 +319,9 @@ pub struct ApiConfig {
     /// Ignored for Responses APIs and CLI providers. Turn off if the endpoint rejects `reasoning_content`.
     #[serde(skip_serializing_if = "is_true")]
     pub send_reasoning_content: bool,
-    /// Idle timeout for HTTP reads / CLI prompts (seconds). 0 = no limit.
+    /// Idle timeout in seconds for HTTP reads and CLI prompts. 0 means no limit.
     pub request_timeout_secs: u64,
-    /// Extra attempts after the first failure (0 = try once only).
+    /// Extra attempts after the first failure. 0 means try once.
     pub max_retries: u32,
     /// Base backoff between retries in milliseconds (doubles each attempt).
     pub retry_backoff_ms: u64,
@@ -376,7 +377,7 @@ impl ApiConfig {
 pub const TRANSLATION_CACHE_MAX_MIN: usize = 1;
 /// Default translation-cache capacity (session LFU).
 pub const TRANSLATION_CACHE_MAX_DEFAULT: usize = 128;
-/// Hard cap applied when reading config / constructing the cache.
+/// Hard cap applied when reading the config and when building the cache.
 pub const TRANSLATION_CACHE_MAX_CAP: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -418,26 +419,26 @@ impl TranslationConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OcrConfig {
-    /// PP-OCRv6 tier: tiny | small | medium
+    /// PP-OCRv6 tier (`tiny`, `small`, or `medium`).
     pub model_tier: ModelTier,
     /// ONNX Runtime device. Reloads the engine when changed.
     pub device: OcrDevice,
-    /// Directory for model files (relative to exe dir unless absolute).
+    /// Directory for model files. A relative path is resolved against the executable directory.
     pub models_dir: String,
     pub confidence_threshold: f32,
-    /// Page-level: wait this long with unchanged OCR before translating.
+    /// How long the page's OCR text must stay unchanged before it is translated.
     pub stable_duration_ms: u64,
-    /// If OCR content keeps changing, force-translate after this many ms anyway.
-    /// Covers thrash that never settles (e.g. trailing glyph flicker). 0 = off.
+    /// If the OCR text keeps changing, translate anyway after this many ms. This covers
+    /// flicker that never settles, such as a trailing glyph. 0 turns it off.
     pub max_unstable_ms: u64,
-    /// Drop single ASCII letter/digit OCR hits (e.g. "0", "V", "C").
+    /// Drop OCR hits that are a single ASCII letter or digit, such as "0", "V", or "C".
     pub filter_single_char: bool,
-    /// Per-block: text must stay at roughly the same place this long before emit.
-    /// Filters icons/animations that OCR misreads as changing text. 0 = disabled.
+    /// How long a block's text must stay in roughly the same place before it is emitted.
+    /// This filters icons and animations that OCR misreads as changing text. 0 turns it off.
     pub block_persist_ms: u64,
     /// Forget a track if it is missing from frames longer than this.
     pub block_max_miss_ms: u64,
-    /// Multi-line / paragraph merge heuristics (tunable).
+    /// Rules for merging lines into paragraphs.
     pub line_merge: LineMergeConfig,
 }
 
@@ -469,18 +470,18 @@ pub enum LineMergeOrder {
     LeftToRightTopToBottom,
 }
 
-/// Tunable multi-line OCR merge (geometry + join style).
+/// Rules for merging OCR lines into blocks, covering geometry and join style.
 ///
-/// Distance thresholds are fractions of the **full capture frame** (not line
-/// height). Shape comparisons stay box-to-box (`|delta| / larger`). Tune via
-/// `config.toml` `[ocr.line_merge]` or the OCR settings UI.
+/// Distance thresholds are fractions of the full capture frame, not of the line
+/// height. Shape comparisons stay box to box (`|delta| / larger`). Tune them in
+/// `config.toml` under `[ocr.line_merge]` or on the OCR settings page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineMergeConfig {
     /// Master switch. `false` keeps every OCR line as its own block.
     pub enabled: bool,
     /// When hand-drawn OCR regions exist, join every line in each region.
-    /// Ignored for whole-window OCR (rules still apply).
+    /// Whole-window OCR ignores this and uses the rules below.
     pub merge_whole_region: bool,
     /// Join order inside a merged group.
     pub order: LineMergeOrder,
@@ -493,9 +494,9 @@ pub struct LineMergeConfig {
     pub align_ratio: f32,
     /// Allowed `|h1 − h2| / larger(h)` to treat lines as the same size.
     pub height_delta_ratio: f32,
-    /// Row / column banding as a fraction of frame height / width.
+    /// Row band height as a fraction of frame height, and column band width as a fraction of frame width.
     pub order_band_ratio: f32,
-    /// Lower counts as below if `top + height × this ≥` the upper vertical mid.
+    /// A lower line counts as below when its `top + height × this` reaches the upper line's vertical middle.
     pub below_mid_ratio: f32,
     /// When true, do not glue a shorter upper line onto a much wider line below.
     pub reject_short_long: bool,
@@ -512,9 +513,9 @@ impl Default for LineMergeConfig {
             enabled: true,
             merge_whole_region: false,
             order: LineMergeOrder::default(),
-            // ~16px on 1080p — below typical UI list pitch, above wrap leading.
+            // About 16 px at 1080p. Smaller than a typical UI list pitch, larger than wrapped-line leading.
             gap_ratio: 0.015,
-            // ~29px on 1080p/1920 — side-by-side neighbors in the same row.
+            // About 29 px at 1920 wide. Joins side-by-side neighbors in the same row.
             horizontal_gap_ratio: 0.015,
             align_ratio: 0.012,
             height_delta_ratio: 0.45,
@@ -596,7 +597,7 @@ pub fn format_argb_hex(argb: u32) -> String {
     format!("#{argb:08X}")
 }
 
-/// Parse `"#AARRGGBB"` (optional surrounding space; hex digits case-insensitive).
+/// Parse `"#AARRGGBB"`. Surrounding spaces are allowed and hex digits ignore case.
 pub fn parse_argb_hex(s: &str) -> Option<u32> {
     let hex = s.trim().strip_prefix('#')?;
     if hex.len() != 8 {

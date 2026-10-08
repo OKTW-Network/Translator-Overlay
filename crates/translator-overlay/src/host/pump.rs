@@ -69,7 +69,7 @@ impl OverlayHost {
         }
     }
 
-    /// Returns `true` when the thread should exit (`WM_QUIT`).
+    /// Returns `true` when the thread should exit on `WM_QUIT`.
     fn drain_thread_messages(&mut self, apply: &mut bool, allow_restack: &mut bool, command_wake: &mut bool) -> bool {
         let mut msg = MSG::default();
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {

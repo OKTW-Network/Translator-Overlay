@@ -1,4 +1,4 @@
-//! Control-window language: system locale on first run, then the saved choice.
+//! Control-window language. The first run follows the system locale, and later runs use the saved choice.
 
 use translator_core::UiLanguage;
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
@@ -18,7 +18,7 @@ pub fn apply_ui_locale(language: Option<UiLanguage>) {
 
 /// `GetUserDefaultLocaleName`, or empty when the call fails.
 pub fn system_locale_name() -> String {
-    // LOCALE_NAME_MAX_LENGTH.
+    // LOCALE_NAME_MAX_LENGTH
     let mut buf = [0u16; 85];
     let len = unsafe { GetUserDefaultLocaleName(&mut buf) };
     if len <= 1 {

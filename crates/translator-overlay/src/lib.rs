@@ -1,10 +1,10 @@
 //! Transparent click-through overlay and an independent translation window.
 //!
-//! Creates a layered Win32 popup (`WS_EX_LAYERED | WS_EX_TRANSPARENT | …`) that
-//! tracks a target window and draws semi-transparent boxes + translations at
-//! OCR bounding boxes (mapped from capture-image coordinates). A second,
-//! clickable always-on-top reader window shows the same text independently.
-//! A third always-on-top HUD has start / pause / stop and pipeline status.
+//! The overlay is a layered Win32 popup (`WS_EX_LAYERED | WS_EX_TRANSPARENT | …`)
+//! that follows a target window. It draws semi-transparent boxes with translations
+//! at the OCR bounding boxes, mapped from capture-image coordinates. A second,
+//! clickable, always-on-top reader window shows the same text on its own.
+//! A third always-on-top HUD has Start, Pause, and Stop buttons and the pipeline status.
 
 mod command;
 mod controller;

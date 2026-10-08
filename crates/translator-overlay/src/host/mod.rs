@@ -49,7 +49,7 @@ pub(crate) struct OverlayHost {
     pub(crate) blocks: Vec<TranslatedBlock>,
     pub(crate) content_w: u32,
     pub(crate) content_h: u32,
-    /// Paint buffer size in **OCR / capture content** pixels (not screen client).
+    /// Paint buffer size in OCR capture pixels, not screen client pixels.
     pub(crate) surface_w: i32,
     pub(crate) surface_h: i32,
     pub(crate) dirty: bool,
@@ -62,14 +62,15 @@ pub(crate) struct OverlayHost {
     pub(crate) picker: Option<RegionPicker>,
     /// Pause hides captions without dropping `blocks`.
     pub(crate) captions_hidden: bool,
-    /// Last successfully presented/moved client rect in screen space.
-    /// Pure target drags reuse this for MoveOnly (`SetWindowPos` without re-ULW).
+    /// Last client rect, in screen space, that was presented or moved successfully.
+    /// A plain target drag reuses it for MoveOnly, a `SetWindowPos` with no new `UpdateLayeredWindow`.
     pub(crate) presented_rect: Option<ClientRect>,
-    /// Interactive title-bar drag / resize (`EVENT_SYSTEM_MOVESIZE*`).
+    /// True during an interactive title-bar drag or resize (`EVENT_SYSTEM_MOVESIZE*`).
     pub(crate) in_movesize: bool,
-    /// Precise insert-after was denied (UIPI); stay topmost while the target is focused.
+    /// UIPI denied the precise insert-after, so stay topmost while the target is focused.
     pub(crate) z_order_force_topmost: bool,
-    /// Next present must FullPresent: first Show of a layered HWND can leave DWM blank.
+    /// The next present must be a FullPresent, because the first Show of a layered HWND
+    /// can leave DWM blank.
     pub(crate) replay_present: bool,
     pub(crate) event_tx: mpsc::UnboundedSender<OverlayEvent>,
     pub(crate) follow_hooks: [HWINEVENTHOOK; 5],
@@ -328,8 +329,8 @@ impl OverlayHost {
         Ok(())
     }
 
-    /// Hidden ULW, then an off-screen Show + topmost-band round-trip, so the first
-    /// picker is not DWM's first compositor surface for this HWND.
+    /// Run a hidden `UpdateLayeredWindow`, then an off-screen Show and a round trip through
+    /// the topmost band, so the first picker is not DWM's first compositor surface for this HWND.
     fn warmup_overlay_layer(&mut self) {
         const OFFSCREEN: i32 = -32_000;
         let hwnd = self.hwnd;

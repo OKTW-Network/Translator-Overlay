@@ -1,8 +1,8 @@
 //! Claude Code CLI client (`claude -p --input-format stream-json --output-format stream-json`).
 //!
 //! Uses the user's own installed and logged-in Claude Code. This module never reads, stores,
-//! refreshes or forwards Claude credentials: no `--bare` (it skips OAuth), no `CLAUDE_CONFIG_DIR`
-//! override, no auth env vars. Claude Code manages its login by itself.
+//! refreshes, or forwards Claude credentials. It passes no `--bare` (which skips OAuth), no
+//! `CLAUDE_CONFIG_DIR` override, and no auth environment variables. Claude Code manages its own login.
 
 use std::{path::Path, time::Duration};
 
@@ -104,7 +104,7 @@ pub fn user_line(text: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 enum TurnStep {
     Pending,
-    /// Turn finished; carries the `result` text as a fallback when no deltas streamed.
+    /// The turn finished. Carries the `result` text as a fallback when no deltas streamed.
     Done(String),
     Failed(String),
 }
@@ -197,7 +197,7 @@ fn models_from_initialize(response: &Value) -> Vec<String> {
     };
     let mut ids: Vec<String> = Vec::new();
     for id in models.iter().filter_map(|m| m.get("value").and_then(Value::as_str)).map(str::trim) {
-        // "default" means "no --model"; the empty model field already does that.
+        // "default" means passing no --model, which an empty model field already does.
         if !id.is_empty() && id != "default" && !ids.iter().any(|seen| seen == id) {
             ids.push(id.to_string());
         }
@@ -213,7 +213,7 @@ pub struct ClaudeSession {
 }
 
 impl ClaudeSession {
-    /// Spawn the long-lived process. Claude Code emits `system/init` with the first turn, so no handshake.
+    /// Spawn the long-lived process. Claude Code sends `system/init` with the first turn, so there is no handshake.
     pub fn connect(program: &Path, model: &str, effort: Option<&str>, cwd: &Path, system: &str) -> Result<Self, TranslateError> {
         std::fs::write(cwd.join(SYSTEM_PROMPT_FILE), system)
             .map_err(|e| TranslateError::CliProtocol(format!("write isolated {SYSTEM_PROMPT_FILE}: {e}")))?;
@@ -296,7 +296,7 @@ impl ClaudeSession {
                 let error = event.pointer("/response/error").and_then(Value::as_str).unwrap_or("unknown error");
                 return Err(TranslateError::CliProtocol(format!("Claude Code initialize failed: {error}")));
             }
-            // Only `models` is read; the rest of the response (account details) is ignored.
+            // Only `models` is read. The rest of the response, such as account details, is ignored.
             return Ok(event.pointer("/response/response").map(models_from_initialize).unwrap_or_default());
         }
     }
@@ -332,7 +332,7 @@ impl ClaudeSession {
         if tail.is_empty() { message } else { format!("{message}: {tail}") }
     }
 
-    /// The turn cannot be resumed cleanly; `CliBackend` recreates the session next time.
+    /// The turn cannot be resumed cleanly, so `CliBackend` recreates the session next time.
     pub fn cancel_turn(&mut self) {
         let _ = self.child.start_kill();
     }
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(parse_translation_blocks(&second).expect("turn 2 json").len(), 1);
         assert_eq!(session_pid(&backend), pid, "append-only turn must reuse the same Claude Code process");
 
-        // Cancel mid-stream: the session is dropped and the next turn recreates it with a bootstrap.
+        // Cancelling mid-stream drops the session, and the next turn recreates it with a bootstrap.
         messages.push(ChatMessage::assistant(&second));
         let mut cancelled = messages.clone();
         cancelled.push(ChatMessage::user(

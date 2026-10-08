@@ -1,4 +1,4 @@
-//! Translate job lifecycle (start, finish, apply to overlay / state).
+//! Translate job lifecycle, from start to finish, and applying the result to the overlay and state.
 
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ impl Pipeline {
                 s.status = PipelineStatus::Idle;
             }
             drop(s);
-            // Manual / empty-page path must also wipe the live overlay window.
+            // A manual or empty page must also clear the live overlay window.
             if let Some(o) = self.overlay.as_ref()
                 && let Err(e) = o.send(OverlayCommand::Clear)
             {
@@ -52,7 +52,7 @@ impl Pipeline {
             return;
         }
 
-        // Skip identical content unless forced (saves API calls).
+        // Skip identical content unless forced, to save API calls.
         if !force && self.last_translated_fp == Some(page.fingerprint) {
             info!(?page.fingerprint, "skip translate — content unchanged");
             let mut s = self.state.write();
@@ -86,7 +86,7 @@ impl Pipeline {
 
         info!(hits = hit_count, unique_misses = resolved.misses.len(), blocks = page.blocks.len(), force, "translate cache partition");
 
-        // Show remembered captions now; new lines wait for the API.
+        // Show remembered captions now. New lines wait for the API.
         let preview = TranslationCache::hits_only(&page.blocks, &resolved.hits);
         if !preview.is_empty() {
             show_captions(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);

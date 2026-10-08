@@ -16,8 +16,8 @@ use crate::{
     http::translation_json_schema,
 };
 
-// Codex 0.154.0 config schema. Apply before app-server startup as well as thread creation:
-// disabling a hook after SessionStart, or only asking the model to ignore it, is too late.
+// Codex 0.154.0 config schema. Apply it before app-server startup and again at thread creation.
+// Disabling a hook after SessionStart, or only asking the model to ignore it, is too late.
 const ISOLATION_CONFIG: &[(&str, &str)] = &[
     ("project_doc_max_bytes", "0"),
     ("skills.include_instructions", "false"),
@@ -222,11 +222,11 @@ impl CodexSession {
                 let name = server["name"].as_str().ok_or_else(|| isolation_error("missing MCP name"))?;
                 disabled.insert(name.to_string(), serde_json::json!({ "enabled": false }));
             }
-            // An empty map does NOT clear inherited MCP config. Override every discovered name.
+            // An empty map does not clear the inherited MCP config, so override every discovered name.
             params["config"]["mcp_servers"] = Value::Object(disabled);
             let created = rpc.request("thread/start", params, cancel, timeout).await?;
-            // 0.154.0 unconditionally loads global AGENTS through its home provider.
-            // The user explicitly permits override files; they remain in model context.
+            // 0.154.0 always loads the global AGENTS file through its home provider.
+            // The user explicitly allows override files, and they stay in the model context.
             let sources = created["instructionSources"]
                 .as_array()
                 .ok_or_else(|| isolation_error("unknown instruction sources"))?;

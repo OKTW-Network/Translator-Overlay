@@ -1,4 +1,4 @@
-//! Config apply and OCR engine load wiring.
+//! Applying config changes and loading the OCR engine.
 
 use std::path::PathBuf;
 
@@ -11,7 +11,7 @@ use translator_overlay::OverlayCommand;
 use crate::pipeline::worker::Pipeline;
 
 impl Pipeline {
-    /// Resolve the default config path; on failure record `save config:` and return `None`.
+    /// Resolve the default config path. On failure, set the save-config error and return `None`.
     fn default_config_path(&mut self) -> Option<PathBuf> {
         match config_path() {
             Ok(p) => Some(p),
@@ -23,7 +23,7 @@ impl Pipeline {
         }
     }
 
-    /// Persist only overlay / reader / HUD visibility on the live config.
+    /// Save only the overlay, reader, and HUD visibility of the live config.
     pub(crate) fn set_overlay_display(&mut self, enabled: bool, reader_enabled: bool, hud_enabled: bool) {
         let overlay = {
             let mut s = self.state.write();
@@ -48,7 +48,7 @@ impl Pipeline {
         }
     }
 
-    /// Persist only the control-window language on the live config.
+    /// Save only the control-window language of the live config.
     pub(crate) fn set_ui_language(&mut self, language: UiLanguage) {
         self.state.write().config.ui.language = Some(language);
         self.sync_reader_placeholder();
@@ -72,7 +72,7 @@ impl Pipeline {
     }
 
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
-        // Threshold / filter / merge knobs change how raw blocks are derived.
+        // The threshold, filter, and merge settings change how raw blocks are built.
         self.last_raw_ocr = None;
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier || self.ocr_device != cfg.ocr.device;
         self.gate = StabilityGate::from_config(&cfg.ocr);
@@ -91,7 +91,7 @@ impl Pipeline {
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::UpdateConfig(cfg.overlay.clone()));
         }
-        // Reload from disk can change the UI language.
+        // A config reloaded from disk can change the UI language.
         self.sync_reader_placeholder();
 
         self.state.write().config = cfg.clone();
@@ -121,10 +121,10 @@ impl Pipeline {
             eng.apply_runtime_config(&cfg.ocr);
             self.state.write().restore_operational_status();
         } else if self.model_load.is_none() {
-            // Engine missing and no load in flight (e.g. prior failure) — retry.
+            // No engine and no load in flight, for example after a failure, so try again.
             self.start_model_load();
         } else {
-            // Keep Downloading/Loading status; do not wipe via restore_operational_status.
+            // Keep the downloading or loading status instead of calling restore_operational_status.
             self.sync_model_load();
         }
     }
@@ -140,11 +140,11 @@ impl Pipeline {
         false
     }
 
-    /// Start a background OCR download/load if one is not already running.
+    /// Start a background OCR download and load if one is not already running.
     ///
-    /// Does not cancel or replace an in-flight job. If a job for another engine
-    /// identity is already running, it is left alone; [`sync_model_load`] starts
-    /// the desired load once that job finishes.
+    /// This never cancels or replaces a job in flight. If a job for another tier or
+    /// device is running, it is left alone, and [`sync_model_load`] starts the wanted
+    /// load once that job finishes.
     pub(crate) fn start_model_load(&mut self) {
         let desired = self.state.read().config.ocr.clone();
         if let Some(job) = self.model_load.as_ref() {

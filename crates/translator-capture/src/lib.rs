@@ -1,4 +1,4 @@
-//! Window capture via Windows Graphics Capture API (`windows-capture`).
+//! Window capture through the Windows Graphics Capture API (`windows-capture`).
 
 mod client_area;
 mod resize_watch;
@@ -22,7 +22,7 @@ pub enum CaptureError {
     AlreadyRunning,
 }
 
-/// A captured frame in tightly packed RGBA8 (`width * height * 4`, no row padding).
+/// A captured frame in tightly packed RGBA8 (`width * height * 4` bytes, no row padding).
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub width: u32,

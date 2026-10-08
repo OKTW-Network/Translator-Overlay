@@ -1,4 +1,4 @@
-//! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
+//! PP-OCRv6 engine backed by `oar-ocr`, running on ONNX Runtime with WebGPU or DirectML.
 
 use std::sync::Arc;
 
@@ -33,8 +33,8 @@ pub struct OcrEngine {
 impl OcrEngine {
     /// Load ONNX models from local paths under `models_dir`.
     ///
-    /// Prefer [`Self::start_load`] when files may still need downloading.
-    /// This only requires the files to exist; download verifies sizes.
+    /// Use [`Self::start_load`] when files may still need downloading.
+    /// This only requires the files to exist. The download checks their sizes.
     pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
         let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
@@ -74,14 +74,14 @@ impl OcrEngine {
         })
     }
 
-    /// Update thresholds / merge knobs without reloading ONNX sessions.
+    /// Update the thresholds and merge settings without reloading the ONNX sessions.
     pub fn apply_runtime_config(&mut self, config: &OcrConfig) {
         self.confidence_threshold = config.confidence_threshold;
         self.filter_single_char = config.filter_single_char;
         self.line_merge = config.line_merge.clone();
     }
 
-    /// One batched inference call across all images (det + rec batch on the GPU).
+    /// Run one batched inference over all images. Detection and recognition both batch on the GPU.
     async fn predict_batch(&self, images: Vec<RgbImage>) -> Result<Vec<OAROCRResult>, OcrError> {
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || inner.predict(images).map_err(|e| OcrError::Engine(e.to_string())))
@@ -89,7 +89,7 @@ impl OcrEngine {
             .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR task: {e}"))))
     }
 
-    /// Threshold / filter / merge one OCR page into blocks.
+    /// Turn one OCR page into blocks by applying the threshold, the filters, and the merge.
     fn blocks_from_page(&self, page: OAROCRResult, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
         let mut blocks = Vec::new();
         for (i, region) in page.text_regions.into_iter().enumerate() {
@@ -103,7 +103,7 @@ impl OcrEngine {
             if text.is_empty() {
                 continue;
             }
-            // Drop single Latin letter/digit noise before merge (icons → "V"/"0").
+            // Drop single Latin letters and digits before the merge. Icons often read as "V" or "0".
             if self.filter_single_char && is_single_latin_or_digit(&text) {
                 continue;
             }
@@ -118,10 +118,10 @@ impl OcrEngine {
             });
         }
 
-        // Reading order + merge stacked lines that share column / height / gap.
+        // Merge stacked lines that share a column, height, and gap, and sort into reading order.
         let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
 
-        // Re-apply after merge in case a merge edge case left a single token.
+        // Filter again in case an edge case in the merge left a single character.
         if self.filter_single_char {
             filter_single_char_blocks(blocks)
         } else {
@@ -131,9 +131,9 @@ impl OcrEngine {
 
     /// Run OCR on each crop and offset boxes back into full-frame coordinates.
     ///
-    /// Empty `regions` → whole frame (geometry rules only). Non-empty regions
-    /// merge per-crop so independent boxes do not glue together. Whole-region
-    /// merge uses the full frame size for thresholds, never the crop size.
+    /// Empty `regions` means the whole frame, merged by the geometry rules only.
+    /// Each region merges on its own, so separate boxes do not glue together. The
+    /// whole-region merge still measures thresholds against the full frame, never the crop.
     pub async fn recognize_rgba_regions(&self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
         let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4));
         if expected.is_none_or(|n| rgba.len() < n) {
@@ -145,8 +145,8 @@ impl OcrEngine {
         } else {
             (regions, self.line_merge.merge_whole_region)
         };
-        // Crop every region first, then one batched inference for all of them —
-        // oar-ocr batches detection across images and pools recognition crops.
+        // Crop every region first and run one batched inference over all of them.
+        // oar-ocr batches detection across images and pools the recognition crops.
         let crops: Vec<(u32, u32, RgbImage)> = regions
             .iter()
             .filter_map(|region| crop_to_rgb8(width, height, rgba, *region))

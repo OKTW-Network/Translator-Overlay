@@ -1,8 +1,8 @@
-//! Target follow via out-of-context `SetWinEventHook`.
+//! Follow the target with an out-of-context `SetWinEventHook`.
 //!
-//! The hook cannot borrow `OverlayHost` (it re-enters inside `PeekMessage` /
-//! `WaitMessage`). It only reads `FOLLOW_TARGET` / `FOLLOW_OVERLAY`, posts a
-//! thread notice, and clears ownership before a dying target takes the overlay.
+//! The hook cannot borrow `OverlayHost`, because it re-enters inside `PeekMessage`
+//! or `WaitMessage`. It only reads `FOLLOW_TARGET` and `FOLLOW_OVERLAY`, posts a
+//! thread notice, and clears ownership before a dying target takes the overlay with it.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -23,7 +23,7 @@ use crate::host::win32::set_overlay_owner;
 
 pub(crate) static FOLLOW_TARGET: AtomicIsize = AtomicIsize::new(0);
 pub(crate) static FOLLOW_OVERLAY: AtomicIsize = AtomicIsize::new(0);
-/// Dedicated wake for target geometry / Z-order — must not coalesce with `WM_APP`.
+/// Wake message for target geometry and Z-order changes. It must not coalesce with `WM_APP`.
 pub(crate) const FOLLOW_EVENT_MESSAGE: u32 = WM_APP + 1;
 
 fn overlay_thread_id(fallback: HWND) -> u32 {
@@ -60,7 +60,7 @@ fn clear_owner_for_dying_target() {
 fn should_forward(event: u32, is_target: bool, is_overlay: bool, is_window_object: bool) -> bool {
     match event {
         EVENT_SYSTEM_FOREGROUND => true,
-        // Top-level Z-order changes report on the parent/desktop, not the target.
+        // Z-order changes of top-level windows are reported on the parent or desktop, not the target.
         EVENT_OBJECT_REORDER if is_window_object => true,
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND if is_target => true,
         EVENT_SYSTEM_MOVESIZESTART | EVENT_SYSTEM_MOVESIZEEND if is_target && is_window_object => true,

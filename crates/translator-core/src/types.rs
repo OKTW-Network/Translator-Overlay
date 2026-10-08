@@ -65,7 +65,8 @@ pub struct NormRect {
     pub height: f32,
 }
 
-/// `toml_edit` prints `f32 as f64` with the full binary expansion (`0.02` → `0.01999…`).
+/// TOML serializers widen `f32` to `f64` and print the full binary expansion, so `0.02`
+/// becomes `0.01999…`. Round-trip through the shortest `f32` text first.
 fn serialize_f32<S: Serializer>(value: &f32, serializer: S) -> Result<S::Ok, S::Error> {
     let short = value.to_string().parse::<f64>().unwrap_or(*value as f64);
     serializer.serialize_f64(short)
@@ -129,9 +130,9 @@ impl NormRect {
 /// Used by stability fingerprints, block persistence, sticky remap, and the
 /// translation cache. Does not rewrite `OcrBlock.text` sent to the model.
 ///
-/// - Fullwidth `？` / `！` fold to ASCII `?` / `!`.
+/// - Fullwidth `？` and `！` fold to ASCII `?` and `!`.
 /// - Wave dash `〜` and fullwidth tilde `～` fold to ASCII `~`.
-/// - Ellipsis-length thrash (`…` / `……` / `...` / `・・・`) collapses to one `…`.
+/// - Ellipses of any length (`…`, `……`, `...`, `・・・`) collapse to one `…`.
 /// - A trailing collapsed `…` is dropped unless the whole line is only `…`.
 pub fn normalize_ocr_text(s: &str) -> String {
     let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -178,10 +179,10 @@ pub struct OcrBlock {
     pub text: String,
     pub confidence: f32,
     pub bbox: Rect,
-    /// Detector lines merged into this block (`1` = single line).
+    /// Detector lines merged into this block. `1` means a single line.
     pub source_lines: u32,
-    /// Vertical span of original ink (union of merged line boxes).
-    /// Equals `bbox.height` for a single line; overlay uses this as min cover height.
+    /// Vertical span of the original ink, the union of the merged line boxes.
+    /// It equals `bbox.height` for a single line. The overlay never covers less than this.
     pub source_height: f32,
 }
 
@@ -193,9 +194,9 @@ pub struct TranslatedBlock {
     pub translation: String,
     pub confidence: f32,
     pub bbox: Rect,
-    /// Detector lines in the source (`1` = single line; overlay may widen/shrink).
+    /// Detector lines in the source. `1` means a single line, which the overlay may widen or shrink.
     pub source_lines: u32,
-    /// Vertical span of original ink; overlay min cover height (see [`OcrBlock::source_height`]).
+    /// Vertical span of the original ink. See [`OcrBlock::source_height`].
     pub source_height: f32,
 }
 
@@ -213,7 +214,7 @@ pub enum ModelTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OcrDevice {
-    /// WebGPU execution provider (Dawn / D3D12 on Windows), with CPU fallback.
+    /// WebGPU execution provider (Dawn on D3D12), with CPU fallback.
     #[default]
     Webgpu,
     /// DirectML execution provider (D3D12), with CPU fallback.
@@ -257,7 +258,7 @@ mod tests {
         assert_eq!(a.center(), (5.0, 5.0));
         assert_eq!(a.iou(a), 1.0);
         assert_eq!(a.iou(Rect::new(20.0, 0.0, 10.0, 10.0)), 0.0);
-        // Half overlap: intersection 50, union 150.
+        // Half overlap gives an intersection of 50 and a union of 150.
         assert!((a.iou(Rect::new(5.0, 0.0, 10.0, 10.0)) - 1.0 / 3.0).abs() < 1e-6);
     }
 

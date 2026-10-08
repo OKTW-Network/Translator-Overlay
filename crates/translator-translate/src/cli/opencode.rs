@@ -15,10 +15,11 @@ use crate::{
 
 const AUTH_HINT: &str = "OpenCode CLI is not authenticated. Run `opencode auth login`.";
 
-/// Isolated config stays `ask` so tools stay advertised and ACP can reject.
-/// Skill and execute are denied: that drops `<available_skills>` and the Code Mode catalog.
-/// Title agent is disabled to skip `small_model`. Build prompt is `TRANSLATE.md`, not `AGENTS.md`.
-/// `plugin` is the V1 key (OpenCode 2 maps it to `plugins`); `"-opencode.tools"` unloads that builtin.
+/// The isolated config stays on `ask`, so tools stay advertised and ACP can reject them.
+/// Denying skill and execute drops `<available_skills>` and the Code Mode catalog.
+/// The title agent is off so `small_model` never runs. The build prompt is `TRANSLATE.md`,
+/// not `AGENTS.md`. `plugin` is the V1 key, which OpenCode 2 maps to `plugins`, and
+/// `"-opencode.tools"` unloads that built-in plugin.
 const OPENCODE_JSON: &str = r#"{"tools":{"skill":false,"execute":false},"permission":{"*":"ask"},"plugin":["-opencode.tools"],"agent":{"build":{"prompt":"{file:./TRANSLATE.md}","permission":{"*":"ask","skill":"deny","execute":"deny"}},"plan":{"permission":{"*":"ask","skill":"deny","execute":"deny"}},"explore":{"permission":{"*":"ask","skill":"deny","execute":"deny"}},"general":{"permission":{"*":"ask","skill":"deny","execute":"deny"}},"title":{"disable":true}},"experimental":{"continue_loop_on_deny":true}}"#;
 
 pub async fn connect(

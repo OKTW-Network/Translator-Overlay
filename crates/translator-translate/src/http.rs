@@ -1,4 +1,4 @@
-//! OpenAI-compatible HTTP request/response types and parsers.
+//! OpenAI-compatible HTTP request and response types, and their parsers.
 
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use translator_core::{ApiConfig, HttpApi};
 use crate::{Completion, TranslateError};
 
 /// OpenAI `strict` requires every property in `required` and `additionalProperties: false`.
-/// xAI 400s if `items` is an array (tuple form); keep `items` an object and use `anyOf`.
+/// xAI returns HTTP 400 when `items` is an array (tuple form), so `items` stays an object and uses `anyOf`.
 pub fn translation_json_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -65,7 +65,7 @@ pub struct ChatCompletionRequestBody<'a> {
     pub response_format: Option<serde_json::Value>,
 }
 
-/// Body fragment used when calling the Responses API (`store: false` + encrypted reasoning).
+/// Body fragment for the Responses API, with `store: false` and encrypted reasoning.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponsesRequestBody<'a> {
     pub model: &'a str,
@@ -153,7 +153,7 @@ pub fn responses_request_body<'a>(api: &'a ApiConfig, items: &[ResponseItem], se
     }
 }
 
-/// One item in a stateless Responses `input` list (authored message or API output).
+/// One item in a stateless Responses `input` list, either an authored message or API output.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseItem {
     Message {
@@ -161,7 +161,7 @@ pub enum ResponseItem {
         content: String,
         reasoning_content: Option<String>,
     },
-    /// Pass-through `/responses` output item (reasoning or assistant message).
+    /// A `/responses` output item passed through as is, either reasoning or an assistant message.
     Output(serde_json::Value),
 }
 
@@ -198,7 +198,7 @@ fn responses_input(items: &[ResponseItem]) -> Vec<serde_json::Value> {
         if is_reasoning && let Some(obj) = v.as_object_mut() {
             obj.entry("summary").or_insert(serde_json::json!([]));
         }
-        // Meta HTTP 400 if `reasoning` sits immediately before `user`.
+        // Meta returns HTTP 400 when `reasoning` sits right before `user`.
         let next_user = matches!(items.get(i + 1), Some(ResponseItem::Message { role, .. }) if role == "user");
         let prev_asst = matches!(out.last(), Some(p) if p.get("role").and_then(serde_json::Value::as_str) == Some("assistant"));
         if is_reasoning && next_user && prev_asst {
@@ -259,7 +259,7 @@ fn looks_like_sse(s: &str) -> bool {
     t.starts_with("data:") || t.starts_with("event:") || t.starts_with(':')
 }
 
-/// Parse OpenAI-compatible `GET /models` JSON (`data[].id`).
+/// Parse the `data[].id` list from an OpenAI-compatible `GET /models` response.
 pub(crate) fn parse_openai_model_ids(body: &str) -> Result<Vec<String>, TranslateError> {
     let value: Value = serde_json::from_str(body).map_err(|e| TranslateError::Parse(e.to_string()))?;
     let data = value
@@ -452,7 +452,6 @@ fn chat_reasoning_text(reasoning_content: Option<&str>, reasoning: Option<&serde
 }
 
 fn chat_completion_result(text: String, reasoning_content: Option<String>) -> Completion {
-    // Clone is intentional: history needs its own owned copy.
     let content = text.clone();
     Completion {
         replay_items: vec![ResponseItem::Message {

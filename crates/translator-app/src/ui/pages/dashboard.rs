@@ -1,4 +1,4 @@
-//! Operator workspace: session settings above a divider, then preview | results.
+//! Operator workspace. Session settings sit above a divider, with the preview and results side by side below it.
 
 use std::{mem, sync::Arc};
 

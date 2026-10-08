@@ -1,4 +1,4 @@
-//! Layered-window DIB (BGRA) and `UpdateLayeredWindow` present.
+//! BGRA DIB for a layered window, presented with `UpdateLayeredWindow`.
 
 use std::mem::size_of;
 
@@ -14,9 +14,9 @@ use windows::Win32::{
 
 use crate::error::OverlayError;
 
-/// Off-screen 32-bit DIB selected into a memory DC, plus a screen DC for present.
+/// Off-screen 32-bit DIB selected into a memory DC, plus a screen DC to present with.
 ///
-/// `*mut u8` keeps this type `!Send` / `!Sync` — it must stay on the overlay thread.
+/// The `*mut u8` field makes this type `!Send` and `!Sync`, so it stays on the overlay thread.
 pub(crate) struct DibSurface {
     hdc_screen: HDC,
     hdc_mem: HDC,
@@ -28,9 +28,9 @@ pub(crate) struct DibSurface {
 
 impl DibSurface {
     pub(crate) fn create() -> Result<Self, OverlayError> {
-        // MSDN: UpdateLayeredWindow's hdcDst is a *screen* DC (`GetDC(NULL)`), not a
-        // window DC from a still-hidden layered popup. Teardown must ReleaseDC the
-        // same HWND used here (`None` / NULL).
+        // Per the Win32 docs, UpdateLayeredWindow's hdcDst is a screen DC (`GetDC(NULL)`),
+        // not a window DC from a still-hidden layered popup. Teardown must call ReleaseDC
+        // with the same HWND, which is `None` here.
         let hdc_screen = unsafe { GetDC(None) };
         if hdc_screen.is_invalid() {
             return Err(OverlayError::Other("GetDC failed".into()));
@@ -117,7 +117,7 @@ impl DibSurface {
         self.update_layered(hwnd, Some((POINT { x, y }, SIZE { cx: dest_w, cy: dest_h })))
     }
 
-    /// Restore the layered bitmap without moving or resizing. Passing `ppt_dst` /
+    /// Restore the layered bitmap without moving or resizing. Passing `ppt_dst` or
     /// `psize` restacks some DWM surfaces and can drop `WS_EX_TOPMOST`.
     pub(crate) fn present_bits(&self, hwnd: HWND) -> Result<(), OverlayError> {
         self.update_layered(hwnd, None)

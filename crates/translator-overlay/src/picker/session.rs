@@ -1,4 +1,4 @@
-//! Region-picker session on the overlay HWND (input + click-through).
+//! Region-picker session on the overlay HWND, covering input and click-through.
 
 use std::sync::atomic::Ordering;
 
@@ -36,14 +36,14 @@ impl OverlayHost {
             .unwrap_or((800, 600));
         self.picker = Some(RegionPicker::new(regions, cw, ch));
         self.presented_rect = None;
-        // Captions own the target; picker insert-above requires an unowned overlay.
+        // The caption overlay is owned by the target, but inserting the picker above it needs an unowned overlay.
         set_overlay_owner(self.hwnd, None);
         self.set_click_through(false);
         PICKER_HIT_TEST.store(true, Ordering::Relaxed);
         set_picker_cursor(PickerCursor::Cross);
         self.dirty = true;
-        // Dashboard just received the click, so this process may set foreground.
-        // Raise the target before apply so unowned-topmost-while-focused is true.
+        // The Dashboard just received the click, so this process may set the foreground window.
+        // Raise the target before applying, so the unowned overlay goes topmost while the target is focused.
         if let Some(target) = self.target {
             raise_target_window(target);
         }

@@ -1,5 +1,5 @@
-//! Flash the control window's taskbar button when a translate API error lands
-//! while the dashboard is not focused. Never steals foreground.
+//! Flash the control window's taskbar button when a translate API error arrives
+//! while the dashboard is not focused. It never takes the foreground.
 
 use std::mem::size_of;
 
@@ -15,13 +15,13 @@ use windows::{
     core::{BOOL, w},
 };
 
-/// Flash the control-window taskbar until it is focused. No-op if already focused.
+/// Flash the control window's taskbar button until it is focused. Does nothing if it already is.
 pub fn flash_control_window_taskbar() {
-    // TODO: windows-reactor 0.100 `WindowRef` has no HWND (`request_close` only). GitHub master
-    // exposes `context.run_window(|w| w.as_raw())` via `IWindowNative::WindowHandle` — switch
-    // when that ships on crates.io instead of pid + `WinUIDesktopWin32WindowClass`.
+    // TODO: In windows-reactor 0.100, `WindowRef` has no HWND, only `request_close`. GitHub master
+    // exposes `context.run_window(|w| w.as_raw())` through `IWindowNative::WindowHandle`. When that
+    // ships on crates.io, use it instead of matching the pid and `WinUIDesktopWin32WindowClass`.
     let mut hwnd = HWND::default();
-    // Callback returns FALSE to stop the walk; windows-rs maps that to Err even when we found a window.
+    // The callback returns FALSE to stop the walk, and windows-rs turns that into Err even after a match.
     let _ = unsafe { EnumWindows(Some(enum_control), LPARAM(std::ptr::from_mut(&mut hwnd) as isize)) };
     if hwnd.is_invalid() {
         debug!("control window HWND not found — skip taskbar flash");

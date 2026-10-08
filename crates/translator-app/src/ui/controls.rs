@@ -1,4 +1,4 @@
-//! Reusable setting-row controls (text, toggle, slider, optional toggle+slider).
+//! Reusable settings rows for text, toggles, sliders, and optional values behind a toggle.
 
 use std::borrow::Cow;
 
@@ -60,7 +60,7 @@ fn compact_toggle(is_on: bool, enabled: bool, on_toggled: impl Fn(bool) + 'stati
         .vertical_alignment(VerticalAlignment::Center)
 }
 
-/// Label + single-line text box as a settings card.
+/// Settings card with a label and a single-line text box.
 pub fn card_text(
     key: &str,
     header: impl Into<String>,
@@ -89,7 +89,7 @@ pub struct ModelSuggestParams {
     pub loading: bool,
 }
 
-/// Label + AutoSuggestBox + refresh as a settings card.
+/// Settings card with a label, an AutoSuggestBox, and a refresh button.
 pub fn card_model_suggest(p: ModelSuggestParams, on_changed: impl Fn(String) + Clone + 'static, on_refresh: impl Fn() + 'static) -> View {
     let suggest = AutoSuggestBox::new()
         .text(p.value)
@@ -138,7 +138,7 @@ pub fn card_model_suggest(p: ModelSuggestParams, on_changed: impl Fn(String) + C
     )
 }
 
-/// Label + password box + show/hide toggle as a settings card.
+/// Settings card with a label, a password box, and a show or hide toggle.
 pub fn card_password(
     key: &str,
     header: impl Into<String>,
@@ -182,7 +182,7 @@ pub fn card_password(
     )
 }
 
-/// Label + toggle as a settings card (switch flush-right).
+/// Settings card with a label and a toggle switch aligned right.
 pub fn card_toggle(
     key: &str,
     header: impl Into<String>,
@@ -193,7 +193,7 @@ pub fn card_toggle(
     settings_card(key, header, description, compact_toggle(is_on, true, on_toggled))
 }
 
-/// Params for [`card_slider_number`] (keeps call sites clippy-clean).
+/// Arguments for [`card_slider_number`], grouped so call sites stay under Clippy's argument limit.
 pub struct SliderNumberParams {
     pub key: &'static str,
     pub header: Cow<'static, str>,
@@ -261,7 +261,7 @@ fn slider_and_box(
     (slider, number_box)
 }
 
-/// Slider + NumberBox on one row (labels left, controls flush-right) — standalone card.
+/// Standalone card with a Slider and a NumberBox on one row, labels on the left and controls aligned right.
 pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> View {
     let (slider, number_box) = slider_and_box((p.value, p.min, p.max, p.step), true, (180.0, 140.0, 100.0), on_changed);
     let controls = StackPanel::new()
@@ -271,7 +271,7 @@ pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clon
     settings_card(p.key, p.header, p.description.as_deref(), controls)
 }
 
-/// Params for optional numeric rows (toggle + slider + NumberBox).
+/// Arguments for an optional numeric row with a toggle, a slider, and a NumberBox.
 pub struct OptionalSliderParams {
     pub key: &'static str,
     pub header: Cow<'static, str>,
@@ -284,7 +284,7 @@ pub struct OptionalSliderParams {
     pub step: f64,
 }
 
-/// Optional number: Slider + NumberBox; Off omits from config (value kept for restore).
+/// Optional number with a Slider and a NumberBox. Turning it off leaves it out of the config but keeps the value for later.
 pub fn optional_slider_row(
     p: OptionalSliderParams,
     on_value: impl Fn(f64) + Clone + 'static,
@@ -304,7 +304,7 @@ pub fn optional_slider_row(
     )
 }
 
-/// Params for [`optional_number_row`] (NumberBox only, no slider).
+/// Arguments for [`optional_number_row`], which has a NumberBox and no slider.
 pub struct OptionalNumberParams {
     pub key: &'static str,
     pub header: Cow<'static, str>,
@@ -317,7 +317,7 @@ pub struct OptionalNumberParams {
     pub step: f64,
 }
 
-/// Optional integer/float with master toggle (e.g. max_tokens).
+/// Optional integer or float behind a toggle, such as max_tokens.
 pub fn optional_number_row(p: OptionalNumberParams, on_value: impl Fn(f64) + 'static, on_enabled: impl Fn(bool) + 'static) -> View {
     let min = p.min;
     let max = p.max;
@@ -360,7 +360,7 @@ pub struct OptionalTextParams {
     pub placeholder: Cow<'static, str>,
 }
 
-/// Optional string field with master toggle (e.g. reasoning_effort).
+/// Optional string field behind a toggle, such as reasoning_effort.
 pub fn optional_text_row(p: OptionalTextParams, on_text: impl Fn(String) + 'static, on_enabled: impl Fn(bool) + 'static) -> View {
     settings_card(
         p.key,
@@ -394,10 +394,11 @@ pub struct ColorPopupParams {
     pub placeholder: Cow<'static, str>,
 }
 
-/// Compact color row: swatch + hex; ColorPicker expands under the same header row.
+/// Compact color row with a swatch and a hex value. The ColorPicker opens under the same header row.
 ///
-/// Not a Flyout (ThemeShadow over Mica paints as a solid block). Subtle Button
-/// keeps native PointerOver; the 32×32 chip is content so colour stays full size.
+/// It is not a Flyout, because ThemeShadow over Mica paints as a solid block. A Subtle
+/// Button keeps the native PointerOver look, and the 32×32 chip is its content so the
+/// colour stays full size.
 pub fn card_color_popup(
     p: ColorPopupParams,
     on_hex_changed: impl Fn(String) + Clone + 'static,

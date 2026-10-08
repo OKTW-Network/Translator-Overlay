@@ -1,4 +1,4 @@
-//! Text stability gate: wait until OCR content stops changing.
+//! Text stability gate. It waits until the OCR content stops changing.
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -13,17 +13,17 @@ use translator_core::{OcrBlock, OcrConfig, normalize_ocr_text};
 pub struct OcrFingerprint(u64);
 
 impl OcrFingerprint {
-    /// Content fingerprint for stability: normalized text only (sorted).
+    /// Fingerprint the sorted, normalized text of `blocks`.
     ///
-    /// BBox is intentionally ignored — detector jitter and animated backgrounds
-    /// shift boxes every frame even when the readable text is unchanged.
+    /// Boxes are left out on purpose. Detector jitter and animated backgrounds
+    /// shift them every frame even when the readable text is unchanged.
     pub fn from_blocks(blocks: &[OcrBlock]) -> Self {
         let mut lines: Vec<String> = blocks
             .iter()
             .map(|b| normalize_ocr_text(&b.text))
             .filter(|t| !t.is_empty())
             .collect();
-        // Order-independent so merge/detector reordering does not reset the gate.
+        // Ignore order, so a merge or detector reordering does not reset the gate.
         lines.sort();
         let mut hasher = DefaultHasher::new();
         for line in &lines {
@@ -52,7 +52,7 @@ const SWITCH_HITS: u32 = 2;
 #[derive(Debug, Default)]
 pub struct StabilityGate {
     stable_duration: Duration,
-    /// Force-translate after this long without a settled emit. Zero = disabled.
+    /// Force a translate after this long without a settled emit. Zero turns it off.
     max_unstable: Duration,
     active: Option<OcrFingerprint>,
     active_since: Option<Instant>,
@@ -60,7 +60,7 @@ pub struct StabilityGate {
     pending: Option<OcrFingerprint>,
     pending_hits: u32,
     last_emitted: Option<OcrFingerprint>,
-    /// Wall clock for the current unsettled wait (survives fingerprint switches).
+    /// Start of the current unsettled wait. It survives fingerprint switches.
     unstable_since: Option<Instant>,
 }
 
@@ -77,7 +77,7 @@ impl StabilityGate {
         Self::new(config.stable_duration_ms, config.max_unstable_ms)
     }
 
-    /// Full reset including emitted history (e.g. new target window).
+    /// Reset everything, including the emitted history. Used for a new target window.
     pub fn reset_all(&mut self) {
         *self = Self {
             stable_duration: self.stable_duration,
@@ -86,11 +86,11 @@ impl StabilityGate {
         };
     }
 
-    /// Feed a new fingerprint from the latest OCR (after block filters).
+    /// Feed the fingerprint of the latest OCR, taken after the block filters.
     pub fn observe(&mut self, fp: OcrFingerprint) -> StabilityOutcome {
         let now = Instant::now();
 
-        // Same as active candidate — accumulate stability.
+        // Same as the active candidate, so count another hit.
         if self.active == Some(fp) {
             self.pending = None;
             self.pending_hits = 0;
@@ -99,10 +99,10 @@ impl StabilityGate {
             let elapsed = now.saturating_duration_since(*since);
 
             if self.last_emitted == Some(fp) {
-                // Matches last emit. Do NOT clear `unstable_since` every frame —
-                // A↔B thrash would reset the force timer on every return to A.
-                // Only calm the clock once force window elapsed while still on A
-                // (thrash resolved without a divergent emit).
+                // This matches the last emit. Clearing `unstable_since` on every match would
+                // let an A, B, A thrash reset the force timer on each return to A. Clear it
+                // only after the force window passes while still on A, which means the
+                // thrash settled without a divergent emit.
                 if self.force_due(now) {
                     self.unstable_since = None;
                 }
@@ -119,18 +119,19 @@ impl StabilityGate {
             };
         }
 
-        // Different from active — require repeated evidence before switching
-        // (unless we have no active yet).
+        // Different from the active fingerprint. Switch only after repeated sightings,
+        // unless there is no active fingerprint yet.
         if self.active.is_none() {
             self.commit_active(fp, now);
             self.mark_unstable(now);
             return self.outcome_for_active(now, fp);
         }
 
-        // Diverged from active: keep max-unstable wait across sticky blips.
+        // Diverged from the active fingerprint. Keep the max_unstable clock running across
+        // sticky blips.
         self.mark_unstable(now);
 
-        // Long thrash: force the latest reading, even before SWITCH_HITS.
+        // After a long thrash, force the latest reading even before SWITCH_HITS.
         if self.force_due(now) && self.last_emitted != Some(fp) {
             self.commit_active(fp, now);
             return self.emit_ready(fp, self.wait_elapsed_ms(now));
@@ -148,7 +149,7 @@ impl StabilityGate {
             return self.outcome_for_active(now, fp);
         }
 
-        // Still holding previous active while the blip is unconfirmed.
+        // Keep the previous active fingerprint while the blip is unconfirmed.
         self.outcome_for_active(now, fp)
     }
 
@@ -203,7 +204,7 @@ impl StabilityGate {
         let elapsed = now.saturating_duration_since(since);
 
         if self.last_emitted == Some(active) {
-            // Sticky hold of a previously emitted page.
+            // Hold on to the page that was already emitted.
             if latest != active {
                 self.mark_unstable(now);
                 if self.force_due(now) {
@@ -211,13 +212,13 @@ impl StabilityGate {
                     return self.emit_ready(latest, self.wait_elapsed_ms(now));
                 }
             } else if self.force_due(now) {
-                // Thrash window elapsed while back on emitted content — calm.
+                // The thrash window passed while back on the emitted content, so stop the clock.
                 self.unstable_since = None;
             }
             return StabilityOutcome::AlreadyEmitted { fingerprint: active };
         }
 
-        // Prefer latest observation when force-timeout fires mid-switch.
+        // When the force timeout fires mid-switch, emit the latest observation.
         if self.force_due(now) {
             let emit_fp = if latest != active { latest } else { active };
             if self.last_emitted == Some(emit_fp) {
@@ -242,7 +243,7 @@ impl StabilityGate {
         }
     }
 
-    /// Force-emit current fingerprint (manual translate), bypassing wait.
+    /// Emit `fp` now without waiting. Manual translate uses this.
     pub fn force_emit(&mut self, fp: OcrFingerprint) -> StabilityOutcome {
         let now = Instant::now();
         self.commit_active(fp, now);
@@ -306,7 +307,7 @@ mod tests {
 
     #[test]
     fn cold_start_after_reset_all_waits_duration() {
-        // Models post-empty: clear_stale_overlay → reset_all → wait again.
+        // After a blank screen, clear_stale_overlay calls reset_all and the gate waits again.
         let mut gate = StabilityGate::new(40, 0);
         let fp = fingerprint("page");
         assert!(matches!(gate.observe(fp), StabilityOutcome::Changed));
@@ -321,12 +322,12 @@ mod tests {
 
     #[test]
     fn single_frame_blip_does_not_reset_active() {
-        // stable_duration=0 so priming emit is immediate; test sticky hold.
+        // With stable_duration 0 the first emit is immediate, which leaves only the sticky hold to test.
         let mut gate = StabilityGate::new(0, 0);
         let a = fingerprint("menu");
         let b = fingerprint("noise");
         assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
-        // One-off different reading — keep AlreadyEmitted on sticky "menu".
+        // A one-off different reading keeps "menu" as AlreadyEmitted.
         assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
         assert!(matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. }));
     }
@@ -337,7 +338,7 @@ mod tests {
         let a = fingerprint("old");
         let b = fingerprint("new");
         assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
-        // First b is a blip — still old emitted.
+        // The first b is a blip, so the old page stays emitted.
         assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
         // The second b confirms the switch, and after an emit one match is Ready.
         assert!(matches!(gate.observe(b), StabilityOutcome::Ready { .. }));
@@ -354,7 +355,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(40));
         assert!(matches!(gate.observe(b), StabilityOutcome::Changed | StabilityOutcome::Waiting { .. }));
         std::thread::sleep(Duration::from_millis(50));
-        // Total wait ≥ 80ms across switches → force translate latest.
+        // The total wait across switches is at least 80 ms, so the latest reading is forced.
         assert!(matches!(
             gate.observe(a),
             StabilityOutcome::Ready {
@@ -367,19 +368,19 @@ mod tests {
     #[test]
     fn post_emit_thrash_force_ready_without_two_identical_hits() {
         // After the first translate, alternating A and B never gives B two hits in a row,
-        // alone, but max_unstable must still force re-translate with latest B.
+        // but max_unstable must still force a re-translate with the latest B.
         let mut gate = StabilityGate::new(0, 90);
         let a = fingerprint("line-a");
         let b = fingerprint("line-b");
 
         assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
-        // Alternating blips: each is only one hit of the other fp.
+        // Each alternating blip is only one hit of the other fingerprint.
         assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
         assert!(matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. }));
         std::thread::sleep(Duration::from_millis(50));
         assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
         std::thread::sleep(Duration::from_millis(50));
-        // Wait clock must survive returns to A; force Ready with divergent B.
+        // The wait clock survives the returns to A, so the divergent B is forced Ready.
         assert!(matches!(
             gate.observe(b),
             StabilityOutcome::Ready {

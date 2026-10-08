@@ -1,8 +1,8 @@
 //! Insert a native `NavigationViewItemHeader` ("Settings") into the pane.
 //!
 //! windows-reactor 0.100 has no header widget, so this talks to WinUI over COM.
-//! [`crate::ui::xaml::apply`] finds the `NavigationView` on `GotFocus` and re-runs
-//! [`sync`] on `Rendering` after reactor reconciles `MenuItems`.
+//! [`crate::ui::xaml::apply`] finds the `NavigationView` on `GotFocus` and runs
+//! [`sync`] again on `Rendering` after windows-reactor reconciles `MenuItems`.
 
 #![allow(non_snake_case)]
 
@@ -56,7 +56,7 @@ impl RuntimeName for NavigationViewItemHeaderName {
     const NAME: &'static str = "Microsoft.UI.Xaml.Controls.NavigationViewItemHeader";
 }
 
-/// Walk ancestors (and a few children) until a `NavigationView` is found.
+/// Walk the ancestors, and a few children, until a `NavigationView` turns up.
 pub(crate) fn navigation_view(start: &IInspectable) -> Option<IInspectable> {
     let statics = visual_tree().ok()?;
     let mut current = start.clone();
@@ -87,7 +87,7 @@ fn ensure_settings_header(nav: &IInspectable) -> Result<()> {
         (Interface::vtable(&nav).MenuItems)(Interface::as_raw(&nav), &mut result).and_then(|| inspectable(result))?
     };
     let items: IVector<IInspectable> = items.cast()?;
-    // Dashboard is [0]; need at least one settings item after the header slot.
+    // Dashboard is item 0, and at least one settings item must follow the header slot.
     if items.Size()? < 2 {
         return Ok(());
     }
@@ -99,7 +99,7 @@ fn ensure_settings_header(nav: &IInspectable) -> Result<()> {
         windows_core::factory::<NavigationViewItemHeaderName, INavigationViewItemHeaderFactory>()?;
     let header = unsafe {
         let mut result = zeroed();
-        // SAFETY: `CreateInstance` writes the new header into `result`; base/inner are unused (null).
+        // SAFETY: `CreateInstance` writes the new header into `result`. The base and inner pointers are null and unused.
         (Interface::vtable(&header_factory).CreateInstance)(Interface::as_raw(&header_factory), null_mut(), null_mut(), &mut result)
             .and_then(|| inspectable(result))?
     };

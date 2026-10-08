@@ -1,4 +1,4 @@
-//! PP-OCRv6 inference via `oar-ocr` (ONNX Runtime) and text stability gate.
+//! PP-OCRv6 inference through `oar-ocr` on ONNX Runtime, plus the text stability gate.
 
 mod crop;
 mod download;

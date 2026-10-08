@@ -1,4 +1,4 @@
-//! Control-window pages: dashboard and settings forms.
+//! Control-window pages, which are the dashboard and the settings forms.
 
 mod api;
 mod dashboard;

@@ -1,4 +1,4 @@
-//! Shared UI state, ChromeSnap, and config draft helpers.
+//! Shared UI state, `ChromeSnap`, and helpers for the config draft.
 
 use std::{borrow::Cow, sync::Arc};
 
@@ -17,7 +17,7 @@ use crate::{
     ui::locale::apply_ui_locale,
 };
 
-/// Apply overlay / reader / HUD visibility immediately (live config + disk), and keep the draft in sync.
+/// Apply the overlay, reader, and HUD visibility right away to the live config and the disk, and keep the draft in sync.
 pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bool, hud_enabled: bool) {
     ui.draft.overlay.enabled = enabled;
     ui.draft.overlay.reader_enabled = reader_enabled;
@@ -29,7 +29,7 @@ pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bo
     });
 }
 
-/// Apply the control-window language immediately and persist it on the live config.
+/// Apply the control-window language right away and save it in the live config.
 pub fn send_ui_language(ui: &mut UiShared, language: UiLanguage) {
     ui.draft.ui.language = Some(language);
     ui.state.write().config.ui.language = Some(language);
@@ -40,14 +40,14 @@ pub fn send_ui_language(ui: &mut UiShared, language: UiLanguage) {
 /// Messages the root `AppRoot` component accepts.
 #[derive(Clone, Debug)]
 pub enum AppMsg {
-    /// UI-thread refresh (do not re-arm the pipeline waiter).
+    /// Refresh from the UI thread without re-arming the pipeline waiter.
     Refresh,
-    /// Background pipeline requested a rerender; re-arm the waiter.
+    /// The background pipeline asked for a rerender, so re-arm the waiter.
     PipelineWake,
     SelectPage(String),
     PaneOpen(bool),
     TogglePane,
-    /// Load model ids for the current API draft (`debounce` waits 400ms first).
+    /// Load model ids for the current API draft. With `debounce`, wait 400 ms first.
     FetchModelList {
         debounce: bool,
     },
@@ -57,7 +57,7 @@ pub enum AppMsg {
     },
 }
 
-/// Shared UI handle for event closures. Clone once per handler (cheap Arc bumps).
+/// Shared UI handle for event closures. Clone it once per handler, which only bumps `Arc` counts.
 #[derive(Clone)]
 pub struct UiCx {
     pub shared: Arc<Mutex<UiShared>>,
@@ -90,7 +90,7 @@ impl UiCx {
     }
 }
 
-/// Pending destructive settings action awaiting ContentDialog confirmation.
+/// A destructive settings action waiting for confirmation in a ContentDialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfirmAction {
     #[default]
@@ -133,7 +133,7 @@ pub struct NamedStore {
     pub delete: fn(&mut UiShared, &str) -> Result<(), String>,
     /// Extra state to drop when the name row is cancelled.
     pub on_cancel: fn(&mut UiShared),
-    /// Translation keys: empty-name error, then overwrite and delete dialog title and body.
+    /// Translation keys for the empty-name error, then the overwrite and delete dialog titles and bodies.
     pub name_required: &'static str,
     pub overwrite_title: &'static str,
     pub overwrite_body: &'static str,
@@ -206,22 +206,22 @@ pub struct UiShared {
     pub state: SharedState,
     pub cmd_tx: CmdTx,
     pub windows: Vec<WindowInfo>,
-    /// `None` until the user picks a window (ComboBox placeholder).
+    /// `None` until the user picks a window, which shows the ComboBox placeholder.
     pub selected_idx: Option<usize>,
-    /// Editable draft of settings (committed on Save).
+    /// Editable settings draft, committed on Save.
     pub draft: AppConfig,
-    /// Optional API numbers (kept while toggle is off so re-enable restores).
+    /// Optional API numbers. They are kept while their toggle is off, so turning it back on restores them.
     pub optional: OptionalApiState,
     pub text_argb_str: String,
     pub bg_argb_str: String,
-    /// ColorPicker panel open (text / background). Only one should be true.
+    /// Whether the text or background ColorPicker is open. At most one should be.
     pub text_color_picker_open: bool,
     pub bg_color_picker_open: bool,
-    /// Show API key as plain text (PasswordRevealMode::Visible).
+    /// Show the API key as plain text (`PasswordRevealMode::Visible`).
     pub api_key_revealed: bool,
-    /// Pending Reload / Discard confirmation dialog.
+    /// Pending Reload or Discard confirmation dialog.
     pub confirm: ConfirmAction,
-    /// Inline form validation message (blocks Save until fixed).
+    /// Inline validation message. Save stays blocked until it is fixed.
     pub form_error: Option<Cow<'static, str>>,
     /// Named OCR region presets (`region-presets.toml`).
     pub region_presets: RegionPresetFile,
@@ -366,7 +366,7 @@ fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
         top_p_enabled: cfg.api.top_p.is_some(),
         max_tokens_enabled: cfg.api.max_tokens.is_some(),
         reasoning_enabled: cfg.api.reasoning_effort.as_ref().is_some_and(|s| !s.trim().is_empty()),
-        // Always keep a valid number (toggle off = omit on save, not empty field).
+        // Always keep a valid number. A toggle that is off leaves the value out on save instead of emptying the field.
         temp_val: f64::from(cfg.api.temperature.unwrap_or(0.7)),
         top_p_val: f64::from(cfg.api.top_p.unwrap_or(0.9)),
         max_tokens_val: f64::from(cfg.api.max_tokens.unwrap_or(2048)),
@@ -390,7 +390,7 @@ pub fn apply_optional_from_config(ui: &mut UiShared) {
     ui.optional = optional_api_state(&ui.draft);
 }
 
-/// Merge optional / overlay free-form fields into a config snapshot (pure).
+/// Merge the optional API fields and the overlay color fields into a config snapshot. Has no side effects.
 pub fn effective_draft(ui: &UiShared) -> AppConfig {
     let mut cfg = ui.draft.clone();
     let o = &ui.optional;
@@ -424,22 +424,22 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
     cfg
 }
 
-/// True when the form (draft + free-text fields) differs from `live`.
+/// True when the form, meaning the draft and the free-text fields, differs from `live`.
 ///
-/// Prefer this when the caller already holds `state.read()` — nested
-/// `is_settings_dirty` → `state.read()` deadlocks under parking_lot's fair
-/// policy once a writer (pipeline) is waiting.
+/// Use this when the caller already holds `state.read()`. Calling `is_settings_dirty`
+/// there takes `state.read()` a second time, which deadlocks under parking_lot's fair
+/// policy once the pipeline is waiting to write.
 pub fn draft_differs_from(ui: &UiShared, live: &AppConfig) -> bool {
     effective_draft(ui) != *live
 }
 
 /// True only when the form actually differs from the running config.
 ///
-/// Do not trust a sticky dirty flag: Slider/NumberBox/TextBox often fire
-/// change events when re-bound on a snapshot-driven rerender, which would
-/// mark dirty even when nothing changed.
+/// A sticky dirty flag is not reliable. Slider, NumberBox, and TextBox often fire
+/// change events when they are bound again on a rerender, which would mark the form
+/// dirty even when nothing changed.
 ///
-/// Acquires `state` once; safe to call without an existing state lock.
+/// Takes the `state` lock once, so call it only when the caller does not hold that lock.
 pub fn is_settings_dirty(ui: &UiShared) -> bool {
     let live = ui.state.read().config.clone();
     draft_differs_from(ui, &live)
@@ -453,7 +453,7 @@ pub fn mark_dirty(ui: &mut UiShared) {
 
 /// Soft validation issues that should block Save.
 pub fn form_validation_error(ui: &UiShared) -> Option<Cow<'static, str>> {
-    // Optional numbers always have a value; toggle off = omit. No empty checks.
+    // Optional numbers always have a value, and a toggle that is off leaves it out, so there is nothing empty to check.
     if ui.optional.reasoning_enabled && ui.optional.reasoning_str.trim().is_empty() {
         return Some(t!("err.reasoning_empty"));
     }
@@ -516,7 +516,7 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Title bar, nav Start/Stop, settings Save bar, dashboard InfoBar.
+/// State for the title bar, the nav Start and Stop button, the settings Save bar, and the dashboard InfoBar.
 pub struct ChromeSnap {
     pub status: PipelineStatus,
     pub target: Option<String>,
@@ -542,7 +542,7 @@ pub fn take_chrome(shared: &Arc<Mutex<UiShared>>) -> ChromeSnap {
         capture_paused: s.capture_paused,
         capture_busy: s.capture_busy,
         selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
-        // Use already-held `s.config` — do not call is_settings_dirty (nested read).
+        // Use the `s.config` already held. is_settings_dirty would take a nested read lock.
         settings_dirty: draft_differs_from(&ui, &s.config),
         form_error: ui.form_error.clone(),
         settings_message: s.settings_message.clone(),

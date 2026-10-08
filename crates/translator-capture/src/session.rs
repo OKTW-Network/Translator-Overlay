@@ -34,8 +34,8 @@ fn lock(latest: &LatestFrame) -> MutexGuard<'_, Option<CapturedFrame>> {
 
 /// Copy tightly packed RGBA8 out of a mapped WGC buffer into owned [`Bytes`].
 ///
-/// Mapped GPU memory cannot be retained. When the crate copies rows into `scratch`
-/// (padded pitch), that allocation is frozen into `Bytes` to avoid a second copy.
+/// Mapped GPU memory cannot be kept. When the crate copies padded rows into `scratch`,
+/// that allocation is frozen into `Bytes` to avoid a second copy.
 fn pack_rgba(frame: &mut Frame<'_>, scratch: &mut Vec<u8>) -> Result<Bytes, CaptureError> {
     let buffer = frame.buffer().map_err(|e| CaptureError::Frame(e.to_string()))?;
     if buffer.has_padding() {
@@ -66,8 +66,9 @@ impl GraphicsCaptureApiHandler for FrameHandler {
     }
 
     fn on_frame_arrived(&mut self, frame: &mut Frame<'_>, _capture_control: InternalCaptureControl) -> Result<(), Self::Error> {
-        // Title-bar / edge drag: do not map or copy the WGC buffer. Overlay
-        // follow keeps the last captions; OCR waits until MOVESIZEEND.
+        // While the user drags the title bar or an edge, skip mapping and copying the WGC
+        // buffer. The overlay keeps following with the last captions, and OCR waits for
+        // MOVESIZEEND.
         if IN_MOVESIZE.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -142,9 +143,8 @@ impl CaptureSession {
         self.resize.in_movesize()
     }
 
-    /// Latest published raw frame sequence (O(1), no crop / Win32 calls).
-    ///
-    /// Lets callers detect "no new frame" before paying for client-area crop.
+    /// Sequence number of the latest published raw frame. This is O(1) and makes no
+    /// crop or Win32 calls, so callers can spot "no new frame" before paying for a crop.
     pub fn latest_sequence(&self) -> Option<u64> {
         lock(&self.stream.as_ref()?.latest).as_ref().map(|frame| frame.sequence)
     }
@@ -203,10 +203,10 @@ impl CaptureSession {
 
     /// Recreate the WGC session after a target-window resize settles.
     ///
-    /// Graphics Capture keeps the buffer layout from session start; a fresh
-    /// session matches a manual Stop + Start. Edge-drag waits for
-    /// `EVENT_SYSTEM_MOVESIZEEND`. Maximize / snap restart on the first
-    /// size-changing `EVENT_OBJECT_LOCATIONCHANGE`.
+    /// Graphics Capture keeps the buffer layout it had at session start, so a fresh
+    /// session behaves like a manual Stop and Start. An edge drag waits for
+    /// `EVENT_SYSTEM_MOVESIZEEND`. Maximize and snap restart on the first
+    /// `EVENT_OBJECT_LOCATIONCHANGE` that changes the size.
     pub fn sync_stream(&mut self) -> bool {
         if !self.is_running() || !self.resize.take_pending() {
             return false;
@@ -234,8 +234,8 @@ impl CaptureSession {
 
     /// Latest published frame, cropped to the client area. Does not consume the slot.
     ///
-    /// Returns `None` during interactive move/size so callers do not crop via
-    /// DWM or feed OCR a frame from before the drag.
+    /// Returns `None` during an interactive move or resize, so callers do not crop
+    /// through DWM or feed OCR a frame from before the drag.
     pub fn latest_frame(&self) -> Option<CapturedFrame> {
         if self.in_movesize() {
             return None;

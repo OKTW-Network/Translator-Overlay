@@ -1,5 +1,5 @@
-//! NavigationView has no `resource_overrides` in reactor 0.100, so patch
-//! `Application.Current.Resources` (content fill + border, title-bar drag strip).
+//! NavigationView has no `resource_overrides` in windows-reactor 0.100, so patch
+//! `Application.Current.Resources` for the content fill, its border, and the title-bar drag strip.
 
 #![allow(non_snake_case)]
 
@@ -56,7 +56,7 @@ impl RuntimeName for SolidColorBrushName {
     const NAME: &'static str = "Microsoft.UI.Xaml.Media.SolidColorBrush";
 }
 
-/// Override NavigationView content fill/border so Mica shows between cards.
+/// Override the NavigationView content fill and border so Mica shows between cards.
 pub fn apply() -> Result<()> {
     let statics: IApplicationStatics = windows_core::factory::<ApplicationName, IApplicationStatics>()?;
     let app = unsafe {

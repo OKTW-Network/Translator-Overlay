@@ -1,4 +1,4 @@
-//! Translator Overlay — WinUI 3 control app (windows-reactor).
+//! Translator Overlay control app, built with WinUI 3 through windows-reactor.
 
 mod attention;
 mod pipeline;
@@ -31,16 +31,16 @@ use crate::{
     ui::AppRoot,
 };
 
-/// Process-wide handles for the UI (set before `App::run_component`).
+/// Process-wide handles for the UI, set before `App::run_component`.
 pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
     load_onnxruntime();
 
-    // Must run before any HWND is created (pipeline spawns the overlay window).
-    // Otherwise GetClientRect / ClientToScreen stay in a mismatched DPI space
-    // vs Graphics Capture physical pixels → overlay position/size drift.
+    // This must run before any HWND exists, and the pipeline creates the overlay window.
+    // Otherwise GetClientRect and ClientToScreen use a different DPI space than the
+    // physical pixels from Graphics Capture, and the overlay drifts in position and size.
     // SAFETY: process-wide setting with no windows yet. It fails only when the host already
     // set an awareness, which is fine.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -89,9 +89,9 @@ async fn main() {
 
     APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
 
-    // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
-    // `block_on`s this future on that thread — do not move render off-thread.
-    // 0.100 inlines WASDK framework bootstrap (no Bootstrap.dll / setup crate).
+    // WinUI and windows-reactor must pump messages on the OS main thread. `#[tokio::main]`
+    // runs this future with `block_on` on that thread, so do not move rendering elsewhere.
+    // windows-reactor 0.100 bootstraps the WASDK framework itself, with no Bootstrap.dll or setup crate.
     let result = App::run_component::<AppRoot>(());
 
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
@@ -103,7 +103,7 @@ async fn main() {
     }
 }
 
-/// Load our ORT before WinUI maps Windows App Runtime's copy.
+/// Load our ONNX Runtime before WinUI maps the copy that ships with the Windows App Runtime.
 fn load_onnxruntime() {
     let Some(dir) = env::current_exe().ok().and_then(|exe| {
         let dir = exe.parent()?;
@@ -120,7 +120,7 @@ fn load_onnxruntime() {
     };
     let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
     let dll: Vec<u16> = dir.join("onnxruntime.dll").as_os_str().encode_wide().chain([0]).collect();
-    // SAFETY: null-terminated paths; LoadLibrary handle leaked so ORT stays mapped.
+    // SAFETY: the paths are null-terminated. The LoadLibrary handle is leaked so ORT stays mapped.
     let _ = unsafe { SetDllDirectoryW(PCWSTR(wide.as_ptr())) };
     let _ = unsafe { LoadLibraryW(PCWSTR(dll.as_ptr())) };
 }

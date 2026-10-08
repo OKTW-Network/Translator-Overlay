@@ -1,4 +1,4 @@
-//! Overlay layered-window procedure and picker hit-test / cursor flags.
+//! Window procedure for the layered overlay, plus the picker's hit-test and cursor flags.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -22,12 +22,12 @@ pub(crate) const CLASS_NAME: PCWSTR = w!("TranslatorOverlayLayer.v1");
 /// Distinct from the WinUI control window (`Translator Overlay`) so OBS Window Capture can pick this HWND.
 pub(crate) const WINDOW_TITLE: PCWSTR = w!("Translator Overlay Captions");
 
-/// `wnd_proc` cannot reach `OverlayHost`; picker hit-testing is a process-wide flag
+/// `wnd_proc` cannot reach `OverlayHost`. Picker hit-testing is a process-wide flag
 /// because this crate hosts a single overlay window.
 pub(crate) static PICKER_HIT_TEST: AtomicBool = AtomicBool::new(false);
 pub(crate) static HOST_TEARING_DOWN: AtomicBool = AtomicBool::new(false);
-/// Last picker cursor. `WM_SETCURSOR` is sent (not posted) and hits `wnd_proc`
-/// inside `PeekMessage` / `WaitMessage`, so the Peek-loop swallow cannot win.
+/// Last picker cursor. `WM_SETCURSOR` is sent, not posted, and reaches `wnd_proc`
+/// inside `PeekMessage` or `WaitMessage`, so the pump loop cannot swallow it first.
 static PICKER_CURSOR: AtomicU8 = AtomicU8::new(0);
 
 fn picker_cursor_code(kind: PickerCursor) -> u8 {
@@ -88,7 +88,7 @@ pub(crate) unsafe extern "system" fn overlay_wnd_proc(hwnd: HWND, msg: u32, wpar
                 unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
             }
         }
-        // Raise the capture target; refuse overlay activation so it stays foreground.
+        // Raise the capture target and refuse to activate the overlay, so the target stays in the foreground.
         WM_MOUSEACTIVATE => {
             if PICKER_HIT_TEST.load(Ordering::Relaxed) {
                 let target = FOLLOW_TARGET.load(Ordering::Relaxed);

@@ -188,7 +188,7 @@ impl RegionPicker {
     }
 
     pub fn hit_test(&self, px: i32, py: i32) -> Hit {
-        // Top-most region (last drawn) first.
+        // Start with the region drawn last, which is on top.
         for (index, region) in self.regions.iter().enumerate().rev() {
             let pr = self.pixel_rect(*region);
             if let Some(handle) = handle_at(pr, px, py) {
@@ -367,7 +367,7 @@ mod tests {
         let a = NormRect::new(0.1, 0.2, 0.2, 0.2);
         let b = NormRect::new(0.6, 0.6, 0.2, 0.2);
         let mut p = picker_with(&[a, b]);
-        // Miss both → no-op (does not undo last).
+        // A click that misses both regions does nothing and does not undo the last one.
         assert!(!p.on_right_up(10, 180));
         assert_eq!(p.regions.len(), 2);
         let hit = SurfaceRect::from_norm(a, 200, 200);

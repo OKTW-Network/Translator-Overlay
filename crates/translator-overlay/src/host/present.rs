@@ -1,8 +1,9 @@
 //! Overlay visibility and presentation.
 //!
-//! Captions: owned overlay + capture/DWM client rect.
-//! Picker: unowned insert-above + live client rect; pure target drags use
-//! `SetWindowPos` only (no per-drag `UpdateLayeredWindow`).
+//! Captions use an overlay owned by the target and the capture's DWM client rect.
+//! The picker uses an unowned overlay inserted above the target and the live client
+//! rect. A plain target drag only calls `SetWindowPos`, with no `UpdateLayeredWindow`
+//! per drag step.
 
 use std::sync::atomic::Ordering;
 
@@ -78,7 +79,7 @@ impl OverlayHost {
                 self.in_movesize = false;
                 self.presented_rect = None;
             }
-            // Z-order churn during a drag: the drag path moves the overlay itself.
+            // Ignore Z-order churn during a drag, since the drag path moves the overlay itself.
             EVENT_OBJECT_REORDER if self.in_movesize => return false,
             EVENT_OBJECT_DESTROY if self.target == Some(hwnd) => self.drop_dead_target(),
             _ => {}
@@ -86,7 +87,7 @@ impl OverlayHost {
         true
     }
 
-    /// The target window is gone: detach, and cancel the picker if it is open.
+    /// The target window is gone. Detach, and cancel the picker if it is open.
     fn drop_dead_target(&mut self) {
         debug!("target window gone; detaching overlay");
         self.target = None;
@@ -101,7 +102,7 @@ impl OverlayHost {
         }
     }
 
-    /// Interactive title-bar drag / resize: live rect + one `SetWindowPos`.
+    /// Follow an interactive title-bar drag or resize with the live rect and one `SetWindowPos`.
     fn follow_move(&mut self) {
         let Some(target) = self.target else {
             return;
@@ -147,7 +148,7 @@ impl OverlayHost {
             return;
         }
         if unsafe { IsIconic(target) }.as_bool() {
-            // Owned overlay is hidden/shown with the owner; do not SW_HIDE or restore is suppressed.
+            // An owned overlay hides and shows with its owner. SW_HIDE here would block the restore.
             if overlay_owner(self.hwnd) != target {
                 self.hide();
             }
@@ -227,7 +228,7 @@ impl OverlayHost {
             self.hide();
             return;
         }
-        // Do not SW_HIDE on transient !visible / geometry gaps while dragging.
+        // Do not SW_HIDE while dragging, when the target can briefly report invisible or have no geometry.
         if !unsafe { IsWindowVisible(target) }.as_bool() {
             self.abort_picker_drag();
             return;
@@ -300,22 +301,23 @@ impl OverlayHost {
                     warn!(error = %e, ?ownership, "overlay Z-order update failed; showing with current Z-order");
                     let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
                 }
-                // Band change / first-show `SetWindowPos` can drop the ULW above.
-                // Bits-only: no ppt_dst/psize — those restack and can drop HWND_TOPMOST.
+                // A band change or first-show `SetWindowPos` can drop the bitmap set above.
+                // Refresh only the bits, without ppt_dst or psize, because those restack
+                // and can drop HWND_TOPMOST.
                 if present_after_restack {
                     if let Err(e) = self.refresh_layered_bits(rect.2, rect.3) {
                         warn!(error = %e, ?ownership, "UpdateLayeredWindow failed");
                     }
                     self.reassert_z_order_after_bits(target, ownership, want_topmost);
                 }
-                // First Show can leave DWM blank; replay a FullPresent on the next apply.
+                // The first Show can leave DWM blank, so replay a FullPresent on the next apply.
                 if !overlay_visible && self.picker.is_some() {
                     self.replay_present = true;
                     self.dirty = true;
                 }
             }
             PresentationAction::MoveOnly => {
-                // Position only — never re-ULW or restack, or the drag loop hitches.
+                // Move only. Calling UpdateLayeredWindow again or restacking makes the drag stutter.
                 if let Err(e) = move_overlay_position(self.hwnd, rect.0, rect.1) {
                     warn!(error = %e, ?ownership, "overlay follow move failed");
                     return;
@@ -326,8 +328,8 @@ impl OverlayHost {
                 if !allow_restack {
                     return;
                 }
-                // Skip a no-op restack: ShowWindow on an already-visible layered
-                // window without ULW can drop DWM's bitmap.
+                // Skip a restack that changes nothing. ShowWindow on a visible layered
+                // window without UpdateLayeredWindow can drop DWM's bitmap.
                 if (needs_restack || !overlay_visible)
                     && let Err(e) = place_overlay_above_target(self.hwnd, target, ownership, &mut self.z_order_force_topmost)
                 {

@@ -1,4 +1,4 @@
-//! Picker veil, handles, and rubber-band on the overlay DIB.
+//! Picker veil, handles, and rubber band painted on the overlay DIB.
 
 use crate::{
     error::OverlayError,
@@ -37,12 +37,12 @@ impl OverlayHost {
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
             buf.fill(0);
-            // UpdateLayeredWindow hit-tests per-pixel alpha *before* WM_NCHITTEST.
-            // Alpha 0 pixels are click-through, so the whole client must have a
+            // UpdateLayeredWindow hit-tests per-pixel alpha before WM_NCHITTEST.
+            // Pixels with alpha 0 are click-through, so the whole client needs a
             // non-zero veil or empty areas cannot start a drag.
             draw::fill_rect(buf, surface, SurfaceRect::new(0, 0, w, h), Rgba::new(6, 14, 24, 20));
 
-            // Selectable area = full client; inset so the stroke is not clipped.
+            // The whole client is selectable. Inset the outline so its stroke is not clipped.
             draw::stroke_rect(buf, surface, SurfaceRect::new(2, 2, (w - 4).max(1), (h - 4).max(1)), bounds, 2);
 
             for (pr, selected) in rects.iter() {

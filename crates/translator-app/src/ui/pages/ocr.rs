@@ -1,4 +1,4 @@
-//! OCR settings: model, timing, detection, and line merge.
+//! OCR settings for the model, timing, detection, and line merging.
 
 use std::sync::Arc;
 

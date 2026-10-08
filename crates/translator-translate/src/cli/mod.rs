@@ -1,4 +1,4 @@
-//! Long-lived Grok ACP / OpenCode ACP / Codex app-server / Claude Code stream-json translation sessions.
+//! Long-lived translation sessions over Grok ACP, OpenCode ACP, Codex app-server, and Claude Code stream-json.
 
 mod claude;
 mod codex;
@@ -63,7 +63,7 @@ pub(crate) async fn list_models(api: &ApiConfig, cancel: &CancellationToken, tim
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionPlan {
-    /// Remote history already matches `messages` minus the last user turn.
+    /// The remote history already matches `messages` without the last user turn.
     Append { user: String },
     /// Open a new session. `bootstrap` is packed prior turns when history was compressed.
     Recreate {
@@ -234,7 +234,7 @@ impl CliBackend {
         let composed = match plan_turn(&self.mirrored, messages)? {
             SessionPlan::Append { user } if self.live.is_some() => compose_user(None, &user),
             SessionPlan::Append { user } => {
-                // The process died between turns: recreate from the committed prefix.
+                // The process died between turns, so recreate it from the committed prefix.
                 let history = &messages[1..messages.len() - 1];
                 self.recreate(api, &messages[0].content, cancel, timeout).await?;
                 compose_user((!history.is_empty()).then(|| pack_bootstrap(history)).as_deref(), &user)
@@ -271,7 +271,7 @@ impl CliBackend {
                 Ok(text)
             }
             Err(e) => {
-                // Remote now has a dangling user turn (or is dead). Force recreate next time.
+                // The remote now has a dangling user turn or is dead. Recreate it next time.
                 self.close().await;
                 Err(e)
             }

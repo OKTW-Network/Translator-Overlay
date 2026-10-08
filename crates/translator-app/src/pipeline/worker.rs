@@ -1,4 +1,4 @@
-//! Pipeline worker: owns capture / OCR / translate state and the command loop.
+//! Pipeline worker. It owns the capture, OCR, and translation state and runs the command loop.
 
 use std::{
     sync::Arc,
@@ -38,11 +38,12 @@ pub(crate) struct InflightTranslate {
     pub blocks: Vec<OcrBlock>,
     pub content_width: u32,
     pub content_height: u32,
-    /// Unique miss blocks actually sent to the model (ids preserved).
+    /// The unique cache misses sent to the model, with their original ids.
     pub miss_blocks: Vec<OcrBlock>,
-    /// Per-source-block cache hits (`None` = wait for the model / fallback).
+    /// One cache hit per source block. `None` waits for the model or its fallback.
     pub cached_hits: Vec<Option<String>>,
-    /// Overlay at job start (cache-hit preview or last committed page). Restored on retry / fail.
+    /// The overlay when the job started, either the cache-hit preview or the last finished page.
+    /// It comes back on a retry or a failure.
     pub revert_blocks: Vec<TranslatedBlock>,
 }
 
@@ -56,26 +57,26 @@ pub(crate) struct PendingPage {
 
 /// Raw OCR of one capture frame, keyed by frame identity.
 ///
-/// Static windows stop producing WGC frames; re-running inference on the same
-/// frame would burn GPU for identical output. Only the inference is skipped —
-/// persist / stability gate / remap still consume the cached blocks every tick,
-/// which is how the gate accumulates its stable-duration clock. Continuously
-/// redrawing windows (games) get new sequences; [`LastRawOcr::same_content`]
-/// catches repaints whose OCR scope is pixel-identical.
+/// Static windows stop producing WGC frames, and running inference again on the
+/// same frame would burn GPU time for the same output. Only the inference is
+/// skipped. The persistence filter, stability gate, and remap still consume the
+/// cached blocks every tick, which is how the gate's stable-duration clock advances.
+/// Windows that redraw all the time, such as games, get new sequence numbers, and
+/// [`LastRawOcr::same_content`] catches repaints whose OCR scope is pixel-identical.
 pub(crate) struct LastRawOcr {
     pub sequence: u64,
     pub width: u32,
     pub height: u32,
-    /// Pixels the OCR result depends on: one packed RGBA crop per OCR rect
-    /// (whole frame when no regions are configured). Pixels outside the rects
-    /// never affect recognition and are neither stored nor compared.
+    /// The pixels the OCR result depends on, as one packed RGBA crop per OCR rect,
+    /// or the whole frame when there are no regions. Pixels outside the rects never
+    /// affect recognition, so they are not stored or compared.
     pub scope: Vec<Bytes>,
     pub blocks: Vec<OcrBlock>,
 }
 
 impl LastRawOcr {
-    /// Pack the OCR scope of `frame`: each rect's rows, or the whole frame when
-    /// no regions are configured.
+    /// Pack the OCR scope of `frame`, which is each rect's rows, or the whole frame
+    /// when there are no regions.
     pub(crate) fn pack_scope(frame: &CapturedFrame, rects: &[Rect]) -> Vec<Bytes> {
         if rects.is_empty() {
             return vec![frame.rgba.clone()];
@@ -83,20 +84,20 @@ impl LastRawOcr {
         rects.iter().map(|r| pack_rect(frame, *r)).collect()
     }
 
-    /// Same scope pixels — an OCR pass would return the same blocks.
+    /// True when the scope pixels match, so an OCR pass would return the same blocks.
     ///
-    /// Compares RGBA, a superset of what OCR reads (alpha is dropped): an
-    /// alpha-only change costs one redundant inference, never a stale hit.
+    /// This compares RGBA, which is more than OCR reads, since OCR drops alpha. An
+    /// alpha-only change costs one extra inference but never gives a stale hit.
     pub(crate) fn same_content(&self, frame: &CapturedFrame, rects: &[Rect]) -> bool {
         if self.width != frame.width || self.height != frame.height {
             return false;
         }
-        // Malformed buffer — miss instead of slicing out of bounds.
+        // Treat a malformed buffer as a miss instead of slicing out of bounds.
         if frame.rgba.len() != frame.width as usize * frame.height as usize * 4 {
             return false;
         }
         if rects.is_empty() {
-            // Whole-window scope: one packed buffer covering the full frame.
+            // For the whole window, one buffer covers the full frame.
             return self.scope.len() == 1 && self.scope[0] == frame.rgba;
         }
         self.scope.len() == rects.len() && self.scope.iter().zip(rects).all(|(stored, r)| rect_unchanged(frame, *r, stored))
@@ -116,7 +117,7 @@ fn pack_rect(frame: &CapturedFrame, rect: Rect) -> Bytes {
     Bytes::from(out)
 }
 
-/// Row-wise memcmp of one rect against its packed copy (early-exit on first row diff).
+/// Compare one rect against its packed copy row by row, stopping at the first row that differs.
 fn rect_unchanged(frame: &CapturedFrame, rect: Rect, stored: &Bytes) -> bool {
     let (x0, y0, x1, y1) = rect.clamped_bounds(frame.width, frame.height);
     let cw = (x1 - x0) as usize;
@@ -133,7 +134,7 @@ fn rect_unchanged(frame: &CapturedFrame, rect: Rect, stored: &Bytes) -> bool {
     true
 }
 
-/// Owned pipeline state machine (one Tokio task).
+/// Pipeline state machine, owned by one Tokio task.
 pub(crate) struct Pipeline {
     pub state: SharedState,
     pub session: CaptureSession,
@@ -150,14 +151,15 @@ pub(crate) struct Pipeline {
     pub ocr_tier: ModelTier,
     pub ocr_device: OcrDevice,
     pub last_raw_ocr: Option<LastRawOcr>,
-    /// Raise-on-restart offset added to frame sequences in preview state, so a
-    /// renumbered stream never reuses a sequence the preview skip / UI cache saw.
+    /// Offset added to frame sequences in the preview state. It grows on every stream
+    /// restart, so a renumbered stream never reuses a sequence that the preview skip
+    /// or the UI cache already saw.
     pub preview_seq_bias: u64,
-    /// Wall-clock: raw OCR first went empty (may still have hysteresis tracks).
+    /// When raw OCR first went empty. The persistence filter may still hold tracks.
     pub raw_empty_since: Option<Instant>,
-    /// Wall-clock since raw OCR last became non-empty.
+    /// When raw OCR last became non-empty.
     pub raw_content_since: Option<Instant>,
-    /// Sticky remap failed while captions still present.
+    /// When the sticky remap started failing while captions were still up.
     pub remap_miss_since: Option<Instant>,
     pub overlay: Option<OverlayController>,
 }
@@ -211,7 +213,7 @@ impl Pipeline {
         };
 
         pipeline.sync_reader_placeholder();
-        // Kick off download + load without blocking the command loop / UI.
+        // Start the download and load without blocking the command loop or the UI.
         pipeline.start_model_load();
         pipeline
     }
@@ -305,7 +307,7 @@ impl Pipeline {
                     } else if s.auto_running {
                         s.status = PipelineStatus::Capturing;
                     } else if s.status != PipelineStatus::Idle {
-                        // Stop already set Idle; a Cancel queued during close must not overwrite it.
+                        // Stop already set Idle, and a Cancel queued during the close must not overwrite it.
                         s.status = PipelineStatus::Cancelled;
                     }
                 }
@@ -349,7 +351,7 @@ impl Pipeline {
                 self.last_translated_fp = None;
                 self.state.write().history.clear();
                 info!("LLM conversation reset");
-                // Leave Downloading/Loading alone while models are still loading.
+                // Leave the downloading or loading status alone while models are still loading.
                 if self.model_load.is_none() {
                     self.state.write().restore_operational_status();
                 }
@@ -369,13 +371,13 @@ impl Pipeline {
     pub(crate) fn cancel_inflight(&mut self) {
         if let Some(job) = self.inflight.take() {
             job.cancel.cancel();
-            // Drop the pending user turn so stop/shutdown mid-request does not
-            // leave a dangling multi-user conversation for the next translate.
+            // Drop the pending user turn so a stop or shutdown mid-request does not leave
+            // two user turns in a row for the next translate.
             self.conversation.rollback_user_turn();
         }
     }
 
-    /// Shared reset when a continuous capture session successfully starts.
+    /// Reset state after a continuous capture session starts.
     fn on_capture_started(&mut self) {
         self.reset_ocr_session(true);
         // The fresh stream renumbers frames from 1.
@@ -551,7 +553,7 @@ impl Pipeline {
         s.status = PipelineStatus::Idle;
     }
 
-    /// Reset gate / timers / captions. Optionally clear LLM conversation.
+    /// Reset the gate, timers, and captions, and optionally the LLM conversation.
     pub(crate) fn reset_ocr_session(&mut self, clear_conversation: bool) {
         self.gate.reset_all();
         self.persist.reset();
@@ -565,7 +567,7 @@ impl Pipeline {
         self.raw_empty_since = None;
         self.raw_content_since = None;
         self.remap_miss_since = None;
-        // Drop OCR + caption state so sticky remap cannot resurrect a prior session.
+        // Drop the OCR and caption state so the sticky remap cannot bring back an earlier session.
         let mut s = self.state.write();
         s.latest_ocr_blocks.clear();
         s.latest_translated_blocks.clear();
@@ -584,9 +586,9 @@ impl Pipeline {
         s.preview.rgba = Some(frame.rgba.clone());
     }
 
-    /// A restarted stream renumbers frames from 1 — drop the raw-OCR cache and
-    /// raise the preview sequence bias so a repeated sequence is never mistaken
-    /// for an unchanged frame.
+    /// A restarted stream numbers its frames from 1 again. Drop the raw OCR cache and
+    /// raise the preview sequence bias, so a repeated sequence is never mistaken for
+    /// an unchanged frame.
     fn consume_stream_restart(&mut self) {
         if self.session.sync_stream() {
             self.last_raw_ocr = None;
@@ -594,9 +596,9 @@ impl Pipeline {
         }
     }
 
-    /// Absorb the last published preview sequence into the bias: a renumbered
-    /// stream's frames then publish strictly higher sequences, so the preview
-    /// skip and the UI preview cache never match a stale entry.
+    /// Add the last published preview sequence to the bias. Frames from a renumbered
+    /// stream then publish strictly higher sequences, so the preview skip and the UI
+    /// preview cache never match a stale entry.
     fn absorb_preview_sequence(&mut self) {
         let last = self.state.read().preview.sequence;
         self.preview_seq_bias = self.preview_seq_bias.saturating_add(last);
@@ -634,16 +636,16 @@ impl Pipeline {
         if !self.session.is_running() || self.inflight.is_some() || self.state.read().capture_paused {
             return;
         }
-        // Skip OCR / preview / caption expiry while the target is in its
-        // move/size loop. Frames are not published until MOVESIZEEND.
+        // Skip OCR, the preview, and caption expiry while the target is being moved or
+        // resized. No frames are published until MOVESIZEEND.
         if self.session.in_movesize() {
             return;
         }
 
         self.consume_stream_restart();
 
-        // Stale tick (no new frame published): consume the cached blocks without
-        // the client-area crop, Win32 queries, or a preview write.
+        // When no new frame was published, consume the cached blocks without the
+        // client-area crop, the Win32 queries, or a preview write.
         let stale = self
             .last_raw_ocr
             .as_ref()
@@ -656,7 +658,7 @@ impl Pipeline {
         } else if let Some(frame) = self.session.latest_frame() {
             self.update_preview(&frame);
             if self.engine.is_none() {
-                // Do not auto-retry after a failed load — wait for ApplyConfig / tier change.
+                // Do not retry a failed load on its own. Wait for ApplyConfig or a tier change.
                 let load_failed = matches!(self.state.read().status, PipelineStatus::Error { .. });
                 if !load_failed {
                     let _ = self.ensure_engine();
@@ -737,13 +739,13 @@ async fn sleep_or_pending(wait: Option<Duration>) {
     }
 }
 
-/// Rebuild displayed translations from current OCR.
+/// Rebuild the displayed translations from the current OCR.
 ///
-/// A caption is valid only while its normalized source string is still in OCR.
-/// Different text is **not** reused — a new box appears only after
-/// `finish_translate`. Same-text remaps keep the previous box (no follow-move)
-/// so persist/detector swings cannot walk or re-fit the caption. Capture-surface
-/// resize takes the latest OCR box so scale stays correct.
+/// A caption stays valid only while its normalized source string is still in the OCR.
+/// Different text is not reused, and a new box appears only after `finish_translate`.
+/// A remap with the same text keeps the previous box, so swings from persistence or
+/// the detector cannot move or refit the caption. After a capture resize, the latest
+/// OCR box is used so the scale stays correct.
 pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock], content_resized: bool) -> Vec<TranslatedBlock> {
     let mut used = vec![false; translated.len()];
     let mut out = Vec::new();
@@ -783,8 +785,9 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
 
 /// True when the remapped overlay set differs in count, text, or bbox.
 ///
-/// Match by source+translation (not zip order): OCR reorder must not force a
-/// repaint that re-runs label layout and looks like the captions moved.
+/// Blocks are matched by source and translation, not by position. A reordered OCR
+/// result must not force a repaint, which reruns label layout and looks like the
+/// captions moved.
 pub(crate) fn translated_geometry_changed(previous: &[TranslatedBlock], remapped: &[TranslatedBlock]) -> bool {
     if previous.len() != remapped.len() {
         return true;
@@ -845,7 +848,7 @@ mod tests {
 
     #[test]
     fn same_content_ignores_pixels_outside_regions() {
-        // 32×32 frame; scope = one 8×8 region at (4, 4).
+        // A 32×32 frame whose scope is one 8×8 region at (4, 4).
         let rect = Rect::new(4.0, 4.0, 8.0, 8.0);
         let mut base = vec![7u8; 32 * 32 * 4];
         let src = CapturedFrame::new(32, 32, base.clone(), 1);
@@ -857,21 +860,21 @@ mod tests {
             blocks: Vec::new(),
         };
 
-        // Change a pixel OUTSIDE the region (31, 31): still a content hit.
+        // Changing pixel (31, 31), outside the region, is still a content hit.
         let i = (31 * 32 + 31) as usize * 4;
         base[i] = 9;
         let outside = CapturedFrame::new(32, 32, base, 2);
         assert!(cache.same_content(&outside, &[rect]), "changes outside regions must hit");
 
-        // Change a pixel INSIDE the region (5, 5): miss.
+        // Changing pixel (5, 5), inside the region, is a miss.
         let mut inside = cache.scope[0].to_vec();
-        // crop-local (1, 1) in an 8-wide crop → (8 + 1) px, 4 bytes/px
+        // That is (1, 1) in the 8-wide crop, so pixel 8 + 1 at 4 bytes per pixel.
         inside[(8 + 1) * 4] = 9;
         let scope = vec![Bytes::from(inside)];
         let cache = LastRawOcr { scope, ..cache };
         assert!(!cache.same_content(&src, &[rect]), "changes inside regions must miss");
 
-        // Different region count: miss.
+        // A different region count is a miss.
         assert!(!cache.same_content(&src, &[rect, rect]));
     }
 

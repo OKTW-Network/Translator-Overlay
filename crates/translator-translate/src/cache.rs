@@ -1,7 +1,7 @@
-//! Session translation cache: unique OCR source strings → last model translation.
+//! Session translation cache that maps each unique OCR source string to its last model translation.
 //!
-//! Eviction is LFU with LRU as the tie-break (lowest `freq`, then oldest `last_tick`).
-//! In-memory only; the pipeline thread owns the instance.
+//! Eviction is LFU with LRU as the tie-break, so the lowest `freq` goes first, then the oldest `last_tick`.
+//! It lives in memory only, and the pipeline thread owns it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,9 +10,9 @@ use translator_core::{OcrBlock, TRANSLATION_CACHE_MAX_MIN, TranslatedBlock, Tran
 /// Per-block lookup result plus the unique misses to send to the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheResolve {
-    /// Parallel to the source page: `Some` = reuse this translation.
+    /// One entry per source block. `Some` holds a translation to reuse.
     pub hits: Vec<Option<String>>,
-    /// Unique (by normalized text) blocks that still need the API. Original ids kept.
+    /// Blocks that still need the API, unique by normalized text, with their original ids.
     pub misses: Vec<OcrBlock>,
 }
 
@@ -30,7 +30,7 @@ struct CacheEntry {
     last_tick: u64,
 }
 
-/// In-memory LFU translation cache (LRU tie-break).
+/// In-memory LFU translation cache with an LRU tie-break.
 #[derive(Debug, Clone)]
 pub struct TranslationCache {
     map: HashMap<CacheKey, CacheEntry>,
@@ -81,7 +81,7 @@ impl TranslationCache {
         })
     }
 
-    /// Return a cached translation and bump frequency / recency.
+    /// Return a cached translation and bump its frequency and recency.
     pub fn lookup(&mut self, source: &str, source_lang: &str, target_lang: &str) -> Option<String> {
         let key = Self::key(source, source_lang, target_lang)?;
         let tick = self.next_tick();
@@ -91,7 +91,7 @@ impl TranslationCache {
         Some(entry.translation.clone())
     }
 
-    /// Store or overwrite a translation. Empty source / translation is ignored.
+    /// Store or overwrite a translation. An empty source or translation is ignored.
     pub fn insert(&mut self, source: &str, source_lang: &str, target_lang: &str, translation: &str) {
         let Some(key) = Self::key(source, source_lang, target_lang) else {
             return;
@@ -117,7 +117,7 @@ impl TranslationCache {
 
     /// Split a page into cache hits and unique misses.
     ///
-    /// `force` (Retry) and a disabled cache skip lookup and send every block.
+    /// With `force` (Retry) or a disabled cache, nothing is looked up and every block is sent.
     pub fn resolve(&mut self, blocks: &[OcrBlock], cfg: &TranslationConfig, force: bool) -> CacheResolve {
         if force || !cfg.cache_enabled {
             return CacheResolve {
@@ -155,7 +155,7 @@ impl TranslationCache {
         CacheResolve { hits, misses }
     }
 
-    /// Persist model-returned pairs only (skip ids the model omitted).
+    /// Store only the pairs the model returned, skipping ids it left out.
     pub fn store_model_pairs(
         &mut self,
         source_blocks: &[OcrBlock],
@@ -177,7 +177,7 @@ impl TranslationCache {
         }
     }
 
-    /// Rebuild a full page: cache hits first, then model rows (by id, then normalized text).
+    /// Rebuild a full page from the cache hits, then the model rows matched by id and then by normalized text.
     pub fn stitch(source: &[OcrBlock], hits: &[Option<String>], model_blocks: &[TranslatedBlock]) -> Vec<TranslatedBlock> {
         let mut by_id: HashMap<u32, &str> = HashMap::with_capacity(model_blocks.len());
         let mut by_norm: HashMap<String, &str> = HashMap::with_capacity(model_blocks.len());
@@ -214,7 +214,7 @@ impl TranslationCache {
             .collect()
     }
 
-    /// Only blocks that already have a cached translation (misses omitted).
+    /// Only the blocks that already have a cached translation. Misses are left out.
     pub fn hits_only(source: &[OcrBlock], hits: &[Option<String>]) -> Vec<TranslatedBlock> {
         source
             .iter()

@@ -1,4 +1,4 @@
-//! API settings: provider, connection, sampling, and named profiles.
+//! API settings for the provider, connection, sampling, and named profiles.
 
 use std::{borrow::Cow, sync::Arc};
 

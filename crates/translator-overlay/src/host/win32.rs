@@ -1,12 +1,14 @@
 //! Overlay ownership, client geometry, and Z-order placement.
 //!
-//! Captions own the capture target and use capture/DWM client metrics so boxes
-//! stay aligned with OCR frames. The region picker stays unowned and inserts
-//! above the target (topmost only while the target is foreground). If UIPI
-//! denies insert-after, the overlay latches `HWND_TOPMOST` while the target is
-//! foreground. On focus loss it leaves that band and pulls beside the target
-//! (`sit` / `HWND_BOTTOM` climb) so a UIPI-denied insert-after on the new FG
-//! cannot leave it covering other windows.
+//! The caption overlay is owned by the capture target and uses the capture's DWM
+//! client metrics, so boxes stay aligned with OCR frames. The region picker stays
+//! unowned and inserts itself above the target, and it is topmost only while the
+//! target is in the foreground. If User Interface Privilege Isolation (UIPI) denies
+//! the insert-after, the overlay latches `HWND_TOPMOST` while the target is in the
+//! foreground. When the target loses focus, the overlay leaves that band and moves
+//! back next to the target, either directly or by climbing up from `HWND_BOTTOM`.
+//! That way a denied insert-after on the new foreground window cannot leave the
+//! overlay covering other windows.
 
 use tracing::{debug, warn};
 use windows::Win32::{
@@ -25,10 +27,10 @@ pub(crate) type ClientRect = (i32, i32, i32, i32);
 
 /// Whether the overlay should be owned by the capture target.
 ///
-/// Owned captions ride the target's Z-order group (`SWP_NOOWNERZORDER`).
-/// The picker stays unowned so insert-above + hit-testing work. While the
-/// target is foreground, an unowned picker sits in the topmost band so the
-/// newly activated target cannot cover it.
+/// Owned captions move with the target's Z-order group (`SWP_NOOWNERZORDER`).
+/// The picker stays unowned so inserting above the target and hit-testing work.
+/// While the target is in the foreground, the unowned picker sits in the topmost
+/// band so the newly activated target cannot cover it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OverlayOwnership {
     OwnedByTarget,
@@ -92,7 +94,7 @@ pub(crate) fn target_is_foreground(target: HWND) -> bool {
     !owner_root.is_invalid() && owner_root == target
 }
 
-/// Focus and raise `target`. Overlay restack stays in `place_overlay_above_target`.
+/// Focus and raise `target`. Restacking the overlay is left to `place_overlay_above_target`.
 ///
 /// Attaches to the current foreground thread so `SetForegroundWindow` can succeed
 /// from the `WS_EX_NOACTIVATE` overlay thread.
@@ -162,7 +164,7 @@ fn set_topmost_band(overlay: HWND, want_topmost: bool) -> windows::core::Result<
         if visible {
             return Ok(());
         }
-        // Hidden but already in-band (minimize → restore): show without restacking.
+        // Hidden but already in the right band, as after a minimize and restore. Show it without restacking.
         return unsafe {
             SetWindowPos(overlay, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
         };
@@ -186,7 +188,7 @@ fn place_force_topmost(overlay: HWND, target: HWND) -> windows::core::Result<()>
     set_overlay_owner(overlay, None);
     let target_fg = target_is_foreground(target);
     let want_topmost = overlay_wants_topmost(OverlayOwnership::Unowned, window_is_topmost(target), target_fg);
-    // Do not HWND_NOTOPMOST before park — that parks at the top of the normal band.
+    // Do not move to HWND_NOTOPMOST before parking. That lands at the top of the normal band.
     if want_topmost {
         set_topmost_band(overlay, true)
     } else {
@@ -215,12 +217,13 @@ fn covering_foreground(overlay: HWND, fg: HWND, target: HWND) -> bool {
     !fg.is_invalid() && z_order_is_above(overlay, fg) && z_order_is_above(fg, target)
 }
 
-/// Pull beside `target` without insert-after on a possibly UIPI-protected FG hwnd.
+/// Move next to `target` without an insert-after on the foreground window, which UIPI may protect.
 ///
-/// `HWND_NOTOPMOST` alone parks at the top of the normal band and covers the FG.
-/// Sitting above the target (or climbing from `HWND_BOTTOM`) uses the target's
-/// predecessor instead. If that predecessor *is* the protected FG, the slot
-/// between them is unreachable — leave covering rather than burying under target.
+/// `HWND_NOTOPMOST` alone lands at the top of the normal band and covers the
+/// foreground window. Sitting above the target, or climbing up from `HWND_BOTTOM`,
+/// anchors on the target's predecessor instead. If that predecessor is the
+/// protected foreground window, the slot between them cannot be reached. Then the
+/// overlay stays covering instead of being buried under the target.
 fn pull_beside_target(overlay: HWND, target: HWND, fg: HWND) {
     let _ = sit_above_target(overlay, target);
     if z_order_is_above(overlay, target) && !covering_foreground(overlay, fg, target) {
@@ -240,13 +243,14 @@ fn pull_beside_target(overlay: HWND, target: HWND, fg: HWND) {
 }
 
 fn park_unfocused(overlay: HWND, target: HWND) -> windows::core::Result<()> {
-    // Picker must stay unowned — owning a foreign HWND hides this layered popup.
+    // The picker must stay unowned. Giving it a foreign owner HWND hides this layered popup.
     set_overlay_owner(overlay, None);
     let fg = foreground_top_level();
     let fg_ok = !fg.is_invalid() && fg != overlay && fg != target;
 
-    // One-shot leave+tuck when FG allows insert-after. UIPI often denies this
-    // (ACCESS_DENIED); fall through to NOTOPMOST + pull beside target.
+    // When the foreground window allows insert-after, leave the band and tuck under it
+    // in one call. UIPI often denies this with ACCESS_DENIED, and then the code below
+    // drops to NOTOPMOST and moves next to the target.
     if fg_ok {
         let _ = set_window_pos(overlay, Some(fg), false);
     }
@@ -271,7 +275,7 @@ fn park_unfocused(overlay: HWND, target: HWND) -> windows::core::Result<()> {
     Ok(())
 }
 
-/// Move the overlay to a screen position without a Z-order or ULW pass.
+/// Move the overlay to a screen position without a Z-order or `UpdateLayeredWindow` pass.
 pub(crate) fn move_overlay_position(overlay: HWND, x: i32, y: i32) -> windows::core::Result<()> {
     if overlay.is_invalid() {
         return Ok(());
@@ -283,7 +287,7 @@ pub(crate) fn move_overlay_position(overlay: HWND, x: i32, y: i32) -> windows::c
     result
 }
 
-/// Whether `place_overlay_above_target` will `SetWindowPos` (needs a prior ULW).
+/// Whether `place_overlay_above_target` will call `SetWindowPos`, which needs a prior `UpdateLayeredWindow`.
 pub(crate) fn overlay_needs_restack(overlay: HWND, target: HWND, ownership: OverlayOwnership, force_topmost: bool) -> bool {
     let target_topmost = window_is_topmost(target);
     let ownership = if force_topmost { OverlayOwnership::Unowned } else { ownership };
@@ -304,9 +308,10 @@ pub(crate) fn overlay_needs_restack(overlay: HWND, target: HWND, ownership: Over
 
 /// Keep `overlay` immediately above `target` without raising a normal target globally.
 ///
-/// If insert-after / band sync is denied (UIPI), latch `force_topmost` and sit in
-/// the topmost band while the target is foreground. On focus loss, drop that band
-/// and pull beside the target without requiring insert-after on the new FG.
+/// If UIPI denies the insert-after or the band change, latch `force_topmost` and sit
+/// in the topmost band while the target is in the foreground. When the target loses
+/// focus, leave that band and move next to the target without an insert-after on the
+/// new foreground window.
 pub(crate) fn place_overlay_above_target(
     overlay: HWND,
     target: HWND,
@@ -327,7 +332,7 @@ pub(crate) fn place_overlay_above_target(
     let want_topmost = overlay_wants_topmost(ownership, target_topmost, target_fg);
     debug!(?ownership, want_topmost, target_fg, overlay_topmost = window_is_topmost(overlay), "overlay z-order place");
 
-    // Park before HWND_NOTOPMOST — that band call covers the new FG on its own.
+    // Park before any HWND_NOTOPMOST call, which by itself covers the new foreground window.
     if !want_topmost && ownership == OverlayOwnership::Unowned {
         return park_unfocused(overlay, target);
     }
@@ -337,13 +342,13 @@ pub(crate) fn place_overlay_above_target(
     }
 
     // A topmost picker above a normal target must not insert-after a non-topmost
-    // predecessor — that `SetWindowPos` drops it out of the topmost band.
+    // predecessor. That `SetWindowPos` would drop it out of the topmost band.
     if want_topmost && !target_topmost {
         return Ok(());
     }
 
-    // Re-read after synchronizing the topmost band: that operation itself may
-    // have changed which window is immediately above the target.
+    // Read the predecessor again after the band change, which may have changed
+    // the window right above the target.
     let above_target = predecessor_hwnd(target).map(|hwnd| hwnd.0 as isize);
     match choose_z_order_anchor(overlay.0 as isize, above_target, target_topmost) {
         ZOrderAnchor::Preserve => {
@@ -359,8 +364,8 @@ pub(crate) fn place_overlay_above_target(
 
 /// Live Win32 client rect for the region picker.
 ///
-/// Uses `GetClientRect` + `ClientToScreen` so geometry stays current while the
-/// target is dragged. Capture DWM metrics can briefly fail or lag mid-move.
+/// Uses `GetClientRect` and `ClientToScreen` so the geometry stays current while the
+/// target is dragged. The capture's DWM metrics can briefly fail or lag during a move.
 pub(crate) fn live_client_screen_rect(target: HWND) -> Option<ClientRect> {
     if target.is_invalid() {
         return None;
@@ -385,13 +390,13 @@ pub(crate) fn live_client_screen_rect(target: HWND) -> Option<ClientRect> {
     Some((tl.x, tl.y, w, h))
 }
 
-/// Signed x and y from a mouse-message `LPARAM` (`GET_X_LPARAM` / `GET_Y_LPARAM`).
+/// Signed x and y from a mouse-message `LPARAM`, like `GET_X_LPARAM` and `GET_Y_LPARAM`.
 pub(crate) fn lparam_point(lparam: LPARAM) -> (i32, i32) {
     let packed = lparam.0 as u32;
     ((packed & 0xFFFF) as i16 as i32, (packed >> 16) as i16 as i32)
 }
 
-/// cargo test is multi-threaded; USER32 window state is process-global.
+/// cargo test runs tests on many threads, and USER32 window state is process-wide.
 #[cfg(test)]
 pub(crate) fn lock_hwnd_tests() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -537,7 +542,7 @@ mod tests {
         place_unowned(w.overlay, w.target, &mut force_topmost, "place while focused")?;
         assert_visible_topmost(w.overlay, w.target, "initial focus")?;
 
-        // Minimize/restore style hide must not stick while target is focused.
+        // A hide like the one from minimize and restore must not stick while the target is focused.
         let _ = unsafe { ShowWindow(w.overlay, SW_HIDE) };
         place_unowned(w.overlay, w.target, &mut force_topmost, "place after hide")?;
         assert_visible_topmost(w.overlay, w.target, "after hide while focused")?;
@@ -554,7 +559,7 @@ mod tests {
         }
         assert_parked_beside_target(w.overlay, w.target, w.other)?;
 
-        // Park must not permanently lose topmost: refocus restores the band.
+        // Parking must not lose topmost for good. Focusing the target again restores the band.
         refocus_target_restores_topmost(&w, &mut force_topmost)?;
 
         let _ = unsafe { SetForegroundWindow(w.other) };
@@ -568,8 +573,8 @@ mod tests {
         refocus_target_restores_topmost(&w, &mut force_topmost).map_err(|e| format!("refocus after bury climb: {e}"))
     }
 
-    /// Simulates the UIPI path: insert-after FG fails, and HWND_NOTOPMOST alone
-    /// parks at the top of the normal band and covers the new FG.
+    /// Simulates the UIPI path. The insert-after on the foreground window fails, and
+    /// HWND_NOTOPMOST alone lands at the top of the normal band, covering the new foreground window.
     #[test]
     fn park_pulls_beside_target_after_notopmost_covers_foreground() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
@@ -581,7 +586,7 @@ mod tests {
         assert_visible_topmost(w.overlay, w.target, "initial focus")?;
 
         let _ = unsafe { SetForegroundWindow(w.other) };
-        // UIPI aftermath: leave the topmost band without tucking below FG.
+        // What UIPI leaves behind is a band change with no tuck below the foreground window.
         set_topmost_band(w.overlay, false).map_err(|e| format!("HWND_NOTOPMOST: {e}"))?;
         if target_is_foreground(w.other) {
             if !covering_foreground(w.overlay, w.other, w.target) {
@@ -594,12 +599,12 @@ mod tests {
 
         place_unowned(w.overlay, w.target, &mut force_topmost, "park after NOTOPMOST cover")?;
         assert_parked_beside_target(w.overlay, w.target, w.other)?;
-        // Regression: Hide-based park lost topmost on the next focus.
+        // Regression test. Parking by hiding the window used to lose topmost on the next focus.
         refocus_target_restores_topmost(&w, &mut force_topmost)
     }
 
-    /// When the new FG is immediately above the target, park must not bury
-    /// the overlay under the target (the bad Hide / HWND_BOTTOM "fix").
+    /// When the new foreground window is right above the target, parking must not bury
+    /// the overlay under the target, which an earlier Hide and HWND_BOTTOM attempt did.
     #[test]
     fn park_with_fg_as_target_predecessor_stays_above_target() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
@@ -610,9 +615,9 @@ mod tests {
         place_unowned(w.overlay, w.target, &mut force_topmost, "place while focused")?;
         assert_visible_topmost(w.overlay, w.target, "initial focus")?;
 
-        // other precedes target → predecessor_hwnd(target) == other once other is FG.
-        // SetForegroundWindow raises `other`; insert target under it afterwards so
-        // extra desktop windows on CI cannot sit between them.
+        // Once `other` is in the foreground, it must be the target's predecessor.
+        // SetForegroundWindow raises `other`, and then the target is inserted right
+        // under it so other desktop windows on CI cannot sit between them.
         let _ = unsafe { SetForegroundWindow(w.other) };
         let _ = unsafe { SetWindowPos(w.target, Some(w.other), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
         if target_is_foreground(w.other) && predecessor_hwnd(w.target) != Some(w.other) {

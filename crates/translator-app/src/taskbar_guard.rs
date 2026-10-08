@@ -1,9 +1,9 @@
-//! Restore the shell taskbar's topmost z-order after a WinUI 3 window activates.
+//! Restore the shell taskbar's topmost Z-order after a WinUI 3 window activates.
 //!
-//! WASDK / WinUI 3 can drop `Shell_TrayWnd` out of the topmost stack on launch
+//! WinUI 3 can drop `Shell_TrayWnd` out of the topmost band on launch
 //! ([microsoft-ui-xaml#11091](https://github.com/microsoft/microsoft-ui-xaml/issues/11091)).
-//! Auto-hide then fails once any window covers the 1px hover strip. Re-asserting
-//! `HWND_TOPMOST` on the tray is the same recovery as clicking the taskbar.
+//! Auto-hide then breaks once any window covers the 1 px hover strip. Setting
+//! `HWND_TOPMOST` on the tray again has the same effect as clicking the taskbar.
 
 use std::mem::size_of;
 
@@ -21,7 +21,7 @@ use windows::{
 
 const TRAY_CLASSES: [&str; 2] = ["Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
 
-/// Re-assert `HWND_TOPMOST` on every shell taskbar window (primary + secondary).
+/// Set `HWND_TOPMOST` again on every shell taskbar window, primary and secondary.
 pub fn restore_taskbar_zorder() {
     if let Err(e) = unsafe { EnumWindows(Some(enum_tray), LPARAM(0)) } {
         debug!(error = %e, "EnumWindows for taskbar restore failed");

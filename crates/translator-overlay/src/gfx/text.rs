@@ -1,4 +1,4 @@
-//! Shared Segoe UI label painting (overlay captions + translation window).
+//! Segoe UI label painting shared by the overlay captions and the translation window.
 
 use windows::{
     Win32::{
@@ -17,7 +17,7 @@ use crate::{
     gfx::draw::{Rgba, SurfaceRect, SurfaceSize, blend_over, label_pad},
 };
 
-/// Font size + text colour for one painted label.
+/// Font size and text colour for one painted label.
 pub(crate) struct LabelStyle {
     pub font_px: i32,
     pub color: Rgba,
@@ -27,8 +27,8 @@ pub(crate) struct LabelStyle {
 
 pub(crate) fn create_segoe_font(px: i32) -> Result<HFONT, OverlayError> {
     let pitch = (DEFAULT_PITCH.0 as u32) | (FF_DONTCARE.0 as u32);
-    // Regular weight matches typical game/UI source text better than semibold
-    // (which looks larger/heavier than the OCR ink).
+    // Regular weight matches typical game and UI text better than semibold, which
+    // looks larger and heavier than the OCR ink.
     let font = unsafe {
         CreateFontW(
             -px,

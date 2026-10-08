@@ -88,14 +88,15 @@ impl ClientAreaMetrics {
             frame_top: outer.top,
         };
 
-        // DPI-unaware hosts may report client == window; invent caption only then.
-        // Skip when DWM already contains rcClient (`offset_y == 0` can be real client chrome).
+        // DPI-unaware hosts may report the client rect as the whole window. Only then do we
+        // add a caption inset. Skip it when DWM already contains rcClient, because
+        // `offset_y == 0` can be real client chrome.
         let collapsed = metrics.offset_x == 0
             && metrics.offset_y == 0
             && metrics.client_width == metrics.window_width
             && metrics.client_height == metrics.window_height;
         if !dwm_contains_client && collapsed && info.dwStyle.contains(WS_CAPTION) {
-            // SAFETY: metric indices are the documented caption / frame constants.
+            // SAFETY: the metric indices are the documented caption and frame constants.
             let dpi = unsafe { GetDpiForWindow(hwnd) }.max(1);
             let caption = unsafe { GetSystemMetricsForDpi(SM_CYCAPTION, dpi) }
                 + unsafe { GetSystemMetricsForDpi(SM_CYFRAME, dpi) }
@@ -105,7 +106,7 @@ impl ClientAreaMetrics {
             }
         }
 
-        // Prefer DWM outer size when WGC uses that frame but rcClient was outside it.
+        // Use the DWM outer size when WGC captures that frame but rcClient lies outside it.
         if let Some(dwm) = dwm.filter(|_| !dwm_contains_client) {
             let num_w = (dwm.right - dwm.left).max(0) as u32;
             let num_h = (dwm.bottom - dwm.top).max(0) as u32;
@@ -124,7 +125,8 @@ impl ClientAreaMetrics {
         }
 
         metrics.clamp();
-        // WGC can sit 1px above DWM/`rcClient`; bump an existing inset, never invent one.
+        // WGC can sit 1 px above DWM and `rcClient`. Grow an existing inset by one, but
+        // never add one.
         if metrics.offset_y > 0 {
             metrics.offset_y = metrics.offset_y.saturating_add(1);
             metrics.client_height = metrics.client_height.saturating_sub(1).max(1);
@@ -186,7 +188,7 @@ impl ClientAreaMetrics {
     }
 }
 
-/// Physical client rect `(left, top, width, height)` — same geometry as crop.
+/// Physical client rect as `(left, top, width, height)`, with the same geometry as the crop.
 pub fn client_screen_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
     ClientAreaMetrics::from_hwnd(hwnd).ok().map(|m| m.screen_rect())
 }
@@ -243,7 +245,7 @@ mod tests {
 
     #[test]
     fn crop_scales_title_bar_with_ceil() {
-        // 31 × 900/600 = 46.5 → ceil 47; floor sizes match.
+        // 31 × 900/600 = 46.5, which rounds up to 47. Sizes round down.
         let cropped = metrics(800, 600, 784, 553, 8, 31).crop_frame(&CapturedFrame::new(1200, 900, vec![0u8; 1200 * 900 * 4], 0));
         assert_eq!(cropped.width, 1176);
         assert_eq!(cropped.height, 829);

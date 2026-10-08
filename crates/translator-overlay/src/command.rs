@@ -1,4 +1,4 @@
-//! Overlay thread IPC: commands in, events out.
+//! Messages to and from the overlay thread. Commands go in and events come out.
 
 use translator_core::{NormRect, OverlayConfig, TranslatedBlock};
 
@@ -44,7 +44,7 @@ pub enum OverlayCommand {
     Shutdown,
 }
 
-/// Overlay thread → pipeline (picker results).
+/// Events from the overlay thread to the pipeline, such as picker results.
 #[derive(Debug, Clone)]
 pub enum OverlayEvent {
     RegionsCommitted(Vec<NormRect>),

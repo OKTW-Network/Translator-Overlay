@@ -1,4 +1,5 @@
-//! Background pipeline: capture → OCR → stability gate → LLM translate → overlay.
+//! Background pipeline. Frames go from capture to OCR, through the stability gate,
+//! to LLM translation, and then to the overlay.
 
 mod config_apply;
 mod ocr;
@@ -13,8 +14,8 @@ pub use crate::pipeline::worker::{CmdTx, SharedState, spawn_pipeline};
 
 static UI_PING: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
 
-/// Capture a Send ping so the pipeline can wake the UI component.
-/// First call wins; later calls are ignored.
+/// Store a `Send` ping so the pipeline can wake the UI component.
+/// The first call wins, and later calls are ignored.
 pub fn install_ui_ping(tx: std::sync::mpsc::Sender<()>) {
     let _ = UI_PING.set(tx);
 }
@@ -36,35 +37,35 @@ pub enum PipelineCommand {
     PauseCapture,
     ResumeCapture,
     StopCapture,
-    /// Dashboard window combo; wakes the worker so the HUD Start button can enable.
+    /// The Dashboard window combo changed. Wakes the worker so the HUD Start button can turn on.
     SetSelectedWindow,
-    /// Grab one frame and OCR + translate immediately (bypass stability wait).
+    /// Grab one frame, then OCR and translate it right away, skipping the stability wait.
     ManualCapture,
-    /// Drop LLM conversation history (keeps OCR models and translation cache).
+    /// Drop the LLM conversation history. The OCR models and the translation cache stay.
     ResetConversation,
-    /// Drop the session translation cache (keeps conversation history).
+    /// Drop the session translation cache. The conversation history stays.
     ClearTranslationCache,
-    /// Apply a full config snapshot (saved from the settings UI).
+    /// Apply a full config snapshot saved from the settings UI.
     ApplyConfig(Box<AppConfig>),
-    /// Persist and apply overlay / reader visibility without saving the rest of the draft.
+    /// Save and apply the overlay and reader visibility without saving the rest of the draft.
     SetOverlayDisplay {
         enabled: bool,
         reader_enabled: bool,
         hud_enabled: bool,
     },
-    /// Persist the control-window language without saving the rest of the draft.
+    /// Save the control-window language without saving the rest of the draft.
     SetUiLanguage {
         language: UiLanguage,
     },
-    /// Cancel the in-flight translation request (if any).
+    /// Cancel the in-flight translation request, if there is one.
     CancelTranslate,
-    /// Open the on-target region picker (`hwnd` is the capture / selected window).
+    /// Open the region picker over the target. `hwnd` is the captured or selected window.
     BeginRegionSelect {
         hwnd: isize,
     },
     ConfirmRegionSelect,
     ClearRegionSelect,
-    /// Replace session OCR crops (empty = whole window). Not persisted.
+    /// Replace the session's OCR crops. Empty means the whole window. Not saved to disk.
     SetCaptureRegions {
         regions: Vec<NormRect>,
     },

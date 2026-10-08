@@ -1,4 +1,4 @@
-//! PP-OCRv6 model download (GitHub Releases → `models_dir`) and load orchestration.
+//! Download PP-OCRv6 models from GitHub Releases into `models_dir`, then load them.
 
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use crate::{
     models::{ModelArtifact, artifacts_for_tier},
 };
 
-/// Latest download / ORT-load phase (`watch` coalesces to the newest value).
+/// Latest phase of a download and ORT load. The `watch` channel keeps only the newest value.
 #[derive(Clone)]
 pub enum ModelLoadUpdate {
     /// `DownloadingModels` or `LoadingModels`, ready to show as the pipeline status.
@@ -28,10 +28,10 @@ pub struct ModelLoadTask {
 }
 
 impl OcrEngine {
-    /// Download missing models (if needed) then build the ORT session in the background.
+    /// In the background, download any missing models and then build the ORT session.
     ///
-    /// Returns a [`ModelLoadTask`] whose `watch` receiver always holds the latest phase.
-    /// Dropping the receiver ignores the result; the task may still finish in the background.
+    /// The returned [`ModelLoadTask`] has a `watch` receiver that always holds the latest
+    /// phase. Dropping the receiver ignores the result, though the task may still finish.
     pub fn start_load(config: OcrConfig) -> ModelLoadTask {
         let tier = config.model_tier;
         let device = config.device;
@@ -105,7 +105,7 @@ fn missing_artifacts(models_dir: &Path, tier: ModelTier) -> Vec<&'static ModelAr
 
 /// Download one artifact into `models_dir` through a `.part` file.
 ///
-/// HTTPS plus the exact byte length is the integrity check (no hash).
+/// HTTPS and the exact byte length are the only integrity checks. There is no hash.
 async fn download_one(
     client: &reqwest::Client,
     art: &ModelArtifact,

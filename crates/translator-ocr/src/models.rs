@@ -1,7 +1,7 @@
-//! PP-OCRv6 ONNX artifacts (file names + GitHub release sizes/URLs).
+//! PP-OCRv6 ONNX artifacts, with their file names and GitHub release sizes and URLs.
 //!
-//! Missing files are fetched by the app into `models_dir` (see [`crate::download`]).
-//! Load only checks that the files exist; download verifies byte length.
+//! The app fetches missing files into `models_dir` (see [`crate::download`]).
+//! Loading checks only that the files exist. The download checks the byte length.
 
 use std::path::{Path, PathBuf};
 

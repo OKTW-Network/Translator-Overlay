@@ -1,4 +1,4 @@
-//! OCR noise filters: single-token junk and temporal block persistence.
+//! OCR noise filters for single-character junk and for blocks that do not persist.
 
 use std::time::{Duration, Instant};
 
@@ -6,10 +6,10 @@ use translator_core::{OcrBlock, OcrConfig, Rect, normalize_ocr_text};
 
 use crate::reindex;
 
-/// True when `text` is a single ASCII letter or digit (e.g. `"0"`, `"V"`, `"c"`).
+/// True when `text` is a single ASCII letter or digit, such as `"0"`, `"V"`, or `"c"`.
 ///
-/// Icons and HUD glyphs are often misread as one Latin char; real words/CJK stay.
-/// Shape-only (character class), not a vocabulary allow/deny list.
+/// OCR often misreads icons and HUD glyphs as one Latin character. Real words and CJK
+/// text are kept. The check looks only at the character class, not at a word list.
 pub fn is_single_latin_or_digit(text: &str) -> bool {
     let t = text.trim();
     let mut chars = t.chars();
@@ -24,7 +24,7 @@ pub fn filter_single_char_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
     reindex(blocks.into_iter().filter(|b| !is_single_latin_or_digit(&b.text)).collect())
 }
 
-/// Swap a confirmed track to a new OCR reading (text + box together).
+/// Move a track to a new OCR reading, replacing the text and box together.
 fn adopt_reading(track: &mut Track, block: OcrBlock, now: Instant) {
     track.text = block.text.clone();
     track.bbox = block.bbox;
@@ -37,21 +37,21 @@ fn adopt_reading(track: &mut Track, block: OcrBlock, now: Instant) {
 
 /// Tracks per-region text over time and only emits blocks that stay put.
 ///
-/// Fast-changing OCR (animated icons, particle effects) never reaches the
+/// Fast-changing OCR, such as animated icons and particle effects, never reaches the
 /// persistence threshold and is discarded. Static UI text is kept.
 ///
-/// Once a track is confirmed, it keeps being emitted for `max_miss` even if
-/// OCR misses it for a frame or two (common when the background animates).
+/// Once a track is confirmed, it keeps being emitted for `max_miss` even if OCR
+/// misses it for a frame or two, which is common when the background animates.
 ///
-/// If the reading at a spot keeps flipping, force-confirm after `max_unstable`
-/// from first sighting so thrash still reaches translation. Unconfirmed tracks
-/// are retained at least that long (not only `max_miss`) so the force timer
-/// can actually fire.
+/// If the reading at a spot keeps flipping, the track is confirmed anyway once
+/// `max_unstable` has passed since it was first seen, so the text still gets
+/// translated. Unconfirmed tracks are kept at least that long, not only for
+/// `max_miss`, so the force timer can fire.
 #[derive(Debug)]
 pub struct BlockPersistenceFilter {
     persist: Duration,
     max_miss: Duration,
-    /// Force-confirm thrashing tracks after this long. Zero = disabled.
+    /// Confirm thrashing tracks after this long. Zero turns it off.
     max_unstable: Duration,
     tracks: Vec<Track>,
 }
@@ -63,19 +63,19 @@ const QUANT: f32 = 16.0;
 struct Track {
     text: String,
     bbox: Rect,
-    /// Wall clock from first sighting at this spot (not reset on text thrash).
+    /// When the track was first seen at this spot. A text change does not reset it.
     first_seen: Instant,
     first_stable_since: Instant,
     last_seen: Instant,
     /// True once the text has lingered long enough at this spot.
     confirmed: bool,
-    /// Last good sample (used for hysteresis when a frame misses the region).
+    /// Last good sample, emitted again when a frame misses the region.
     last_block: OcrBlock,
-    /// While confirmed, OCR text that differs from the frozen emit (pending adopt).
+    /// OCR text that differs from the frozen emit of a confirmed track, waiting to be adopted.
     pending_text: Option<String>,
-    /// When `pending_text` first appeared (or last changed).
+    /// When `pending_text` last changed.
     pending_since: Option<Instant>,
-    /// When confirmed text first diverged from OCR (continuous thrash clock).
+    /// When the OCR first diverged from the confirmed text. Text changes do not reset it.
     thrash_since: Option<Instant>,
 }
 
@@ -97,10 +97,10 @@ impl BlockPersistenceFilter {
         self.tracks.clear();
     }
 
-    /// How long to keep a track that is not currently confirmed.
+    /// How long a track may go unseen before it is dropped.
     ///
-    /// Must be ≥ `max_unstable` so thrashing regions live long enough to force
-    /// confirm. Confirmed tracks still expire on the shorter `max_miss` grace.
+    /// Unconfirmed tracks stay at least `max_unstable`, so thrashing regions live long
+    /// enough to be force-confirmed. Confirmed tracks expire on the shorter `max_miss`.
     fn track_retain(&self, confirmed: bool) -> Duration {
         if confirmed || self.max_unstable.is_zero() {
             self.max_miss
@@ -111,7 +111,7 @@ impl BlockPersistenceFilter {
 
     /// Update tracks from this frame and return only persistent blocks.
     ///
-    /// When disabled (`block_persist_ms == 0`), returns `blocks` unchanged.
+    /// When the filter is off (`block_persist_ms == 0`), returns `blocks` unchanged.
     pub fn filter(&mut self, blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
         if self.persist.is_zero() {
             return blocks;
@@ -120,9 +120,9 @@ impl BlockPersistenceFilter {
         let now = Instant::now();
         let persist = self.persist;
         let max_unstable = self.max_unstable;
-        // One OCR box per track per frame. Stacked unmerged lines sit inside the
-        // match radius of their neighbors; without this they collapse onto the
-        // last couple of tracks.
+        // Each track takes at most one OCR box per frame. Stacked unmerged lines sit
+        // inside their neighbors' match radius, and without this rule they collapse
+        // onto the last couple of tracks.
         let mut claimed = vec![false; self.tracks.len()];
 
         for block in blocks {
@@ -135,14 +135,14 @@ impl BlockPersistenceFilter {
                 claimed[idx] = true;
                 let track = &mut self.tracks[idx];
                 if normalize_ocr_text(&track.text) == text_key {
-                    // Same region + same text → accumulate persistence.
+                    // Same region and same text, so the track keeps persisting.
                     track.last_seen = now;
                     track.pending_text = None;
                     track.pending_since = None;
                     track.thrash_since = None;
-                    // Once confirmed, freeze the box. Overlay remap already keeps
-                    // the caption box; detector jitter / trailing glyphs must not
-                    // walk it. Unconfirmed tracks still track the latest sample.
+                    // Freeze the box once the track is confirmed. The overlay remap
+                    // already keeps the caption box, and detector jitter or trailing
+                    // glyphs must not move it. Unconfirmed tracks follow the latest sample.
                     if track.confirmed {
                         track.last_block.confidence = block.confidence;
                     } else {
@@ -153,10 +153,11 @@ impl BlockPersistenceFilter {
                         track.confirmed = true;
                     }
                 } else if track.confirmed {
-                    // Confirmed region, different OCR string: keep emitted text
-                    // *and* the last caption box so overlay does not walk to the
-                    // new line (and re-fit font/width) before a real re-translate.
-                    // Adopt text + bbox together after linger or max_unstable.
+                    // A confirmed region read a different string. Keep both the emitted
+                    // text and the last caption box, so the overlay does not jump to the
+                    // new line and refit its font and width before a real re-translate.
+                    // Adopt the new text and box together once the reading lingers or
+                    // max_unstable passes.
                     track.last_seen = now;
                     if track.thrash_since.is_none() {
                         track.thrash_since = Some(now);
@@ -178,7 +179,8 @@ impl BlockPersistenceFilter {
                         adopt_reading(track, block, now);
                     }
                 } else {
-                    // Unconfirmed text flip: restart same-text timer, keep first_seen.
+                    // The text of an unconfirmed track changed. Restart the same-text
+                    // timer but keep first_seen.
                     track.last_seen = now;
                     adopt_reading(track, block, now);
                 }
@@ -202,8 +204,8 @@ impl BlockPersistenceFilter {
             }
         }
 
-        // Emit every confirmed track still within the miss grace window.
-        // Hysteresis: keep showing text even if this frame's OCR missed the box.
+        // Emit every confirmed track still inside the miss grace window, so text stays
+        // up even when this frame's OCR missed its box.
         let max_miss = self.max_miss;
         let mut out: Vec<OcrBlock> = self
             .tracks
@@ -218,8 +220,8 @@ impl BlockPersistenceFilter {
                 .then_with(|| (a.bbox.x as i32).cmp(&(b.bbox.x as i32)))
         });
 
-        // Drop tracks that vanished past their retain window. Unconfirmed thrash
-        // tracks use max(max_miss, max_unstable) so force-confirm can fire.
+        // Drop tracks unseen for longer than their retain window. Unconfirmed tracks
+        // use max(max_miss, max_unstable) so the force-confirm can fire.
         let retain_confirmed = self.track_retain(true);
         let retain_unconfirmed = self.track_retain(false);
         self.tracks.retain(|t| {
@@ -241,8 +243,8 @@ impl BlockPersistenceFilter {
             let (tcx, tcy) = track.bbox.center();
             let dx = (cx - tcx).abs();
             let dy = (cy - tcy).abs();
-            // Match by center proximity (tolerant of OCR box jitter and width
-            // swings when trailing glyphs appear/disappear).
+            // Match on center distance, which tolerates OCR box jitter and the width
+            // swings when trailing glyphs come and go.
             let max_dx = (block.bbox.width.max(track.bbox.width) * 0.65).max(QUANT * 3.0).max(24.0);
             let max_dy = (block.bbox.height.max(track.bbox.height) * 0.90).max(QUANT * 2.5).max(16.0);
             if dx > max_dx || dy > max_dy {
@@ -251,13 +253,13 @@ impl BlockPersistenceFilter {
 
             let same_text = normalize_ocr_text(&track.text) == text_key;
             let iou = block.bbox.iou(track.bbox);
-            // Different text at nearly the same center still matches (OCR thrash
-            // often changes box size enough to tank IoU below 0.2).
+            // Different text at nearly the same center still matches, because OCR
+            // thrash often changes the box size enough to push IoU below 0.2.
             if !same_text && iou < 0.05 && (dx > max_dx * 0.45 || dy > max_dy * 0.45) {
                 continue;
             }
 
-            // Prefer same text; otherwise prefer closer centers.
+            // Prefer the same text, then the closer center.
             let center_score = 1.0 - (dx / max_dx).clamp(0.0, 1.0) * 0.5 - (dy / max_dy).clamp(0.0, 1.0) * 0.5;
             let score = if same_text {
                 iou + 1.0 + center_score
@@ -317,16 +319,16 @@ mod tests {
     #[test]
     fn persistence_drops_flickering_text() {
         let mut f = BlockPersistenceFilter::new(80, 200, 2_000);
-        // Frame 1: icon noise + real text
+        // The first frame has icon noise and real text.
         let out1 = f.filter(vec![block("HP", 10.0, 10.0), block("x#?", 200.0, 50.0)]);
         assert!(out1.is_empty(), "first sight should not emit");
 
-        // Frame 2 soon after: HP stays, noise text changes (animation)
+        // Soon after, "HP" stays and the animated noise text changes.
         std::thread::sleep(Duration::from_millis(40));
         let out2 = f.filter(vec![block("HP", 11.0, 10.0), block("@@", 201.0, 51.0)]);
         assert!(out2.is_empty(), "still under persist window");
 
-        // Frame 3 after persist: only HP remains stable
+        // After the persist window, only "HP" is stable.
         std::thread::sleep(Duration::from_millis(50));
         let out3 = f.filter(vec![block("HP", 10.0, 11.0), block("!!", 199.0, 49.0)]);
         assert_eq!(out3.len(), 1);
@@ -374,7 +376,7 @@ mod tests {
         assert_eq!(confirmed.len(), 1);
         let frozen = confirmed[0].bbox;
 
-        // Same text, different row: overlay remap keeps the caption box anyway.
+        // Same text on a different row. The overlay remap keeps the caption box anyway.
         let moved = block("Menu", 100.0, 220.0);
         let out = f.filter(vec![moved]);
         assert_eq!(out.len(), 1);
@@ -391,7 +393,7 @@ mod tests {
         assert_eq!(confirmed.len(), 1);
         let frozen = confirmed[0].bbox;
 
-        // New line in the same region: wider box, different text.
+        // A new line in the same region, with a wider box and different text.
         let next = block_wh("次の台詞です", 100.0, 200.0, 200.0, 24.0);
         let held = f.filter(vec![next.clone()]);
         assert_eq!(held.len(), 1);
@@ -413,8 +415,8 @@ mod tests {
         assert_eq!(f.filter(vec![block("Menu", 100.0, 200.0)]).len(), 1);
 
         f.reset();
-        // Same text at a scaled position after a capture resize: must not emit
-        // the old-pixel box (or any box) until the track persists again.
+        // The same text at a scaled position after a capture resize must not emit the
+        // old box, or any box, until the track persists again.
         let scaled = f.filter(vec![block("Menu", 150.0, 300.0)]);
         assert!(scaled.is_empty(), "reset must drop confirmed tracks");
     }
@@ -429,7 +431,7 @@ mod tests {
 
     #[test]
     fn thrashing_text_force_confirms_after_max_unstable() {
-        // Persist never settles (same-text window huge); text flips every frame.
+        // The same-text window is huge so persistence never settles, and the text flips every frame.
         let mut f = BlockPersistenceFilter::new(10_000, 500, 80);
         let _ = f.filter(vec![block("hello!", 10.0, 10.0)]);
         assert!(f.filter(vec![block("hello", 11.0, 10.0)]).is_empty());
@@ -442,7 +444,7 @@ mod tests {
 
     #[test]
     fn thrashing_with_bbox_width_swing_still_force_confirms() {
-        // Trailing glyph flicker often changes box width / center a lot.
+        // Trailing glyph flicker often moves the box width and center a lot.
         let mut f = BlockPersistenceFilter::new(10_000, 400, 80);
         let _ = f.filter(vec![block_wh("セリフ", 100.0, 200.0, 80.0, 22.0)]);
         let _ = f.filter(vec![block_wh("セリフ。", 98.0, 199.0, 160.0, 24.0)]);
@@ -455,15 +457,15 @@ mod tests {
 
     #[test]
     fn unconfirmed_track_survives_longer_than_max_miss_for_force() {
-        // max_miss is short; max_unstable is longer — track must live to force.
+        // max_miss is short and max_unstable is longer. The track must live long enough to be forced.
         let mut f = BlockPersistenceFilter::new(10_000, 50, 120);
         let _ = f.filter(vec![block("a!", 10.0, 10.0)]);
         std::thread::sleep(Duration::from_millis(70)); // past max_miss, under max_unstable
-        // Still matched: last_seen updates. Simulate gap then return:
+        // An empty frame leaves the track unseen past max_miss.
         let mid = f.filter(vec![]);
         assert!(mid.is_empty());
         std::thread::sleep(Duration::from_millis(30));
-        // Track retained because unconfirmed retain = max_unstable (120).
+        // The track is still there because unconfirmed tracks are kept for max_unstable (120 ms).
         let _ = f.filter(vec![block("a", 11.0, 10.0)]);
         std::thread::sleep(Duration::from_millis(40));
         let forced = f.filter(vec![block("a?", 10.0, 11.0)]);
@@ -490,9 +492,9 @@ mod tests {
 
     #[test]
     fn stacked_unmerged_lines_do_not_share_a_track() {
-        // Four overlapping dialogue lines (merge off). Matching must be 1:1 per
-        // frame — otherwise later lines steal earlier tracks and only the last
-        // couple survive.
+        // Four overlapping dialogue lines with merging off. Matching must be one to one
+        // per frame. Otherwise later lines steal earlier tracks and only the last couple
+        // survive.
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let lines = vec![
             block_wh("一行目です", 100.0, 200.0, 240.0, 32.0),

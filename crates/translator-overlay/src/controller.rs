@@ -26,7 +26,7 @@ impl OverlayController {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        // HWND + WaitMessage are bound to this OS thread; not a Tokio task.
+        // The HWND and WaitMessage are bound to this OS thread, so this cannot be a Tokio task.
         let join = std::thread::Builder::new()
             .name("overlay".into())
             .spawn(move || match OverlayHost::create(config, event_tx) {
@@ -68,7 +68,7 @@ impl OverlayController {
         self.events.recv().await
     }
 
-    /// Request shutdown and join the overlay thread (also safe if already stopped).
+    /// Request shutdown and join the overlay thread. Safe to call when it already stopped.
     pub async fn shutdown(&mut self) {
         let _ = self.send(OverlayCommand::Shutdown);
         if let Some(join) = self.join.take() {
@@ -90,7 +90,7 @@ impl OverlayController {
 impl Drop for OverlayController {
     fn drop(&mut self) {
         let _ = self.send(OverlayCommand::Shutdown);
-        // Do not join here — Drop may run on a Tokio worker. `shutdown().await` joins.
+        // Do not join here, since Drop may run on a Tokio worker. `shutdown().await` joins.
         let _ = self.join.take();
     }
 }

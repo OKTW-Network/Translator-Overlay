@@ -1,4 +1,4 @@
-//! Root WinUI component: title bar, navigation, page routing.
+//! Root WinUI component with the title bar, navigation, and page routing.
 
 use std::{
     env,

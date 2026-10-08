@@ -16,7 +16,7 @@ use crate::{
 const AUTH_HINT: &str = "Grok CLI is not authenticated. Run `grok login` or set XAI_API_KEY.";
 
 pub fn spawn_args(model: &str, reasoning_effort: Option<&str>, system: &str) -> Vec<String> {
-    // Global flags first: `grok [flags] agent stdio`. Flags after `agent` are rejected.
+    // Global flags go first, as in `grok [flags] agent stdio`. Flags after `agent` are rejected.
     let mut args = vec![
         "--no-subagents".into(),
         "--no-memory".into(),

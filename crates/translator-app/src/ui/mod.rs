@@ -1,4 +1,4 @@
-//! windows-reactor control UI — dashboard + settings (card layout).
+//! Control window UI built with windows-reactor, with a dashboard and card-based settings pages.
 
 mod app;
 mod cards;

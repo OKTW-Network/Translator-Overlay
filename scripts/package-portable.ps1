@@ -1,31 +1,31 @@
 <#
 .SYNOPSIS
-  Build translator-app (release) and pack a portable ZIP (framework-dependent).
+  Build translator-app in release mode and pack it as a portable, framework-dependent ZIP.
 
 .DESCRIPTION
-  Produces dist/TranslatorOverlay-<version>-win-x64.zip containing the files
-  required to run a framework-dependent windows-reactor 0.100 app:
+  Produces dist/TranslatorOverlay-<version>-win-x64.zip with the files that a
+  framework-dependent windows-reactor 0.100 app needs to run.
 
     - translator-app.exe
-    - lib/onnxruntime.dll       (custom ORT with DirectML + WebGPU)
+    - lib/onnxruntime.dll       (custom ORT with DirectML and WebGPU)
     - lib/DirectML.dll          (DirectML EP)
-    - lib/webgpu_dawn.dll       (WebGPU EP / Dawn)
-    - lib/dxcompiler.dll        (Dawn D3D12 shader compiler)
+    - lib/webgpu_dawn.dll       (WebGPU EP, built on Dawn)
+    - lib/dxcompiler.dll        (Dawn's D3D12 shader compiler)
     - lib/dxil.dll              (DXIL validator used with dxcompiler)
 
-  windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
-  Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
-  See: https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
-  Visual C++ Redistributable may also be needed for MSVC CRT DLLs.
+  windows-reactor 0.100 bootstraps WASDK itself, so there is no Bootstrap.dll.
+  Target machines need Windows 11 (build 22000 or later) and Windows App Runtime 2.4,
+  which is available at https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
+  They may also need the Visual C++ Redistributable for the MSVC CRT DLLs.
 
 .PARAMETER SkipBuild
-  Skip `cargo build --release` (use existing target/release artifacts).
+  Skip `cargo build --release` and use the existing target/release artifacts.
 
 .PARAMETER OutDir
-  Staging / output root. Default: <repo>/dist
+  Root folder for staging and output. Defaults to <repo>/dist.
 
 .PARAMETER ZipName
-  Override zip file name (without path). Default: TranslatorOverlay-<ver>-win-x64.zip
+  ZIP file name, without a path. Defaults to TranslatorOverlay-<ver>-win-x64.zip.
 
 .EXAMPLE
   .\scripts\package-portable.ps1
@@ -101,7 +101,7 @@ foreach ($name in $SidecarDlls) {
     }
 }
 
-# Clean stage
+# Start from an empty stage folder.
 if (Test-Path -LiteralPath $StageDir) {
     Remove-Item -LiteralPath $StageDir -Recurse -Force
 }

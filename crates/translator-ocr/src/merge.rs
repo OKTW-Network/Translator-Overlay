@@ -1,23 +1,26 @@
 //! Merge OCR line boxes into paragraph blocks.
 //!
-//! Strategy (tunable via [`LineMergeConfig`]):
-//! 1. **Frame-relative `|gap|`** — vertical vs height, horizontal vs width.
-//! 2. **Same-row first** — nearest-right fragments, then nearest-below (a split
-//!    long line becomes one box before stacking).
-//! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
-//! 4. **Reading order** — row-major or column-major join / emit order.
+//! [`LineMergeConfig`] tunes each step.
+//!
+//! 1. Gaps are measured against the frame. Vertical gaps divide by the frame height
+//!    and horizontal gaps by the frame width.
+//! 2. Fragments on the same row join first, to the nearest one on the right. Then
+//!    lines join to the nearest one below, so a split long line becomes one box
+//!    before it stacks.
+//! 3. With `merge_all`, every line in the crop joins into one block.
+//! 4. Lines join and blocks come out in row-major or column-major reading order.
 
 use translator_core::{LineMergeConfig, LineMergeOrder, OcrBlock, Rect};
 
 use crate::reindex;
 
-/// Scale-free slack for ratio-space compares (`px / frame` or `|d| / larger`).
+/// Scale-free slack for comparing ratios such as `px / frame` or `|d| / larger`.
 const RATIO_EPS: f32 = 1e-5;
 
 /// Merge consecutive line-level OCR boxes that belong to the same paragraph.
 ///
-/// `frame_w` / `frame_h` are the **full capture** size even when `blocks` came
-/// from a crop. `merge_all` joins every remaining line (whole selected region).
+/// `frame_w` and `frame_h` are the full capture size, even when `blocks` came
+/// from a crop. `merge_all` joins every line, for a whole selected region.
 pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
     if !cfg.enabled || blocks.len() <= 1 {
         return reindex(blocks);
@@ -133,7 +136,7 @@ fn find(parent: &mut [usize], mut x: usize) -> usize {
     x
 }
 
-/// Union by rank. Keep the rank: the root decides where a joined row lands in the output,
+/// Union by rank. Keep the rank. The root decides where a joined row lands in the output,
 /// and that order breaks distance ties in the next pass, so another rule changes the merges.
 fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
     let mut ra = find(parent, a);
@@ -177,8 +180,8 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
     }
     conf /= members.len() as f32;
 
-    // One-line-tall anchor so overlay font tracks a single glyph row.
-    // `source_height` is the ink union; overlay uses it as min cover height.
+    // Keep the box one line tall so the overlay sizes its font to a single glyph row.
+    // `source_height` is the ink union, and the overlay never covers less than that.
     let line_h = median_f32(heights);
     let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
     let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
@@ -721,7 +724,7 @@ mod tests {
             line(1, "world", 12.0, 10.0 + 18.0 + 20.0, 90.0, 18.0),
         ];
         let cfg = LineMergeConfig::default();
-        // 20px / 1080 ≈ 0.0185 > 0.015 → no merge; 20px / 2000 = 0.01 < 0.015 → merge.
+        // 20 px / 1080 ≈ 0.0185 is over 0.015, so no merge. 20 px / 2000 = 0.01 is under, so they merge.
         let tall = merge_line_blocks_with(blocks.clone(), &cfg, 1920, 2000, false);
         let short = merge_line_blocks_with(blocks, &cfg, 1920, 1080, false);
         assert_eq!(tall.len(), 1, "larger frame makes 20px a small relative gap");

@@ -1,14 +1,13 @@
-//! Out-of-process target resize via `SetWinEventHook`.
+//! Watch an out-of-process target for resizes with `SetWinEventHook`.
 //!
-//! Interactive drag uses `EVENT_SYSTEM_MOVESIZESTART` / `END` — pause frame
-//! publish for the whole loop, and restart WGC only when the user releases if
-//! the size changed. Maximize / snap / `SetWindowPos` do not enter that loop;
-//! those go through `EVENT_OBJECT_LOCATIONCHANGE` and restart as soon as the
-//! size changes.
+//! An interactive drag sends `EVENT_SYSTEM_MOVESIZESTART` and `EVENT_SYSTEM_MOVESIZEEND`.
+//! Frame publishing pauses for the whole drag, and WGC restarts on release only if the
+//! size changed. Maximize, snap, and `SetWindowPos` skip that loop. They arrive as
+//! `EVENT_OBJECT_LOCATIONCHANGE` and restart capture as soon as the size changes.
 //!
 //! The capture session has no Win32 message pump, so the hooks live on a
-//! dedicated thread. One session / process — the callback reads process-wide
-//! atomics.
+//! dedicated thread. There is one session per process, so the callback reads
+//! process-wide atomics.
 
 use std::{
     sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
@@ -43,7 +42,7 @@ pub(crate) struct ResizeWatch {
 impl ResizeWatch {
     pub(crate) fn new() -> Self {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        // SetWinEventHook callbacks run on this thread; needs GetMessageW.
+        // SetWinEventHook callbacks run on this thread, which needs a GetMessageW loop.
         let join = std::thread::Builder::new()
             .name("capture-resize".into())
             .spawn(move || hook_thread(ready_tx))

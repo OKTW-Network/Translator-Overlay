@@ -1,4 +1,4 @@
-//! Runtime application / pipeline state.
+//! Runtime state shared by the app and the pipeline.
 
 use std::collections::VecDeque;
 
@@ -19,7 +19,7 @@ pub enum PipelineStatus {
     WaitingForStable {
         elapsed_ms: u64,
     },
-    /// App-owned model download (GitHub → `models_dir`); UI stays operable.
+    /// The app is downloading models from GitHub into `models_dir`. The UI stays usable.
     DownloadingModels {
         file: String,
         /// 1-based index among files being fetched this run.
@@ -30,12 +30,12 @@ pub enum PipelineStatus {
     /// Building the ONNX Runtime session after files are on disk.
     LoadingModels,
     Translating,
-    /// Auto-retry after a transient translate API / network / CLI error.
+    /// Automatic retry after a transient API, network, or CLI error.
     RetryingTranslate {
         /// 1-based retry about to run.
         attempt: u32,
         max_retries: u32,
-        /// Display of the error that triggered this retry.
+        /// The error that triggered this retry, as shown to the user.
         message: String,
     },
     /// In-flight translation was aborted by the user.
@@ -101,32 +101,33 @@ pub struct AppState {
     pub target_hwnd: Option<isize>,
     pub preview: PreviewInfo,
     pub auto_running: bool,
-    /// Auto OCR loop is frozen; session and last captions stay until resume / stop.
+    /// The auto OCR loop is frozen. The session and the last captions stay until resume or stop.
     pub capture_paused: bool,
-    /// Last window chosen on the Dashboard (HUD Start uses this when idle).
+    /// Last window chosen on the Dashboard. HUD Start uses it when idle.
     pub selected_hwnd: Option<isize>,
     pub selected_title: Option<String>,
-    /// Start/Stop locked while Stop waits for CLI session close.
+    /// Start and Stop stay disabled while Stop waits for the CLI session to close.
     pub capture_busy: bool,
-    /// True while an LLM request is in flight (cancellable).
+    /// True while a cancellable LLM request is in flight.
     pub translate_in_flight: bool,
     /// Last error message (kept after status changes so the UI can show it).
     pub last_error: Option<String>,
-    /// Settings last saved successfully (shown in UI).
+    /// Set after a successful settings save. The UI shows it.
     pub settings_message: Option<String>,
-    /// Wall-clock duration of the last OCR inference (ms), if any.
+    /// Wall-clock time of the last OCR inference in ms, if any.
     pub last_ocr_ms: Option<u64>,
-    /// Number of text blocks from the last OCR pass (pre-merge raw or durable).
+    /// Number of text blocks the last OCR inference returned.
     pub last_ocr_block_count: u32,
-    /// Session OCR crops (normalized client rects). Empty = whole window.
+    /// OCR crops for this session, as normalized client rects. Empty means the whole window.
     pub ocr_regions: Vec<NormRect>,
     /// True while the on-target region picker is open.
     pub region_select_active: bool,
-    /// Working copy while picking (for Dashboard count / preview outlines).
+    /// The picker's working copy, used for the Dashboard count and the preview outlines.
     pub region_select_draft: Vec<NormRect>,
     /// Unique source strings currently in the session translation cache.
     pub translation_cache_len: usize,
-    /// True after a translate failure until a translate succeeds (one flash per streak).
+    /// Set by a translate failure and cleared by the next success, so a failure streak
+    /// flashes the taskbar once.
     pub attention_sent: bool,
     next_history_id: u64,
 }
@@ -142,10 +143,10 @@ impl AppState {
         self.status = PipelineStatus::Error { message };
     }
 
-    /// Restore a non-error operational status from current flags / overlay content.
+    /// Restore a non-error status from the current flags and overlay content.
     ///
-    /// Shared by config save, conversation reset, and similar UI-side recoveries
-    /// so status rules stay in one place.
+    /// Config save, conversation reset, and other UI-side recoveries all call this,
+    /// so the status rules live in one place.
     pub fn restore_operational_status(&mut self) {
         if self.capture_paused {
             self.status = PipelineStatus::Paused;

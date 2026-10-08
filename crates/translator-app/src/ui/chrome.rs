@@ -1,4 +1,4 @@
-//! Window chrome: status, Start/Stop, sticky Save bar, settings page shell.
+//! Window chrome, covering the status, Start and Stop, the sticky Save bar, and the settings page shell.
 
 use std::{borrow::Cow, sync::Arc};
 
@@ -23,7 +23,7 @@ use crate::{
     },
 };
 
-/// Pipeline InfoBar for the Dashboard only. Always open (Informational when idle).
+/// Pipeline InfoBar for the Dashboard. It is always open, and it is Informational when idle.
 pub fn status_infobar(snap: &ChromeSnap) -> InfoBar {
     let status_label = status_text(&snap.status);
     let target = snap.target.as_deref().map(Cow::Borrowed).unwrap_or_else(|| t!("target.none"));
@@ -45,7 +45,7 @@ pub fn status_infobar(snap: &ChromeSnap) -> InfoBar {
         .is_closable(false)
 }
 
-/// Compact title-bar status: pipeline label and target window only.
+/// Compact title-bar status that shows only the pipeline label and the target window.
 pub fn app_status_strip(snap: &ChromeSnap) -> TextBlock {
     TextBlock::new()
         .text(format!("{}  ·  {}", status_text(&snap.status), snap.target.as_deref().unwrap_or(&t!("target.none"))))
@@ -59,7 +59,7 @@ pub fn app_status_strip(snap: &ChromeSnap) -> TextBlock {
         .vertical_alignment(VerticalAlignment::Center)
 }
 
-/// Language combo for `TitleBar` `RightHeader` (fixed next to caption buttons).
+/// Language combo for the `TitleBar` `RightHeader`, next to the caption buttons.
 pub fn ui_language_combo(shared: &Arc<Mutex<UiShared>>, bump: &LocalSender<AppMsg>) -> View {
     let selected = {
         let ui = shared.lock();
@@ -90,8 +90,8 @@ pub fn ui_language_combo(shared: &Arc<Mutex<UiShared>>, bump: &LocalSender<AppMs
         .into()
 }
 
-/// Start/Pause (same slot) plus Stop above it in the NavigationView pane footer.
-/// Style setters do not re-run; remount via `key` when Accent/Subtle or compact geometry change.
+/// Start/Pause button, with Stop above it, for the NavigationView pane footer. Start and Pause share one slot.
+/// Style setters do not run again, so a new `key` remounts them when the Accent or Subtle style or the compact size changes.
 pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &LocalSender<AppMsg>, pane_open: bool) -> View {
     let cx = UiCx::new(shared, bump);
     let has_window = snap.selected_hwnd.is_some();
@@ -134,6 +134,7 @@ pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSna
         if pane_open { "wide" } else { "compact" },
         if stop_enabled { "stop-on" } else { "stop-off" },
     );
+    // NavigationViewItemOnLeftMinHeight and NavigationViewItemOnLeftIconBoxHeight
     const NAV_ITEM_HEIGHT: f64 = 36.0;
     const NAV_ICON_BOX: f64 = 40.0;
     const NAV_GLYPH: f64 = 16.0;
@@ -270,7 +271,7 @@ pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSna
     ])
 }
 
-/// Shared Save / Reload / Discard bar for settings pages.
+/// Save, Reload, and Discard bar shared by the settings pages.
 pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
     let dirty = snap.settings_dirty;
@@ -380,7 +381,7 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: 
     ))
 }
 
-/// Sticky top bar: page title + Save actions (outside scroll).
+/// Sticky top bar with the page title and Save actions, outside the scroll area.
 pub fn settings_sticky_chrome(title: &str, shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let title_el = TextBlock::new().text(title).font_size(28.0).font_weight(FontWeight::BOLD);
 
@@ -466,7 +467,7 @@ pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
     }
 }
 
-/// Standard settings page body (cards only).
+/// Standard settings page body, made of cards only.
 pub fn settings_page_shell(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &LocalSender<AppMsg>, body: impl Into<View>) -> View {
     StackPanel::new()
         .spacing(12.0)

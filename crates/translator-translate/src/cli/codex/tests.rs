@@ -558,8 +558,8 @@ command = {}
         assert!(!hook_marker.exists(), "hook or notify executed");
         assert_eq!(parse_translation_blocks(&result.unwrap()).unwrap(), vec![(0, "測試".into())]);
         println!("synthetic context: unwanted markers absent; MCP/hooks did not execute; allowed override present={allow_override}");
-        // 0.154.0 always advertises apply_patch; its feature flag is retired. The read-only
-        // sandbox and rejection of active item events remain necessary even with tools disabled.
+        // 0.154.0 always advertises apply_patch, and its feature flag is gone. The read-only
+        // sandbox and the rejection of active item events are still needed with tools off.
         let names: Vec<_> = body["tools"]
             .as_array()
             .unwrap()

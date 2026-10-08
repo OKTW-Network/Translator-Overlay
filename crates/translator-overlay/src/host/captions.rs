@@ -25,7 +25,7 @@ impl OverlayHost {
         let bg = draw::Rgba::from_argb(self.config.background_color_argb);
         let fg = draw::Rgba::from_argb(self.config.text_color_argb);
 
-        // Layout first (needs GDI measure / font) before borrowing DIB pixels.
+        // Lay out first, since that needs GDI measuring and fonts, before borrowing the DIB pixels.
         let content_w = self.content_w;
         let content_h = self.content_h;
         let pending: Vec<(SurfaceRect, String, u32, i32)> = self
@@ -71,13 +71,14 @@ impl OverlayHost {
         Ok(())
     }
 
-    /// Pick CreateFont height so the GDI cell fits inside the OCR glyph box.
+    /// Pick a CreateFont height so the GDI cell fits inside the OCR glyph box.
     ///
-    /// Fixed ratios still overshoot (Segoe UI cell > requested height; vertical
-    /// OCR width is padded). Shrink until ascent+descent ≤ ~90% of short side.
+    /// Fixed ratios still overshoot, because the Segoe UI cell is taller than the
+    /// requested height and vertical OCR boxes are padded. Shrink until ascent plus
+    /// descent is at most about 90% of the box's short side.
     fn fit_font_to_source_box(&mut self, base: SurfaceRect) -> Result<i32, OverlayError> {
         let target = base.w.min(base.h).max(1);
-        // Leave a little air so ClearType stems don't look larger than source ink.
+        // Leave a little air so ClearType stems do not look larger than the source ink.
         let max_cell = ((target as f32) * 0.90).round().max(8.0) as i32;
         let mut px = draw::font_height_for(base);
 
@@ -105,11 +106,11 @@ impl OverlayHost {
 
     /// Layout one overlay label.
     ///
-    /// - Merged paragraph (`source_lines > 1`): lock width to OCR column; wrap.
-    /// - Single line: shrink font (down to ~70%) to fit source width, then allow
-    ///   width growth up to 1.75x if the translation is still longer.
-    /// - Height is at least `source_span_h` so a short translation still covers
-    ///   every original line.
+    /// A merged paragraph (`source_lines > 1`) keeps the OCR column width and wraps.
+    /// A single line shrinks its font, down to about 70%, to fit the source width.
+    /// If the translation is still longer, the box grows up to 1.75 times as wide.
+    /// The height is at least `source_span_h`, so a short translation still covers
+    /// every original line.
     fn layout_label(
         &mut self,
         base: SurfaceRect,
@@ -124,7 +125,7 @@ impl OverlayHost {
         let min_h = source_span_h.max(base.h);
 
         if source_lines <= 1 {
-            // 1) Shrink font so the translation can stay one line inside source_w.
+            // First shrink the font so the translation fits on one line inside source_w.
             let min_font = ((font_px as f32) * 0.70).round().max(8.0) as i32;
             loop {
                 let pad = label_pad(font_px);
@@ -136,7 +137,7 @@ impl OverlayHost {
                 font_px = (font_px - 1).max(min_font);
             }
 
-            // 2) If still wider than source at min font, grow width (cap 1.75×).
+            // If it is still wider than the source at the smallest font, grow the box up to 1.75 times.
             let pad = label_pad(font_px);
             let natural = self.measure_single_line(text, font_px)?;
             let need_w = (natural.0 + pad * 2).max(1);
@@ -147,13 +148,13 @@ impl OverlayHost {
                 need_w.min(expand_cap).min(max_w).max(source_w)
             };
 
-            // Stay one line so the caption cannot cover the OCR line below.
-            // Wrapping then clipping the rect is what chopped glyphs.
+            // Stay on one line so the caption cannot cover the OCR line below.
+            // Wrapping and then clipping the rect used to cut glyphs off.
             let box_h = (natural.1 + pad * 2).max(font_px + pad * 2).max(min_h);
             return Ok((place_label(base, box_w, box_h, surface), font_px));
         }
 
-        // Multi-line source: keep OCR column width; wrap height only.
+        // A multi-line source keeps the OCR column width, and only the height follows the wrap.
         let pad = label_pad(font_px);
         let box_w = source_w;
         let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
@@ -161,7 +162,7 @@ impl OverlayHost {
         Ok((place_label(base, box_w, box_h, surface), font_px))
     }
 
-    /// Unwrapped single-line extent (width, height) in pixels.
+    /// Width and height in pixels of the text on one unwrapped line.
     fn measure_single_line(&mut self, text: &str, font_px: i32) -> Result<(i32, i32), OverlayError> {
         self.ensure_font(font_px)?;
         let hdc = self.surface.hdc();

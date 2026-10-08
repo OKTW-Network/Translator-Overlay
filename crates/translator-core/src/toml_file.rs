@@ -1,4 +1,4 @@
-//! Shared TOML load/save for sidecar files next to the executable.
+//! TOML load and save for the files kept next to the executable.
 
 use std::path::{Path, PathBuf};
 

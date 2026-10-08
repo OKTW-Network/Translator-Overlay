@@ -29,11 +29,11 @@ function Test-Staged {
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $OutDir = Join-Path $Root "third_party\onnxruntime-win-x64"
 $SourceDir = Join-Path $Root "third_party\onnxruntime-src"
-# ORT 1.30 Dawn checks DXC out at third_party/directx-shader-compiler/src
-# (1.28 used third_party/dxc). That extra path under GHA
+# In ORT 1.30, Dawn checks DXC out at third_party/directx-shader-compiler/src,
+# where 1.28 used third_party/dxc. On GitHub Actions the longer path under
 # D:\a\Translator-Overlay\Translator-Overlay\... overflows MAX_PATH, so
-# utils/llvm-build/llvm-build is missing and CMake reports ENOENT.
-# RUNNER_TEMP is D:\a\_temp on GHA; local keeps the in-tree build dir.
+# utils/llvm-build/llvm-build goes missing and CMake reports ENOENT.
+# GitHub Actions sets RUNNER_TEMP to D:\a\_temp. Local builds keep the in-tree build dir.
 if ($env:RUNNER_TEMP) {
     $BuildDir = Join-Path $env:RUNNER_TEMP "ort-build"
 } else {
@@ -63,7 +63,7 @@ if (-not (Test-Path -LiteralPath $SourceDir)) {
 Push-Location -LiteralPath $SourceDir
 try {
     git config core.longpaths true
-    # Dawn's nested DXC clone is a separate repo; inherit longpaths via env.
+    # Dawn's nested DXC clone is a separate repo, so pass core.longpaths through the environment.
     $env:GIT_CONFIG_COUNT = "1"
     $env:GIT_CONFIG_KEY_0 = "core.longpaths"
     $env:GIT_CONFIG_VALUE_0 = "true"
@@ -86,8 +86,9 @@ try {
         throw "git submodule update failed with exit code $LASTEXITCODE"
     }
 
-    # Dawn's DXC FindD3D12 reads WIN10_SDK_PATH from the registry; the 64-bit
+    # Dawn's DXC FindD3D12 reads WIN10_SDK_PATH from the registry, but the 64-bit
     # KitsRoot10 (Program Files\Windows Kits\10) often has no um\d3d12.h.
+    # Point it at the Program Files (x86) kit that has the header.
     $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
     if (Test-Path -LiteralPath (Join-Path $kits "Include")) {
         $sdkVer = Get-ChildItem -LiteralPath (Join-Path $kits "Include") -Directory |
@@ -107,7 +108,7 @@ try {
     $stagedVersion = Get-Content -LiteralPath (Join-Path $OutDir "VERSION") -ErrorAction SilentlyContinue
     $versionChanged = $switchTag -or (($null -ne $stagedVersion) -and ($stagedVersion -ne $OrtTag))
     if ($Force -or $versionChanged) {
-        # Leftover CMake/Dawn files from another ORT tag (or generator) misconfigure the next build.
+        # Leftover CMake and Dawn files from another ORT tag or generator break the next configure.
         foreach ($buildRoot in @($BuildDir, (Join-Path $SourceDir "build"))) {
             if (Test-Path -LiteralPath $buildRoot) {
                 Write-Host "==> Cleaning $buildRoot"
@@ -117,7 +118,7 @@ try {
     }
 
     Write-Host "==> Building ONNX Runtime (DirectML + WebGPU)..."
-    # Flags match pykeio/ort-artifacts Windows WebGPU (ORT 1.30 option names).
+    # These flags match the Windows WebGPU build in pykeio/ort-artifacts, with ORT 1.30 option names.
     $buildArgs = @(
         "--config", "Release",
         "--parallel",

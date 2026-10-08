@@ -1,4 +1,4 @@
-//! Translation client: OpenAI-compatible HTTP or long-lived Grok/OpenCode/Codex/Claude Code CLI sessions.
+//! Translation client over OpenAI-compatible HTTP or long-lived Grok, OpenCode, Codex, or Claude Code CLI sessions.
 
 mod cache;
 mod cli;
@@ -54,7 +54,7 @@ impl TranslateError {
         matches!(self, Self::Cancelled)
     }
 
-    /// Whether a retry might help (network / 5xx / timeout — not auth / cancel).
+    /// Whether a retry might help. Network errors, 5xx, and timeouts qualify. Auth errors and cancels do not.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
@@ -66,7 +66,7 @@ impl TranslateError {
     }
 }
 
-/// True when another attempt should run after `attempt` (0-based completed tries).
+/// True when another attempt should run after `attempt`, the 0-based count of completed tries.
 pub fn should_retry(error: &TranslateError, attempt: u32, max_retries: u32) -> bool {
     error.is_retryable() && attempt < max_retries
 }
@@ -78,7 +78,7 @@ fn new_session_id() -> String {
     format!("{nanos:x}-{n:x}-{}", std::process::id())
 }
 
-/// Model output: assistant text plus Responses items to replay on the next turn.
+/// Model output, made of the assistant text and the Responses items to replay on the next turn.
 #[derive(Debug, Clone)]
 pub struct Completion {
     pub text: String,
@@ -87,13 +87,13 @@ pub struct Completion {
 
 /// In-memory multi-turn conversation reused across translations.
 ///
-/// `items` is the source of truth (authored messages + Responses output). Chat Completions / CLI
-/// use [`Self::messages`], which drops pass-through output items.
+/// `items` is the source of truth, holding authored messages and Responses output. Chat Completions
+/// and the CLI backends use [`Self::messages`], which drops the passed-through output items.
 #[derive(Debug, Clone)]
 pub struct Conversation {
     pub items: Vec<ResponseItem>,
-    /// Client-generated id sent as `x-grok-conv-id` / `prompt_cache_key`.
-    /// Stable for the conversation lifetime; new id only on [`Self::clear`].
+    /// Client-generated id sent as `x-grok-conv-id` and `prompt_cache_key`.
+    /// It lasts for the whole conversation and changes only on [`Self::clear`].
     pub session_id: String,
 }
 
@@ -149,7 +149,7 @@ impl Conversation {
         self.items.push(ResponseItem::message("user", content));
     }
 
-    /// Append a successful model turn. `replay_items` (Responses) replace a plain assistant message on the tape.
+    /// Append a successful model turn. Responses `replay_items` take the place of a plain assistant message.
     pub fn commit_completion(&mut self, completion: &Completion) {
         if completion.replay_items.is_empty() {
             self.items.push(ResponseItem::message("assistant", &completion.text));
@@ -158,14 +158,14 @@ impl Conversation {
         }
     }
 
-    /// Drop all messages (e.g. new capture target) and mint a new session id.
+    /// Drop all messages, as for a new capture target, and create a new session id.
     pub fn clear(&mut self) {
         self.items.clear();
         self.session_id = new_session_id();
     }
 
-    /// When turn count reaches `max_turns`, keep only the system message plus
-    /// the last `history_max_items` user turns (with their reasoning/assistant items).
+    /// When the turn count reaches `max_turns`, keep only the system message and the
+    /// last `history_max_items` user turns, along with their reasoning and assistant items.
     pub fn compress_if_needed(&mut self, max_turns: usize, history_max_items: usize) {
         if self.turn_count() < max_turns {
             return;
@@ -188,8 +188,8 @@ impl Conversation {
         self.items.drain(usize::from(sys)..from);
     }
 
-    /// Compress + system prompt + user payload for a new translate request.
-    /// Returns a snapshot used by the HTTP/CLI job; the live conversation stays on the caller.
+    /// Compress the history and add the system prompt and user payload for a new translate request.
+    /// Returns a snapshot for the HTTP or CLI job. The live conversation stays with the caller.
     pub fn begin_translate_request(&mut self, translation_cfg: &TranslationConfig, blocks: &[OcrBlock]) -> Self {
         self.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
         self.ensure_system(default_system_prompt(translation_cfg));
@@ -205,7 +205,7 @@ impl Conversation {
     }
 }
 
-/// Build default system prompt for structured block translation.
+/// Build the default system prompt for structured block translation.
 pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
     if let Some(custom) = &cfg.system_prompt {
         return custom.clone();
@@ -271,7 +271,7 @@ struct TranslationResponse {
     b: Vec<(serde_json::Value, serde_json::Value)>,
 }
 
-/// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
+/// Merge the LLM's JSON output with the original OCR blocks, and report which ids the model returned.
 pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
     let parsed = parse_translation_blocks(response_json)?;
     let model_ids: HashSet<u32> = parsed.iter().map(|(id, _)| *id).collect();
@@ -296,7 +296,7 @@ pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<Me
     Ok(MergeOutcome { blocks, model_ids })
 }
 
-/// Parsed model translations plus the ids present in the JSON (not fallbacks).
+/// Parsed model translations, plus the ids that were present in the JSON rather than filled in.
 #[derive(Debug, Clone)]
 pub struct MergeOutcome {
     pub blocks: Vec<TranslatedBlock>,
@@ -438,7 +438,7 @@ fn parse_u32_prefix(s: &str) -> Option<(u32, &str)> {
     Some((id, &s[n..]))
 }
 
-/// JSON number token; `None` rest = still growing at end of buffer.
+/// JSON number token. A `None` rest means the number may still grow at the end of the buffer.
 fn parse_json_number_prefix(s: &str) -> Option<(String, Option<&str>)> {
     let body = s.strip_prefix('-').unwrap_or(s);
     let int_digits = body.bytes().take_while(u8::is_ascii_digit).count();
@@ -464,7 +464,7 @@ fn parse_json_number_prefix(s: &str) -> Option<(String, Option<&str>)> {
     }
 }
 
-/// `(unescaped, Some(rest))` when the string closed; `None` rest = still open.
+/// Returns `(unescaped, Some(rest))` when the string closed. A `None` rest means it is still open.
 fn parse_json_string_prefix(s: &str) -> Option<(String, Option<&str>)> {
     let bytes = s.as_bytes();
     if bytes.first().copied() != Some(b'"') {
@@ -490,13 +490,13 @@ fn parse_json_string_prefix(s: &str) -> Option<(String, Option<&str>)> {
         }
         i += 1;
     }
-    // Still open: close it to unescape what has arrived. A `\u` escape cut mid-way stays raw.
+    // The string is still open. Close it to unescape what has arrived. A `\u` escape cut off midway stays raw.
     let open = &s[..bytes.len() - usize::from(escape)];
     let text = serde_json::from_str(&format!("{open}\"")).unwrap_or_else(|_| open[1..].to_string());
     Some((text, None))
 }
 
-/// Fence-strip plus balanced `{...}` extraction (ignore prose around JSON).
+/// Candidate JSON texts. Strips code fences and pulls out a balanced `{...}` so prose around the JSON is ignored.
 fn json_parse_candidates(raw: &str) -> Vec<String> {
     let trimmed = raw.trim().trim_start_matches('\u{feff}');
     let unfenced = strip_markdown_fence(trimmed);
@@ -508,10 +508,10 @@ fn json_parse_candidates(raw: &str) -> Vec<String> {
         }
     };
 
-    // 1) Whole string as-is (after fence strip).
+    // First, the whole string after stripping fences.
     push(&mut out, unfenced.clone());
 
-    // 2) Balanced `{...}` extraction (ignore prose around JSON).
+    // Then, the first balanced `{...}`, which skips prose around the JSON.
     if let Some(obj) = first_json_object(&unfenced) {
         push(&mut out, obj.to_string());
     }
@@ -602,8 +602,8 @@ impl TranslateClient {
     }
 
     pub fn update_config(&mut self, config: ApiConfig) {
-        // The idle timeout lives inside the client. Keep the client otherwise so its connection
-        // pool survives; the pipeline calls this before every translation.
+        // The idle timeout lives inside the client. Otherwise keep the client so its connection
+        // pool survives, since the pipeline calls this before every translation.
         if self.config.request_timeout_secs != config.request_timeout_secs {
             self.http = build_http_client(&config);
         }
@@ -619,7 +619,7 @@ impl TranslateClient {
         }
     }
 
-    /// Drop the long-lived Grok/OpenCode/Codex session (Reset / new capture target).
+    /// Drop the long-lived CLI session, on Reset or for a new capture target.
     pub fn reset_session(&self) {
         self.cli.epoch.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut backend) = self.cli.backend.try_lock() {
@@ -627,7 +627,7 @@ impl TranslateClient {
         }
     }
 
-    /// Stop / app exit: wait for an in-flight turn, then close and delete persisted CLI state.
+    /// On Stop or app exit, wait for an in-flight turn, then close and delete the saved CLI state.
     pub async fn close_session(&self) {
         self.cli.epoch.fetch_add(1, Ordering::SeqCst);
         let mut backend = self.cli.backend.lock().await;
@@ -772,7 +772,7 @@ impl TranslateClient {
 
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Fetch available model ids for the current provider (HTTP `/models` or a short-lived CLI session).
+/// Fetch the model ids for the current provider from HTTP `/models` or a short-lived CLI session.
 pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<Vec<String>, TranslateError> {
     if cancel.is_cancelled() {
         return Err(TranslateError::Cancelled);
@@ -793,7 +793,7 @@ fn build_http_client(config: &ApiConfig) -> reqwest::Client {
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
-/// Join translated block texts for UI / history.
+/// Join translated block texts for the UI and the history.
 pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
     blocks.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>().join("\n")
 }
@@ -845,7 +845,7 @@ mod tests {
         }
         assert_eq!(conv.turn_count(), 5);
         conv.compress_if_needed(5, 2);
-        // system + 2 pairs (4 messages) = 5
+        // The system message plus 2 pairs (4 messages) makes 5.
         let messages = conv.messages();
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, "system");

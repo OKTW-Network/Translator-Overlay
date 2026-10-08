@@ -12,13 +12,13 @@ pub struct Rgb8Crop {
     pub rgb: Vec<u8>,
 }
 
-/// Smallest crop we will send to the detector (px).
+/// Smallest crop side in pixels that is sent to the detector.
 pub const MIN_CROP_PX: u32 = 8;
 
-/// Crop `rgba` to `rect` (capture-pixel space) and drop alpha in one pass.
+/// Crop `rgba` to `rect`, given in capture pixels, and drop alpha in the same pass.
 ///
-/// OCR detection/recognition wants RGB8; cropping straight to RGB8 avoids a
-/// separate full-crop RGBA buffer plus a second conversion pass.
+/// OCR detection and recognition take RGB8. Cropping straight to RGB8 avoids a
+/// separate RGBA crop buffer and a second conversion pass.
 pub fn crop_to_rgb8(width: u32, height: u32, rgba: &[u8], rect: Rect) -> Option<Rgb8Crop> {
     if width == 0 || height == 0 {
         return None;
@@ -72,7 +72,7 @@ mod tests {
         let w = 16u32;
         let h = 16u32;
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        // Unique pixel at (5, 3)
+        // A unique pixel at (5, 3).
         let i = (3 * w + 5) as usize * 4;
         rgba[i] = 9;
         rgba[i + 1] = 8;
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(crop.y, 2);
         assert_eq!(crop.width, 8);
         assert_eq!(crop.height, 8);
-        // source (5, 3) → crop-local (1, 1) in an 8-wide crop, 3 bytes/px
+        // Source (5, 3) lands at (1, 1) in the 8-wide crop, at 3 bytes per pixel.
         let dest = (8 + 1) * 3;
         assert_eq!(&crop.rgb[dest..dest + 3], &[9, 8, 7]);
     }

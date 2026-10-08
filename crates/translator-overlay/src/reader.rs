@@ -1,4 +1,4 @@
-//! Borderless layered translation window (same paint path as overlay labels).
+//! Borderless layered translation window. It paints with the same code as the overlay labels.
 
 use std::mem::size_of;
 
@@ -76,8 +76,8 @@ impl ReaderWindow {
         };
         let atom = unsafe { RegisterClassExW(&wc) };
 
-        // CW_USEDEFAULT is ignored for WS_POPUP (the window lands at 0,0).
-        // Create overlapped so the window manager can cascade, then drop chrome.
+        // WS_POPUP ignores CW_USEDEFAULT and puts the window at (0, 0). Create it
+        // overlapped so the window manager cascades it, then remove the frame.
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,

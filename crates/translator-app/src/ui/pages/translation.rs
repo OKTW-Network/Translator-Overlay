@@ -1,4 +1,4 @@
-//! Translation settings: languages, history, cache, and system prompt.
+//! Translation settings for languages, history, the cache, and the system prompt.
 
 use std::sync::Arc;
 

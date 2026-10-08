@@ -1,4 +1,4 @@
-//! Settings card layout: section labels and header/control rows.
+//! Settings card layout, with section labels and rows of a header and a control.
 
 use windows_reactor::{
     AutomationExt, Border, ChildrenControl, ContentControl, FontWeight, Grid, GridChildExt, GridLength, HorizontalAlignment, LayoutControl,
@@ -36,7 +36,7 @@ pub fn section_header(title: impl Into<String>) -> TextBlock {
         .margin(Thickness::new(0.0, 12.0, 0.0, 4.0))
 }
 
-/// Label for a cluster of cards inside a section (not a peer of [`section_header`]).
+/// Label for a group of cards inside a section. It sits below [`section_header`], not beside it.
 pub fn subsection_header(title: impl Into<String>) -> TextBlock {
     TextBlock::new()
         .text(title)
@@ -71,12 +71,12 @@ fn settings_row_body(header: impl Into<String>, description: Option<&str>, contr
         ))
 }
 
-/// Standalone settings card: Header + Description on the left, control flush-right.
+/// Standalone settings card with the header and description on the left and the control aligned right.
 pub fn settings_card(key: &str, header: impl Into<String>, description: Option<&str>, control: impl Into<View>) -> View {
     settings_card_with_below(key, header, description, control, None)
 }
 
-/// [`settings_card`] with optional extra content under the header/control row.
+/// [`settings_card`] with optional extra content under the header and control row.
 pub fn settings_card_with_below(
     key: &str,
     header: impl Into<String>,
@@ -102,7 +102,7 @@ pub fn settings_card_with_below(
         .content(content)
 }
 
-/// Card with header/description on top and full-width content below (sliders, multiline).
+/// Card with the header and description on top and full-width content below, such as sliders or multiline text.
 pub fn settings_card_stack(key: &str, header: impl Into<String>, description: Option<&str>, content: impl Into<View>) -> View {
     let head = labeled_stack(TextBlock::new().text(header).font_weight(FontWeight::SEMI_BOLD).font_size(14.0), description);
 
