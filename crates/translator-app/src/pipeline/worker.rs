@@ -8,12 +8,12 @@ use std::{
 use bytes::Bytes;
 use parking_lot::RwLock;
 use rust_i18n::t;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
-use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
+use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{HudPrimary, HudSnapshot, OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
@@ -44,13 +44,6 @@ pub(crate) struct InflightTranslate {
     pub cached_hits: Vec<Option<String>>,
     /// Overlay at job start (cache-hit preview or last committed page). Restored on retry / fail.
     pub revert_blocks: Vec<TranslatedBlock>,
-}
-
-/// Background OCR model download + ORT session build (`watch` = latest phase only).
-pub(crate) struct InflightModelLoad {
-    pub rx: watch::Receiver<ModelLoadUpdate>,
-    pub tier: ModelTier,
-    pub device: OcrDevice,
 }
 
 #[derive(Clone)]
@@ -154,7 +147,7 @@ pub(crate) struct Pipeline {
     pub last_translated_fp: Option<OcrFingerprint>,
     pub last_page: Option<PendingPage>,
     pub inflight: Option<InflightTranslate>,
-    pub model_load: Option<InflightModelLoad>,
+    pub model_load: Option<ModelLoadTask>,
     pub ocr_tier: ModelTier,
     pub ocr_device: OcrDevice,
     pub last_raw_ocr: Option<LastRawOcr>,
@@ -702,7 +695,7 @@ enum PipelineEvent {
 async fn next_event(
     rx: &mut CmdRx,
     inflight: Option<&mut InflightTranslate>,
-    model_load: Option<&mut InflightModelLoad>,
+    model_load: Option<&mut ModelLoadTask>,
     overlay: Option<&mut OverlayController>,
     wait: Option<Duration>,
 ) -> PipelineEvent {

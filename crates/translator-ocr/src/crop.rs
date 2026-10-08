@@ -94,5 +94,15 @@ mod tests {
         assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 4.0, 4.0)).is_none());
         assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(40.0, 40.0, 10.0, 10.0)).is_none());
         assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 16.0, 16.0)).is_some());
+        assert!(crop_to_rgb8(32, 32, &rgba[..rgba.len() - 1], Rect::new(0.0, 0.0, 16.0, 16.0)).is_none(), "short buffer");
+    }
+
+    #[test]
+    fn whole_frame_crop_keeps_rgb_order() {
+        let rgba = [1u8, 2, 3, 255, 4, 5, 6, 128].repeat(32);
+        let crop = crop_to_rgb8(8, 8, &rgba, Rect::new(0.0, 0.0, 8.0, 8.0)).unwrap();
+        assert_eq!((crop.x, crop.y, crop.width, crop.height), (0, 0, 8, 8));
+        assert_eq!(&crop.rgb[..6], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(crop.rgb.len(), 8 * 8 * 3);
     }
 }

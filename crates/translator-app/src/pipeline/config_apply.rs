@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 use rust_i18n::t;
 use tracing::{error, info};
-use translator_core::{AppConfig, PipelineStatus, UiLanguage, config_path};
+use translator_core::{AppConfig, UiLanguage, config_path};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, StabilityGate};
 use translator_overlay::OverlayCommand;
 
-use crate::pipeline::worker::{InflightModelLoad, Pipeline};
+use crate::pipeline::worker::Pipeline;
 
 impl Pipeline {
     /// Resolve the default config path; on failure record `save config:` and return `None`.
@@ -167,12 +167,8 @@ impl Pipeline {
         let task = OcrEngine::start_load(desired);
         self.ocr_tier = task.tier;
         self.ocr_device = task.device;
-        self.model_load = Some(InflightModelLoad {
-            rx: task.rx,
-            tier: task.tier,
-            device: task.device,
-        });
         info!(tier = ?task.tier, device = ?task.device, "OCR model load started");
+        self.model_load = Some(task);
         self.sync_model_load();
     }
 
@@ -182,63 +178,41 @@ impl Pipeline {
             return;
         };
         let sender_gone = job.rx.has_changed().is_err();
-        let update = job.rx.borrow_and_update().clone();
-        let tier = job.tier;
-        let device = job.device;
-        let desired = self.state.read().config.ocr.clone();
+        let (tier, device) = (job.tier, job.device);
+        let finished = match job.rx.borrow_and_update().clone() {
+            ModelLoadUpdate::Progress(status) if !sender_gone => {
+                self.state.write().status = status;
+                return;
+            }
+            finished => finished,
+        };
 
-        match update {
-            ModelLoadUpdate::Ready(engine) => {
-                self.model_load = None;
-                if (tier, device) != (desired.model_tier, desired.device) {
-                    info!(
-                        finished = ?(tier, device),
-                        desired = ?(desired.model_tier, desired.device),
-                        "discarding OCR engine for stale identity"
-                    );
-                    self.start_model_load();
-                    return;
-                }
+        // The job is done, or its task ended without a result.
+        self.model_load = None;
+        let desired = self.state.read().config.ocr.clone();
+        if (tier, device) != (desired.model_tier, desired.device) {
+            info!(
+                finished = ?(tier, device),
+                desired = ?(desired.model_tier, desired.device),
+                "OCR load ended for a stale engine; starting the desired one"
+            );
+            self.start_model_load();
+            return;
+        }
+        match finished {
+            ModelLoadUpdate::Ready(mut engine) => {
                 info!(?tier, ?device, "OCR engine ready");
-                self.ocr_tier = tier;
-                self.ocr_device = device;
+                engine.apply_runtime_config(&desired);
                 self.engine = Some(engine);
-                if let Some(eng) = self.engine.as_mut() {
-                    eng.apply_runtime_config(&self.state.read().config.ocr);
-                }
                 self.state.write().restore_operational_status();
             }
             ModelLoadUpdate::Failed(message) => {
-                self.model_load = None;
-                if (tier, device) != (desired.model_tier, desired.device) {
-                    info!(
-                        finished = ?(tier, device),
-                        desired = ?(desired.model_tier, desired.device),
-                        error = %message,
-                        "stale OCR load failed; starting desired engine"
-                    );
-                    self.start_model_load();
-                    return;
-                }
                 error!(error = %message, ?tier, ?device, "OCR model load failed");
                 self.state.write().set_error(t!("err.models", error = message));
             }
-            progress if sender_gone => {
-                self.model_load = None;
-                if (tier, device) != (desired.model_tier, desired.device) {
-                    info!(
-                        finished = ?(tier, device),
-                        desired = ?(desired.model_tier, desired.device),
-                        "stale OCR load ended unexpectedly; starting desired engine"
-                    );
-                    self.start_model_load();
-                    return;
-                }
-                error!(?tier, ?device, status = ?progress.to_status(), "OCR model load task ended unexpectedly");
+            ModelLoadUpdate::Progress(status) => {
+                error!(?tier, ?device, ?status, "OCR model load task ended unexpectedly");
                 self.state.write().set_error(t!("err.models_task_ended"));
-            }
-            progress => {
-                self.state.write().status = progress.to_status().unwrap_or(PipelineStatus::LoadingModels);
             }
         }
     }
