@@ -6,44 +6,23 @@ mod session;
 use translator_core::{NormRect, Rect};
 
 use crate::gfx::draw::SurfaceRect;
-pub(crate) use crate::picker::session::{PickerEnd, is_picker_message};
+pub(crate) use crate::picker::session::PickerEnd;
 
 pub const HANDLE_SIZE: i32 = 8;
 pub const EDGE_HIT: i32 = 6;
 pub const MIN_PX: i32 = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PixelRect {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
-
-impl PixelRect {
-    pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
-        Self { x, y, w, h }
-    }
-
+/// Picker geometry. The picker paints in target client pixels, which are surface pixels.
+impl SurfaceRect {
     pub fn from_points(a: (i32, i32), b: (i32, i32)) -> Self {
         let x = a.0.min(b.0);
         let y = a.1.min(b.1);
-        Self {
-            x,
-            y,
-            w: (a.0.max(b.0) - x).max(1),
-            h: (a.1.max(b.1) - y).max(1),
-        }
+        Self::new(x, y, (a.0.max(b.0) - x).max(1), (a.1.max(b.1) - y).max(1))
     }
 
     pub fn from_norm(n: NormRect, client_w: i32, client_h: i32) -> Self {
         let r = n.to_pixel(client_w.max(0) as u32, client_h.max(0) as u32);
-        Self {
-            x: r.x.round() as i32,
-            y: r.y.round() as i32,
-            w: r.width.round().max(1.0) as i32,
-            h: r.height.round().max(1.0) as i32,
-        }
+        Self::new(r.x.round() as i32, r.y.round() as i32, r.width.round().max(1.0) as i32, r.height.round().max(1.0) as i32)
     }
 
     pub fn to_norm(self, client_w: i32, client_h: i32) -> Option<NormRect> {
@@ -52,15 +31,6 @@ impl PixelRect {
         }
         NormRect::from_pixel(Rect::new(self.x as f32, self.y as f32, self.w as f32, self.h as f32), client_w as u32, client_h as u32)
             .sanitize()
-    }
-
-    pub fn to_surface(self) -> SurfaceRect {
-        SurfaceRect {
-            x: self.x,
-            y: self.y,
-            w: self.w,
-            h: self.h,
-        }
     }
 
     pub fn contains(self, px: i32, py: i32) -> bool {
@@ -72,7 +42,7 @@ impl PixelRect {
         let h = self.h.clamp(MIN_PX, client_h.max(MIN_PX));
         let x = self.x.clamp(0, (client_w - w).max(0));
         let y = self.y.clamp(0, (client_h - h).max(0));
-        Self { x, y, w, h }
+        Self::new(x, y, w, h)
     }
 
     /// Move only the edges of `handle`. The opposite edges stay put, so
@@ -92,9 +62,8 @@ impl PixelRect {
                 right = (right + dx).clamp(min_right, max_right);
             }
             Handle::W | Handle::NW | Handle::SW => {
-                let min_left = 0;
-                let max_left = (right - min_w).max(min_left);
-                left = (left + dx).clamp(min_left, max_left);
+                let max_left = (right - min_w).max(0);
+                left = (left + dx).clamp(0, max_left);
             }
             Handle::N | Handle::S => {}
         }
@@ -105,19 +74,13 @@ impl PixelRect {
                 bottom = (bottom + dy).clamp(min_bottom, max_bottom);
             }
             Handle::N | Handle::NE | Handle::NW => {
-                let min_top = 0;
-                let max_top = (bottom - min_h).max(min_top);
-                top = (top + dy).clamp(min_top, max_top);
+                let max_top = (bottom - min_h).max(0);
+                top = (top + dy).clamp(0, max_top);
             }
             Handle::E | Handle::W => {}
         }
 
-        Self {
-            x: left,
-            y: top,
-            w: (right - left).max(1),
-            h: (bottom - top).max(1),
-        }
+        Self::new(left, top, (right - left).max(1), (bottom - top).max(1))
     }
 }
 
@@ -180,20 +143,14 @@ enum DragKind {
     Move {
         index: usize,
         start: (i32, i32),
-        orig: PixelRect,
+        orig: SurfaceRect,
     },
     Resize {
         index: usize,
         handle: Handle,
         start: (i32, i32),
-        orig: PixelRect,
+        orig: SurfaceRect,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerAction {
-    None,
-    RegionsChanged,
 }
 
 pub struct RegionPicker {
@@ -226,12 +183,14 @@ impl RegionPicker {
         self.drag = None;
     }
 
+    fn pixel_rect(&self, region: NormRect) -> SurfaceRect {
+        SurfaceRect::from_norm(region, self.client_w, self.client_h)
+    }
+
     pub fn hit_test(&self, px: i32, py: i32) -> Hit {
         // Top-most region (last drawn) first.
         for (index, region) in self.regions.iter().enumerate().rev() {
-            let pr = self
-                .live_rect(index)
-                .unwrap_or_else(|| PixelRect::from_norm(*region, self.client_w, self.client_h));
+            let pr = self.pixel_rect(*region);
             if let Some(handle) = handle_at(pr, px, py) {
                 return Hit::Handle { index, handle };
             }
@@ -243,34 +202,28 @@ impl RegionPicker {
     }
 
     pub fn on_left_down(&mut self, px: i32, py: i32) {
-        match self.hit_test(px, py) {
+        let start = (px, py);
+        self.drag = Some(match self.hit_test(px, py) {
             Hit::Handle { index, handle } => {
                 self.selected = Some(index);
-                let orig = PixelRect::from_norm(self.regions[index], self.client_w, self.client_h);
-                self.drag = Some(DragKind::Resize {
+                let orig = self.pixel_rect(self.regions[index]);
+                DragKind::Resize {
                     index,
                     handle,
-                    start: (px, py),
+                    start,
                     orig,
-                });
+                }
             }
             Hit::Body { index } => {
                 self.selected = Some(index);
-                let orig = PixelRect::from_norm(self.regions[index], self.client_w, self.client_h);
-                self.drag = Some(DragKind::Move {
-                    index,
-                    start: (px, py),
-                    orig,
-                });
+                let orig = self.pixel_rect(self.regions[index]);
+                DragKind::Move { index, start, orig }
             }
             Hit::None => {
                 self.selected = None;
-                self.drag = Some(DragKind::Create {
-                    start: (px, py),
-                    current: (px, py),
-                });
+                DragKind::Create { start, current: start }
             }
-        }
+        });
     }
 
     pub fn on_move(&mut self, px: i32, py: i32) -> Hit {
@@ -280,9 +233,8 @@ impl RegionPicker {
                 self.drag = Some(DragKind::Create { start, current });
             }
             Some(DragKind::Move { index, start, orig }) => {
-                let dx = px - start.0;
-                let dy = py - start.1;
-                let moved = PixelRect::new(orig.x + dx, orig.y + dy, orig.w, orig.h).clamp_inside(self.client_w, self.client_h);
+                let moved = SurfaceRect::new(orig.x + px - start.0, orig.y + py - start.1, orig.w, orig.h)
+                    .clamp_inside(self.client_w, self.client_h);
                 if let Some(n) = moved.to_norm(self.client_w, self.client_h) {
                     self.regions[index] = n;
                 }
@@ -293,9 +245,7 @@ impl RegionPicker {
                 start,
                 orig,
             }) => {
-                let dx = px - start.0;
-                let dy = py - start.1;
-                let resized = orig.apply_resize(handle, dx, dy, self.client_w, self.client_h);
+                let resized = orig.apply_resize(handle, px - start.0, py - start.1, self.client_w, self.client_h);
                 if let Some(n) = resized.to_norm(self.client_w, self.client_h) {
                     self.regions[index] = n;
                 }
@@ -305,71 +255,60 @@ impl RegionPicker {
         self.hit_test(px, py)
     }
 
-    pub fn on_left_up(&mut self, _px: i32, _py: i32) -> PickerAction {
-        let drag = self.drag.take();
-        match drag {
+    /// Ends the drag. Returns whether the regions changed.
+    pub fn on_left_up(&mut self) -> bool {
+        match self.drag.take() {
             Some(DragKind::Create { start, current }) => {
                 let start = (start.0.clamp(0, self.client_w), start.1.clamp(0, self.client_h));
                 let current = (current.0.clamp(0, self.client_w), current.1.clamp(0, self.client_h));
-                let rect = PixelRect::from_points(start, current);
+                let rect = SurfaceRect::from_points(start, current);
                 if rect.w < MIN_PX || rect.h < MIN_PX {
-                    return PickerAction::None;
+                    return false;
                 }
-                if let Some(n) = rect.to_norm(self.client_w, self.client_h) {
-                    self.regions.push(n);
-                    self.selected = Some(self.regions.len() - 1);
-                    return PickerAction::RegionsChanged;
-                }
-                PickerAction::None
+                let Some(n) = rect.to_norm(self.client_w, self.client_h) else {
+                    return false;
+                };
+                self.regions.push(n);
+                self.selected = Some(self.regions.len() - 1);
+                true
             }
-            Some(DragKind::Move { .. } | DragKind::Resize { .. }) => PickerAction::RegionsChanged,
-            None => PickerAction::None,
+            Some(DragKind::Move { .. } | DragKind::Resize { .. }) => true,
+            None => false,
         }
     }
 
-    pub fn on_right_up(&mut self, px: i32, py: i32) -> PickerAction {
+    /// Deletes the region under the cursor. Returns whether the regions changed.
+    pub fn on_right_up(&mut self, px: i32, py: i32) -> bool {
         if self.drag.is_some() {
-            return PickerAction::None;
+            return false;
         }
         match self.hit_test(px, py) {
             Hit::Body { index } | Hit::Handle { index, .. } => {
-                if index < self.regions.len() {
-                    self.regions.remove(index);
-                    self.selected = None;
-                    return PickerAction::RegionsChanged;
-                }
-                PickerAction::None
+                self.regions.remove(index);
+                self.selected = None;
+                true
             }
-            _ => PickerAction::None,
+            Hit::None => false,
         }
     }
 
-    pub fn rubber_band(&self) -> Option<PixelRect> {
+    pub fn rubber_band(&self) -> Option<SurfaceRect> {
         match self.drag {
-            Some(DragKind::Create { start, current }) => Some(PixelRect::from_points(start, current)),
+            Some(DragKind::Create { start, current }) => Some(SurfaceRect::from_points(start, current)),
             _ => None,
         }
     }
 
-    pub fn live_pixel_rects(&self) -> Vec<(PixelRect, bool)> {
+    pub fn live_pixel_rects(&self) -> Vec<(SurfaceRect, bool)> {
         self.regions
             .iter()
             .enumerate()
-            .map(|(i, r)| {
-                let pr = PixelRect::from_norm(*r, self.client_w, self.client_h);
-                (pr, self.selected == Some(i))
-            })
+            .map(|(i, r)| (self.pixel_rect(*r), self.selected == Some(i)))
             .collect()
-    }
-
-    fn live_rect(&self, index: usize) -> Option<PixelRect> {
-        self.regions
-            .get(index)
-            .map(|r| PixelRect::from_norm(*r, self.client_w, self.client_h))
     }
 }
 
-fn handle_at(pr: PixelRect, px: i32, py: i32) -> Option<Handle> {
+fn handle_at(pr: SurfaceRect, px: i32, py: i32) -> Option<Handle> {
     let hs = HANDLE_SIZE;
     let near_l = (px - pr.x).abs() <= EDGE_HIT;
     let near_r = (px - (pr.x + pr.w)).abs() <= EDGE_HIT;
@@ -406,8 +345,8 @@ mod tests {
         let mut p = picker_with(&[]);
         p.on_left_down(20, 50);
         p.on_move(80, 110);
-        assert_eq!(p.rubber_band(), Some(PixelRect::from_points((20, 50), (80, 110))));
-        assert!(matches!(p.on_left_up(80, 110), PickerAction::RegionsChanged));
+        assert_eq!(p.rubber_band(), Some(SurfaceRect::from_points((20, 50), (80, 110))));
+        assert!(p.on_left_up());
         assert_eq!(p.regions.len(), 1);
         let r = p.regions[0];
         assert!(r.x > 0.05 && r.x < 0.15);
@@ -419,7 +358,7 @@ mod tests {
         let mut p = picker_with(&[]);
         p.on_left_down(20, 50);
         p.on_move(24, 54);
-        assert!(matches!(p.on_left_up(24, 54), PickerAction::None));
+        assert!(!p.on_left_up());
         assert!(p.regions.is_empty());
     }
 
@@ -429,10 +368,10 @@ mod tests {
         let b = NormRect::new(0.6, 0.6, 0.2, 0.2);
         let mut p = picker_with(&[a, b]);
         // Miss both → no-op (does not undo last).
-        assert!(matches!(p.on_right_up(10, 180), PickerAction::None));
+        assert!(!p.on_right_up(10, 180));
         assert_eq!(p.regions.len(), 2);
-        let hit = PixelRect::from_norm(a, 200, 200);
-        assert!(matches!(p.on_right_up(hit.x + 4, hit.y + 4), PickerAction::RegionsChanged));
+        let hit = SurfaceRect::from_norm(a, 200, 200);
+        assert!(p.on_right_up(hit.x + 4, hit.y + 4));
         assert_eq!(p.regions.len(), 1);
         assert!((p.regions[0].x - b.x).abs() < 1e-5);
     }
@@ -441,23 +380,23 @@ mod tests {
     fn resize_east_grows_width() {
         let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
         let mut p = picker_with(&[n]);
-        let pr = PixelRect::from_norm(n, 200, 200);
+        let pr = SurfaceRect::from_norm(n, 200, 200);
         p.on_left_down(pr.x + pr.w, pr.y + pr.h / 2);
         p.on_move(pr.x + pr.w + 20, pr.y + pr.h / 2);
-        let _ = p.on_left_up(pr.x + pr.w + 20, pr.y + pr.h / 2);
+        let _ = p.on_left_up();
         assert!(p.regions[0].width > n.width + 0.05);
     }
 
     #[test]
     fn resize_past_client_keeps_opposite_edge() {
         let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
-        let pr = PixelRect::from_norm(n, 200, 200);
+        let pr = SurfaceRect::from_norm(n, 200, 200);
 
         let mut east = picker_with(&[n]);
         east.on_left_down(pr.x + pr.w, pr.y + pr.h / 2);
         east.on_move(800, pr.y + pr.h / 2);
-        let _ = east.on_left_up(800, pr.y + pr.h / 2);
-        let out = PixelRect::from_norm(east.regions[0], 200, 200);
+        let _ = east.on_left_up();
+        let out = SurfaceRect::from_norm(east.regions[0], 200, 200);
         assert_eq!(out.x, pr.x);
         assert_eq!(out.x + out.w, 200);
         assert_eq!(out.y, pr.y);
@@ -466,16 +405,16 @@ mod tests {
         let mut west = picker_with(&[n]);
         west.on_left_down(pr.x, pr.y + pr.h / 2);
         west.on_move(-400, pr.y + pr.h / 2);
-        let _ = west.on_left_up(-400, pr.y + pr.h / 2);
-        let out = PixelRect::from_norm(west.regions[0], 200, 200);
+        let _ = west.on_left_up();
+        let out = SurfaceRect::from_norm(west.regions[0], 200, 200);
         assert_eq!(out.x, 0);
         assert_eq!(out.x + out.w, pr.x + pr.w);
 
         let mut south = picker_with(&[n]);
         south.on_left_down(pr.x + pr.w / 2, pr.y + pr.h);
         south.on_move(pr.x + pr.w / 2, 900);
-        let _ = south.on_left_up(pr.x + pr.w / 2, 900);
-        let out = PixelRect::from_norm(south.regions[0], 200, 200);
+        let _ = south.on_left_up();
+        let out = SurfaceRect::from_norm(south.regions[0], 200, 200);
         assert_eq!(out.y, pr.y);
         assert_eq!(out.y + out.h, 200);
         assert_eq!(out.x, pr.x);
@@ -486,11 +425,11 @@ mod tests {
     fn resize_east_stops_at_min_width() {
         let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
         let mut p = picker_with(&[n]);
-        let pr = PixelRect::from_norm(n, 200, 200);
+        let pr = SurfaceRect::from_norm(n, 200, 200);
         p.on_left_down(pr.x + pr.w, pr.y + pr.h / 2);
         p.on_move(pr.x - 80, pr.y + pr.h / 2);
-        let _ = p.on_left_up(pr.x - 80, pr.y + pr.h / 2);
-        let out = PixelRect::from_norm(p.regions[0], 200, 200);
+        let _ = p.on_left_up();
+        let out = SurfaceRect::from_norm(p.regions[0], 200, 200);
         assert_eq!(out.x, pr.x);
         assert_eq!(out.w, MIN_PX);
     }
@@ -503,7 +442,7 @@ mod tests {
         assert!(p.rubber_band().is_some());
         p.cancel_drag();
         assert!(p.rubber_band().is_none());
-        assert!(matches!(p.on_left_up(80, 110), PickerAction::None));
+        assert!(!p.on_left_up());
         assert!(p.regions.is_empty());
     }
 
@@ -512,7 +451,7 @@ mod tests {
         let mut p = picker_with(&[]);
         p.on_left_down(10, 4);
         p.on_move(80, 40);
-        assert!(matches!(p.on_left_up(80, 40), PickerAction::RegionsChanged));
+        assert!(p.on_left_up());
         assert_eq!(p.regions.len(), 1);
     }
 }

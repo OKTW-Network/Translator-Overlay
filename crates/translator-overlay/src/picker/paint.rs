@@ -36,72 +36,40 @@ impl OverlayHost {
                 .surface
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
-            draw::clear(buf);
+            buf.fill(0);
             // UpdateLayeredWindow hit-tests per-pixel alpha *before* WM_NCHITTEST.
             // Alpha 0 pixels are click-through, so the whole client must have a
             // non-zero veil or empty areas cannot start a drag.
-            draw::fill_rect(buf, surface, SurfaceRect { x: 0, y: 0, w, h }, Rgba::new(6, 14, 24, 20));
+            draw::fill_rect(buf, surface, SurfaceRect::new(0, 0, w, h), Rgba::new(6, 14, 24, 20));
 
             // Selectable area = full client; inset so the stroke is not clipped.
-            draw::stroke_rect(
-                buf,
-                surface,
-                SurfaceRect {
-                    x: 2,
-                    y: 2,
-                    w: (w - 4).max(1),
-                    h: (h - 4).max(1),
-                },
-                bounds,
-                2,
-            );
+            draw::stroke_rect(buf, surface, SurfaceRect::new(2, 2, (w - 4).max(1), (h - 4).max(1)), bounds, 2);
 
             for (pr, selected) in rects.iter() {
                 let stroke = if *selected { selected_stroke } else { region_stroke };
                 let thick = if *selected { 3 } else { 2 };
-                draw::fill_rect(buf, surface, pr.to_surface(), fill);
-                draw::stroke_rect(buf, surface, pr.to_surface(), stroke, thick);
+                draw::fill_rect(buf, surface, *pr, fill);
+                draw::stroke_rect(buf, surface, *pr, stroke, thick);
                 for (hx, hy) in [(pr.x, pr.y), (pr.x + pr.w, pr.y), (pr.x, pr.y + pr.h), (pr.x + pr.w, pr.y + pr.h)] {
-                    draw::fill_rect(
-                        buf,
-                        surface,
-                        SurfaceRect {
-                            x: hx - HANDLE_SIZE / 2,
-                            y: hy - HANDLE_SIZE / 2,
-                            w: HANDLE_SIZE,
-                            h: HANDLE_SIZE,
-                        },
-                        handle,
-                    );
+                    let knob = SurfaceRect::new(hx - HANDLE_SIZE / 2, hy - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+                    draw::fill_rect(buf, surface, knob, handle);
                 }
-                let label_rect = SurfaceRect {
-                    x: pr.x + 4,
-                    y: pr.y + 4,
-                    w: 22,
-                    h: 18,
-                };
-                draw::fill_rect(buf, surface, label_rect, Rgba::new(0, 0, 0, 160));
+                draw::fill_rect(buf, surface, number_rect(*pr), Rgba::new(0, 0, 0, 160));
             }
 
             if let Some(band) = band {
-                draw::stroke_rect(buf, surface, band.to_surface(), selected_stroke, 2);
+                draw::stroke_rect(buf, surface, band, selected_stroke, 2);
             }
         }
 
         for (i, (pr, _selected)) in rects.into_iter().enumerate() {
-            let label = format!("{}", i + 1);
-            let label_rect = SurfaceRect {
-                x: pr.x + 4,
-                y: pr.y + 4,
-                w: 22,
-                h: 18,
-            };
-            self.paint_label(label_rect, &label, LabelStyle {
-                font_px: 13,
-                color: text,
-                vcenter: false,
-            })?;
+            self.paint_label(number_rect(pr), &(i + 1).to_string(), LabelStyle { font_px: 13, color: text, vcenter: false })?;
         }
         Ok(())
     }
+}
+
+/// Badge in the top-left corner of a region that shows its number.
+fn number_rect(region: SurfaceRect) -> SurfaceRect {
+    SurfaceRect::new(region.x + 4, region.y + 4, 22, 18)
 }

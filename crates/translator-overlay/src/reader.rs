@@ -28,6 +28,7 @@ use crate::{
         surface::DibSurface,
         text::{self, LabelStyle},
     },
+    host::win32::lparam_point,
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayReader.v2");
@@ -240,25 +241,20 @@ impl ReaderWindow {
     fn repaint(&mut self) -> Result<(), OverlayError> {
         let (w, h) = self.client_size();
         self.surface.ensure(w, h)?;
-        let bg = draw::background_rgba(&self.config);
-        let fg = draw::text_rgba(&self.config);
+        let bg = draw::Rgba::from_argb(self.config.background_color_argb);
+        let fg = draw::Rgba::from_argb(self.config.text_color_argb);
         let surface = draw::SurfaceSize::new(w, h);
         {
             let buf = self
                 .surface
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("reader paint bitmap missing".into()))?;
-            draw::clear(buf);
-            draw::fill_rect(buf, surface, SurfaceRect { x: 0, y: 0, w, h }, bg);
+            buf.fill(0);
+            draw::fill_rect(buf, surface, SurfaceRect::new(0, 0, w, h), bg);
         }
 
         let inset = TEXT_INSET.min(w / 4).min(h / 4).max(0);
-        let text_box = SurfaceRect {
-            x: inset,
-            y: inset,
-            w: (w - inset * 2).max(1),
-            h: (h - inset * 2).max(1),
-        };
+        let text_box = SurfaceRect::new(inset, inset, (w - inset * 2).max(1), (h - inset * 2).max(1));
         let hdc = self.surface.hdc();
         let hfont = self.hfont;
         let shown = if self.text.trim().is_empty() {
@@ -288,11 +284,8 @@ impl ReaderWindow {
     }
 
     fn hit_test(&self, lparam: LPARAM) -> LRESULT {
-        // GET_X_LPARAM / GET_Y_LPARAM: signed 16-bit halves of screen coords.
-        let packed = lparam.0 as u32;
-        let sx = (packed & 0xFFFF) as i16 as i32;
-        let sy = ((packed >> 16) & 0xFFFF) as i16 as i32;
-        let mut pt = POINT { x: sx, y: sy };
+        let (x, y) = lparam_point(lparam);
+        let mut pt = POINT { x, y };
         if !unsafe { ScreenToClient(self.hwnd, &mut pt) }.as_bool() {
             return LRESULT(HTCAPTION as isize);
         }

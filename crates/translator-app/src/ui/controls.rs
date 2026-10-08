@@ -4,7 +4,6 @@ use std::borrow::Cow;
 
 use rust_i18n::t;
 use translator_core::{format_argb_hex, parse_argb_hex};
-use translator_overlay::argb_channels;
 use windows_reactor::{
     AutoSuggestBox, Border, Button, ButtonStyle, ChildrenControl, Color, ColorPicker, ContentControl, FontIcon, HorizontalAlignment,
     LayoutControl, NumberBox, Orientation, PasswordBox, PasswordRevealMode, ProgressRing, RadioButton, Slider, StackPanel, TextBlock,
@@ -439,7 +438,7 @@ pub fn card_color_popup(
     on_hex_changed: impl Fn(String) + Clone + 'static,
     on_toggle_open: impl Fn() + 'static,
 ) -> View {
-    let (a, r, g, b) = argb_channels(parse_argb_hex(&p.hex).unwrap_or(0xFF00_0000));
+    let [a, r, g, b] = parse_argb_hex(&p.hex).unwrap_or(0xFF00_0000).to_be_bytes();
     // Opaque RGB so low-alpha colours stay visible on the card.
     let swatch_fill = Color::rgb(r, g, b);
 
@@ -483,9 +482,7 @@ pub fn card_color_popup(
             .is_alpha_enabled(true)
             .is_hex_input_visible(false)
             .is_color_channel_text_input_visible(false)
-            .on_color_changed(move |c: Color| {
-                on_hex_changed(format_argb_hex((u32::from(c.a) << 24) | (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)))
-            })
+            .on_color_changed(move |c: Color| on_hex_changed(format_argb_hex(u32::from_be_bytes([c.a, c.r, c.g, c.b]))))
             .into()
     });
 

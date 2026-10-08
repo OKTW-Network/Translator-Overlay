@@ -5,8 +5,8 @@ use tracing::warn;
 use windows::Win32::{
     Foundation::HWND,
     UI::WindowsAndMessaging::{
-        DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_APP, WM_MOUSEMOVE, WM_QUIT,
-        WaitMessage,
+        DispatchMessageW, EVENT_OBJECT_LOCATIONCHANGE, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_APP, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONUP, WaitMessage,
     },
 };
 
@@ -16,7 +16,6 @@ use crate::{
         OverlayHost,
         follow::{FOLLOW_EVENT_MESSAGE, install_follow_hooks},
     },
-    picker::is_picker_message,
 };
 
 impl OverlayHost {
@@ -92,7 +91,10 @@ impl OverlayHost {
                     continue;
                 }
             }
-            if self.picker.is_some() && msg.hwnd == self.hwnd && is_picker_message(msg.message) {
+            if self.picker.is_some()
+                && msg.hwnd == self.hwnd
+                && matches!(msg.message, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_RBUTTONUP)
+            {
                 self.dispatch_picker_msg(&msg);
                 *apply = true;
                 if msg.message != WM_MOUSEMOVE {

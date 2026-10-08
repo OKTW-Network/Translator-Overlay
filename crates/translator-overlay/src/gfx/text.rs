@@ -14,7 +14,7 @@ use windows::{
 
 use crate::{
     error::OverlayError,
-    gfx::draw::{Rgba, SurfaceRect, SurfaceSize, label_pad},
+    gfx::draw::{Rgba, SurfaceRect, SurfaceSize, blend_over, label_pad},
 };
 
 /// Font size + text colour for one painted label.
@@ -133,41 +133,12 @@ pub(crate) fn draw_text_label(
             let idx = y * surface.stride + x * 4;
             let midx = row * rw * 4 + col * 4;
             let coverage = buf[idx].max(buf[idx + 1]).max(buf[idx + 2]) as u32;
-            buf[idx] = bg_copy[midx];
-            buf[idx + 1] = bg_copy[midx + 1];
-            buf[idx + 2] = bg_copy[midx + 2];
-            buf[idx + 3] = bg_copy[midx + 3];
+            buf[idx..idx + 4].copy_from_slice(&bg_copy[midx..midx + 4]);
             if coverage > 8 {
                 let fa = ((color.a as u32 * coverage) / 255) as u8;
-                blend_premul(buf, idx, color.r, color.g, color.b, fa);
+                blend_over(buf, idx, Rgba { a: fa, ..color });
             }
         }
     }
     Ok(())
-}
-
-fn blend_premul(buf: &mut [u8], idx: usize, r: u8, g: u8, b: u8, a: u8) {
-    if a == 0 {
-        return;
-    }
-    if a == 255 {
-        buf[idx] = b;
-        buf[idx + 1] = g;
-        buf[idx + 2] = r;
-        buf[idx + 3] = 255;
-        return;
-    }
-    let src_a = a as u32;
-    let inv = 255 - src_a;
-    let dst_b = buf[idx] as u32;
-    let dst_g = buf[idx + 1] as u32;
-    let dst_r = buf[idx + 2] as u32;
-    let dst_a = buf[idx + 3] as u32;
-    let sb = (b as u32 * src_a) / 255;
-    let sg = (g as u32 * src_a) / 255;
-    let sr = (r as u32 * src_a) / 255;
-    buf[idx] = (sb + (dst_b * inv) / 255).min(255) as u8;
-    buf[idx + 1] = (sg + (dst_g * inv) / 255).min(255) as u8;
-    buf[idx + 2] = (sr + (dst_r * inv) / 255).min(255) as u8;
-    buf[idx + 3] = (src_a + (dst_a * inv) / 255).min(255) as u8;
 }

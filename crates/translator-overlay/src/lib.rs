@@ -19,5 +19,4 @@ pub use crate::{
     command::{HudPrimary, HudSnapshot, OverlayCommand, OverlayEvent},
     controller::OverlayController,
     error::OverlayError,
-    gfx::draw::argb_channels,
 };
