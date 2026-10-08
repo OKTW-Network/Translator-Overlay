@@ -14,7 +14,7 @@ use crate::{
         CliBackend, LiveSession, TempCwd,
         codex::{CodexSession, TurnOutput, list_models, read_list, spawn_args, thread_start_params},
         resolve_program,
-        rpc::JsonRpcChild,
+        rpc::{JsonRpcChild, kill_and_wait},
     },
     parse_translation_blocks,
 };
@@ -225,7 +225,6 @@ async fn codex_protocol_regression() {
             ],
             false,
         )
-        .await
         .unwrap();
         let cancel = CancellationToken::new();
         if matches!(scenario, "pages" | "cursor_loop") {
@@ -235,7 +234,7 @@ async fn codex_protocol_regression() {
             } else {
                 assert!(pages.is_err());
             }
-            rpc.kill_and_wait().await;
+            kill_and_wait(&mut rpc.child).await;
             continue;
         }
         let session =
@@ -461,9 +460,7 @@ command = {}
         let timeout = Duration::from_secs(30);
         std::fs::remove_file(home.join("AGENTS.override.md")).unwrap();
         {
-            let rpc = JsonRpcChild::spawn(&program, &args, &nested, &[("CODEX_HOME", home.to_str().unwrap())], false)
-                .await
-                .unwrap();
+            let rpc = JsonRpcChild::spawn(&program, &args, &nested, &[("CODEX_HOME", home.to_str().unwrap())], false).unwrap();
             let result = CodexSession::from_rpc(
                 rpc,
                 thread_start_params("gpt-5.4", &nested, "TRANSLATION_ONLY", ServiceTier::Standard),
@@ -483,9 +480,7 @@ command = {}
         }
         assert!(!mcp_marker.exists(), "MCP process started during inventory discovery");
         assert!(!hook_marker.exists(), "hook executed before isolation");
-        let rpc = JsonRpcChild::spawn(&program, &args, &nested, &[("CODEX_HOME", home.to_str().unwrap())], false)
-            .await
-            .unwrap();
+        let rpc = JsonRpcChild::spawn(&program, &args, &nested, &[("CODEX_HOME", home.to_str().unwrap())], false).unwrap();
         let mut session = CodexSession::from_rpc(
             rpc,
             thread_start_params("gpt-5.4", &nested, "TRANSLATION_ONLY: return translation JSON.", ServiceTier::Standard),

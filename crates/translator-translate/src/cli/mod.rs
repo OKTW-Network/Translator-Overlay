@@ -80,9 +80,7 @@ pub fn plan_turn(mirrored: &[ChatMessage], messages: &[ChatMessage]) -> Result<S
     if messages[0].role != "system" {
         return Err(TranslateError::CliProtocol("CLI translate missing system message".into()));
     }
-    let last = messages
-        .last()
-        .ok_or_else(|| TranslateError::CliProtocol("empty messages".into()))?;
+    let last = &messages[messages.len() - 1];
     if last.role != "user" {
         return Err(TranslateError::CliProtocol("CLI translate expected a trailing user turn".into()));
     }
@@ -233,30 +231,18 @@ impl CliBackend {
             self.close().await;
             self.session_epoch = epoch;
         }
-        let plan = plan_turn(&self.mirrored, messages)?;
-
-        match &plan {
-            SessionPlan::Append { .. } if self.live.is_some() => {}
+        let composed = match plan_turn(&self.mirrored, messages)? {
+            SessionPlan::Append { user } if self.live.is_some() => compose_user(None, &user),
             SessionPlan::Append { user } => {
-                // Process died between turns — recreate from the committed prefix.
-                let system = messages[0].content.clone();
-                let bootstrap = if messages.len() > 2 {
-                    Some(pack_bootstrap(&messages[1..messages.len() - 1]))
-                } else {
-                    None
-                };
+                // The process died between turns: recreate from the committed prefix.
+                let history = &messages[1..messages.len() - 1];
+                self.recreate(api, &messages[0].content, cancel, timeout).await?;
+                compose_user((!history.is_empty()).then(|| pack_bootstrap(history)).as_deref(), &user)
+            }
+            SessionPlan::Recreate { system, bootstrap, user } => {
                 self.recreate(api, &system, cancel, timeout).await?;
-                let composed = compose_user(bootstrap.as_deref(), user);
-                return self.run_user(api, messages, &composed, cancel, timeout, on_text).await;
+                compose_user(bootstrap.as_deref(), &user)
             }
-            SessionPlan::Recreate { system, .. } => {
-                self.recreate(api, system, cancel, timeout).await?;
-            }
-        }
-
-        let composed = match &plan {
-            SessionPlan::Append { user } => compose_user(None, user),
-            SessionPlan::Recreate { bootstrap, user, .. } => compose_user(bootstrap.as_deref(), user),
         };
         self.run_user(api, messages, &composed, cancel, timeout, on_text).await
     }
@@ -367,14 +353,7 @@ fn make_isolated_cwd() -> Result<PathBuf, TranslateError> {
         .join("translator-overlay-cli")
         .join(format!("{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| TranslateError::CliProtocol(format!("create isolated cwd: {e}")))?;
-    if !isolated_cwd_is_safe(&dir) {
-        return Err(TranslateError::CliProtocol("isolated cwd unexpectedly contains project rules".into()));
-    }
     Ok(dir)
-}
-
-pub fn isolated_cwd_is_safe(cwd: &Path) -> bool {
-    !cwd.join("AGENTS.md").exists() && !cwd.join("Agents.md").exists()
 }
 
 #[cfg(test)]

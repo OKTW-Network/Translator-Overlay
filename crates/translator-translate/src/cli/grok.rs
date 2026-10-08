@@ -9,7 +9,7 @@ use crate::{
     TranslateError,
     cli::{
         TempCwd,
-        rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure, models_after_connect},
+        rpc::{AcpSession, JsonRpcChild, acp_open, models_after_connect},
     },
 };
 
@@ -52,36 +52,17 @@ pub async fn connect(
     cancel: &CancellationToken,
     timeout: Duration,
 ) -> Result<(AcpSession, Value), TranslateError> {
-    let args = spawn_args(model, reasoning_effort, system);
-    let mut rpc = JsonRpcChild::spawn(program, &args, cwd, &[], true).await?;
-    let created = async {
-        rpc.request("initialize", acp_initialize_params(), cancel, timeout)
-            .await
-            .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
-        rpc.request(
-            "session/new",
-            serde_json::json!({
-                "cwd": cwd.to_string_lossy(),
-                "mcpServers": [],
-                "_meta": {
-                    "systemPromptOverride": system,
-                    "yoloMode": false
-                }
-            }),
-            cancel,
-            timeout,
-        )
-        .await
-        .map_err(|e| map_auth_failure(e, AUTH_HINT))
-    }
-    .await;
-    match created.and_then(|created| AcpSession::id_from(&created).map(|id| (id, created))) {
-        Ok((id, created)) => Ok((AcpSession::new(rpc, id, true, None), created)),
-        Err(e) => {
-            rpc.kill_and_wait().await;
-            Err(e)
+    let rpc = JsonRpcChild::spawn(program, &spawn_args(model, reasoning_effort, system), cwd, &[], true)?;
+    let session = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "mcpServers": [],
+        "_meta": {
+            "systemPromptOverride": system,
+            "yoloMode": false
         }
-    }
+    });
+    let (rpc, id, created) = acp_open(rpc, session, AUTH_HINT, cancel, timeout).await?;
+    Ok((AcpSession::new(rpc, id, true, None), created))
 }
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
@@ -93,7 +74,7 @@ pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Du
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::rpc::is_auth_failure;
+    use crate::cli::rpc::{is_auth_failure, map_auth_failure};
 
     #[test]
     fn spawn_args_are_global_then_agent_stdio() {

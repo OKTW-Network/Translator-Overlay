@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
 use translator_overlay::{OverlayCommand, OverlayController};
 use translator_translate::{
-    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed, peek_translation_pairs,
+    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations, peek_translation_pairs,
 };
 
 use crate::{
@@ -152,7 +152,7 @@ impl Pipeline {
 
     pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: Result<Completion, TranslateError>) {
         match result {
-            Ok(completion) => match merge_translations_detailed(&job.miss_blocks, &completion.text) {
+            Ok(completion) => match merge_translations(&job.miss_blocks, &completion.text) {
                 Ok(outcome) => {
                     self.conversation.commit_completion(&completion);
                     let tcfg = self.state.read().config.translation.clone();

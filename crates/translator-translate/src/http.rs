@@ -36,6 +36,9 @@ pub fn translation_json_schema() -> serde_json::Value {
     })
 }
 
+/// Error when a Chat Completions reply has no usable text.
+const NO_CHAT_CONTENT: &str = "no choices/content in response";
+
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -218,6 +221,7 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    #[cfg(test)]
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_string(),
@@ -239,7 +243,7 @@ pub fn completion_from_http_body(http_api: HttpApi, body: &str) -> Result<Comple
     let trimmed = body.trim();
     if looks_like_sse(trimmed) {
         let mut acc = SseAcc::new(http_api);
-        for ev in sse_events(trimmed) {
+        for ev in drain_sse_events(&mut trimmed.to_string(), true) {
             acc.push(&ev)?;
         }
         return acc.finish();
@@ -426,15 +430,13 @@ fn extract_chat_completion(response_json: &str) -> Result<Completion, TranslateE
         .into_iter()
         .next()
         .map(|c| c.message)
-        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))?;
+        .ok_or_else(|| TranslateError::Parse(NO_CHAT_CONTENT.into()))?;
     if let Some(refusal) = msg.refusal.filter(|s| !s.is_empty()) {
         return Err(TranslateError::Parse(format!("model refused: {refusal}")));
     }
-    let text = msg
-        .content
-        .ok_or_else(|| TranslateError::Parse("no choices/content in response".into()))?;
+    let text = msg.content.ok_or_else(|| TranslateError::Parse(NO_CHAT_CONTENT.into()))?;
     if text.trim().is_empty() {
-        return Err(TranslateError::Parse("no choices/content in response".into()));
+        return Err(TranslateError::Parse(NO_CHAT_CONTENT.into()));
     }
     Ok(chat_completion_result(text, chat_reasoning_text(msg.reasoning_content.as_deref(), msg.reasoning.as_ref())))
 }
@@ -595,7 +597,7 @@ impl ChatSse {
             return Err(TranslateError::Parse(format!("model refused: {refusal}")));
         }
         if self.text.trim().is_empty() {
-            return Err(TranslateError::Parse("no choices/content in response".into()));
+            return Err(TranslateError::Parse(NO_CHAT_CONTENT.into()));
         }
         Ok(chat_completion_result(self.text, (!self.reasoning.is_empty()).then_some(self.reasoning)))
     }
@@ -734,11 +736,6 @@ fn stream_api_error(err: &serde_json::Value) -> TranslateError {
         status: 500,
         body: msg.to_string(),
     }
-}
-
-fn sse_events(body: &str) -> Vec<SseEvent> {
-    let mut buf = body.replace("\r\n", "\n");
-    drain_sse_events(&mut buf, true)
 }
 
 fn drain_sse_events(buf: &mut String, flush: bool) -> Vec<SseEvent> {

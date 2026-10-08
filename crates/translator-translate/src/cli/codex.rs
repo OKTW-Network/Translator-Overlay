@@ -9,7 +9,10 @@ use translator_core::ServiceTier;
 
 use crate::{
     TranslateError,
-    cli::{TempCwd, rpc::JsonRpcChild},
+    cli::{
+        TempCwd,
+        rpc::{JsonRpcChild, kill_and_wait},
+    },
     http::translation_json_schema,
 };
 
@@ -121,7 +124,7 @@ async fn read_list(
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
     let cwd = TempCwd::create()?;
-    let mut rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd.path(), &[], false).await?;
+    let mut rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd.path(), &[], false)?;
     let result = async {
         initialize_app_server(&mut rpc, cancel, timeout).await?;
         let items = read_list(&mut rpc, "model/list", serde_json::json!({ "limit": 100, "includeHidden": false }), cancel, timeout).await?;
@@ -141,7 +144,7 @@ pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Du
         }
     }
     .await;
-    rpc.kill_and_wait().await;
+    kill_and_wait(&mut rpc.child).await;
     result
 }
 
@@ -194,7 +197,7 @@ impl CodexSession {
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<Self, TranslateError> {
-        let rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd, &[], false).await?;
+        let rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd, &[], false)?;
         Self::from_rpc(rpc, thread_start_params(model, cwd, system, service_tier), cancel, timeout).await
     }
 
@@ -268,7 +271,7 @@ impl CodexSession {
         let thread_id = match initialized {
             Ok(id) => id,
             Err(error) => {
-                rpc.kill_and_wait().await;
+                kill_and_wait(&mut rpc.child).await;
                 return Err(error);
             }
         };
@@ -357,11 +360,11 @@ impl CodexSession {
     }
 
     pub async fn close(&mut self) {
-        self.rpc.kill_and_wait().await;
+        kill_and_wait(&mut self.rpc.child).await;
     }
 
     pub fn kill(&mut self) {
-        self.rpc.shutdown();
+        let _ = self.rpc.child.start_kill();
     }
 }
 
