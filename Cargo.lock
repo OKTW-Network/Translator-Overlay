@@ -3153,7 +3153,6 @@ dependencies = [
 name = "translator-capture"
 version = "0.3.0"
 dependencies = [
- "arc-swap",
  "bytes",
  "thiserror",
  "tracing",

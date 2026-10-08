@@ -173,45 +173,14 @@ unsafe extern "system" fn on_win_event(
     if target == 0 || hwnd.0 as isize != target {
         return;
     }
-    match classify_resize_event(event, IN_MOVESIZE.load(Ordering::Relaxed)) {
-        ResizeEventAction::BeginMovesize => IN_MOVESIZE.store(true, Ordering::Release),
-        ResizeEventAction::EndMovesize => {
+    match event {
+        EVENT_SYSTEM_MOVESIZESTART => IN_MOVESIZE.store(true, Ordering::Release),
+        EVENT_SYSTEM_MOVESIZEEND => {
             IN_MOVESIZE.store(false, Ordering::Release);
             mark_if_resized(target);
         }
-        ResizeEventAction::NoteLocation => mark_if_resized(target),
-        ResizeEventAction::Ignore => {}
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResizeEventAction {
-    Ignore,
-    BeginMovesize,
-    EndMovesize,
-    NoteLocation,
-}
-
-fn classify_resize_event(event: u32, in_movesize: bool) -> ResizeEventAction {
-    match event {
-        EVENT_SYSTEM_MOVESIZESTART => ResizeEventAction::BeginMovesize,
-        EVENT_SYSTEM_MOVESIZEEND => ResizeEventAction::EndMovesize,
-        EVENT_OBJECT_LOCATIONCHANGE if !in_movesize => ResizeEventAction::NoteLocation,
-        _ => ResizeEventAction::Ignore,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use windows::Win32::UI::WindowsAndMessaging::{EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART};
-
-    use crate::resize_watch::{ResizeEventAction, classify_resize_event};
-
-    #[test]
-    fn interactive_movesize_pauses_location_restarts() {
-        assert_eq!(classify_resize_event(EVENT_SYSTEM_MOVESIZESTART, false), ResizeEventAction::BeginMovesize);
-        assert_eq!(classify_resize_event(EVENT_OBJECT_LOCATIONCHANGE, true), ResizeEventAction::Ignore);
-        assert_eq!(classify_resize_event(EVENT_SYSTEM_MOVESIZEEND, true), ResizeEventAction::EndMovesize);
-        assert_eq!(classify_resize_event(EVENT_OBJECT_LOCATIONCHANGE, false), ResizeEventAction::NoteLocation);
+        // A drag restarts capture once on MOVESIZEEND, not on every location change.
+        EVENT_OBJECT_LOCATIONCHANGE if !IN_MOVESIZE.load(Ordering::Relaxed) => mark_if_resized(target),
+        _ => {}
     }
 }
