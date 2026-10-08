@@ -1,8 +1,9 @@
 <img width="960" height="200" alt="AI Slop" src="https://github.com/user-attachments/assets/9d681a9b-7548-43e6-9cff-8d01d9f00f54" />
 
 # Translator Overlay
-
+<img align="left" width="50" height="50" src="crates/translator-app/assets/icon.png">
 Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以點擊可穿透的 Overlay 顯示譯文。
+<br clear="left"/>
 
 ## 功能
 
