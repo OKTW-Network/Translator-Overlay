@@ -1,9 +1,9 @@
 //! Software compositing for overlay bitmaps (BGRA, premultiplied alpha).
 
-use translator_core::{OverlayConfig, Rect};
+use translator_core::Rect;
 
 /// Axis-aligned rect in surface (overlay) pixel space.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceRect {
     pub x: i32,
     pub y: i32,
@@ -12,6 +12,10 @@ pub struct SurfaceRect {
 }
 
 impl SurfaceRect {
+    pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Self { x, y, w, h }
+    }
+
     pub fn clamp_to(self, width: i32, height: i32) -> Option<Self> {
         if width <= 0 || height <= 0 || self.w <= 0 || self.h <= 0 {
             return None;
@@ -22,11 +26,7 @@ impl SurfaceRect {
         let y1 = (self.y + self.h).min(height);
         let w = x1 - x0;
         let h = y1 - y0;
-        if w <= 0 || h <= 0 {
-            None
-        } else {
-            Some(Self { x: x0, y: y0, w, h })
-        }
+        if w <= 0 || h <= 0 { None } else { Some(Self::new(x0, y0, w, h)) }
     }
 }
 
@@ -65,7 +65,7 @@ pub fn place_label(base: SurfaceRect, box_w: i32, box_h: i32, surface: SurfaceSi
     if y + box_h > surface.height {
         y = (surface.height - box_h).max(0);
     }
-    SurfaceRect { x, y, w: box_w, h: box_h }
+    SurfaceRect::new(x, y, box_w, box_h)
 }
 
 /// Straight (non-premultiplied) RGBA colour.
@@ -79,6 +79,12 @@ pub struct Rgba {
 
 impl Rgba {
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Colour from config `#AARRGGBB` form.
+    pub const fn from_argb(argb: u32) -> Self {
+        let [a, r, g, b] = argb.to_be_bytes();
         Self { r, g, b, a }
     }
 }
@@ -106,115 +112,44 @@ pub fn map_rect_to_surface(bbox: Rect, content_w: u32, content_h: u32, surface_w
     } else {
         (w.max(24), h.max(22))
     };
-    SurfaceRect { x, y, w, h }.clamp_to(surface_w, surface_h)
-}
-
-pub fn argb_channels(argb: u32) -> (u8, u8, u8, u8) {
-    let a = ((argb >> 24) & 0xFF) as u8;
-    let r = ((argb >> 16) & 0xFF) as u8;
-    let g = ((argb >> 8) & 0xFF) as u8;
-    let b = (argb & 0xFF) as u8;
-    (a, r, g, b)
-}
-
-pub fn background_rgba(cfg: &OverlayConfig) -> Rgba {
-    let (a, r, g, b) = argb_channels(cfg.background_color_argb);
-    Rgba::new(r, g, b, a)
-}
-
-pub fn text_rgba(cfg: &OverlayConfig) -> Rgba {
-    let (a, r, g, b) = argb_channels(cfg.text_color_argb);
-    Rgba::new(r, g, b, a)
-}
-
-#[inline]
-fn write_premul(buf: &mut [u8], idx: usize, r: u8, g: u8, b: u8, a: u8) {
-    let af = a as u32;
-    buf[idx] = ((b as u32 * af) / 255) as u8;
-    buf[idx + 1] = ((g as u32 * af) / 255) as u8;
-    buf[idx + 2] = ((r as u32 * af) / 255) as u8;
-    buf[idx + 3] = a;
+    SurfaceRect::new(x, y, w, h).clamp_to(surface_w, surface_h)
 }
 
 /// Source-over composite of a straight (non-premultiplied) RGBA colour onto a
 /// premultiplied BGRA destination pixel.
 #[inline]
-fn blend_over(buf: &mut [u8], idx: usize, r: u8, g: u8, b: u8, a: u8) {
+pub(crate) fn blend_over(buf: &mut [u8], idx: usize, color: Rgba) {
+    let Rgba { r, g, b, a } = color;
     if a == 0 {
         return;
     }
     if a == 255 {
-        write_premul(buf, idx, r, g, b, 255);
+        buf[idx..idx + 4].copy_from_slice(&[b, g, r, 255]);
         return;
     }
     let src_a = a as u32;
     let inv = 255 - src_a;
-    let dst_b = buf[idx] as u32;
-    let dst_g = buf[idx + 1] as u32;
-    let dst_r = buf[idx + 2] as u32;
-    let dst_a = buf[idx + 3] as u32;
-
-    let out_b = (b as u32 * src_a + dst_b * inv) / 255;
-    let out_g = (g as u32 * src_a + dst_g * inv) / 255;
-    let out_r = (r as u32 * src_a + dst_r * inv) / 255;
-    let out_a = src_a + (dst_a * inv) / 255;
-
-    buf[idx] = out_b.min(255) as u8;
-    buf[idx + 1] = out_g.min(255) as u8;
-    buf[idx + 2] = out_r.min(255) as u8;
-    buf[idx + 3] = out_a.min(255) as u8;
+    let over = |src: u8, dst: u8| ((src as u32 * src_a + dst as u32 * inv) / 255).min(255) as u8;
+    buf[idx] = over(b, buf[idx]);
+    buf[idx + 1] = over(g, buf[idx + 1]);
+    buf[idx + 2] = over(r, buf[idx + 2]);
+    buf[idx + 3] = (src_a + (buf[idx + 3] as u32 * inv) / 255).min(255) as u8;
 }
 
 /// Stroke an axis-aligned rectangle (`thickness` inward from `rect` edges).
 pub fn stroke_rect(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect, color: Rgba, thickness: i32) {
     let t = thickness.max(1);
-    let Some(rect) = rect.clamp_to(surface.width, surface.height) else {
+    let Some(SurfaceRect { x, y, w, h }) = rect.clamp_to(surface.width, surface.height) else {
         return;
     };
-    fill_rect(
-        buf,
-        surface,
-        SurfaceRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: t,
-        },
-        color,
-    );
-    fill_rect(
-        buf,
-        surface,
-        SurfaceRect {
-            x: rect.x,
-            y: (rect.y + rect.h - t).max(rect.y),
-            w: rect.w,
-            h: t,
-        },
-        color,
-    );
-    fill_rect(
-        buf,
-        surface,
-        SurfaceRect {
-            x: rect.x,
-            y: rect.y,
-            w: t,
-            h: rect.h,
-        },
-        color,
-    );
-    fill_rect(
-        buf,
-        surface,
-        SurfaceRect {
-            x: (rect.x + rect.w - t).max(rect.x),
-            y: rect.y,
-            w: t,
-            h: rect.h,
-        },
-        color,
-    );
+    for edge in [
+        SurfaceRect::new(x, y, w, t),
+        SurfaceRect::new(x, (y + h - t).max(y), w, t),
+        SurfaceRect::new(x, y, t, h),
+        SurfaceRect::new((x + w - t).max(x), y, t, h),
+    ] {
+        fill_rect(buf, surface, edge, color);
+    }
 }
 
 /// Fill a rectangle with a straight RGBA colour (composited over existing).
@@ -225,23 +160,9 @@ pub fn fill_rect(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect, color:
     for y in rect.y..(rect.y + rect.h) {
         let row = y as usize * surface.stride;
         for x in rect.x..(rect.x + rect.w) {
-            let idx = row + x as usize * 4;
-            blend_over(buf, idx, color.r, color.g, color.b, color.a);
+            blend_over(buf, row + x as usize * 4, color);
         }
     }
-}
-
-/// Clear buffer to fully transparent.
-pub fn clear(buf: &mut [u8]) {
-    buf.fill(0);
-}
-
-/// Per-glyph box size in surface pixels (short side of the OCR rect).
-///
-/// - horizontal lines: height ≈ glyph size
-/// - vertical / stacked columns: width ≈ glyph size (height is the full run)
-pub fn char_box_px(rect: SurfaceRect) -> i32 {
-    rect.w.max(1).min(rect.h.max(1))
 }
 
 /// Initial CreateFontW character-height estimate from the OCR line box.
@@ -331,7 +252,6 @@ mod tests {
     fn font_height_vertical_uses_width() {
         // Tall thin column (vertical CJK / stacked UI): char size ≈ width, not height.
         let vertical = SurfaceRect { x: 0, y: 0, w: 24, h: 220 };
-        assert_eq!(char_box_px(vertical), 24);
         let px = font_height_for(vertical);
         // Vertical fill is more conservative (~0.58 of width).
         assert!((12..=16).contains(&px), "vertical text should size from width (~14px), got {px}");

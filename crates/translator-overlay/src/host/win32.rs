@@ -10,7 +10,7 @@
 
 use tracing::{debug, warn};
 use windows::Win32::{
-    Foundation::{HWND, POINT, RECT},
+    Foundation::{HWND, LPARAM, POINT, RECT},
     Graphics::Gdi::ClientToScreen,
     System::Threading::{AttachThreadInput, GetCurrentThreadId},
     UI::WindowsAndMessaging::{
@@ -385,11 +385,18 @@ pub(crate) fn live_client_screen_rect(target: HWND) -> Option<ClientRect> {
     Some((tl.x, tl.y, w, h))
 }
 
+/// Signed x and y from a mouse-message `LPARAM` (`GET_X_LPARAM` / `GET_Y_LPARAM`).
+pub(crate) fn lparam_point(lparam: LPARAM) -> (i32, i32) {
+    let packed = lparam.0 as u32;
+    ((packed & 0xFFFF) as i16 as i32, (packed >> 16) as i16 as i32)
+}
+
 /// cargo test is multi-threaded; USER32 window state is process-global.
 #[cfg(test)]
-pub(crate) fn lock_hwnd_tests() -> parking_lot::MutexGuard<'static, ()> {
-    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-    LOCK.lock()
+pub(crate) fn lock_hwnd_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A failed smoke test poisons the lock; later tests still need exclusive USER32 state.
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -410,44 +417,19 @@ mod tests {
     }
 
     #[test]
-    fn unowned_unfocus_does_not_cover_the_new_foreground() {
+    fn unowned_unfocus_does_not_cover_the_new_foreground() -> Result<(), String> {
         for (start_force_topmost, via_fallback) in [(true, false), (false, false), (false, true)] {
-            if let Err(e) = z_order_hwnd_smoke(start_force_topmost, via_fallback) {
-                panic!("force={start_force_topmost} fallback={via_fallback}: {e}");
-            }
+            z_order_hwnd_smoke(start_force_topmost, via_fallback)
+                .map_err(|e| format!("force={start_force_topmost} fallback={via_fallback}: {e}"))?;
         }
-    }
-
-    #[test]
-    fn park_pulls_beside_target_after_notopmost_covers_foreground() {
-        // Simulates the UIPI path: insert-after FG fails, HWND_NOTOPMOST alone
-        // parks at the top of the normal band and covers the new FG.
-        if let Err(e) = park_after_notopmost_cover_smoke() {
-            panic!("{e}");
-        }
-    }
-
-    #[test]
-    fn park_with_fg_as_target_predecessor_stays_above_target() {
-        // When the new FG is immediately above the target, park must not bury
-        // the overlay under the target (the bad Hide / HWND_BOTTOM "fix").
-        if let Err(e) = park_when_fg_is_predecessor_smoke() {
-            panic!("{e}");
-        }
-    }
-
-    #[test]
-    fn raise_target_window_steals_foreground_from_another_window() {
-        if let Err(e) = raise_target_hwnd_smoke() {
-            panic!("{e}");
-        }
+        Ok(())
     }
 
     struct ZOrderWindows {
         target: HWND,
         overlay: HWND,
         other: HWND,
-        _lock: parking_lot::MutexGuard<'static, ()>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for ZOrderWindows {
@@ -586,7 +568,10 @@ mod tests {
         refocus_target_restores_topmost(&w, &mut force_topmost).map_err(|e| format!("refocus after bury climb: {e}"))
     }
 
-    fn park_after_notopmost_cover_smoke() -> Result<(), String> {
+    /// Simulates the UIPI path: insert-after FG fails, and HWND_NOTOPMOST alone
+    /// parks at the top of the normal band and covers the new FG.
+    #[test]
+    fn park_pulls_beside_target_after_notopmost_covers_foreground() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
         let w = create_z_order_windows()?;
@@ -613,7 +598,10 @@ mod tests {
         refocus_target_restores_topmost(&w, &mut force_topmost)
     }
 
-    fn park_when_fg_is_predecessor_smoke() -> Result<(), String> {
+    /// When the new FG is immediately above the target, park must not bury
+    /// the overlay under the target (the bad Hide / HWND_BOTTOM "fix").
+    #[test]
+    fn park_with_fg_as_target_predecessor_stays_above_target() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
         let w = create_z_order_windows()?;
@@ -636,7 +624,8 @@ mod tests {
         refocus_target_restores_topmost(&w, &mut force_topmost)
     }
 
-    fn raise_target_hwnd_smoke() -> Result<(), String> {
+    #[test]
+    fn raise_target_window_steals_foreground_from_another_window() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
         let w = create_z_order_windows()?;

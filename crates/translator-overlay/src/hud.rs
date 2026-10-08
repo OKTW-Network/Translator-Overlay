@@ -278,15 +278,15 @@ impl HudWindow {
     fn repaint(&mut self) -> Result<(), OverlayError> {
         let (w, h) = self.client_size();
         self.surface.ensure(w, h)?;
-        let bg = draw::background_rgba(&self.config);
-        let fg = draw::text_rgba(&self.config);
+        let bg = draw::Rgba::from_argb(self.config.background_color_argb);
+        let fg = draw::Rgba::from_argb(self.config.text_color_argb);
         let surface = draw::SurfaceSize::new(w, h);
         {
             let buf = self
                 .surface
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("hud paint bitmap missing".into()))?;
-            draw::clear(buf);
+            buf.fill(0);
             draw::fill_rect(buf, surface, SurfaceRect { x: 0, y: 0, w, h }, bg);
             paint_button(buf, surface, Self::primary_rect(), fg, self.snapshot.primary_enabled, |buf, surface, r, c| {
                 match self.snapshot.primary {
