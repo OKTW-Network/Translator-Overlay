@@ -145,15 +145,20 @@ pub const REGION_PRESETS: NamedStore = NamedStore {
     pick: |ui| &mut ui.presets,
     names: |ui| ui.region_presets.presets.iter().map(|p| p.name.clone()).collect(),
     commit: |ui, name| {
-        // The Save button opens the name row only with sanitized regions.
-        ui.region_presets.upsert(name.to_string(), ui.pending_save_regions.clone());
-        save_region_presets(ui)?;
+        // The Save button fills this with sanitized regions. An empty list would save a preset the next load drops.
+        if ui.pending_save_regions.is_empty() {
+            return Err(t!("err.regions_required").into_owned());
+        }
+        let mut file = ui.region_presets.clone();
+        file.upsert(name.to_string(), ui.pending_save_regions.clone());
+        save_region_presets(ui, file)?;
         ui.pending_save_regions.clear();
         Ok(())
     },
     delete: |ui, name| {
-        ui.region_presets.presets.retain(|p| p.name != name);
-        save_region_presets(ui)
+        let mut file = ui.region_presets.clone();
+        file.presets.retain(|p| p.name != name);
+        save_region_presets(ui, file)
     },
     on_cancel: |ui| ui.pending_save_regions.clear(),
     name_required: "err.preset_name_required",
@@ -168,18 +173,19 @@ pub const API_PROFILES: NamedStore = NamedStore {
     names: |ui| ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
     commit: |ui, name| {
         let api = effective_draft(ui).api;
-        match ui.api_profiles.iter_mut().find(|p| p.name == name) {
+        let mut profiles = ui.api_profiles.clone();
+        match profiles.iter_mut().find(|p| p.name == name) {
             Some(p) => p.api = api,
-            None => ui.api_profiles.push(ApiProfile {
+            None => profiles.push(ApiProfile {
                 name: name.to_string(),
                 api,
             }),
         }
-        save_api_profiles(ui)
+        save_api_profiles(ui, profiles)
     },
     delete: |ui, name| {
-        ui.api_profiles.retain(|p| p.name != name);
-        save_api_profiles(ui)
+        let profiles = ui.api_profiles.iter().filter(|p| p.name != name).cloned().collect();
+        save_api_profiles(ui, profiles)
     },
     on_cancel: |_| {},
     name_required: "err.profile_name_required",
@@ -311,12 +317,14 @@ pub fn selected_preset(ui: &UiShared) -> Option<&RegionPreset> {
     ui.presets.selected.and_then(|i| ui.region_presets.presets.get(i))
 }
 
-/// Persist current in-memory presets to `region-presets.toml`.
-fn save_region_presets(ui: &UiShared) -> Result<(), String> {
+/// Write `file` to `region-presets.toml`. It replaces the in-memory list only when the write
+/// succeeds, so a failed save does not show a preset that is not on disk.
+fn save_region_presets(ui: &mut UiShared, file: RegionPresetFile) -> Result<(), String> {
     let path = region_presets_path().map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())?;
-    ui.region_presets
-        .save(&path)
-        .map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())
+    file.save(&path)
+        .map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())?;
+    ui.region_presets = file;
+    Ok(())
 }
 
 /// Selected API profile, if the combo index is in range.
@@ -324,11 +332,10 @@ pub fn selected_api_profile(ui: &UiShared) -> Option<&ApiProfile> {
     ui.profiles.selected.and_then(|i| ui.api_profiles.get(i))
 }
 
-/// Persist current in-memory API profiles to `api-profiles.toml`.
-fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
-    let mut file = ApiProfileFile {
-        profiles: ui.api_profiles.clone(),
-    };
+/// Write `profiles` to `api-profiles.toml`. They replace the in-memory list only when the
+/// write succeeds, so a failed save does not show a profile that is not on disk.
+fn save_api_profiles(ui: &mut UiShared, profiles: Vec<ApiProfile>) -> Result<(), String> {
+    let mut file = ApiProfileFile { profiles };
     let path = api_profiles_path().map_err(|e| t!("err.save_api_profiles", error = e.to_string()).into_owned())?;
     file.save(&path)
         .map_err(|e| t!("err.save_api_profiles", error = e.to_string()).into_owned())?;

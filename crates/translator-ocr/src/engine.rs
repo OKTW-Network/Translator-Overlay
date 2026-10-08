@@ -190,5 +190,6 @@ fn execution_providers(device: OcrDevice) -> Vec<OrtExecutionProvider> {
 
 fn aabb_to_rect(bb: &BoundingBox) -> Rect {
     let (x_min, y_min, x_max, y_max) = bb.aabb();
-    Rect::new(x_min.min(x_max), y_min.min(y_max), (x_max - x_min).abs(), (y_max - y_min).abs())
+    // `f32::max` turns a NaN extent from a degenerate polygon into 0.
+    Rect::new(x_min.min(x_max), y_min.min(y_max), (x_max - x_min).abs().max(0.0), (y_max - y_min).abs().max(0.0))
 }
