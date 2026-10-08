@@ -188,26 +188,35 @@ impl CliBackend {
         }
     }
 
+    /// Drop the session without waiting for it.
+    ///
+    /// Killing the process, deleting the OpenCode session row, and removing the cwd can take
+    /// seconds, and callers run on the pipeline task. A helper thread does the teardown in that
+    /// order, so the delete still runs inside its cwd.
     pub fn shutdown(&mut self) {
-        if let Some(mut live) = self.live.take() {
-            live.kill();
+        self.mirrored.clear();
+        let live = self.live.take();
+        let cwd = self.isolated_cwd.take();
+        if live.is_none() && cwd.is_none() {
+            return;
         }
-        self.drop_cwd();
+        std::thread::spawn(move || {
+            if let Some(mut live) = live {
+                live.kill();
+            }
+            if let Some(dir) = cwd {
+                remove_isolated_cwd(&dir);
+            }
+        });
     }
 
     pub async fn close(&mut self) {
         if let Some(mut live) = self.live.take() {
             live.close().await;
         }
-        self.drop_cwd();
-    }
-
-    fn drop_cwd(&mut self) {
         self.mirrored.clear();
-        if let Some(dir) = self.isolated_cwd.take()
-            && let Err(e) = remove_dir_all_once(&dir)
-        {
-            tracing::warn!(path = %dir.display(), %e, "failed to remove isolated CLI cwd");
+        if let Some(dir) = self.isolated_cwd.take() {
+            remove_isolated_cwd(&dir);
         }
     }
 
@@ -322,12 +331,12 @@ impl CliBackend {
     }
 }
 
-/// Single best-effort recursive delete; `Ok` when the dir is gone.
-pub(crate) fn remove_dir_all_once(dir: &Path) -> Result<(), std::io::Error> {
+/// Best-effort recursive delete. A missing directory counts as removed.
+fn remove_isolated_cwd(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(path = %dir.display(), error = %e, "failed to remove isolated CLI cwd"),
     }
 }
 
@@ -345,9 +354,7 @@ impl TempCwd {
 
 impl Drop for TempCwd {
     fn drop(&mut self) {
-        if let Err(e) = remove_dir_all_once(&self.0) {
-            tracing::warn!(path = %self.0.display(), error = %e, "failed to remove isolated cwd");
-        }
+        remove_isolated_cwd(&self.0);
     }
 }
 

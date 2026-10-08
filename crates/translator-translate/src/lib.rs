@@ -490,8 +490,10 @@ fn parse_json_string_prefix(s: &str) -> Option<(String, Option<&str>)> {
         }
         i += 1;
     }
-    let end = bytes.len() - usize::from(escape);
-    Some((s[1..end].to_string(), None))
+    // Still open: close it to unescape what has arrived. A `\u` escape cut mid-way stays raw.
+    let open = &s[..bytes.len() - usize::from(escape)];
+    let text = serde_json::from_str(&format!("{open}\"")).unwrap_or_else(|_| open[1..].to_string());
+    Some((text, None))
 }
 
 /// Fence-strip plus balanced `{...}` extraction (ignore prose around JSON).
@@ -620,8 +622,11 @@ impl TranslateClient {
     }
 
     pub fn update_config(&mut self, config: ApiConfig) {
-        // Rebuild client so idle timeout reflects the latest config.
-        self.http = build_http_client(&config);
+        // The idle timeout lives inside the client. Keep the client otherwise so its connection
+        // pool survives; the pipeline calls this before every translation.
+        if self.config.request_timeout_secs != config.request_timeout_secs {
+            self.http = build_http_client(&config);
+        }
         let session_changed = self.config.provider != config.provider
             || self.config.cli_path != config.cli_path
             || self.config.model != config.model
@@ -1244,6 +1249,9 @@ mod tests {
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A"],[1,"B"#), [(0, "A".into()), (1, "B".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"B"]]}"#), [(0, "A\"B".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"#), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"B"#), [(0, "A\"B".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"a\nb"#), [(0, "a\nb".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"x\u00"#), [(0, "x\\u00".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[2,"X"],[2,"Y"]]}"#), [(2, "X".into()), (2, "Y".into())]);
         assert!(peek_translation_pairs(r#"{"b":[[0,"#).is_empty());
         assert_eq!(peek_translation_pairs(r#"{"b":[[12,"x"]"#), [(12, "x".into())]);
@@ -1283,6 +1291,77 @@ mod tests {
         assert!(!should_retry(&err, 2, 2));
         assert!(!should_retry(&TranslateError::Cancelled, 0, 2));
         assert!(!should_retry(&TranslateError::MissingBaseUrl, 0, 2));
+    }
+
+    /// Loopback HTTP/1.1 server that answers every request with an empty translation and counts
+    /// accepted TCP connections.
+    fn keep_alive_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(socket) = socket else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || serve_chat_replies(socket));
+            }
+        });
+        (base_url, accepted)
+    }
+
+    fn serve_chat_replies(socket: std::net::TcpStream) {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let reply = r#"{"choices":[{"message":{"role":"assistant","content":"{\"b\":[]}"}}]}"#;
+        let mut writer = socket.try_clone().unwrap();
+        let mut reader = BufReader::new(socket);
+        loop {
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            write!(writer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_config_keeps_the_http_connection_pool() {
+        let (base_url, accepted) = keep_alive_server();
+        let api = ApiConfig {
+            base_url,
+            model: "m".into(),
+            stream: false,
+            ..ApiConfig::default()
+        };
+        let mut client = TranslateClient::new(api.clone());
+        let conv = Conversation::empty();
+        let cancel = CancellationToken::new();
+
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        client.update_config(api.clone());
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "the same config must reuse the pooled connection");
+
+        client.update_config(ApiConfig {
+            request_timeout_secs: api.request_timeout_secs + 1,
+            ..api
+        });
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "a new idle timeout needs a new client");
     }
 
     #[tokio::test]

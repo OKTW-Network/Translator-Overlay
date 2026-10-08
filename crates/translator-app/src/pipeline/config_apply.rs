@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use rust_i18n::t;
 use tracing::{error, info};
 use translator_core::{AppConfig, PipelineStatus, UiLanguage, config_path};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, StabilityGate};
@@ -16,7 +17,7 @@ impl Pipeline {
             Ok(p) => Some(p),
             Err(e) => {
                 error!(error = %e, "failed to resolve config path");
-                self.state.write().set_error(format!("save config: {e}"));
+                self.state.write().set_error(t!("err.save_config", error = e.to_string()));
                 None
             }
         }
@@ -40,9 +41,17 @@ impl Pipeline {
         info!(enabled, reader_enabled, hud_enabled, "overlay display updated");
     }
 
+    /// Send the translation-window placeholder in the current UI language.
+    pub(crate) fn sync_reader_placeholder(&self) {
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.send(OverlayCommand::SetReaderPlaceholder(t!("reader.placeholder").into_owned()));
+        }
+    }
+
     /// Persist only the control-window language on the live config.
     pub(crate) fn set_ui_language(&mut self, language: UiLanguage) {
         self.state.write().config.ui.language = Some(language);
+        self.sync_reader_placeholder();
         if !self.persist_live_config() {
             return;
         }
@@ -56,7 +65,7 @@ impl Pipeline {
         };
         if let Err(e) = save.save(&path) {
             error!(error = %e, "failed to save live config");
-            self.state.write().set_error(format!("save config: {e}"));
+            self.state.write().set_error(t!("err.save_config", error = e.to_string()));
             return false;
         }
         true
@@ -82,6 +91,8 @@ impl Pipeline {
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::UpdateConfig(cfg.overlay.clone()));
         }
+        // Reload from disk can change the UI language.
+        self.sync_reader_placeholder();
 
         self.state.write().config = cfg.clone();
         let Some(path) = self.default_config_path() else {
@@ -91,7 +102,7 @@ impl Pipeline {
             error!(error = %e, "failed to save config");
             let mut s = self.state.write();
             s.config = cfg;
-            s.set_error(format!("save config: {e}"));
+            s.set_error(t!("err.save_config", error = e.to_string()));
             return;
         }
 
@@ -210,7 +221,7 @@ impl Pipeline {
                     return;
                 }
                 error!(error = %message, ?tier, ?device, "OCR model load failed");
-                self.state.write().set_error(format!("models: {message}"));
+                self.state.write().set_error(t!("err.models", error = message));
             }
             progress if sender_gone => {
                 self.model_load = None;
@@ -224,7 +235,7 @@ impl Pipeline {
                     return;
                 }
                 error!(?tier, ?device, status = ?progress.to_status(), "OCR model load task ended unexpectedly");
-                self.state.write().set_error("models: load task ended unexpectedly");
+                self.state.write().set_error(t!("err.models_task_ended"));
             }
             progress => {
                 self.state.write().status = progress.to_status().unwrap_or(PipelineStatus::LoadingModels);

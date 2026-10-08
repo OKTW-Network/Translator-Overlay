@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use rust_i18n::t;
 use tracing::{debug, error, info, warn};
 use translator_capture::CapturedFrame;
 use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
@@ -132,7 +133,7 @@ impl Pipeline {
                     Ok(b) => b,
                     Err(e) => {
                         error!(error = %e, "OCR failed");
-                        self.state.write().set_error(format!("OCR: {e}"));
+                        self.state.write().set_error(t!("err.ocr", error = e.to_string()));
                         return;
                     }
                 };
@@ -390,7 +391,7 @@ impl Pipeline {
             Ok(b) => b,
             Err(e) => {
                 error!(error = %e, "manual OCR failed");
-                self.state.write().set_error(format!("OCR: {e}"));
+                self.state.write().set_error(t!("err.ocr", error = e.to_string()));
                 return;
             }
         };

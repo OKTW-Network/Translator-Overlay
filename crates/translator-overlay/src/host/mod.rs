@@ -270,6 +270,11 @@ impl OverlayHost {
                     self.hide();
                 }
             }
+            OverlayCommand::SetReaderPlaceholder(text) => {
+                if let Some(reader) = self.reader.as_mut() {
+                    reader.set_placeholder(text);
+                }
+            }
             OverlayCommand::BeginRegionSelect { regions } => self.begin_picker(regions),
             OverlayCommand::CancelRegionSelect => {
                 if self.picker.is_some() {
