@@ -7,7 +7,7 @@ use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
     ApiConfig, ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage,
-    api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
+    api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
 };
 use windows_reactor::LocalSender;
 
@@ -244,8 +244,10 @@ pub fn save_region_presets(ui: &mut UiShared) -> Result<(), String> {
 }
 
 /// Write `pending_save_regions` under `name` (exact match overwrite).
+///
+/// Callers pass a trimmed, non-empty name; the Save button only opens with sanitized regions.
 pub fn commit_pending_preset(ui: &mut UiShared, name: String) -> Result<(), String> {
-    let (name, regions) = validate_preset(&name, &ui.pending_save_regions).map_err(|e| e.to_string())?;
+    let regions = ui.pending_save_regions.clone();
     if let Some(p) = ui.region_presets.iter_mut().find(|p| p.name == name) {
         p.regions = regions;
     } else {

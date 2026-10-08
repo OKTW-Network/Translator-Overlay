@@ -3,20 +3,11 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::{
-    toml_file::{TomlFileError, load_toml_or_empty, write_toml_str},
+    toml_file::{TomlFileError, load_toml_or_empty, save_toml},
     types::NormRect,
 };
-
-#[derive(Debug, Error)]
-pub enum RegionPresetsError {
-    #[error(transparent)]
-    Toml(#[from] TomlFileError),
-    #[error("{0}")]
-    Invalid(String),
-}
 
 /// One named set of OCR boxes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,28 +24,14 @@ pub struct RegionPresetFile {
 }
 
 impl RegionPresetFile {
-    pub fn load_or_empty_at(path: &Path) -> Result<Self, RegionPresetsError> {
+    pub fn load_or_empty_at(path: &Path) -> Result<Self, TomlFileError> {
         let mut file: Self = load_toml_or_empty(path)?;
         file.sanitize_in_place();
         Ok(file)
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), RegionPresetsError> {
-        let mut doc = toml_edit::ser::to_document(self).map_err(TomlFileError::from)?;
-        // `to_string` keeps every preset on one line. A standard table puts `name` and `regions` on their own lines.
-        if let Some(slot) = doc.get_mut("presets") {
-            let tables = slot.as_array().filter(|array| !array.is_empty()).map(|array| {
-                array
-                    .iter()
-                    .filter_map(toml_edit::Value::as_inline_table)
-                    .map(|preset| preset.clone().into_table())
-                    .collect()
-            });
-            if let Some(tables) = tables {
-                *slot = toml_edit::Item::ArrayOfTables(tables);
-            }
-        }
-        Ok(write_toml_str(path, &doc.to_string())?)
+    pub fn save(&self, path: &Path) -> Result<(), TomlFileError> {
+        save_toml(path, self)
     }
 
     /// Drop invalid rects; drop presets that end up with no regions or empty names.
@@ -74,19 +51,6 @@ impl RegionPresetFile {
             self.presets.push(RegionPreset { name, regions });
         }
     }
-}
-
-/// Sanitize and require a non-empty trimmed name plus at least one valid rect.
-pub fn validate_preset(name: &str, regions: &[NormRect]) -> Result<(String, Vec<NormRect>), RegionPresetsError> {
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err(RegionPresetsError::Invalid("Preset name is required.".into()));
-    }
-    let regions = sanitize_regions(regions);
-    if regions.is_empty() {
-        return Err(RegionPresetsError::Invalid("A preset needs at least one OCR region.".into()));
-    }
-    Ok((name, regions))
 }
 
 pub fn sanitize_regions(regions: &[NormRect]) -> Vec<NormRect> {
@@ -123,7 +87,6 @@ mod tests {
         assert!(text.contains("[[presets]]\n"), "{text}");
         assert!(text.contains("name = \"HUD\"\n"), "{text}");
         assert!(text.contains("x = 0.02"), "{text}");
-        assert!(!text.contains("[[presets.regions]]"), "{text}");
         let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
         assert_eq!(loaded.presets.len(), 1);
         assert_eq!(loaded.presets[0].name, "HUD");
@@ -200,14 +163,19 @@ height = 0.12
     }
 
     #[test]
-    fn sanitize_and_validate() {
+    fn sanitize_drops_tiny_rects_and_blank_presets() {
         let bad = [NormRect::new(0.0, 0.0, 0.001, 0.5), NormRect::new(0.1, 0.2, 0.3, 0.4)];
-        let cleaned = sanitize_regions(&bad);
-        assert_eq!(cleaned.len(), 1);
-        assert!(validate_preset("  ", &cleaned).is_err());
-        assert!(validate_preset("ok", &[]).is_err());
-        let (name, regions) = validate_preset("  ok  ", &bad).unwrap();
-        assert_eq!(name, "ok");
-        assert_eq!(regions.len(), 1);
+        assert_eq!(sanitize_regions(&bad).len(), 1);
+        let preset = |name: &str, regions: &[NormRect]| RegionPreset {
+            name: name.into(),
+            regions: regions.to_vec(),
+        };
+        let mut file = RegionPresetFile {
+            presets: vec![preset("  ", &bad), preset("  ok  ", &bad), preset("tiny", &bad[..1])],
+        };
+        file.sanitize_in_place();
+        assert_eq!(file.presets.len(), 1);
+        assert_eq!(file.presets[0].name, "ok");
+        assert_eq!(file.presets[0].regions.len(), 1);
     }
 }
