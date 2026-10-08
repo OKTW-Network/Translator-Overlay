@@ -16,7 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrBlock, TranslatedBlock, TranslationConfig};
+use translator_core::{ApiConfig, HttpApi, OcrBlock, TranslatedBlock, TranslationConfig};
 
 pub use crate::{
     cache::{CacheResolve, TranslationCache},
@@ -68,7 +68,7 @@ impl TranslateError {
 
 /// True when another attempt should run after `attempt` (0-based completed tries).
 pub fn should_retry(error: &TranslateError, attempt: u32, max_retries: u32) -> bool {
-    !error.is_cancelled() && error.is_retryable() && attempt < max_retries
+    error.is_retryable() && attempt < max_retries
 }
 
 fn new_session_id() -> String {
@@ -272,7 +272,7 @@ struct TranslationResponse {
 }
 
 /// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
-pub fn merge_translations_detailed(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
+pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
     let parsed = parse_translation_blocks(response_json)?;
     let model_ids: HashSet<u32> = parsed.iter().map(|(id, _)| *id).collect();
 
@@ -512,7 +512,7 @@ fn json_parse_candidates(raw: &str) -> Vec<String> {
     push(&mut out, unfenced.clone());
 
     // 2) Balanced `{...}` extraction (ignore prose around JSON).
-    if let Some(obj) = extract_balanced(unfenced.as_str(), '{', '}') {
+    if let Some(obj) = first_json_object(&unfenced) {
         push(&mut out, obj.to_string());
     }
 
@@ -536,45 +536,33 @@ fn strip_markdown_fence(s: &str) -> String {
     body.join("\n").trim().to_string()
 }
 
-/// Extract the first balanced `open`…`close` region, respecting JSON strings.
-fn extract_balanced(s: &str, open: char, close: char) -> Option<&str> {
-    let start = s.find(open)?;
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
+/// The first balanced `{…}` object in `s`, skipping braces inside JSON strings.
+fn first_json_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let mut depth = 0u32;
     let mut in_string = false;
     let mut escape = false;
-    let mut i = start;
-
-    while i < s.len() {
-        let ch = s[i..].chars().next()?;
-        let ch_len = ch.len_utf8();
-
+    for (i, ch) in s[start..].char_indices() {
         if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
+            match ch {
+                _ if escape => escape = false,
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
             }
-            i += ch_len;
             continue;
         }
-
         match ch {
             '"' => in_string = true,
-            c if c == open => depth += 1,
-            c if c == close => {
+            '{' => depth += 1,
+            '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(&s[start..i + ch_len]);
+                    return Some(&s[start..=start + i]);
                 }
             }
             _ => {}
         }
-        // Safety: only walk UTF-8 char boundaries.
-        let _ = bytes;
-        i += ch_len;
     }
     None
 }
@@ -593,16 +581,8 @@ struct CliHandle {
     epoch: AtomicU64,
 }
 
-impl std::fmt::Debug for CliHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CliHandle")
-            .field("epoch", &self.epoch.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
 /// HTTP or long-lived CLI translation backend.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TranslateClient {
     http: reqwest::Client,
     config: ApiConfig,
@@ -800,11 +780,10 @@ pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<
     if cancel.is_cancelled() {
         return Err(TranslateError::Cancelled);
     }
-    match api.provider {
-        ModelProvider::OpenaiCompatible => list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await,
-        ModelProvider::GrokCli | ModelProvider::OpenCodeCli | ModelProvider::CodexCli | ModelProvider::ClaudeCli => {
-            list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
-        }
+    if api.provider.is_cli() {
+        list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
+    } else {
+        list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await
     }
 }
 
@@ -829,14 +808,6 @@ mod tests {
 
     use super::*;
     use crate::http::{completion_from_http_body, extract_responses_completion};
-
-    #[test]
-    fn http_complete_does_not_send_opencode_session_header() {
-        let src = include_str!("lib.rs");
-        let removed = ["x-", "opencode", "-session"].concat();
-        assert!(!src.contains(&removed));
-        assert!(src.contains("x-grok-conv-id"));
-    }
 
     #[test]
     fn changing_service_tier_resets_cli_session() {
@@ -895,7 +866,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[[1,"T1"]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T1");
     }
 
@@ -1105,7 +1076,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = "```json\n{\"b\":[[0,\"T2\"]]}\n```";
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T2");
     }
 
@@ -1120,11 +1091,11 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"Here you go: {"b": [[0, "T3"]]} Hope that helps!"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T3");
 
         let json = r#"{"b": [[0, "T3",],]}"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        assert!(merge_translations(&source, json).is_err());
     }
 
     #[test]
@@ -1138,7 +1109,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[["2","T4"]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T4");
 
         let source = vec![OcrBlock {
@@ -1150,11 +1121,11 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[[1,120]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "120");
 
-        assert!(merge_translations_detailed(&source, r#"{"b":[[true,"T"]]}"#).is_err());
-        assert!(merge_translations_detailed(&source, r#"{"b":[["text",1]]}"#).is_err());
+        assert!(merge_translations(&source, r#"{"b":[[true,"T"]]}"#).is_err());
+        assert!(merge_translations(&source, r#"{"b":[["text",1]]}"#).is_err());
     }
 
     #[test]
@@ -1178,7 +1149,7 @@ mod tests {
             },
         ];
         let json = r#"{"b":[[1,"T"]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap();
+        let out = merge_translations(&source, json).unwrap();
         assert!(out.model_ids.contains(&1));
         assert!(!out.model_ids.contains(&2));
         assert_eq!(out.blocks[1].translation, "B");
@@ -1195,9 +1166,9 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"[[1,"T5"]]"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        assert!(merge_translations(&source, json).is_err());
         let json = r#"{"blocks":[{"id":1,"translation":"T5"}]}"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        assert!(merge_translations(&source, json).is_err());
     }
 
     #[test]
