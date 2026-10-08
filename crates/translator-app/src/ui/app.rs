@@ -1,8 +1,9 @@
 //! Root WinUI component: title bar, navigation, page routing.
 
 use std::{
+    env,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         mpsc::{Receiver, RecvTimeoutError},
     },
     time::Duration,
@@ -168,12 +169,14 @@ impl Component for AppRoot {
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
         context.window_title("Translator Overlay");
-        context.window_visuals(
-            WindowVisuals::new()
-                .backdrop(WindowBackdrop::Mica)
-                .theme(WindowTheme::System)
-                .client_size(1280.0, 800.0),
-        );
+        let mut visuals = WindowVisuals::new()
+            .backdrop(WindowBackdrop::Mica)
+            .theme(WindowTheme::System)
+            .client_size(1280.0, 800.0);
+        if let Some(icon) = window_icon_path() {
+            visuals = visuals.icon(icon);
+        }
+        context.window_visuals(visuals);
         context.use_effect("taskbar-zorder", (), || {
             restore_taskbar_zorder();
             None
@@ -285,6 +288,25 @@ impl Component for AppRoot {
             .background(Color::transparent())
             .children((title_bar, nav))
     }
+}
+
+fn window_icon_path() -> Option<&'static str> {
+    static PATH: OnceLock<String> = OnceLock::new();
+    let path = PATH.get_or_init(|| {
+        const BYTES: &[u8] = include_bytes!("../../assets/icon.ico");
+        if let Some(path) = env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("icon.ico")))
+            && path.is_file()
+        {
+            return path.to_string_lossy().into_owned();
+        }
+        let dest = env::temp_dir().join("translator-overlay-icon.ico");
+        if std::fs::write(&dest, BYTES).is_ok() {
+            dest.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        }
+    });
+    (!path.is_empty()).then_some(path.as_str())
 }
 
 fn nav_item(tag: &str, label: &str, symbol: Symbol, selected: bool) -> View {

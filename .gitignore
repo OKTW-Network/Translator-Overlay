@@ -15,5 +15,7 @@ region-presets.toml
 api-profiles.toml
 .idea/
 .vscode/
+__pycache__/
+*.py[cod]
 *.pdb
 /third_party/
