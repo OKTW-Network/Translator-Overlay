@@ -1,4 +1,4 @@
-//! Shared WinUI `GotFocus` + `Rendering` hook, plus COM patches (Mica, nav header, slider step).
+//! Shared WinUI `GotFocus` + `Rendering` hook, plus COM patches (Mica, nav header, title-bar icon, slider step).
 //!
 //! Cached COM pointers are forgotten on TLS drop — WinRT `Release` during thread
 //! teardown aborts WinUI (`0xC0000409`).
@@ -8,6 +8,7 @@
 mod mica;
 mod nav_header;
 mod range_step;
+mod title_bar_icon;
 
 use std::{
     cell::RefCell,
@@ -241,6 +242,7 @@ pub(crate) fn refresh_nav_header() {
 
 fn on_tree(nav: &IInspectable) {
     nav_header::sync(nav);
+    title_bar_icon::sync(nav);
     range_step::sync(nav);
 }
 
