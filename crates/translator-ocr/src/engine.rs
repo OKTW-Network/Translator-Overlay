@@ -1,6 +1,6 @@
 //! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use image::RgbImage;
 use oar_ocr::{
@@ -28,37 +28,15 @@ pub struct OcrEngine {
     confidence_threshold: f32,
     filter_single_char: bool,
     line_merge: LineMergeConfig,
-    model_paths: ModelPaths,
-}
-
-impl std::fmt::Debug for OcrEngine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OcrEngine")
-            .field("confidence_threshold", &self.confidence_threshold)
-            .field("filter_single_char", &self.filter_single_char)
-            .field("line_merge_enabled", &self.line_merge.enabled)
-            .field("merge_whole_region", &self.line_merge.merge_whole_region)
-            .field("det", &self.model_paths.det)
-            .field("rec", &self.model_paths.rec)
-            .finish()
-    }
 }
 
 impl OcrEngine {
-    /// Ensure `models_dir` exists (portable layout next to the exe).
-    pub fn ensure_models_dir(models_dir: &Path) -> Result<(), OcrError> {
-        std::fs::create_dir_all(models_dir).map_err(|e| OcrError::Other(format!("create models dir {}: {e}", models_dir.display())))?;
-        Ok(())
-    }
-
     /// Load ONNX models from local paths under `models_dir`.
     ///
     /// Prefer [`Self::start_load`] when files may still need downloading.
     /// This only requires the files to exist; download verifies sizes.
     pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
-        Self::ensure_models_dir(&models_dir)?;
-
         let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
         if !paths.all_present() {
             return Err(OcrError::Other(format!("OCR models missing under {} (run ensure_models first)", models_dir.display())));
@@ -93,7 +71,6 @@ impl OcrEngine {
             confidence_threshold: config.confidence_threshold,
             filter_single_char: config.filter_single_char,
             line_merge: config.line_merge.clone(),
-            model_paths: paths,
         })
     }
 
@@ -102,18 +79,6 @@ impl OcrEngine {
         self.confidence_threshold = config.confidence_threshold;
         self.filter_single_char = config.filter_single_char;
         self.line_merge = config.line_merge.clone();
-    }
-
-    /// Run OCR on one RGB8 image.
-    ///
-    /// `frame_w` / `frame_h` are the full capture size (merge thresholds).
-    /// `merge_all` is true only for a user-drawn region with whole-region merge on.
-    async fn recognize(&self, image: RgbImage, frame_w: u32, frame_h: u32, merge_all: bool) -> Result<Vec<OcrBlock>, OcrError> {
-        let results = self.predict_batch(vec![image]).await?;
-        let Some(page) = results.into_iter().next() else {
-            return Ok(Vec::new());
-        };
-        Ok(self.blocks_from_page(page, frame_w, frame_h, merge_all))
     }
 
     /// One batched inference call across all images (det + rec batch on the GPU).
@@ -170,11 +135,16 @@ impl OcrEngine {
     /// merge per-crop so independent boxes do not glue together. Whole-region
     /// merge uses the full frame size for thresholds, never the crop size.
     pub async fn recognize_rgba_regions(&self, width: u32, height: u32, rgba: &[u8], regions: &[Rect]) -> Result<Vec<OcrBlock>, OcrError> {
-        if regions.is_empty() {
-            return self.recognize_rgba(width, height, rgba, width, height, false).await;
+        let expected = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4));
+        if expected.is_none_or(|n| rgba.len() < n) {
+            return Err(OcrError::Image(format!("{width}x{height} frame needs more than {} bytes", rgba.len())));
         }
-
-        let merge_all = self.line_merge.merge_whole_region;
+        let whole_frame = [Rect::new(0.0, 0.0, width as f32, height as f32)];
+        let (regions, merge_all) = if regions.is_empty() {
+            (&whole_frame[..], false)
+        } else {
+            (regions, self.line_merge.merge_whole_region)
+        };
         // Crop every region first, then one batched inference for all of them —
         // oar-ocr batches detection across images and pools recognition crops.
         let crops: Vec<(u32, u32, RgbImage)> = regions
@@ -204,20 +174,6 @@ impl OcrEngine {
         Ok(reindex(all))
     }
 
-    /// Run OCR on RGBA pixel buffer (e.g. capture frame).
-    async fn recognize_rgba(
-        &self,
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-        frame_w: u32,
-        frame_h: u32,
-        merge_all: bool,
-    ) -> Result<Vec<OcrBlock>, OcrError> {
-        let rgb = rgba_to_rgb8(width, height, rgba)?;
-        self.recognize(rgb, frame_w, frame_h, merge_all).await
-    }
-
     /// Join block texts for UI display.
     pub fn blocks_to_text(blocks: &[OcrBlock]) -> String {
         blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n")
@@ -234,43 +190,5 @@ fn execution_providers(device: OcrDevice) -> Vec<OrtExecutionProvider> {
 
 fn aabb_to_rect(bb: &BoundingBox) -> Rect {
     let (x_min, y_min, x_max, y_max) = bb.aabb();
-    let left = x_min.min(x_max);
-    let top = y_min.min(y_max);
-    let width = (x_max - x_min).abs().max(0.0);
-    let height = (y_max - y_min).abs().max(0.0);
-    Rect::new(left, top, width, height)
-}
-
-/// Convert tightly packed RGBA8 to RGB8 in one pass (drops alpha).
-fn rgba_to_rgb8(width: u32, height: u32, rgba: &[u8]) -> Result<RgbImage, OcrError> {
-    let expected = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| OcrError::Image("frame dimensions overflow".into()))?;
-    if rgba.len() < expected {
-        return Err(OcrError::Image(format!("buffer too small: {} < {}", rgba.len(), expected)));
-    }
-    let mut rgb = Vec::with_capacity(expected / 4 * 3);
-    for px in rgba[..expected].as_chunks::<4>().0 {
-        rgb.extend_from_slice(&px[..3]);
-    }
-    RgbImage::from_raw(width, height, rgb).ok_or_else(|| OcrError::Image("invalid RGBA buffer".into()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rgba_to_rgb8_drops_alpha_in_order() {
-        let rgba = [1u8, 2, 3, 255, 4, 5, 6, 128];
-        let img = rgba_to_rgb8(2, 1, &rgba).unwrap();
-        assert_eq!(img.as_raw(), &[1, 2, 3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn rgba_to_rgb8_rejects_short_buffers() {
-        assert!(rgba_to_rgb8(2, 1, &[0u8; 7]).is_err());
-        assert!(rgba_to_rgb8(2, 1, &[0u8; 8]).is_ok());
-    }
+    Rect::new(x_min.min(x_max), y_min.min(y_max), (x_max - x_min).abs(), (y_max - y_min).abs())
 }

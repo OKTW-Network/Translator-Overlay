@@ -23,34 +23,71 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, fram
         return reindex(blocks);
     }
 
-    let frame_w = frame_w.max(1);
-    let frame_h = frame_h.max(1);
+    let frame = Frame {
+        w: frame_w.max(1),
+        h: frame_h.max(1),
+    };
 
     if merge_all {
         let members: Vec<usize> = (0..blocks.len()).collect();
-        return reindex(vec![assemble_group(&blocks, members, cfg, frame_w, frame_h)]);
+        return reindex(vec![assemble_group(&blocks, members, cfg, frame)]);
     }
 
-    let rows = join_nearest(blocks, cfg, frame_w, frame_h, Neighbor::Right);
-    let mut merged = join_nearest(rows, cfg, frame_w, frame_h, Neighbor::Below);
-    sort_blocks(&mut merged, cfg, frame_w, frame_h);
-    reindex(merged)
+    let rows = join_nearest(blocks, cfg, frame, Axis::X);
+    let merged = join_nearest(rows, cfg, frame, Axis::Y);
+    reindex(sort_blocks(merged, cfg, frame))
 }
 
+/// Full capture size in pixels, at least 1 on each side.
 #[derive(Clone, Copy)]
-enum Neighbor {
-    Below,
-    Right,
+struct Frame {
+    w: u32,
+    h: u32,
 }
 
-fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32, neighbor: Neighbor) -> Vec<OcrBlock> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
+}
+
+impl Axis {
+    fn cross(self) -> Self {
+        match self {
+            Self::X => Self::Y,
+            Self::Y => Self::X,
+        }
+    }
+
+    /// Start and length of `r` along this axis.
+    fn span(self, r: Rect) -> (f32, f32) {
+        match self {
+            Self::X => (r.x, r.width),
+            Self::Y => (r.y, r.height),
+        }
+    }
+
+    /// Frame size along this axis.
+    fn extent(self, frame: Frame) -> f32 {
+        match self {
+            Self::X => frame.w as f32,
+            Self::Y => frame.h as f32,
+        }
+    }
+}
+
+/// Union each block with its nearest neighbor after it along `axis` (right for X, below for Y).
+fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis: Axis) -> Vec<OcrBlock> {
     let n = blocks.len();
     if n <= 1 {
         return blocks;
     }
 
-    let frame_w_f = frame_w as f32;
-    let frame_h_f = frame_h as f32;
+    let span = axis.extent(frame);
+    let max_gap = match axis {
+        Axis::X => cfg.horizontal_gap_ratio,
+        Axis::Y => cfg.gap_ratio,
+    };
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank = vec![0u8; n];
     for i in 0..n {
@@ -59,35 +96,18 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, fram
             if i == j {
                 continue;
             }
-            let Some(gap) = (match neighbor {
-                Neighbor::Below => vertical_gap_if_below(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_h_f),
-                Neighbor::Right => horizontal_gap_if_right(&blocks[i], &blocks[j], cfg.below_mid_ratio, frame_w_f),
-            }) else {
+            let Some(gap) = gap_after(&blocks[i], &blocks[j], axis, cfg.below_mid_ratio, span) else {
                 continue;
             };
-            let (span, max_gap) = match neighbor {
-                Neighbor::Below => (frame_h_f, cfg.gap_ratio),
-                Neighbor::Right => (frame_w_f, cfg.horizontal_gap_ratio),
-            };
-            if !approx_le(gap.abs() / span, max_gap) {
+            if !approx_le(gap.abs() / span, max_gap) || !can_link(&blocks[i], &blocks[j], axis, frame, cfg) {
                 continue;
             }
-            let can = match neighbor {
-                Neighbor::Below => can_link_stacked(&blocks[i], &blocks[j], frame_w, cfg),
-                Neighbor::Right => height_compatible(&blocks[i], &blocks[j], cfg) && vert_compatible(&blocks[i], &blocks[j], frame_h, cfg),
-            };
-            if !can {
-                continue;
-            }
-            if best.map(|(_, g)| approx_lt(gap.abs(), g.abs())).unwrap_or(true) {
+            if best.is_none_or(|(_, g)| approx_lt(gap.abs(), g.abs())) {
                 best = Some((j, gap));
             }
         }
         if let Some((j, _)) = best
-            && !match neighbor {
-                Neighbor::Below => has_intervening_below(&blocks, i, j, frame_w, frame_h, cfg),
-                Neighbor::Right => has_intervening_right(&blocks, i, j, frame_w, frame_h, cfg),
-            }
+            && !has_intervening(&blocks, i, j, axis, frame, cfg)
         {
             union(&mut parent, &mut rank, i, j);
         }
@@ -100,10 +120,11 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, fram
     groups
         .into_iter()
         .filter(|g| !g.is_empty())
-        .map(|members| assemble_group(&blocks, members, cfg, frame_w, frame_h))
+        .map(|members| assemble_group(&blocks, members, cfg, frame))
         .collect()
 }
 
+/// Union-find root with path halving.
 fn find(parent: &mut [usize], mut x: usize) -> usize {
     while parent[x] != x {
         parent[x] = parent[parent[x]];
@@ -112,6 +133,8 @@ fn find(parent: &mut [usize], mut x: usize) -> usize {
     x
 }
 
+/// Union by rank. Keep the rank: the root decides where a joined row lands in the output,
+/// and that order breaks distance ties in the next pass, so another rule changes the merges.
 fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
     let mut ra = find(parent, a);
     let mut rb = find(parent, b);
@@ -127,8 +150,8 @@ fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
     }
 }
 
-fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) -> OcrBlock {
-    sort_indices(blocks, &mut members, cfg, frame_w, frame_h);
+fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeConfig, frame: Frame) -> OcrBlock {
+    sort_indices(blocks, &mut members, cfg, frame);
 
     let mut text = String::new();
     let mut conf = 0.0f32;
@@ -171,57 +194,45 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
     }
 }
 
-fn sort_blocks(blocks: &mut Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) {
-    if blocks.len() <= 1 {
-        return;
-    }
-    let mut members: Vec<usize> = (0..blocks.len()).collect();
-    sort_indices(blocks, &mut members, cfg, frame_w, frame_h);
-    let mut slots: Vec<Option<OcrBlock>> = std::mem::take(blocks).into_iter().map(Some).collect();
-    *blocks = members
-        .into_iter()
-        .map(|i| slots[i].take().expect("sort permutation is unique"))
-        .collect();
+fn sort_blocks(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame) -> Vec<OcrBlock> {
+    let mut order: Vec<usize> = (0..blocks.len()).collect();
+    sort_indices(&blocks, &mut order, cfg, frame);
+    let mut slots: Vec<Option<OcrBlock>> = blocks.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
-fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfig, frame_w: u32, frame_h: u32) {
-    match cfg.order {
+/// Sort into bands along one axis, then by start position along the other axis, then this one.
+fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfig, frame: Frame) {
+    let band_axis = match cfg.order {
         // Across each row, then the next row down (row-major).
-        LineMergeOrder::LeftToRightTopToBottom => {
-            let rows = assign_bands(blocks, members, Axis::Y, cfg.order_band_ratio, frame_h as f32);
-            members.sort_by(|&a, &b| {
-                rows[a]
-                    .cmp(&rows[b])
-                    .then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
-                    .then_with(|| (blocks[a].bbox.y as i32).cmp(&(blocks[b].bbox.y as i32)))
-            });
-        }
+        LineMergeOrder::LeftToRightTopToBottom => Axis::Y,
         // Down each column, then the next column (column-major).
-        LineMergeOrder::TopToBottomLeftToRight => {
-            let cols = assign_bands(blocks, members, Axis::X, cfg.order_band_ratio, frame_w as f32);
-            members.sort_by(|&a, &b| {
-                cols[a]
-                    .cmp(&cols[b])
-                    .then_with(|| (blocks[a].bbox.y as i32).cmp(&(blocks[b].bbox.y as i32)))
-                    .then_with(|| (blocks[a].bbox.x as i32).cmp(&(blocks[b].bbox.x as i32)))
-            });
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Axis {
-    X,
-    Y,
+        LineMergeOrder::TopToBottomLeftToRight => Axis::X,
+    };
+    let bands = assign_bands(blocks, members, band_axis, cfg.order_band_ratio, band_axis.extent(frame));
+    let start = |i: usize, axis: Axis| axis.span(blocks[i].bbox).0 as i32;
+    let along = band_axis.cross();
+    members.sort_by(|&a, &b| {
+        bands[a]
+            .cmp(&bands[b])
+            .then_with(|| start(a, along).cmp(&start(b, along)))
+            .then_with(|| start(a, band_axis).cmp(&start(b, band_axis)))
+    });
 }
 
 /// Greedy 1-D clusters along `axis` (sorted). `band_ratio` × `axis_span` is the band width.
+///
+/// Columns band on the left edge; rows band on the vertical center.
 fn assign_bands(blocks: &[OcrBlock], members: &[usize], axis: Axis, band_ratio: f32, axis_span: f32) -> Vec<u32> {
+    let coord = |b: &OcrBlock| match axis {
+        Axis::X => b.bbox.x,
+        Axis::Y => b.bbox.center().1,
+    };
     let mut order: Vec<usize> = members.to_vec();
     order.sort_by(|&a, &b| {
-        let ca = axis_coord(&blocks[a], axis);
-        let cb = axis_coord(&blocks[b], axis);
-        ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+        coord(&blocks[a])
+            .partial_cmp(&coord(&blocks[b]))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut ids = vec![0u32; blocks.len()];
@@ -229,7 +240,7 @@ fn assign_bands(blocks: &[OcrBlock], members: &[usize], axis: Axis, band_ratio: 
     let mut last: Option<f32> = None;
     let span = axis_span.max(1.0);
     for i in order {
-        let c = axis_coord(&blocks[i], axis);
+        let c = coord(&blocks[i]);
         if let Some(prev) = last
             && !approx_le((c - prev) / span, band_ratio)
         {
@@ -241,48 +252,24 @@ fn assign_bands(blocks: &[OcrBlock], members: &[usize], axis: Axis, band_ratio: 
     ids
 }
 
-fn axis_coord(b: &OcrBlock, axis: Axis) -> f32 {
-    match axis {
-        Axis::X => b.bbox.x,
-        Axis::Y => b.bbox.y + b.bbox.height * 0.5,
-    }
+/// Gap from the far edge of `a` to the near edge of `b` along `axis`.
+///
+/// `None` unless `b` starts past the middle of `a`, with `mid_ratio` of `b`'s length as slack.
+fn gap_after(a: &OcrBlock, b: &OcrBlock, axis: Axis, mid_ratio: f32, span: f32) -> Option<f32> {
+    let (a0, alen) = axis.span(a.bbox);
+    let (b0, blen) = axis.span(b.bbox);
+    approx_ge((b0 + blen * mid_ratio - (a0 + alen * 0.5)) / span, 0.0).then_some(b0 - (a0 + alen))
 }
 
-fn vertical_gap_if_below(upper: &OcrBlock, lower: &OcrBlock, below_mid_ratio: f32, frame_h: f32) -> Option<f32> {
-    let upper_bottom = upper.bbox.y + upper.bbox.height;
-    let lower_top = lower.bbox.y;
-    let upper_mid = upper.bbox.y + upper.bbox.height * 0.5;
-    let slack = lower.bbox.height * below_mid_ratio;
-    // lower_top + slack >= upper_mid  (ratio-space ε)
-    if !approx_ge((lower_top + slack - upper_mid) / frame_h.max(1.0), 0.0) {
-        return None;
-    }
-    Some(lower_top - upper_bottom)
-}
-
-fn horizontal_gap_if_right(left: &OcrBlock, right: &OcrBlock, beside_mid_ratio: f32, frame_w: f32) -> Option<f32> {
-    let left_right = left.bbox.x + left.bbox.width;
-    let right_left = right.bbox.x;
-    let left_mid = left.bbox.x + left.bbox.width * 0.5;
-    let slack = right.bbox.width * beside_mid_ratio;
-    // right_left + slack >= left_mid  (ratio-space ε)
-    if !approx_ge((right_left + slack - left_mid) / frame_w.max(1.0), 0.0) {
-        return None;
-    }
-    Some(right_left - left_right)
-}
-
-fn can_link_stacked(upper: &OcrBlock, lower: &OcrBlock, frame_w: u32, cfg: &LineMergeConfig) -> bool {
-    if !height_compatible(upper, lower, cfg) {
+fn can_link(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
+    if !height_compatible(a, b, cfg) || !aligned(a, b, axis.cross(), frame, cfg) {
         return false;
     }
-    if !horiz_compatible(upper, lower, frame_w, cfg) {
-        return false;
-    }
-    if cfg.reject_short_long {
-        let sw = upper.bbox.width.max(1.0);
-        let ww = lower.bbox.width.max(1.0);
-        if approx_lt(sw, ww) && approx_ge((ww - sw) / ww, cfg.width_delta_ratio) {
+    // Keep a shorter upper line off a much wider line below it.
+    if axis == Axis::Y && cfg.reject_short_long {
+        let upper_w = a.bbox.width.max(1.0);
+        let lower_w = b.bbox.width.max(1.0);
+        if approx_lt(upper_w, lower_w) && approx_ge((lower_w - upper_w) / lower_w, cfg.width_delta_ratio) {
             return false;
         }
     }
@@ -296,72 +283,38 @@ fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool 
     approx_le((ah - bh).abs() / larger, cfg.height_delta_ratio)
 }
 
-fn horiz_compatible(a: &OcrBlock, b: &OcrBlock, frame_w: u32, cfg: &LineMergeConfig) -> bool {
-    let span = (frame_w as f32).max(1.0);
-    let left_frac = (a.bbox.x - b.bbox.x).abs() / span;
-    let a_cx = a.bbox.x + a.bbox.width * 0.5;
-    let b_cx = b.bbox.x + b.bbox.width * 0.5;
-    let center_frac = (a_cx - b_cx).abs() / span;
-    approx_le(left_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)
+/// Starts or centers along `axis` lie within `align_ratio` of the frame.
+fn aligned(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
+    let span = axis.extent(frame);
+    let (a0, alen) = axis.span(a.bbox);
+    let (b0, blen) = axis.span(b.bbox);
+    let start_frac = (a0 - b0).abs() / span;
+    let center_frac = ((a0 + alen * 0.5) - (b0 + blen * 0.5)).abs() / span;
+    approx_le(start_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)
 }
 
-fn vert_compatible(a: &OcrBlock, b: &OcrBlock, frame_h: u32, cfg: &LineMergeConfig) -> bool {
-    let span = (frame_h as f32).max(1.0);
-    let top_frac = (a.bbox.y - b.bbox.y).abs() / span;
-    let a_cy = a.bbox.y + a.bbox.height * 0.5;
-    let b_cy = b.bbox.y + b.bbox.height * 0.5;
-    let center_frac = (a_cy - b_cy).abs() / span;
-    approx_le(top_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)
-}
-
-fn has_intervening_below(blocks: &[OcrBlock], upper: usize, lower: usize, frame_w: u32, frame_h: u32, cfg: &LineMergeConfig) -> bool {
-    let u = &blocks[upper];
-    let l = &blocks[lower];
-    let y0 = u.bbox.y + u.bbox.height;
-    let y1 = l.bbox.y;
-    let span = (frame_h as f32).max(1.0);
-    if approx_le((y1 - y0) / span, 0.0) {
+/// True when another block sits in the gap between `first` and `second` along `axis`
+/// and lines up with both of them across it.
+fn has_intervening(blocks: &[OcrBlock], first: usize, second: usize, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
+    let (a, b) = (&blocks[first], &blocks[second]);
+    let (a0, alen) = axis.span(a.bbox);
+    let start = a0 + alen;
+    let end = axis.span(b.bbox).0;
+    let span = axis.extent(frame);
+    if approx_le((end - start) / span, 0.0) {
         return false;
     }
-
-    for (k, b) in blocks.iter().enumerate() {
-        if k == upper || k == lower {
-            continue;
-        }
-        let cy = b.bbox.y + b.bbox.height * 0.5;
-        if approx_le((cy - y0) / span, 0.0) || approx_ge((cy - y1) / span, 0.0) {
-            continue;
-        }
-        if horiz_compatible(u, b, frame_w, cfg) && horiz_compatible(b, l, frame_w, cfg) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_intervening_right(blocks: &[OcrBlock], left: usize, right: usize, frame_w: u32, frame_h: u32, cfg: &LineMergeConfig) -> bool {
-    let l = &blocks[left];
-    let r = &blocks[right];
-    let x0 = l.bbox.x + l.bbox.width;
-    let x1 = r.bbox.x;
-    let span = (frame_w as f32).max(1.0);
-    if approx_le((x1 - x0) / span, 0.0) {
-        return false;
-    }
-
-    for (k, b) in blocks.iter().enumerate() {
-        if k == left || k == right {
-            continue;
-        }
-        let cx = b.bbox.x + b.bbox.width * 0.5;
-        if approx_le((cx - x0) / span, 0.0) || approx_ge((cx - x1) / span, 0.0) {
-            continue;
-        }
-        if vert_compatible(l, b, frame_h, cfg) && vert_compatible(b, r, frame_h, cfg) {
-            return true;
-        }
-    }
-    false
+    let cross = axis.cross();
+    blocks.iter().enumerate().any(|(k, m)| {
+        let (m0, mlen) = axis.span(m.bbox);
+        let mid = m0 + mlen * 0.5;
+        k != first
+            && k != second
+            && !approx_le((mid - start) / span, 0.0)
+            && !approx_ge((mid - end) / span, 0.0)
+            && aligned(a, m, cross, frame, cfg)
+            && aligned(m, b, cross, frame, cfg)
+    })
 }
 
 fn approx_le(a: f32, b: f32) -> bool {
@@ -380,7 +333,7 @@ fn median_f32(mut vals: Vec<f32>) -> f32 {
     if vals.is_empty() {
         return 16.0;
     }
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vals.sort_by(f32::total_cmp);
     vals[vals.len() / 2]
 }
 
