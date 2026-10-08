@@ -6,8 +6,10 @@
 use std::{ffi::c_void, mem::zeroed};
 
 use windows_collections::IMap;
-use windows_core::{Error, HRESULT, HSTRING, IInspectable, IInspectable_Vtbl, Interface, Result, RuntimeName, imp::IGenericFactory};
+use windows_core::{HRESULT, HSTRING, IInspectable, IInspectable_Vtbl, Interface, Result, RuntimeName, imp::IGenericFactory};
 use windows_reference::IReference;
+
+use crate::ui::xaml::inspectable;
 
 windows_core::imp::define_interface!(IApplicationStatics, IApplicationStatics_Vtbl, 0x4e0d09f5_4358_512c_a987_503b52848e95);
 #[repr(C)]
@@ -55,11 +57,7 @@ impl RuntimeName for SolidColorBrushName {
 }
 
 /// Override NavigationView content fill/border so Mica shows between cards.
-pub fn apply() {
-    let _ = apply_inner();
-}
-
-fn apply_inner() -> Result<()> {
+pub fn apply() -> Result<()> {
     let statics: IApplicationStatics = windows_core::factory::<ApplicationName, IApplicationStatics>()?;
     let app = unsafe {
         let mut result = zeroed();
@@ -93,13 +91,4 @@ fn transparent_brush() -> Result<IInspectable> {
         (Interface::vtable(&brush).SetColor)(Interface::as_raw(&brush), XamlColor { a: 0, r: 0, g: 0, b: 0 }).ok()?;
     }
     brush.cast()
-}
-
-fn inspectable(ptr: *mut c_void) -> Result<IInspectable> {
-    if ptr.is_null() {
-        Err(Error::empty())
-    } else {
-        // SAFETY: `ptr` is a newly returned WinRT object; `from_raw` takes ownership.
-        Ok(unsafe { IInspectable::from_raw(ptr) })
-    }
 }

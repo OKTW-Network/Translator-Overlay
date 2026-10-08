@@ -6,7 +6,7 @@ use rust_i18n::t;
 use tracing::{debug, error, info, warn};
 use translator_capture::CapturedFrame;
 use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
-use translator_ocr::{OcrEngine, OcrFingerprint, StabilityOutcome};
+use translator_ocr::{OcrFingerprint, StabilityOutcome};
 use translator_overlay::OverlayCommand;
 
 use crate::pipeline::worker::{LastRawOcr, PendingPage, Pipeline, remap_translations_to_ocr, translated_geometry_changed};
@@ -124,38 +124,44 @@ impl Pipeline {
                 debug!(frame = frame.sequence, blocks = cached.blocks.len(), "OCR content cache hit — skipping inference");
                 cached.blocks.clone()
             }
-            _ => {
-                let ocr_start = Instant::now();
-                let Some(engine) = self.engine.as_ref() else {
-                    return;
-                };
-                let raw = match engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &rects).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        error!(error = %e, "OCR failed");
-                        self.state.write().set_error(t!("err.ocr", error = e.to_string()));
-                        return;
-                    }
-                };
-                let ocr_ms = ocr_start.elapsed().as_millis() as u64;
-                {
-                    let mut s = self.state.write();
-                    s.last_ocr_ms = Some(ocr_ms);
-                    s.last_ocr_block_count = raw.len() as u32;
-                }
-                debug!(ocr_ms, blocks = raw.len(), frame = frame.sequence, "OCR frame complete");
-                self.last_raw_ocr = Some(LastRawOcr {
-                    sequence: frame.sequence,
-                    width: frame.width,
-                    height: frame.height,
-                    scope: LastRawOcr::pack_scope(frame, &rects),
-                    blocks: raw.clone(),
-                });
-                raw
-            }
+            _ => match self.infer(frame, &rects).await {
+                Some(raw) => raw,
+                None => return,
+            },
         };
 
         self.consume_raw_ocr(raw, frame.width, frame.height).await;
+    }
+
+    /// Run OCR on `frame`, record its time and block count, and key the result to this frame.
+    ///
+    /// Returns `None` when no engine is loaded or inference fails (the error is on the state).
+    async fn infer(&mut self, frame: &CapturedFrame, rects: &[Rect]) -> Option<Vec<OcrBlock>> {
+        let ocr_start = Instant::now();
+        let engine = self.engine.as_ref()?;
+        let blocks = match engine.recognize_rgba_regions(frame.width, frame.height, &frame.rgba, rects).await {
+            Ok(b) => b,
+            Err(e) => {
+                error!(error = %e, "OCR failed");
+                self.state.write().set_error(t!("err.ocr", error = e.to_string()));
+                return None;
+            }
+        };
+        let ocr_ms = ocr_start.elapsed().as_millis() as u64;
+        {
+            let mut s = self.state.write();
+            s.last_ocr_ms = Some(ocr_ms);
+            s.last_ocr_block_count = blocks.len() as u32;
+        }
+        debug!(ocr_ms, blocks = blocks.len(), frame = frame.sequence, "OCR frame complete");
+        self.last_raw_ocr = Some(LastRawOcr {
+            sequence: frame.sequence,
+            width: frame.width,
+            height: frame.height,
+            scope: LastRawOcr::pack_scope(frame, rects),
+            blocks: blocks.clone(),
+        });
+        Some(blocks)
     }
 
     /// Status guard + persist / stability gate / remap. Runs on every capture
@@ -262,7 +268,6 @@ impl Pipeline {
                 self.raw_content_since = Some(Instant::now());
                 let page = PendingPage {
                     blocks: blocks.clone(),
-                    source_text: OcrEngine::blocks_to_text(&blocks),
                     fingerprint,
                     content_width: frame_w,
                     content_height: frame_h,
@@ -374,59 +379,24 @@ impl Pipeline {
     }
 
     pub(crate) async fn run_ocr_manual(&mut self, frame: &CapturedFrame) {
-        {
-            let mut s = self.state.write();
-            s.status = PipelineStatus::RunningOcr;
-        }
-
-        let ocr_start = Instant::now();
+        self.state.write().status = PipelineStatus::RunningOcr;
         let regions = self.ocr_pixel_regions(frame.width, frame.height);
-        let Some(engine) = self.engine.as_ref() else {
+        // Manual capture always infers, and its result keys the frame for auto ticks.
+        let Some(blocks) = self.infer(frame, &regions).await else {
             return;
         };
-        let blocks = match engine
-            .recognize_rgba_regions(frame.width, frame.height, &frame.rgba, &regions)
-            .await
-        {
-            Ok(b) => b,
-            Err(e) => {
-                error!(error = %e, "manual OCR failed");
-                self.state.write().set_error(t!("err.ocr", error = e.to_string()));
-                return;
-            }
-        };
-        let ocr_ms = ocr_start.elapsed().as_millis() as u64;
-        {
-            let mut s = self.state.write();
-            s.last_ocr_ms = Some(ocr_ms);
-            s.last_ocr_block_count = blocks.len() as u32;
-        }
-        // Manual capture always infers, but its result keys the frame for auto ticks.
-        self.last_raw_ocr = Some(LastRawOcr {
-            sequence: frame.sequence,
-            width: frame.width,
-            height: frame.height,
-            scope: LastRawOcr::pack_scope(frame, &regions),
-            blocks: blocks.clone(),
-        });
-
-        let text = OcrEngine::blocks_to_text(&blocks);
         let fp = OcrFingerprint::from_blocks(&blocks);
         let _ = self.gate.force_emit(fp);
 
-        info!(ocr_ms, blocks = blocks.len(), "manual OCR complete — translating");
+        info!(blocks = blocks.len(), "manual OCR complete — translating");
         let page = PendingPage {
             blocks: blocks.clone(),
-            source_text: text,
             fingerprint: fp,
             content_width: frame.width,
             content_height: frame.height,
         };
         self.last_page = Some(page.clone());
-        {
-            let mut s = self.state.write();
-            s.latest_ocr_blocks = blocks;
-        }
+        self.state.write().latest_ocr_blocks = blocks;
         // Manual always forces a new API call (user intent).
         self.start_translate(page, true);
     }
@@ -456,25 +426,8 @@ impl Pipeline {
             s.region_select_draft.clear();
             s.region_select_active = false;
         }
-        self.on_regions_changed();
-    }
-
-    pub(crate) fn on_regions_changed(&mut self) {
         self.cancel_inflight();
-        self.gate.reset_all();
-        self.persist.reset();
-        self.last_translated_fp = None;
-        self.last_page = None;
-        self.last_raw_ocr = None;
-        self.raw_empty_since = None;
-        self.raw_content_since = None;
-        self.remap_miss_since = None;
-        {
-            let mut s = self.state.write();
-            s.latest_ocr_blocks.clear();
-            s.latest_translated_blocks.clear();
-            s.translate_in_flight = false;
-        }
+        self.reset_ocr_session(false);
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::Clear);
         }

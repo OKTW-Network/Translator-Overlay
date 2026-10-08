@@ -5,6 +5,7 @@ mod cards;
 mod chrome;
 mod controls;
 mod locale;
+mod named;
 mod pages;
 mod preview;
 mod shared;
@@ -25,7 +26,7 @@ mod i18n_tests {
         assert_eq!(t!("action.save", locale = "zh-Hant"), "儲存");
         assert_eq!(t!("action.save", locale = "zh-Hans"), "保存");
         assert_eq!(t!("action.save", locale = "en"), "Save");
-        assert_eq!(t!("only_en", locale = "zh-Hant"), "English only");
+        assert_eq!(t!("action.save", locale = "fr"), "Save", "missing translations fall back to English");
         assert_eq!(t!("status.waiting_stable", locale = "en", elapsed_ms = 12), "Waiting for stable text (12 ms)");
         assert_eq!(t!("status.waiting_stable", locale = "zh-Hant", elapsed_ms = 12), "等待文字穩定（12 ms）");
     }

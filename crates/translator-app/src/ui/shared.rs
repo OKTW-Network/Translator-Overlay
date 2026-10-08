@@ -7,7 +7,7 @@ use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
     ApiConfig, ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage,
-    api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path, validate_preset,
+    api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
 };
 use windows_reactor::LocalSender;
 
@@ -99,12 +99,12 @@ pub enum ConfirmAction {
     Discard,
 }
 
-/// Dashboard-only region preset dialogs.
+/// Name row and confirmation dialogs for a list of saved named items.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum PresetDialog {
+pub enum NamedDialog {
     #[default]
     None,
-    /// Compact inline name row under the preset controls.
+    /// Compact inline name row under the combo.
     SaveName,
     Overwrite {
         name: String,
@@ -112,6 +112,94 @@ pub enum PresetDialog {
     Delete {
         name: String,
     },
+}
+
+/// Combo selection, name draft, and dialog for one list of saved named items.
+#[derive(Debug, Clone, Default)]
+pub struct NamedPick {
+    pub selected: Option<usize>,
+    pub name_draft: String,
+    pub dialog: NamedDialog,
+}
+
+/// Storage hooks that let region presets and API profiles share one save, overwrite,
+/// and delete flow.
+pub struct NamedStore {
+    pub pick: fn(&mut UiShared) -> &mut NamedPick,
+    pub names: fn(&UiShared) -> Vec<String>,
+    /// Store the current form under the name, replacing an item with that name, and write the file.
+    pub commit: fn(&mut UiShared, &str) -> Result<(), String>,
+    /// Remove the named item and write the file.
+    pub delete: fn(&mut UiShared, &str) -> Result<(), String>,
+    /// Extra state to drop when the name row is cancelled.
+    pub on_cancel: fn(&mut UiShared),
+    /// Translation keys: empty-name error, then overwrite and delete dialog title and body.
+    pub name_required: &'static str,
+    pub overwrite_title: &'static str,
+    pub overwrite_body: &'static str,
+    pub delete_title: &'static str,
+    pub delete_body: &'static str,
+}
+
+pub const REGION_PRESETS: NamedStore = NamedStore {
+    pick: |ui| &mut ui.presets,
+    names: |ui| ui.region_presets.presets.iter().map(|p| p.name.clone()).collect(),
+    commit: |ui, name| {
+        // The Save button opens the name row only with sanitized regions.
+        ui.region_presets.upsert(name.to_string(), ui.pending_save_regions.clone());
+        save_region_presets(ui)?;
+        ui.pending_save_regions.clear();
+        Ok(())
+    },
+    delete: |ui, name| {
+        ui.region_presets.presets.retain(|p| p.name != name);
+        save_region_presets(ui)
+    },
+    on_cancel: |ui| ui.pending_save_regions.clear(),
+    name_required: "err.preset_name_required",
+    overwrite_title: "dash.overwrite_preset_title",
+    overwrite_body: "dash.overwrite_preset_body",
+    delete_title: "dash.delete_preset_title",
+    delete_body: "dash.delete_preset_body",
+};
+
+pub const API_PROFILES: NamedStore = NamedStore {
+    pick: |ui| &mut ui.profiles,
+    names: |ui| ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
+    commit: |ui, name| {
+        let api = effective_draft(ui).api;
+        match ui.api_profiles.iter_mut().find(|p| p.name == name) {
+            Some(p) => p.api = api,
+            None => ui.api_profiles.push(ApiProfile {
+                name: name.to_string(),
+                api,
+            }),
+        }
+        save_api_profiles(ui)
+    },
+    delete: |ui, name| {
+        ui.api_profiles.retain(|p| p.name != name);
+        save_api_profiles(ui)
+    },
+    on_cancel: |_| {},
+    name_required: "err.profile_name_required",
+    overwrite_title: "api.overwrite_title",
+    overwrite_body: "api.overwrite_body",
+    delete_title: "api.delete_title",
+    delete_body: "api.delete_body",
+};
+
+/// Store the form under `name`, then select it and close the name row. Errors go to the status bar.
+pub fn commit_named(ui: &mut UiShared, store: &NamedStore, name: String) {
+    if let Err(e) = (store.commit)(ui, &name) {
+        ui.state.write().set_error(e);
+        return;
+    }
+    let selected = (store.names)(ui).iter().position(|n| *n == name);
+    let pick = (store.pick)(ui);
+    pick.selected = selected;
+    pick.name_draft = name;
+    pick.dialog = NamedDialog::None;
 }
 
 pub struct UiShared {
@@ -136,18 +224,13 @@ pub struct UiShared {
     /// Inline form validation message (blocks Save until fixed).
     pub form_error: Option<Cow<'static, str>>,
     /// Named OCR region presets (`region-presets.toml`).
-    pub region_presets: Vec<RegionPreset>,
-    /// Selected preset in the Dashboard combo (`-1` = none).
-    pub preset_selected_idx: i32,
-    pub preset_name_draft: String,
+    pub region_presets: RegionPresetFile,
+    pub presets: NamedPick,
+    /// Regions captured when the preset name row opened.
     pub pending_save_regions: Vec<NormRect>,
-    pub preset_dialog: PresetDialog,
     /// Named API connection profiles (`api-profiles.toml`).
     pub api_profiles: Vec<ApiProfile>,
-    /// Selected profile in the API combo (`-1` = none).
-    pub api_profile_selected_idx: i32,
-    pub api_profile_name_draft: String,
-    pub api_profile_dialog: PresetDialog,
+    pub profiles: NamedPick,
     /// Cached model ids for the API settings AutoSuggestBox.
     pub model_catalog: Vec<String>,
     pub model_list_loading: bool,
@@ -163,8 +246,7 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
     let (region_presets, preset_load_error) = region_presets_path()
         .map_err(|e| t!("err.load_region_presets", error = e.to_string()))
         .and_then(|path| RegionPresetFile::load_or_empty_at(&path).map_err(|e| t!("err.load_region_presets", error = e.to_string())))
-        .map(|file| file.presets)
-        .map_or_else(|message| (Vec::new(), Some(message)), |presets| (presets, None));
+        .map_or_else(|message| (RegionPresetFile::default(), Some(message)), |file| (file, None));
     let (api_profiles, api_profile_load_error) = api_profiles_path()
         .map_err(|e| t!("err.load_api_profiles", error = e.to_string()))
         .and_then(|path| ApiProfileFile::load_or_empty_at(&path).map_err(|e| t!("err.load_api_profiles", error = e.to_string())))
@@ -185,14 +267,10 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         confirm: ConfirmAction::None,
         form_error: None,
         region_presets,
-        preset_selected_idx: -1,
-        preset_name_draft: String::new(),
+        presets: NamedPick::default(),
         pending_save_regions: Vec::new(),
-        preset_dialog: PresetDialog::None,
         api_profiles,
-        api_profile_selected_idx: -1,
-        api_profile_name_draft: String::new(),
-        api_profile_dialog: PresetDialog::None,
+        profiles: NamedPick::default(),
         model_catalog: Vec::new(),
         model_list_loading: false,
         model_list_fp: String::new(),
@@ -230,53 +308,24 @@ pub fn request_model_list(ui: &mut UiShared, bump: &LocalSender<AppMsg>) {
 
 /// Selected Dashboard preset, if the combo index is in range.
 pub fn selected_preset(ui: &UiShared) -> Option<&RegionPreset> {
-    ui.preset_selected_idx.try_into().ok().and_then(|i: usize| ui.region_presets.get(i))
+    ui.presets.selected.and_then(|i| ui.region_presets.presets.get(i))
 }
 
 /// Persist current in-memory presets to `region-presets.toml`.
-pub fn save_region_presets(ui: &mut UiShared) -> Result<(), String> {
-    let file = RegionPresetFile {
-        presets: ui.region_presets.clone(),
-    };
+fn save_region_presets(ui: &UiShared) -> Result<(), String> {
     let path = region_presets_path().map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())?;
-    file.save(&path)
+    ui.region_presets
+        .save(&path)
         .map_err(|e| t!("err.save_region_presets", error = e.to_string()).into_owned())
-}
-
-/// Write `pending_save_regions` under `name` (exact match overwrite).
-pub fn commit_pending_preset(ui: &mut UiShared, name: String) -> Result<(), String> {
-    let (name, regions) = validate_preset(&name, &ui.pending_save_regions).map_err(|e| e.to_string())?;
-    if let Some(p) = ui.region_presets.iter_mut().find(|p| p.name == name) {
-        p.regions = regions;
-    } else {
-        ui.region_presets.push(RegionPreset {
-            name: name.clone(),
-            regions,
-        });
-    }
-    save_region_presets(ui)?;
-    ui.preset_name_draft = name.clone();
-    ui.preset_selected_idx = ui
-        .region_presets
-        .iter()
-        .position(|p| p.name == name)
-        .map(|i| i as i32)
-        .unwrap_or(-1);
-    ui.pending_save_regions.clear();
-    ui.preset_dialog = PresetDialog::None;
-    Ok(())
 }
 
 /// Selected API profile, if the combo index is in range.
 pub fn selected_api_profile(ui: &UiShared) -> Option<&ApiProfile> {
-    ui.api_profile_selected_idx
-        .try_into()
-        .ok()
-        .and_then(|i: usize| ui.api_profiles.get(i))
+    ui.profiles.selected.and_then(|i| ui.api_profiles.get(i))
 }
 
 /// Persist current in-memory API profiles to `api-profiles.toml`.
-pub fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
+fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
     let mut file = ApiProfileFile {
         profiles: ui.api_profiles.clone(),
     };
@@ -287,24 +336,6 @@ pub fn save_api_profiles(ui: &mut UiShared) -> Result<(), String> {
     Ok(())
 }
 
-/// Write current form API settings under `name` (exact match overwrite).
-pub fn commit_api_profile(ui: &mut UiShared, name: String) -> Result<(), String> {
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err(t!("err.profile_name_required").into_owned());
-    }
-    let api = effective_draft(ui).api;
-    if let Some(p) = ui.api_profiles.iter_mut().find(|p| p.name == name) {
-        p.api = api;
-    } else {
-        ui.api_profiles.push(ApiProfile { name: name.clone(), api });
-    }
-    ui.api_profile_name_draft = name.clone();
-    ui.api_profile_selected_idx = ui.api_profiles.iter().position(|p| p.name == name).map(|i| i as i32).unwrap_or(-1);
-    ui.api_profile_dialog = PresetDialog::None;
-    save_api_profiles(ui)
-}
-
 /// Copy the selected profile into the API form. Does not apply until Settings Save.
 pub fn load_api_profile(ui: &mut UiShared) -> Result<(), String> {
     let profile = selected_api_profile(ui)
@@ -312,7 +343,7 @@ pub fn load_api_profile(ui: &mut UiShared) -> Result<(), String> {
         .ok_or_else(|| t!("err.select_profile").into_owned())?;
     ui.draft.api = profile.api;
     apply_optional_from_config(ui);
-    ui.api_profile_dialog = PresetDialog::None;
+    ui.profiles.dialog = NamedDialog::None;
     mark_dirty(ui);
     Ok(())
 }

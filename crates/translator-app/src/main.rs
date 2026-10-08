@@ -41,7 +41,9 @@ async fn main() {
     // Must run before any HWND is created (pipeline spawns the overlay window).
     // Otherwise GetClientRect / ClientToScreen stay in a mismatched DPI space
     // vs Graphics Capture physical pixels → overlay position/size drift.
-    enable_per_monitor_dpi_v2();
+    // SAFETY: process-wide setting with no windows yet. It fails only when the host already
+    // set an awareness, which is fine.
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -121,13 +123,4 @@ fn load_onnxruntime() {
     // SAFETY: null-terminated paths; LoadLibrary handle leaked so ORT stays mapped.
     let _ = unsafe { SetDllDirectoryW(PCWSTR(wide.as_ptr())) };
     let _ = unsafe { LoadLibraryW(PCWSTR(dll.as_ptr())) };
-}
-
-/// Per-monitor DPI v2 so Win32 client rects match capture / overlay pixels.
-fn enable_per_monitor_dpi_v2() {
-    // SAFETY: process-wide, no windows yet; failure is non-fatal (already set).
-    let ok = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    if ok.is_err() {
-        // Common when the host already set awareness; ignore.
-    }
 }

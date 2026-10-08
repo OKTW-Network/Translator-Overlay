@@ -49,7 +49,6 @@ pub(crate) struct InflightTranslate {
 #[derive(Clone)]
 pub(crate) struct PendingPage {
     pub blocks: Vec<OcrBlock>,
-    pub source_text: String,
     pub fingerprint: OcrFingerprint,
     pub content_width: u32,
     pub content_height: u32,
@@ -553,7 +552,7 @@ impl Pipeline {
     }
 
     /// Reset gate / timers / captions. Optionally clear LLM conversation.
-    fn reset_ocr_session(&mut self, clear_conversation: bool) {
+    pub(crate) fn reset_ocr_session(&mut self, clear_conversation: bool) {
         self.gate.reset_all();
         self.persist.reset();
         if clear_conversation {
