@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use rust_i18n::t;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -182,7 +183,7 @@ impl Pipeline {
                     // store invalid model JSON as assistant context.
                     self.conversation.rollback_user_turn();
                     self.apply_stream_preview(&job, &[]);
-                    self.fail_translate(format!("translate parse: {e}"));
+                    self.fail_translate(t!("err.translate_parse", error = e.to_string()).into_owned());
                 }
             },
             Err(e) if e.is_cancelled() => {
@@ -203,7 +204,7 @@ impl Pipeline {
                 error!(error = %e, "translation failed");
                 self.conversation.rollback_user_turn();
                 self.apply_stream_preview(&job, &[]);
-                self.fail_translate(format!("translate: {e}"));
+                self.fail_translate(t!("err.translate", error = e.to_string()).into_owned());
             }
         }
     }

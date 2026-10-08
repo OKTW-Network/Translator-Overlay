@@ -33,6 +33,8 @@ pub enum OverlayCommand {
     /// Hide or restore in-place captions without dropping stored blocks.
     SetCaptionsVisible(bool),
     SetHud(HudSnapshot),
+    /// Localized text the translation window shows while it has nothing to show.
+    SetReaderPlaceholder(String),
     BeginRegionSelect {
         regions: Vec<NormRect>,
     },

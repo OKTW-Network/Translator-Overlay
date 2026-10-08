@@ -7,6 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use parking_lot::RwLock;
+use rust_i18n::t;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -217,6 +218,7 @@ impl Pipeline {
             overlay,
         };
 
+        pipeline.sync_reader_placeholder();
         // Kick off download + load without blocking the command loop / UI.
         pipeline.start_model_load();
         pipeline
@@ -405,16 +407,16 @@ impl Pipeline {
 
     fn begin_region_select(&mut self, hwnd: isize) {
         let Some(overlay) = self.overlay.as_ref() else {
-            self.state.write().set_error("overlay is not available".to_string());
+            self.state.write().set_error(t!("err.overlay_unavailable"));
             return;
         };
         if let Err(e) = overlay.send(OverlayCommand::Attach { target_hwnd: hwnd }) {
-            self.state.write().set_error(format!("region select: {e}"));
+            self.state.write().set_error(t!("err.region_select", error = e.to_string()));
             return;
         }
         let regions = self.state.read().ocr_regions.clone();
         if let Err(e) = overlay.send(OverlayCommand::BeginRegionSelect { regions: regions.clone() }) {
-            self.state.write().set_error(format!("region select: {e}"));
+            self.state.write().set_error(t!("err.region_select", error = e.to_string()));
             return;
         }
         let mut s = self.state.write();
@@ -472,9 +474,9 @@ impl Pipeline {
     fn begin_start_capture(&mut self, hwnd: isize, title: String) {
         if self.model_load.is_some() {
             warn!("start capture ignored — OCR models still loading");
-            self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+            self.state.write().last_error = Some(t!("err.models_loading").into_owned());
         } else if self.engine.is_none() {
-            self.state.write().set_error("OCR engine is not ready".to_string());
+            self.state.write().set_error(t!("err.engine_not_ready"));
         } else {
             let interval = self.state.read().config.capture.min_interval_ms;
             self.cancel_inflight();
@@ -615,7 +617,7 @@ impl Pipeline {
         }
         if self.model_load.is_some() {
             warn!("manual capture ignored — OCR models still loading");
-            self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+            self.state.write().last_error = Some(t!("err.models_loading").into_owned());
             return;
         }
         if !self.ensure_engine() {
@@ -632,7 +634,7 @@ impl Pipeline {
                 self.update_preview(&frame);
                 self.run_ocr_manual(&frame).await;
             }
-            None => self.state.write().set_error("no capture frame"),
+            None => self.state.write().set_error(t!("err.no_frame")),
         }
     }
 

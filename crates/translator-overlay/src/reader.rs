@@ -2,6 +2,7 @@
 
 use std::mem::size_of;
 
+use tracing::warn;
 use translator_core::{OverlayConfig, TranslatedBlock};
 use windows::{
     Win32::{
@@ -30,7 +31,8 @@ use crate::{
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayReader.v2");
-const EMPTY_PLACEHOLDER: &str = "(no translation yet)";
+/// Shown until the app sends a localized placeholder.
+const DEFAULT_PLACEHOLDER: &str = "(no translation yet)";
 const DEFAULT_W: i32 = 440;
 const DEFAULT_H: i32 = 200;
 const MIN_W: i32 = 160;
@@ -38,15 +40,14 @@ const MIN_H: i32 = 80;
 const EDGE: i32 = 8;
 const TEXT_INSET: i32 = 12;
 
-/// Join block translations for the reader, or a placeholder when empty.
+/// Join the non-empty block translations for the reader, one per line.
 pub fn format_reader_text(blocks: &[TranslatedBlock]) -> String {
-    let joined = blocks
+    blocks
         .iter()
         .map(|b| b.translation.trim())
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("\n");
-    if joined.is_empty() { EMPTY_PLACEHOLDER.to_string() } else { joined }
+        .join("\n")
 }
 
 pub(crate) struct ReaderWindow {
@@ -56,7 +57,8 @@ pub(crate) struct ReaderWindow {
     surface: DibSurface,
     hfont: HFONT,
     font_px: i32,
-    last_text: String,
+    text: String,
+    placeholder: String,
     dismissed: bool,
 }
 
@@ -120,7 +122,8 @@ impl ReaderWindow {
             surface,
             hfont,
             font_px,
-            last_text: EMPTY_PLACEHOLDER.to_string(),
+            text: String::new(),
+            placeholder: DEFAULT_PLACEHOLDER.to_string(),
             dismissed: false,
         });
 
@@ -138,17 +141,24 @@ impl ReaderWindow {
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
-        let display = if text.trim().is_empty() {
-            EMPTY_PLACEHOLDER.to_string()
-        } else {
-            text.to_string()
-        };
-        if display == self.last_text {
+        if text == self.text {
             return;
         }
-        self.last_text = display;
+        self.text = text.to_string();
         if let Err(e) = self.repaint() {
-            tracing::warn!(error = %e, "reader repaint failed");
+            warn!(error = %e, "reader repaint failed");
+        }
+    }
+
+    pub(crate) fn set_placeholder(&mut self, placeholder: String) {
+        if placeholder == self.placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
+        if self.text.trim().is_empty()
+            && let Err(e) = self.repaint()
+        {
+            warn!(error = %e, "reader repaint failed");
         }
     }
 
@@ -165,7 +175,7 @@ impl ReaderWindow {
             self.font_px = font_px;
         }
         if let Err(e) = self.repaint() {
-            tracing::warn!(error = %e, "reader config repaint failed");
+            warn!(error = %e, "reader config repaint failed");
         }
         self.sync_visibility(config.reader_enabled);
     }
@@ -206,7 +216,7 @@ impl ReaderWindow {
             unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) };
         let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         if let Err(e) = self.present() {
-            tracing::warn!(error = %e, "reader present failed");
+            warn!(error = %e, "reader present failed");
         }
     }
 
@@ -251,11 +261,16 @@ impl ReaderWindow {
         };
         let hdc = self.surface.hdc();
         let hfont = self.hfont;
+        let shown = if self.text.trim().is_empty() {
+            &self.placeholder
+        } else {
+            &self.text
+        };
         let buf = self
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("reader paint bitmap missing".into()))?;
-        text::draw_text_label(hdc, hfont, buf, surface, text_box, &self.last_text, LabelStyle {
+        text::draw_text_label(hdc, hfont, buf, surface, text_box, shown, LabelStyle {
             font_px: self.font_px,
             color: fg,
             vcenter: false,
@@ -324,7 +339,7 @@ unsafe extern "system" fn reader_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
         WM_NCHITTEST => reader.hit_test(lparam),
         WM_SIZE => {
             if let Err(e) = reader.repaint() {
-                tracing::warn!(error = %e, "reader resize paint failed");
+                warn!(error = %e, "reader resize paint failed");
             }
             LRESULT(0)
         }
@@ -360,8 +375,8 @@ mod tests {
 
     #[test]
     fn format_reader_text_joins_and_skips_empty() {
-        assert_eq!(format_reader_text(&[]), EMPTY_PLACEHOLDER);
-        assert_eq!(format_reader_text(&[block("  "), block("")]), EMPTY_PLACEHOLDER);
+        assert_eq!(format_reader_text(&[]), "");
+        assert_eq!(format_reader_text(&[block("  "), block("")]), "");
         assert_eq!(format_reader_text(&[block("hello"), block("  world  ")]), "hello\nworld");
     }
 }

@@ -461,8 +461,10 @@ impl AcpSession {
             )
             .await;
         self.rpc.wait_or_kill().await;
-        if let Some((p, cwd)) = self.cli_session_delete.take() {
-            best_effort_cli_session_delete(&p, &cwd, &self.session_id);
+        if let Some((program, cwd)) = self.cli_session_delete.take() {
+            // The delete spawns a process and polls it with `thread::sleep`; keep it off the async worker.
+            let session_id = self.session_id.clone();
+            let _ = tokio::task::spawn_blocking(move || best_effort_cli_session_delete(&program, &cwd, &session_id)).await;
         }
     }
 

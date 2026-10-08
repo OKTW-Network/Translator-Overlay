@@ -10,7 +10,7 @@ mod nav_header;
 mod range_step;
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::c_void,
     marker::PhantomData,
     mem::{forget, transmute, transmute_copy},
@@ -216,7 +216,13 @@ impl Drop for CachedNavView {
 
 thread_local! {
     static NAV_VIEW: RefCell<CachedNavView> = const { RefCell::new(CachedNavView(None)) };
+    /// Rendering ticks left in which to re-run [`on_tree`] after the last view rebuild.
+    static PENDING_FRAMES: Cell<u8> = const { Cell::new(0) };
 }
+
+/// Frames to re-sync after a view rebuild. Reactor reconciles `MenuItems` after `view`,
+/// and new pages get their visual children during the next layout pass.
+const SYNC_FRAMES: u8 = 3;
 
 pub(crate) fn inspectable(ptr: *mut c_void) -> Result<IInspectable> {
     if ptr.is_null() {
@@ -232,6 +238,7 @@ pub(crate) fn visual_tree() -> Result<IVisualTreeHelperStatics> {
 }
 
 pub(crate) fn refresh_nav_header() {
+    PENDING_FRAMES.set(SYNC_FRAMES);
     NAV_VIEW.with(|slot| {
         if let Some(nav) = slot.borrow().0.clone() {
             nav_header::sync(&nav);
@@ -272,6 +279,12 @@ fn subscribe_got_focus() -> Result<()> {
 fn subscribe_rendering() -> Result<()> {
     let statics: ICompositionTargetStatics = windows_core::factory::<CompositionTargetName, ICompositionTargetStatics>()?;
     let handler = EventHandler::<IInspectable>::new(|_, _| {
+        // Walking the tree every frame burns CPU while idle; only run after a rebuild.
+        let left = PENDING_FRAMES.get();
+        if left == 0 {
+            return;
+        }
+        PENDING_FRAMES.set(left - 1);
         let Some(nav) = NAV_VIEW.with(|slot| slot.borrow().0.clone()) else {
             return;
         };

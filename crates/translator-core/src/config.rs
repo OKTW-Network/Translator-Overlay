@@ -1,6 +1,7 @@
 //! Application configuration loaded from `config.toml` next to the executable.
 
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
@@ -246,54 +247,51 @@ impl ModelProvider {
 ///
 /// Claude Code's native installer puts `claude.exe` in `%USERPROFILE%\.local\bin`, which is
 /// not always on `PATH` for GUI processes, so that location is tried last.
-pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<std::path::PathBuf> {
+pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<PathBuf> {
     if !provider.is_cli() {
         return None;
     }
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
     let trimmed = cli_path.trim();
     if !trimmed.is_empty() {
-        let path = std::path::PathBuf::from(trimmed);
+        let path = PathBuf::from(trimmed);
         if path.is_file() {
             return Some(path);
         }
         // Bare command names still resolve through PATH; missing absolute paths stay None.
         if path.components().count() == 1 {
-            return find_on_path(trimmed);
+            return find_on_path(trimmed, &path_var);
         }
         return None;
     }
-    find_on_path(provider.default_bin()).or_else(|| {
+    find_on_path(provider.default_bin(), &path_var).or_else(|| {
         if provider != ModelProvider::ClaudeCli {
             return None;
         }
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
         let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
-        let path = std::path::PathBuf::from(home).join(".local").join("bin").join(exe);
+        let path = PathBuf::from(home).join(".local").join("bin").join(exe);
         path.is_file().then_some(path)
     })
 }
 
-fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+/// Search the directories in `path_var` for `name`.
+///
+/// Windows runs only files with an extension, and npm writes an extensionless sh shim next to
+/// `codex.cmd`. So on Windows a name without an extension matches only `.exe`, `.cmd`, or `.bat`.
+fn find_on_path(name: &str, path_var: &OsStr) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }
-    let path_var = std::env::var_os("PATH")?;
-    let append_ext = cfg!(windows) && !std::path::Path::new(name).extension().is_some_and(|e| !e.is_empty());
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if append_ext {
-            for ext in [".exe", ".cmd", ".bat"] {
-                let candidate = dir.join(format!("{name}{ext}"));
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
+    let names: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
+        [".exe", ".cmd", ".bat"].map(|ext| format!("{name}{ext}")).into()
+    } else {
+        vec![name.to_string()]
+    };
+    std::env::split_paths(path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+        .find(|candidate| candidate.is_file())
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -847,6 +845,31 @@ model = "my-model"
         assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::OpenCodeCli, r"Z:\no-such-opencode.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::ClaudeCli, r"Z:\no-such-claude.exe").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_on_path_skips_extensionless_npm_shim() {
+        let root = temp_config_path("path_lookup").with_extension("");
+        let npm = root.join("npm");
+        let bin = root.join("bin");
+        fs::create_dir_all(&npm).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        // npm writes `tool` (sh), `tool.cmd`, and `tool.ps1` side by side.
+        for name in ["tool", "tool.cmd", "tool.ps1", "solo"] {
+            fs::write(npm.join(name), "").unwrap();
+        }
+        fs::write(bin.join("solo.exe"), "").unwrap();
+        let path_var = std::env::join_paths([&npm, &bin]).unwrap();
+
+        assert_eq!(find_on_path("tool", &path_var), Some(npm.join("tool.cmd")));
+        // A bare file earlier on PATH loses to an executable later on PATH.
+        assert_eq!(find_on_path("solo", &path_var), Some(bin.join("solo.exe")));
+        // A name with an extension matches that file only.
+        assert_eq!(find_on_path("tool.ps1", &path_var), Some(npm.join("tool.ps1")));
+        assert_eq!(find_on_path("missing", &path_var), None);
+        assert_eq!(find_on_path("tool", OsStr::new("")), None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
