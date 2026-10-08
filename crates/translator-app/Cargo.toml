@@ -16,7 +16,7 @@ translator-core = { path = "../translator-core" }
 translator-ocr = { path = "../translator-ocr" }
 translator-overlay = { path = "../translator-overlay" }
 translator-translate = { path = "../translator-translate" }
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_WinRT", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_LibraryLoader", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-canvas = { version = "0.100", features = ["reactor"] }
 windows-collections = "0.100"
 windows-core = "0.100"
