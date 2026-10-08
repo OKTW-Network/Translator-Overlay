@@ -221,12 +221,16 @@ pub fn quantize_to_step(v: f64, min: f64, max: f64, step: f64) -> f64 {
     out.clamp(min, max)
 }
 
-fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> View {
-    let min = p.min;
-    let max = p.max;
-    let step = p.step;
-    let value = quantize_to_step(p.value, min, max, step);
-
+/// Slider and NumberBox bound to one value snapped to `step`.
+///
+/// `widths` is (slider, slider minimum, box).
+fn slider_and_box(
+    (value, min, max, step): (f64, f64, f64, f64),
+    enabled: bool,
+    widths: (f64, f64, f64),
+    on_changed: impl Fn(f64) + Clone + 'static,
+) -> (Slider, NumberBox) {
+    let value = quantize_to_step(value, min, max, step);
     let on_slider = {
         let on_changed = on_changed.clone();
         move |v: f64| on_changed(quantize_to_step(v, min, max, step))
@@ -236,34 +240,34 @@ fn slider_number_controls(p: &SliderNumberParams, on_changed: impl Fn(f64) + Clo
             on_changed(quantize_to_step(v, min, max, step));
         }
     };
-
     let slider = Slider::new()
         .value(value)
         .minimum(min)
         .maximum(max)
         .step_frequency(step)
+        .is_enabled(enabled)
         .on_value_changed(on_slider)
-        .width(180.0)
-        .min_width(140.0)
+        .width(widths.0)
+        .min_width(widths.1)
         .vertical_alignment(VerticalAlignment::Center);
-
-    let nb = NumberBox::new()
+    let number_box = NumberBox::new()
         .value(value)
         .minimum(min)
         .maximum(max)
+        .is_enabled(enabled)
         .on_value_changed(on_box)
-        .width(100.0)
+        .width(widths.2)
         .vertical_alignment(VerticalAlignment::Center);
-
-    StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(12.0)
-        .children((slider, nb))
+    (slider, number_box)
 }
 
 /// Slider + NumberBox on one row (labels left, controls flush-right) — standalone card.
 pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> View {
-    let controls = slider_number_controls(&p, on_changed);
+    let (slider, number_box) = slider_and_box((p.value, p.min, p.max, p.step), true, (180.0, 140.0, 100.0), on_changed);
+    let controls = StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(12.0)
+        .children((slider, number_box));
     settings_card(p.key, p.header, p.description.as_deref(), controls)
 }
 
@@ -286,26 +290,7 @@ pub fn optional_slider_row(
     on_value: impl Fn(f64) + Clone + 'static,
     on_enabled: impl Fn(bool) + Clone + 'static,
 ) -> View {
-    let min = p.min;
-    let max = p.max;
-    let step = p.step;
-    let enabled = p.enabled;
-    let applicable = p.applicable;
-    let value = quantize_to_step(p.value, min, max, step);
-
-    let on_slider = {
-        let on_value = on_value.clone();
-        move |v: f64| on_value(quantize_to_step(v, min, max, step))
-    };
-    let on_box = {
-        let on_value = on_value;
-        move |v: Option<f64>| {
-            if let Some(v) = v {
-                on_value(quantize_to_step(v, min, max, step));
-            }
-        }
-    };
-
+    let (slider, number_box) = slider_and_box((p.value, p.min, p.max, p.step), p.applicable && p.enabled, (160.0, 120.0, 88.0), on_value);
     settings_card(
         p.key,
         p.header,
@@ -315,27 +300,7 @@ pub fn optional_slider_row(
             .spacing(12.0)
             .vertical_alignment(VerticalAlignment::Center)
             .horizontal_alignment(HorizontalAlignment::Right)
-            .children((
-                Slider::new()
-                    .value(value)
-                    .minimum(min)
-                    .maximum(max)
-                    .step_frequency(step)
-                    .is_enabled(applicable && enabled)
-                    .on_value_changed(on_slider)
-                    .width(160.0)
-                    .min_width(120.0)
-                    .vertical_alignment(VerticalAlignment::Center),
-                NumberBox::new()
-                    .value(value)
-                    .minimum(min)
-                    .maximum(max)
-                    .is_enabled(applicable && enabled)
-                    .on_value_changed(on_box)
-                    .width(88.0)
-                    .vertical_alignment(VerticalAlignment::Center),
-                compact_toggle(enabled, applicable, on_enabled),
-            )),
+            .children((slider, number_box, compact_toggle(p.enabled, p.applicable, on_enabled))),
     )
 }
 

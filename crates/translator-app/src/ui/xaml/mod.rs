@@ -302,7 +302,9 @@ fn subscribe_rendering() -> Result<()> {
 
 /// Subscribe once; Settings header and slider steps both run from this hook.
 pub fn apply() {
-    mica::apply();
+    if let Err(e) = mica::apply() {
+        warn!(error = %e, "xaml: Mica resource override failed");
+    }
     if let Err(e) = subscribe_got_focus() {
         warn!(error = %e, "xaml: GotFocus subscribe failed");
     }

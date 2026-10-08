@@ -6,9 +6,8 @@ use parking_lot::Mutex;
 use rust_i18n::t;
 use translator_core::{HttpApi, ModelProvider, ServiceTier};
 use windows_reactor::{
-    Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontWeight,
-    HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel, TextBlock, TextBox, ThemeBrush, Thickness, TooltipExt,
-    VerticalAlignment, View,
+    Button, ChildrenControl, ComboBox, ContentControl, HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel,
+    TooltipExt, VerticalAlignment, View,
 };
 
 use crate::ui::{
@@ -18,9 +17,10 @@ use crate::ui::{
         ModelSuggestParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_model_suggest,
         card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row, radio,
     },
+    named::{NamedSnap, name_entry_row, named_combo, named_confirm_dialog, named_delete_button},
     shared::{
-        AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_api_profile, load_api_profile, mark_dirty, request_model_list,
-        save_api_profiles, schedule_model_list_if_needed, selected_api_profile,
+        API_PROFILES, AppMsg, ChromeSnap, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list,
+        schedule_model_list_if_needed, selected_api_profile,
     },
 };
 
@@ -34,35 +34,8 @@ fn provider_label(provider: ModelProvider) -> &'static str {
     }
 }
 
-struct ApiProfileSnap {
-    names: Vec<String>,
-    selected_idx: i32,
-    name_draft: String,
-    dialog: PresetDialog,
-}
-
-fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
-    let has_profiles = !snap.names.is_empty();
-    let profile_selected = has_profiles && snap.selected_idx >= 0;
-    let profile_idx = if profile_selected { Some(snap.selected_idx as usize) } else { None };
-
-    let combo = ComboBox::new()
-        .items_source(snap.names.clone())
-        .selected_index(profile_idx)
-        .placeholder_text(t!("api.select_profile"))
-        .is_enabled(has_profiles)
-        .on_selection_changed({
-            let cx = cx.clone();
-            move |idx: Option<usize>| {
-                cx.with_mut(|ui| {
-                    ui.api_profile_selected_idx = idx.filter(|&i| i < ui.api_profiles.len()).map(|i| i as i32).unwrap_or(-1);
-                });
-            }
-        })
-        .width(180.0)
-        .min_width(140.0)
-        .vertical_alignment(VerticalAlignment::Center);
-
+fn api_profile_section(cx: &UiCx, snap: &NamedSnap) -> View {
+    let combo = named_combo(cx, &API_PROFILES, snap, t!("api.select_profile"));
     let toolbar = StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(8.0)
@@ -75,17 +48,17 @@ fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                     let cx = cx.clone();
                     move || {
                         cx.with_mut(|ui| {
-                            ui.api_profile_name_draft = selected_api_profile(ui)
+                            ui.profiles.name_draft = selected_api_profile(ui)
                                 .map(|p| p.name.clone())
                                 .unwrap_or_else(|| provider_label(ui.draft.api.provider).into());
-                            ui.api_profile_dialog = PresetDialog::SaveName;
+                            ui.profiles.dialog = NamedDialog::SaveName;
                         });
                     }
                 })
                 .content(t!("action.save").as_ref())
                 .tooltip(t!("api.save_profile_tip")),
             Button::new()
-                .is_enabled(profile_selected)
+                .is_enabled(snap.selected().is_some())
                 .on_click({
                     let cx = cx.clone();
                     move || {
@@ -98,144 +71,15 @@ fn api_profile_section(cx: &UiCx, snap: &ApiProfileSnap) -> View {
                 })
                 .content(t!("action.load").as_ref())
                 .tooltip(t!("api.load_profile_tip")),
-            Button::new()
-                .is_enabled(profile_selected)
-                .on_click({
-                    let cx = cx.clone();
-                    move || {
-                        cx.with_mut(|ui| {
-                            let Some(name) = selected_api_profile(ui).map(|p| p.name.clone()) else {
-                                return;
-                            };
-                            ui.api_profile_dialog = PresetDialog::Delete { name };
-                        });
-                    }
-                })
-                .content(t!("action.delete").as_ref())
-                .tooltip(t!("api.delete_profile_tip")),
+            named_delete_button(cx, &API_PROFILES, snap, t!("api.delete_profile_tip")),
         ));
 
     StackPanel::new().spacing(4.0).children((
         section_header(t!("api.profiles")),
         toolbar,
-        api_profile_name_row(cx, snap),
-        api_profile_confirm_dialog(cx, snap),
+        name_entry_row(cx, &API_PROFILES, snap),
+        named_confirm_dialog(cx, &API_PROFILES, snap),
     ))
-}
-
-fn api_profile_name_row(cx: &UiCx, snap: &ApiProfileSnap) -> View {
-    if !matches!(snap.dialog, PresetDialog::SaveName) {
-        return View::empty();
-    }
-
-    let name_tb = TextBox::new()
-        .text(snap.name_draft.clone())
-        .on_text_changed({
-            let cx = cx.clone();
-            move |text: String| {
-                cx.with_mut(|ui| ui.api_profile_name_draft = text);
-            }
-        })
-        .width(180.0)
-        .vertical_alignment(VerticalAlignment::Center);
-
-    Border::new()
-        .background(ThemeBrush::CardBackground)
-        .border_brush(ThemeBrush::CardStroke)
-        .border_thickness(Thickness::uniform(1.0))
-        .corner_radius(4.0)
-        .padding(Thickness::new(8.0, 4.0, 8.0, 4.0))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .content(
-            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
-                TextBlock::new()
-                    .text(t!("action.name"))
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .vertical_alignment(VerticalAlignment::Center),
-                name_tb,
-                Button::new()
-                    .style(ButtonStyle::Accent)
-                    .on_click({
-                        let cx = cx.clone();
-                        move || {
-                            cx.with_mut(|ui| {
-                                let name = ui.api_profile_name_draft.trim().to_string();
-                                if name.is_empty() {
-                                    ui.state.write().set_error(t!("err.profile_name_required"));
-                                    return;
-                                }
-                                if ui.api_profiles.iter().any(|p| p.name == name) {
-                                    ui.api_profile_dialog = PresetDialog::Overwrite { name };
-                                    return;
-                                }
-                                if let Err(e) = commit_api_profile(ui, name) {
-                                    ui.state.write().set_error(e);
-                                }
-                            });
-                        }
-                    })
-                    .content(t!("action.save").as_ref()),
-                Button::new()
-                    .on_click({
-                        let cx = cx.clone();
-                        move || {
-                            cx.with_mut(|ui| {
-                                ui.api_profile_dialog = PresetDialog::None;
-                                ui.api_profile_name_draft.clear();
-                            });
-                        }
-                    })
-                    .content(t!("action.cancel").as_ref()),
-            )),
-        )
-}
-
-fn api_profile_confirm_dialog(cx: &UiCx, snap: &ApiProfileSnap) -> View {
-    let (open, title, body, primary) = match &snap.dialog {
-        PresetDialog::Overwrite { name } => {
-            (true, t!("api.overwrite_title"), t!("api.overwrite_body", name = name), t!("action.overwrite"))
-        }
-        PresetDialog::Delete { name } => (true, t!("api.delete_title"), t!("api.delete_body", name = name), t!("action.delete")),
-        PresetDialog::None | PresetDialog::SaveName => (false, Cow::Borrowed(""), Cow::Borrowed(""), t!("action.ok")),
-    };
-
-    ContentDialog::new()
-        .title(title)
-        .primary_button_text(primary)
-        .close_button_text(t!("action.cancel"))
-        .is_open(open)
-        .on_closed({
-            let cx = cx.clone();
-            move |result: ContentDialogResult| {
-                cx.with_mut(|ui| {
-                    let action = ui.api_profile_dialog.clone();
-                    ui.api_profile_dialog = PresetDialog::None;
-                    if result != ContentDialogResult::Primary {
-                        if matches!(action, PresetDialog::Overwrite { .. }) {
-                            ui.api_profile_dialog = PresetDialog::SaveName;
-                        }
-                        return;
-                    }
-                    match action {
-                        PresetDialog::Overwrite { name } => {
-                            if let Err(e) = commit_api_profile(ui, name) {
-                                ui.state.write().set_error(e);
-                            }
-                        }
-                        PresetDialog::Delete { name } => {
-                            ui.api_profiles.retain(|p| p.name != name);
-                            ui.api_profile_selected_idx = -1;
-                            ui.api_profile_name_draft.clear();
-                            if let Err(e) = save_api_profiles(ui) {
-                                ui.state.write().set_error(e);
-                            }
-                        }
-                        PresetDialog::None | PresetDialog::SaveName => {}
-                    }
-                });
-            }
-        })
-        .content(body.as_ref())
 }
 
 pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
@@ -247,12 +91,7 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             ui.draft.api.clone(),
             ui.optional.clone(),
             ui.api_key_revealed,
-            ApiProfileSnap {
-                names: ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
-                selected_idx: ui.api_profile_selected_idx,
-                name_draft: ui.api_profile_name_draft.clone(),
-                dialog: ui.api_profile_dialog.clone(),
-            },
+            NamedSnap::take(&mut ui, &API_PROFILES),
             ui.model_catalog.clone(),
             ui.model_list_loading,
         )

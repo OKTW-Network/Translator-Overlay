@@ -100,15 +100,12 @@ impl Pipeline {
         };
         if let Err(e) = cfg.save(&path) {
             error!(error = %e, "failed to save config");
-            let mut s = self.state.write();
-            s.config = cfg;
-            s.set_error(t!("err.save_config", error = e.to_string()));
+            self.state.write().set_error(t!("err.save_config", error = e.to_string()));
             return;
         }
 
         {
             let mut s = self.state.write();
-            s.config = cfg.clone();
             s.translation_cache_len = self.translation_cache.len();
             s.settings_message = Some(translator_core::SETTINGS_SAVED.into());
             s.last_error = None;

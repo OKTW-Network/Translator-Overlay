@@ -1,23 +1,26 @@
 //! Operator workspace: session settings above a divider, then preview | results.
 
-use std::{borrow::Cow, mem, sync::Arc};
+use std::{mem, sync::Arc};
 
 use parking_lot::Mutex;
 use rust_i18n::t;
 use translator_capture::list_windows;
 use translator_core::{HistoryEntry, NormRect, PreviewInfo, sanitize_regions};
+use translator_ocr::OcrEngine;
+use translator_translate::blocks_to_translated_text;
 use windows_reactor::{
-    Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontIcon, FontWeight, Grid,
-    GridChildExt, GridLength, HorizontalAlignment, KeyedView, LayoutControl, LocalSender, Orientation, ScrollViewer, StackPanel, TextBlock,
-    TextBox, TextWrapping, ThemeBrush, Thickness, TooltipExt, VerticalAlignment, View,
+    Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, FontIcon, FontWeight, Grid, GridChildExt, GridLength,
+    HorizontalAlignment, KeyedView, LayoutControl, LocalSender, Orientation, ScrollViewer, StackPanel, TextBlock, TextWrapping, ThemeBrush,
+    Thickness, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
     pipeline::PipelineCommand,
     ui::{
         chrome::status_infobar,
+        named::{NamedSnap, name_entry_row, named_combo, named_confirm_dialog, named_delete_button},
         preview::capture_preview,
-        shared::{AppMsg, ChromeSnap, PresetDialog, UiCx, UiShared, commit_pending_preset, save_region_presets, selected_preset, truncate},
+        shared::{AppMsg, ChromeSnap, NamedDialog, REGION_PRESETS, UiCx, UiShared, selected_preset, truncate},
     },
 };
 
@@ -36,14 +39,12 @@ struct DashSnap {
     target_hwnd: Option<isize>,
     window_labels: Vec<String>,
     region_select_active: bool,
-    preset_names: Vec<String>,
-    preset_selected_idx: i32,
-    preset_name_draft: String,
-    preset_dialog: PresetDialog,
+    presets: NamedSnap,
 }
 
 fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
-    let ui = shared.lock();
+    let mut ui = shared.lock();
+    let presets = NamedSnap::take(&mut ui, &REGION_PRESETS);
     let s = ui.state.read();
     DashSnap {
         auto_running: s.auto_running,
@@ -56,23 +57,15 @@ fn take_dash(shared: &Arc<Mutex<UiShared>>) -> DashSnap {
         } else {
             s.ocr_regions.clone()
         },
-        ocr_text: s.latest_ocr_blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"),
-        translation: s
-            .latest_translated_blocks
-            .iter()
-            .map(|b| b.translation.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        ocr_text: OcrEngine::blocks_to_text(&s.latest_ocr_blocks),
+        translation: blocks_to_translated_text(&s.latest_translated_blocks),
         history: s.history.iter().cloned().collect(),
         selected_idx: ui.selected_idx.filter(|&i| i < ui.windows.len()),
         selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
         target_hwnd: s.target_hwnd,
         window_labels: ui.windows.iter().map(|w| truncate(&w.title, 72)).collect(),
         region_select_active: s.region_select_active,
-        preset_names: ui.region_presets.iter().map(|p| p.name.clone()).collect(),
-        preset_selected_idx: ui.preset_selected_idx,
-        preset_name_draft: ui.preset_name_draft.clone(),
-        preset_dialog: ui.preset_dialog.clone(),
+        presets,
     }
 }
 
@@ -163,7 +156,7 @@ pub fn dashboard_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: 
             status_infobar(chrome),
             build_window_row(&cx, &snap, window_labels),
             build_regions_pane(&cx, &snap),
-            preset_confirm_dialog(&cx, &snap),
+            named_confirm_dialog(&cx, &REGION_PRESETS, &snap.presets),
         ));
 
     let results_empty = !has_live && history.is_empty();
@@ -435,8 +428,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
     } else {
         t!("dash.regions_selected", count = region_count)
     };
-    let has_presets = !snap.preset_names.is_empty();
-    let preset_selected = has_presets && snap.preset_selected_idx >= 0;
+    let preset_selected = snap.presets.selected().is_some();
     let can_save = !snap.region_select_active && region_count > 0;
 
     let select_label = if selecting { t!("action.done") } else { t!("dash.select_regions") };
@@ -466,27 +458,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
         .content(select_label.as_ref())
         .tooltip(select_tip);
 
-    let preset_idx = if has_presets && snap.preset_selected_idx >= 0 {
-        Some(snap.preset_selected_idx as usize)
-    } else {
-        None
-    };
-    let preset_combo = ComboBox::new()
-        .items_source(snap.preset_names.clone())
-        .selected_index(preset_idx)
-        .placeholder_text(t!("dash.select_preset"))
-        .is_enabled(has_presets)
-        .on_selection_changed({
-            let cx = cx.clone();
-            move |idx: Option<usize>| {
-                cx.with_mut(|ui| {
-                    ui.preset_selected_idx = idx.filter(|&i| i < ui.region_presets.len()).map(|i| i as i32).unwrap_or(-1);
-                });
-            }
-        })
-        .width(180.0)
-        .min_width(140.0)
-        .vertical_alignment(VerticalAlignment::Center);
+    let preset_combo = named_combo(cx, &REGION_PRESETS, &snap.presets, t!("dash.select_preset"));
 
     let sep = Border::new()
         .background(ThemeBrush::CardStroke)
@@ -513,8 +485,8 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                                 return;
                             }
                             ui.pending_save_regions = regions;
-                            ui.preset_name_draft = selected_preset(ui).map(|p| p.name.clone()).unwrap_or_default();
-                            ui.preset_dialog = PresetDialog::SaveName;
+                            ui.presets.name_draft = selected_preset(ui).map(|p| p.name.clone()).unwrap_or_default();
+                            ui.presets.dialog = NamedDialog::SaveName;
                         });
                     }
                 })
@@ -539,21 +511,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                 })
                 .content(t!("action.load").as_ref())
                 .tooltip(t!("dash.load_preset_tip")),
-            Button::new()
-                .is_enabled(preset_selected)
-                .on_click({
-                    let cx = cx.clone();
-                    move || {
-                        cx.with_mut(|ui| {
-                            let Some(name) = selected_preset(ui).map(|p| p.name.clone()) else {
-                                return;
-                            };
-                            ui.preset_dialog = PresetDialog::Delete { name };
-                        });
-                    }
-                })
-                .content(t!("action.delete").as_ref())
-                .tooltip(t!("dash.delete_preset_tip")),
+            named_delete_button(cx, &REGION_PRESETS, &snap.presets, t!("dash.delete_preset_tip")),
             sep,
             select_btn,
             Button::new()
@@ -584,7 +542,7 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
         .children((
             TextBlock::new().text(t!("dash.regions")).font_weight(FontWeight::SEMI_BOLD),
             toolbar,
-            preset_name_row(cx, snap),
+            name_entry_row(cx, &REGION_PRESETS, &snap.presets),
             TextBlock::new()
                 .text(t!("dash.regions_help"))
                 .font_size(12.0)
@@ -592,122 +550,4 @@ fn build_regions_pane(cx: &UiCx, snap: &DashSnap) -> View {
                 .opacity(0.72)
                 .text_wrapping(TextWrapping::WrapWholeWords),
         ))
-}
-
-fn preset_name_row(cx: &UiCx, snap: &DashSnap) -> View {
-    if !matches!(snap.preset_dialog, PresetDialog::SaveName) {
-        return View::empty();
-    }
-
-    let name_tb = TextBox::new()
-        .text(snap.preset_name_draft.clone())
-        .on_text_changed({
-            let cx = cx.clone();
-            move |text: String| {
-                cx.with_mut(|ui| ui.preset_name_draft = text);
-            }
-        })
-        .width(180.0)
-        .vertical_alignment(VerticalAlignment::Center);
-
-    Border::new()
-        .background(ThemeBrush::CardBackground)
-        .border_brush(ThemeBrush::CardStroke)
-        .border_thickness(Thickness::uniform(1.0))
-        .corner_radius(4.0)
-        .padding(Thickness::new(8.0, 4.0, 8.0, 4.0))
-        .horizontal_alignment(HorizontalAlignment::Stretch)
-        .content(
-            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
-                TextBlock::new()
-                    .text(t!("action.name"))
-                    .font_weight(FontWeight::SEMI_BOLD)
-                    .vertical_alignment(VerticalAlignment::Center),
-                name_tb,
-                Button::new()
-                    .style(ButtonStyle::Accent)
-                    .on_click({
-                        let cx = cx.clone();
-                        move || {
-                            cx.with_mut(|ui| {
-                                let name = ui.preset_name_draft.trim().to_string();
-                                if name.is_empty() {
-                                    ui.state.write().set_error(t!("err.preset_name_required"));
-                                    return;
-                                }
-                                if ui.region_presets.iter().any(|p| p.name == name) {
-                                    ui.preset_dialog = PresetDialog::Overwrite { name };
-                                    return;
-                                }
-                                if let Err(e) = commit_pending_preset(ui, name) {
-                                    ui.state.write().set_error(e);
-                                }
-                            });
-                        }
-                    })
-                    .content(t!("action.save").as_ref()),
-                Button::new()
-                    .on_click({
-                        let cx = cx.clone();
-                        move || {
-                            cx.with_mut(|ui| {
-                                ui.preset_dialog = PresetDialog::None;
-                                ui.pending_save_regions.clear();
-                                ui.preset_name_draft.clear();
-                            });
-                        }
-                    })
-                    .content(t!("action.cancel").as_ref()),
-            )),
-        )
-}
-
-fn preset_confirm_dialog(cx: &UiCx, snap: &DashSnap) -> View {
-    let (open, title, body, primary) = match &snap.preset_dialog {
-        PresetDialog::Overwrite { name } => {
-            (true, t!("dash.overwrite_preset_title"), t!("dash.overwrite_preset_body", name = name), t!("action.overwrite"))
-        }
-        PresetDialog::Delete { name } => {
-            (true, t!("dash.delete_preset_title"), t!("dash.delete_preset_body", name = name), t!("action.delete"))
-        }
-        PresetDialog::None | PresetDialog::SaveName => (false, Cow::Borrowed(""), Cow::Borrowed(""), t!("action.ok")),
-    };
-
-    ContentDialog::new()
-        .title(title)
-        .primary_button_text(primary)
-        .close_button_text(t!("action.cancel"))
-        .is_open(open)
-        .on_closed({
-            let cx = cx.clone();
-            move |result: ContentDialogResult| {
-                cx.with_mut(|ui| {
-                    let action = ui.preset_dialog.clone();
-                    ui.preset_dialog = PresetDialog::None;
-                    if result != ContentDialogResult::Primary {
-                        if matches!(action, PresetDialog::Overwrite { .. }) {
-                            ui.preset_dialog = PresetDialog::SaveName;
-                        }
-                        return;
-                    }
-                    match action {
-                        PresetDialog::Overwrite { name } => {
-                            if let Err(e) = commit_pending_preset(ui, name) {
-                                ui.state.write().set_error(e);
-                            }
-                        }
-                        PresetDialog::Delete { name } => {
-                            ui.region_presets.retain(|p| p.name != name);
-                            ui.preset_selected_idx = -1;
-                            ui.preset_name_draft.clear();
-                            if let Err(e) = save_region_presets(ui) {
-                                ui.state.write().set_error(e);
-                            }
-                        }
-                        PresetDialog::None | PresetDialog::SaveName => {}
-                    }
-                });
-            }
-        })
-        .content(body.as_ref())
 }
