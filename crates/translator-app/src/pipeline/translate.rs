@@ -33,7 +33,9 @@ impl Pipeline {
             let mut s = self.state.write();
             s.latest_translated_blocks.clear();
             s.translate_in_flight = false;
-            if s.auto_running {
+            if s.capture_paused {
+                s.status = PipelineStatus::Paused;
+            } else if s.auto_running {
                 s.status = PipelineStatus::Capturing;
             } else {
                 s.status = PipelineStatus::Idle;
@@ -53,7 +55,9 @@ impl Pipeline {
             info!(?page.fingerprint, "skip translate — content unchanged");
             let mut s = self.state.write();
             s.translate_in_flight = false;
-            if !s.latest_translated_blocks.is_empty() {
+            if s.capture_paused {
+                s.status = PipelineStatus::Paused;
+            } else if !s.latest_translated_blocks.is_empty() {
                 s.status = PipelineStatus::OverlayActive;
             } else if s.auto_running {
                 s.status = PipelineStatus::Capturing;
@@ -187,7 +191,9 @@ impl Pipeline {
                 self.apply_stream_preview(&job, &[]);
                 let mut s = self.state.write();
                 s.translate_in_flight = false;
-                if s.auto_running {
+                if s.capture_paused {
+                    s.status = PipelineStatus::Paused;
+                } else if s.auto_running {
                     s.status = PipelineStatus::Capturing;
                 } else {
                     s.status = PipelineStatus::Cancelled;
@@ -281,6 +287,10 @@ fn apply_translated(
     s.latest_translated_blocks = translated;
     s.translate_in_flight = false;
     s.last_error = None;
-    s.status = PipelineStatus::OverlayActive;
+    s.status = if s.capture_paused {
+        PipelineStatus::Paused
+    } else {
+        PipelineStatus::OverlayActive
+    };
     s.attention_sent = false;
 }

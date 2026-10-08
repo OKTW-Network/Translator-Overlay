@@ -34,6 +34,7 @@ use crate::{
         win32::{ClientRect, set_overlay_owner},
         wnd::{CLASS_NAME, HOST_TEARING_DOWN, WINDOW_TITLE, overlay_wnd_proc},
     },
+    hud::HudWindow,
     picker::{PickerEnd, RegionPicker},
     reader::{ReaderWindow, format_reader_text},
 };
@@ -55,7 +56,10 @@ pub(crate) struct OverlayHost {
     pub(crate) hfont: HFONT,
     pub(crate) font_px: i32,
     pub(crate) reader: Option<Box<ReaderWindow>>,
+    pub(crate) hud: Option<Box<HudWindow>>,
     pub(crate) picker: Option<RegionPicker>,
+    /// Pause hides captions without dropping `blocks`.
+    pub(crate) captions_hidden: bool,
     /// Last successfully presented/moved client rect in screen space.
     /// Pure target drags reuse this for MoveOnly (`SetWindowPos` without re-ULW).
     pub(crate) presented_rect: Option<ClientRect>,
@@ -151,7 +155,9 @@ impl OverlayHost {
             hfont,
             font_px,
             reader: None,
+            hud: None,
             picker: None,
+            captions_hidden: false,
             presented_rect: None,
             in_movesize: false,
             z_order_force_topmost: false,
@@ -167,6 +173,13 @@ impl OverlayHost {
         host.warmup_overlay_layer();
         match ReaderWindow::create(&host.config) {
             Ok(reader) => host.reader = Some(reader),
+            Err(e) => {
+                host.teardown();
+                return Err(e);
+            }
+        }
+        match HudWindow::create(&host.config, host.event_tx.clone()) {
+            Ok(hud) => host.hud = Some(hud),
             Err(e) => {
                 host.teardown();
                 return Err(e);
@@ -225,17 +238,23 @@ impl OverlayHost {
                     self.surface_h = content_height as i32;
                 }
                 self.dirty = true;
-                if let Some(reader) = self.reader.as_mut() {
-                    reader.set_text(&format_reader_text(&self.blocks));
-                }
+                self.sync_caption_windows();
             }
             OverlayCommand::Clear => {
                 self.blocks.clear();
                 self.content_w = 0;
                 self.content_h = 0;
                 self.dirty = true;
-                if let Some(reader) = self.reader.as_mut() {
-                    reader.set_text("");
+                self.sync_caption_windows();
+            }
+            OverlayCommand::SetCaptionsVisible(visible) => {
+                self.captions_hidden = !visible;
+                self.dirty = true;
+                self.sync_caption_windows();
+            }
+            OverlayCommand::SetHud(snapshot) => {
+                if let Some(hud) = self.hud.as_mut() {
+                    hud.apply_snapshot(snapshot);
                 }
             }
             OverlayCommand::UpdateConfig(cfg) => {
@@ -243,6 +262,9 @@ impl OverlayHost {
                 self.dirty = true;
                 if let Some(reader) = self.reader.as_mut() {
                     reader.apply_config(&self.config);
+                }
+                if let Some(hud) = self.hud.as_mut() {
+                    hud.apply_config(&self.config);
                 }
                 if !self.config.enabled && self.picker.is_none() {
                     self.hide();
@@ -268,6 +290,17 @@ impl OverlayHost {
                 }
             }
             OverlayCommand::Shutdown => {}
+        }
+    }
+
+    fn sync_caption_windows(&mut self) {
+        let text = if self.captions_hidden {
+            String::new()
+        } else {
+            format_reader_text(&self.blocks)
+        };
+        if let Some(reader) = self.reader.as_mut() {
+            reader.set_text(&text);
         }
     }
 
@@ -399,6 +432,9 @@ impl OverlayHost {
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();
+        }
+        if let Some(mut hud) = self.hud.take() {
+            hud.teardown();
         }
         if !self.hwnd.is_invalid() {
             if unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {

@@ -10,6 +10,7 @@ mod preview;
 mod shared;
 mod xaml;
 
+pub(crate) use crate::ui::chrome::status_text;
 pub use crate::ui::{
     app::AppRoot,
     locale::{apply_ui_locale, system_locale_name},

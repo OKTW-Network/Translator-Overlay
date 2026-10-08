@@ -356,6 +356,14 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> V
                     };
                     let old_hwnd = ui.selected_idx.and_then(|j| ui.windows.get(j).map(|w| w.hwnd));
                     ui.selected_idx = Some(i);
+                    if let Some(w) = ui.windows.get(i).cloned() {
+                        {
+                            let mut s = ui.state.write();
+                            s.selected_hwnd = Some(w.hwnd);
+                            s.selected_title = Some(w.title.clone());
+                        }
+                        let _ = ui.cmd_tx.send(PipelineCommand::SetSelectedWindow);
+                    }
                     let had_regions = {
                         let s = ui.state.read();
                         !s.ocr_regions.is_empty() || s.region_select_active
@@ -383,6 +391,12 @@ fn build_window_row(cx: &UiCx, snap: &DashSnap, window_labels: Vec<String>) -> V
                     ui.windows = list_windows().unwrap_or_default();
                     if ui.selected_idx.is_some_and(|i| i >= ui.windows.len()) {
                         ui.selected_idx = None;
+                        {
+                            let mut s = ui.state.write();
+                            s.selected_hwnd = None;
+                            s.selected_title = None;
+                        }
+                        let _ = ui.cmd_tx.send(PipelineCommand::SetSelectedWindow);
                     }
                 });
             }

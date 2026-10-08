@@ -582,6 +582,8 @@ pub struct OverlayConfig {
     pub enabled: bool,
     /// Show the independent always-on-top translation window.
     pub reader_enabled: bool,
+    /// Show the always-on-top start / pause / stop control bar.
+    pub hud_enabled: bool,
     /// Translation-window font size in pixels (Segoe UI). Clamped when applied.
     pub reader_font_px: u32,
     /// Text colour including alpha (`#AARRGGBB` in config.toml).
@@ -596,7 +598,8 @@ impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            reader_enabled: true,
+            reader_enabled: false,
+            hud_enabled: false,
             reader_font_px: READER_FONT_PX_DEFAULT,
             text_color_argb: 0xFFFF_FFFF,
             background_color_argb: 0xC800_0000,
@@ -913,7 +916,8 @@ target_lang = "ja"
         assert_eq!(config.translation.target_lang, "ja");
         assert_eq!(config.ocr.model_tier, ModelTier::Small);
         assert!(config.overlay.enabled);
-        assert!(config.overlay.reader_enabled);
+        assert!(!config.overlay.reader_enabled);
+        assert!(!config.overlay.hud_enabled);
     }
 
     #[test]
@@ -964,7 +968,8 @@ text_color_argb = "#FFFFFFFF"
 "##;
         let config: AppConfig = toml::from_str(partial).unwrap();
         assert!(config.overlay.enabled);
-        assert!(config.overlay.reader_enabled);
+        assert!(!config.overlay.reader_enabled);
+        assert!(!config.overlay.hud_enabled);
         assert_eq!(config.overlay.reader_font_px, READER_FONT_PX_DEFAULT);
     }
 

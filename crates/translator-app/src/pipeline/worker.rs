@@ -13,10 +13,13 @@ use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
-use translator_overlay::{OverlayCommand, OverlayController, OverlayEvent};
+use translator_overlay::{HudPrimary, HudSnapshot, OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
-use crate::pipeline::{PipelineCommand, ping_ui};
+use crate::{
+    pipeline::{PipelineCommand, ping_ui},
+    ui::status_text,
+};
 
 pub type SharedState = Arc<RwLock<AppState>>;
 pub type CmdRx = mpsc::UnboundedReceiver<PipelineCommand>;
@@ -229,6 +232,7 @@ impl Pipeline {
 
             self.drive_capture().await;
             ping_ui();
+            self.push_hud();
             let wait = self.next_wait();
             match next_event(&mut rx, self.inflight.as_mut(), self.model_load.as_mut(), self.overlay.as_mut(), wait).await {
                 PipelineEvent::Command(None) => return,
@@ -258,19 +262,20 @@ impl Pipeline {
                     self.overlay = None;
                 }
                 PipelineEvent::Overlay(Some(ev)) => {
-                    self.apply_overlay_event(ev);
+                    self.apply_overlay_event(ev).await;
                     while let Some(ev) = self.overlay.as_mut().and_then(OverlayController::try_recv_event) {
-                        self.apply_overlay_event(ev);
+                        self.apply_overlay_event(ev).await;
                     }
                 }
                 PipelineEvent::Tick => continue,
             }
             ping_ui();
+            self.push_hud();
         }
     }
 
     fn next_wait(&self) -> Option<Duration> {
-        if self.session.is_running() && self.inflight.is_none() {
+        if self.session.is_running() && self.inflight.is_none() && !self.state.read().capture_paused {
             let ms = self.state.read().config.capture.min_interval_ms.max(50);
             Some(Duration::from_millis(ms))
         } else {
@@ -301,7 +306,9 @@ impl Pipeline {
                 } else {
                     let mut s = self.state.write();
                     s.translate_in_flight = false;
-                    if s.auto_running {
+                    if s.capture_paused {
+                        s.status = PipelineStatus::Paused;
+                    } else if s.auto_running {
                         s.status = PipelineStatus::Capturing;
                     } else if s.status != PipelineStatus::Idle {
                         // Stop already set Idle; a Cancel queued during close must not overwrite it.
@@ -310,9 +317,17 @@ impl Pipeline {
                 }
             }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg).await,
-            PipelineCommand::SetOverlayDisplay { enabled, reader_enabled } => self.set_overlay_display(enabled, reader_enabled),
+            PipelineCommand::SetOverlayDisplay {
+                enabled,
+                reader_enabled,
+                hud_enabled,
+            } => self.set_overlay_display(enabled, reader_enabled, hud_enabled),
             PipelineCommand::SetUiLanguage { language } => self.set_ui_language(language),
+            PipelineCommand::PauseCapture => self.pause_capture(),
+            PipelineCommand::ResumeCapture => self.resume_capture(),
             PipelineCommand::StopCapture => self.stop_capture().await,
+            // Combo already wrote AppState; this only wakes push_hud.
+            PipelineCommand::SetSelectedWindow => {}
             PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
             PipelineCommand::ConfirmRegionSelect => {
                 if let Some(o) = self.overlay.as_ref() {
@@ -332,24 +347,7 @@ impl Pipeline {
                 }
                 self.apply_ocr_regions(regions);
             }
-            PipelineCommand::StartCapture { hwnd, title } => {
-                if self.model_load.is_some() {
-                    warn!("start capture ignored — OCR models still loading");
-                    self.state.write().last_error = Some("OCR models are still downloading or loading".into());
-                } else if self.engine.is_none() {
-                    self.state.write().set_error("OCR engine is not ready".to_string());
-                } else {
-                    let interval = self.state.read().config.capture.min_interval_ms;
-                    self.cancel_inflight();
-                    match self.session.start_window(hwnd, title, interval) {
-                        Ok(()) => self.on_capture_started(),
-                        Err(e) => {
-                            error!(error = %e, "start capture failed");
-                            self.state.write().set_error(e.to_string());
-                        }
-                    }
-                }
-            }
+            PipelineCommand::StartCapture { hwnd, title } => self.begin_start_capture(hwnd, title),
             PipelineCommand::ManualCapture => self.manual_capture().await,
             PipelineCommand::ResetConversation => {
                 self.conversation.clear();
@@ -389,6 +387,7 @@ impl Pipeline {
         // The fresh stream renumbers frames from 1.
         self.absorb_preview_sequence();
         if let Some(o) = self.overlay.as_ref() {
+            let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
             let _ = o.send(OverlayCommand::Clear);
             if let Some(hwnd) = self.session.target_hwnd() {
                 let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
@@ -396,6 +395,7 @@ impl Pipeline {
         }
         let mut s = self.state.write();
         s.auto_running = true;
+        s.capture_paused = false;
         s.target_window_title = self.session.target_title();
         s.target_hwnd = self.session.target_hwnd();
         s.translate_in_flight = false;
@@ -426,7 +426,7 @@ impl Pipeline {
         info!("region picker started");
     }
 
-    fn apply_overlay_event(&mut self, ev: OverlayEvent) {
+    async fn apply_overlay_event(&mut self, ev: OverlayEvent) {
         match ev {
             OverlayEvent::RegionsCommitted(regions) => {
                 info!(count = regions.len(), "OCR regions committed");
@@ -442,11 +442,102 @@ impl Pipeline {
                 let mut s = self.state.write();
                 s.region_select_draft = regions;
             }
+            OverlayEvent::HudPrimary => self.on_hud_primary(),
+            OverlayEvent::HudStop => {
+                if !self.state.read().capture_busy && self.state.read().auto_running {
+                    self.state.write().capture_busy = true;
+                    self.stop_capture().await;
+                }
+            }
         }
+    }
+
+    fn on_hud_primary(&mut self) {
+        let (busy, paused, running, hwnd, title) = {
+            let s = self.state.read();
+            (s.capture_busy, s.capture_paused, s.auto_running && !s.capture_paused, s.selected_hwnd, s.selected_title.clone())
+        };
+        if busy {
+            return;
+        }
+        if running {
+            self.pause_capture();
+        } else if paused {
+            self.resume_capture();
+        } else if let (Some(hwnd), Some(title)) = (hwnd, title) {
+            self.begin_start_capture(hwnd, title);
+        }
+    }
+
+    fn begin_start_capture(&mut self, hwnd: isize, title: String) {
+        if self.model_load.is_some() {
+            warn!("start capture ignored — OCR models still loading");
+            self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+        } else if self.engine.is_none() {
+            self.state.write().set_error("OCR engine is not ready".to_string());
+        } else {
+            let interval = self.state.read().config.capture.min_interval_ms;
+            self.cancel_inflight();
+            match self.session.start_window(hwnd, title, interval) {
+                Ok(()) => self.on_capture_started(),
+                Err(e) => {
+                    error!(error = %e, "start capture failed");
+                    self.state.write().set_error(e.to_string());
+                }
+            }
+        }
+    }
+
+    fn pause_capture(&mut self) {
+        {
+            let mut s = self.state.write();
+            if !s.auto_running || s.capture_paused {
+                return;
+            }
+            s.capture_paused = true;
+            s.status = PipelineStatus::Paused;
+        }
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.send(OverlayCommand::SetCaptionsVisible(false));
+        }
+        info!("capture paused");
+    }
+
+    fn resume_capture(&mut self) {
+        {
+            let mut s = self.state.write();
+            if !s.auto_running || !s.capture_paused {
+                return;
+            }
+            s.capture_paused = false;
+            s.restore_operational_status();
+        }
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
+        }
+        info!("capture resumed");
+    }
+
+    fn push_hud(&mut self) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return;
+        };
+        let snap = {
+            let s = self.state.read();
+            let running = s.auto_running && !s.capture_paused;
+            HudSnapshot {
+                label: status_text(&s.status).into_owned(),
+                primary: if running { HudPrimary::Pause } else { HudPrimary::Play },
+                primary_enabled: !s.capture_busy && (s.auto_running || s.selected_hwnd.is_some()),
+                stop_enabled: !s.capture_busy && s.auto_running,
+            }
+        };
+        let _ = overlay.send(OverlayCommand::SetHud(snap));
     }
 
     async fn stop_capture(&mut self) {
         if let Some(o) = self.overlay.as_ref() {
+            let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
             let _ = o.send(OverlayCommand::CancelRegionSelect);
             let _ = o.send(OverlayCommand::Detach);
             let _ = o.send(OverlayCommand::Clear);
@@ -459,6 +550,7 @@ impl Pipeline {
         self.client.close_session().await;
         let mut s = self.state.write();
         s.auto_running = false;
+        s.capture_paused = false;
         s.capture_busy = false;
         s.target_hwnd = None;
         s.translate_in_flight = false;
@@ -545,7 +637,7 @@ impl Pipeline {
     }
 
     async fn drive_capture(&mut self) {
-        if !self.session.is_running() || self.inflight.is_some() {
+        if !self.session.is_running() || self.inflight.is_some() || self.state.read().capture_paused {
             return;
         }
         // Skip OCR / preview / caption expiry while the target is in its

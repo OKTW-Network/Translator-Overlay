@@ -17,11 +17,16 @@ use crate::{
     ui::locale::apply_ui_locale,
 };
 
-/// Apply overlay / reader visibility immediately (live config + disk), and keep the draft in sync.
-pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bool) {
+/// Apply overlay / reader / HUD visibility immediately (live config + disk), and keep the draft in sync.
+pub fn send_overlay_display(ui: &mut UiShared, enabled: bool, reader_enabled: bool, hud_enabled: bool) {
     ui.draft.overlay.enabled = enabled;
     ui.draft.overlay.reader_enabled = reader_enabled;
-    let _ = ui.cmd_tx.send(PipelineCommand::SetOverlayDisplay { enabled, reader_enabled });
+    ui.draft.overlay.hud_enabled = hud_enabled;
+    let _ = ui.cmd_tx.send(PipelineCommand::SetOverlayDisplay {
+        enabled,
+        reader_enabled,
+        hud_enabled,
+    });
 }
 
 /// Apply the control-window language immediately and persist it on the live config.
@@ -486,6 +491,7 @@ pub struct ChromeSnap {
     pub target: Option<String>,
     pub last_error: Option<String>,
     pub auto_running: bool,
+    pub capture_paused: bool,
     pub capture_busy: bool,
     pub selected_hwnd: Option<isize>,
     pub settings_dirty: bool,
@@ -502,6 +508,7 @@ pub fn take_chrome(shared: &Arc<Mutex<UiShared>>) -> ChromeSnap {
         target: s.target_window_title.clone(),
         last_error: s.last_error.clone(),
         auto_running: s.auto_running,
+        capture_paused: s.capture_paused,
         capture_busy: s.capture_busy,
         selected_hwnd: ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd)),
         // Use already-held `s.config` — do not call is_settings_dirty (nested read).

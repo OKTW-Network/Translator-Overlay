@@ -258,6 +258,7 @@ impl ReaderWindow {
         text::draw_text_label(hdc, hfont, buf, surface, text_box, &self.last_text, LabelStyle {
             font_px: self.font_px,
             color: fg,
+            vcenter: false,
         })?;
         self.present()
     }

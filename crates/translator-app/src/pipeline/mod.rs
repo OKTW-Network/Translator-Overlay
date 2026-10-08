@@ -33,7 +33,11 @@ pub enum PipelineCommand {
         hwnd: isize,
         title: String,
     },
+    PauseCapture,
+    ResumeCapture,
     StopCapture,
+    /// Dashboard window combo; wakes the worker so the HUD Start button can enable.
+    SetSelectedWindow,
     /// Grab one frame and OCR + translate immediately (bypass stability wait).
     ManualCapture,
     /// Drop LLM conversation history (keeps OCR models and translation cache).
@@ -46,6 +50,7 @@ pub enum PipelineCommand {
     SetOverlayDisplay {
         enabled: bool,
         reader_enabled: bool,
+        hud_enabled: bool,
     },
     /// Persist the control-window language without saving the rest of the draft.
     SetUiLanguage {

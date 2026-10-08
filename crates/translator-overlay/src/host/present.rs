@@ -202,7 +202,7 @@ impl OverlayHost {
             return;
         };
 
-        if self.blocks.is_empty() || self.content_w == 0 || self.content_h == 0 {
+        if self.captions_hidden || self.blocks.is_empty() || self.content_w == 0 || self.content_h == 0 {
             let (_, _, client_w, client_h) = rect;
             if client_w <= 0 || client_h <= 0 {
                 return;

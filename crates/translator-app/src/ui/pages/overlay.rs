@@ -29,7 +29,8 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                 cx.with_mut(|ui| {
                     if ui.draft.overlay.enabled != on {
                         let reader = ui.draft.overlay.reader_enabled;
-                        send_overlay_display(ui, on, reader);
+                        let hud = ui.draft.overlay.hud_enabled;
+                        send_overlay_display(ui, on, reader, hud);
                     }
                 });
             }
@@ -40,7 +41,20 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                 cx.with_mut(|ui| {
                     if ui.draft.overlay.reader_enabled != on {
                         let enabled = ui.draft.overlay.enabled;
-                        send_overlay_display(ui, enabled, on);
+                        let hud = ui.draft.overlay.hud_enabled;
+                        send_overlay_display(ui, enabled, on, hud);
+                    }
+                });
+            }
+        }),
+        card_toggle("ov-hud", t!("overlay.hud"), Some(&t!("overlay.hud_desc")), overlay.hud_enabled, {
+            let cx = cx.clone();
+            move |on| {
+                cx.with_mut(|ui| {
+                    if ui.draft.overlay.hud_enabled != on {
+                        let enabled = ui.draft.overlay.enabled;
+                        let reader = ui.draft.overlay.reader_enabled;
+                        send_overlay_display(ui, enabled, reader, on);
                     }
                 });
             }

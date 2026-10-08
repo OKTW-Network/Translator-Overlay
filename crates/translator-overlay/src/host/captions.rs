@@ -65,6 +65,7 @@ impl OverlayHost {
             self.paint_label(*rect, text, LabelStyle {
                 font_px: *font_px,
                 color: fg,
+                vcenter: false,
             })?;
         }
         Ok(())

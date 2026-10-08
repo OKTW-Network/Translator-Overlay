@@ -22,12 +22,13 @@ impl Pipeline {
         }
     }
 
-    /// Persist only overlay / reader visibility on the live config.
-    pub(crate) fn set_overlay_display(&mut self, enabled: bool, reader_enabled: bool) {
+    /// Persist only overlay / reader / HUD visibility on the live config.
+    pub(crate) fn set_overlay_display(&mut self, enabled: bool, reader_enabled: bool, hud_enabled: bool) {
         let overlay = {
             let mut s = self.state.write();
             s.config.overlay.enabled = enabled;
             s.config.overlay.reader_enabled = reader_enabled;
+            s.config.overlay.hud_enabled = hud_enabled;
             s.config.overlay.clone()
         };
         if let Some(o) = self.overlay.as_ref() {
@@ -36,7 +37,7 @@ impl Pipeline {
         if !self.persist_live_config() {
             return;
         }
-        info!(enabled, reader_enabled, "overlay display updated");
+        info!(enabled, reader_enabled, hud_enabled, "overlay display updated");
     }
 
     /// Persist only the control-window language on the live config.

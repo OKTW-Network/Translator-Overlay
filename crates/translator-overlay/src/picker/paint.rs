@@ -96,7 +96,11 @@ impl OverlayHost {
                 w: 22,
                 h: 18,
             };
-            self.paint_label(label_rect, &label, LabelStyle { font_px: 13, color: text })?;
+            self.paint_label(label_rect, &label, LabelStyle {
+                font_px: 13,
+                color: text,
+                vcenter: false,
+            })?;
         }
         Ok(())
     }

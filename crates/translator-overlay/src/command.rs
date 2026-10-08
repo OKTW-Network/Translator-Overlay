@@ -2,6 +2,22 @@
 
 use translator_core::{NormRect, OverlayConfig, TranslatedBlock};
 
+/// Icon on the HUD primary button (start / resume vs pause).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudPrimary {
+    Play,
+    Pause,
+}
+
+/// Localized snapshot pushed to the always-on-top control bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HudSnapshot {
+    pub label: String,
+    pub primary: HudPrimary,
+    pub primary_enabled: bool,
+    pub stop_enabled: bool,
+}
+
 pub enum OverlayCommand {
     Attach {
         target_hwnd: isize,
@@ -14,6 +30,9 @@ pub enum OverlayCommand {
     },
     Clear,
     UpdateConfig(OverlayConfig),
+    /// Hide or restore in-place captions without dropping stored blocks.
+    SetCaptionsVisible(bool),
+    SetHud(HudSnapshot),
     BeginRegionSelect {
         regions: Vec<NormRect>,
     },
@@ -29,4 +48,6 @@ pub enum OverlayEvent {
     RegionsCommitted(Vec<NormRect>),
     RegionSelectCancelled,
     RegionSelectUpdated(Vec<NormRect>),
+    HudPrimary,
+    HudStop,
 }

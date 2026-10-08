@@ -41,6 +41,8 @@ pub enum PipelineStatus {
     /// In-flight translation was aborted by the user.
     Cancelled,
     OverlayActive,
+    /// Capture session is live but the auto OCR loop is paused (captions hidden).
+    Paused,
     Error {
         message: String,
     },
@@ -70,6 +72,16 @@ mod tests {
         assert_eq!(ids, vec![3, 2, 1]);
         assert_eq!(state.history.front().unwrap().source_text, "s3");
         assert_eq!(state.history.back().unwrap().source_text, "s1");
+    }
+
+    #[test]
+    fn restore_operational_status_prefers_paused() {
+        let mut state = AppState::new(AppConfig::default());
+        state.auto_running = true;
+        state.capture_paused = true;
+        state.translate_in_flight = true;
+        state.restore_operational_status();
+        assert_eq!(state.status, PipelineStatus::Paused);
     }
 
     #[test]
@@ -128,6 +140,11 @@ pub struct AppState {
     pub target_hwnd: Option<isize>,
     pub preview: PreviewInfo,
     pub auto_running: bool,
+    /// Auto OCR loop is frozen; session and last captions stay until resume / stop.
+    pub capture_paused: bool,
+    /// Last window chosen on the Dashboard (HUD Start uses this when idle).
+    pub selected_hwnd: Option<isize>,
+    pub selected_title: Option<String>,
     /// Start/Stop locked while Stop waits for CLI session close.
     pub capture_busy: bool,
     /// True while an LLM request is in flight (cancellable).
@@ -165,6 +182,9 @@ impl AppState {
             target_hwnd: None,
             preview: PreviewInfo::default(),
             auto_running: false,
+            capture_paused: false,
+            selected_hwnd: None,
+            selected_title: None,
             capture_busy: false,
             translate_in_flight: false,
             last_error: None,
@@ -191,7 +211,9 @@ impl AppState {
     /// Shared by config save, conversation reset, and similar UI-side recoveries
     /// so status rules stay in one place.
     pub fn restore_operational_status(&mut self) {
-        if self.translate_in_flight {
+        if self.capture_paused {
+            self.status = PipelineStatus::Paused;
+        } else if self.translate_in_flight {
             self.status = PipelineStatus::Translating;
         } else if self.auto_running {
             self.status = PipelineStatus::Capturing;

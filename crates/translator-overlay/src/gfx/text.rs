@@ -4,9 +4,9 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, RECT},
         Graphics::Gdi::{
-            CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DT_EDITCONTROL, DT_LEFT, DT_NOPREFIX,
-            DT_TOP, DT_WORDBREAK, DrawTextW, FF_DONTCARE, FW_NORMAL, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode,
-            SetTextColor, TRANSPARENT,
+            CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
+            DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_VCENTER, DT_WORDBREAK, DrawTextW, FF_DONTCARE, FW_NORMAL, HDC, HFONT, HGDIOBJ,
+            OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
     },
     core::w,
@@ -21,6 +21,8 @@ use crate::{
 pub(crate) struct LabelStyle {
     pub font_px: i32,
     pub color: Rgba,
+    /// Single-line, vertically centered (HUD status). Overlay captions stay top-aligned wrap.
+    pub vcenter: bool,
 }
 
 pub(crate) fn create_segoe_font(px: i32) -> Result<HFONT, OverlayError> {
@@ -62,15 +64,27 @@ pub(crate) fn draw_text_label(
     text: &str,
     style: LabelStyle,
 ) -> Result<(), OverlayError> {
+    if text.is_empty() {
+        return Ok(());
+    }
     let _ = unsafe { SelectObject(hdc, HGDIOBJ(hfont.0)) };
     let _ = unsafe { SetBkMode(hdc, TRANSPARENT) };
 
     let pad = label_pad(style.font_px);
-    let mut text_rect = RECT {
-        left: rect.x + pad,
-        top: rect.y + pad,
-        right: (rect.x + rect.w - pad).max(rect.x + pad + 1),
-        bottom: (rect.y + rect.h - pad).max(rect.y + pad + 1),
+    let mut text_rect = if style.vcenter {
+        RECT {
+            left: rect.x + pad,
+            top: rect.y,
+            right: (rect.x + rect.w - pad).max(rect.x + pad + 1),
+            bottom: (rect.y + rect.h).max(rect.y + 1),
+        }
+    } else {
+        RECT {
+            left: rect.x + pad,
+            top: rect.y + pad,
+            right: (rect.x + rect.w - pad).max(rect.x + pad + 1),
+            bottom: (rect.y + rect.h - pad).max(rect.y + pad + 1),
+        }
     };
 
     let rw = (text_rect.right - text_rect.left).max(0) as usize;
@@ -98,7 +112,11 @@ pub(crate) fn draw_text_label(
 
     let mut wide: Vec<u16> = text.encode_utf16().collect();
     let _ = unsafe { SetTextColor(hdc, COLORREF(0x00FF_FFFF)) };
-    let flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX;
+    let flags = if style.vcenter {
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX
+    } else {
+        DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX
+    };
     unsafe { DrawTextW(hdc, &mut wide, &mut text_rect, flags) };
 
     let color = style.color;

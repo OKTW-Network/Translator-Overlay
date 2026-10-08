@@ -90,70 +90,121 @@ pub fn ui_language_combo(shared: &Arc<Mutex<UiShared>>, bump: &LocalSender<AppMs
         .into()
 }
 
-/// Start/Stop for the NavigationView pane footer.
+/// Start/Pause (same slot) plus Stop above it in the NavigationView pane footer.
 /// Style setters do not re-run; remount via `key` when Accent/Subtle or compact geometry change.
 pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &LocalSender<AppMsg>, pane_open: bool) -> View {
     let cx = UiCx::new(shared, bump);
     let has_window = snap.selected_hwnd.is_some();
-    let running = snap.auto_running;
+    let paused = snap.capture_paused;
+    let running = snap.auto_running && !paused;
+    let session = snap.auto_running;
     let busy = snap.capture_busy;
-    let enabled = !busy && (running || has_window);
-    let label = if running { t!("action.stop") } else { t!("action.start") };
-    let glyph = if running { "\u{EE95}" } else { "\u{F5B0}" };
-    let tip = if busy {
+    let primary_enabled = !busy && (session || has_window);
+    let stop_enabled = !busy && session;
+    let primary_label = if running { t!("action.pause") } else { t!("action.start") };
+    let primary_glyph = if running { "\u{E769}" } else { "\u{F5B0}" };
+    let stop_label = t!("action.stop");
+    let primary_tip = if busy {
         t!("capture.waiting_stop")
     } else if running {
-        t!("capture.stop")
+        t!("capture.pause")
+    } else if paused {
+        t!("capture.resume")
     } else if has_window {
         t!("capture.start")
     } else {
         t!("capture.select_window_first")
     };
-    let key = match (running, pane_open) {
-        (true, true) => "btn-stop-wide",
-        (true, false) => "btn-stop-compact",
-        (false, true) => "btn-start-wide",
-        (false, false) => "btn-start-compact",
+    let stop_tip = if busy {
+        t!("capture.waiting_stop")
+    } else if session {
+        t!("capture.stop")
+    } else {
+        t!("capture.stop_idle")
     };
-    // NavigationViewItemOnLeftMinHeight / OnLeftIconBoxHeight.
+    let key = format!(
+        "cap-{}-{}-{}",
+        if running {
+            "pause"
+        } else if paused {
+            "resume"
+        } else {
+            "start"
+        },
+        if pane_open { "wide" } else { "compact" },
+        if stop_enabled { "stop-on" } else { "stop-off" },
+    );
     const NAV_ITEM_HEIGHT: f64 = 36.0;
     const NAV_ICON_BOX: f64 = 40.0;
     const NAV_GLYPH: f64 = 16.0;
-    let glyph_icon = Viewbox::new()
-        .width(NAV_GLYPH)
-        .height(NAV_GLYPH)
-        .stretch(Stretch::Uniform)
-        .horizontal_alignment(HorizontalAlignment::Center)
-        .vertical_alignment(VerticalAlignment::Center)
-        .slot(ViewboxSlot::Child, FontIcon::new().glyph(glyph));
-    let content: View = if pane_open {
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(8.0)
+
+    let glyph_icon = |glyph: &str| {
+        Viewbox::new()
+            .width(NAV_GLYPH)
+            .height(NAV_GLYPH)
+            .stretch(Stretch::Uniform)
+            .horizontal_alignment(HorizontalAlignment::Center)
             .vertical_alignment(VerticalAlignment::Center)
-            .children((glyph_icon, TextBlock::new().text(&*label).vertical_alignment(VerticalAlignment::Center)))
-    } else {
-        glyph_icon
+            .slot(ViewboxSlot::Child, FontIcon::new().glyph(glyph))
+    };
+    let button_content = |glyph: &str, label: &str| -> View {
+        if pane_open {
+            StackPanel::new()
+                .orientation(Orientation::Horizontal)
+                .spacing(8.0)
+                .vertical_alignment(VerticalAlignment::Center)
+                .children((glyph_icon(glyph), TextBlock::new().text(label).vertical_alignment(VerticalAlignment::Center)))
+        } else {
+            glyph_icon(glyph)
+        }
     };
 
-    let mut start = Button::new()
-        .is_enabled(enabled)
+    let mut stop = Button::new()
+        .is_enabled(stop_enabled)
         .vertical_alignment(VerticalAlignment::Bottom)
         .vertical_content_alignment(VerticalAlignment::Center)
         .height(NAV_ITEM_HEIGHT)
-        .automation_name(label)
-        .automation_id("btn-start-stop")
+        .automation_name(stop_label.as_ref())
+        .automation_id("btn-stop")
         .on_click({
             let cx = cx.clone();
             move || {
                 {
                     let ui = cx.shared.lock();
                     let mut s = ui.state.write();
+                    if !s.capture_busy && s.auto_running {
+                        s.capture_busy = true;
+                        drop(s);
+                        let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+                    }
+                }
+                cx.refresh();
+            }
+        });
+    if !pane_open {
+        stop = stop.style(ButtonStyle::Subtle);
+    }
+
+    let mut primary = Button::new()
+        .is_enabled(primary_enabled)
+        .vertical_alignment(VerticalAlignment::Bottom)
+        .vertical_content_alignment(VerticalAlignment::Center)
+        .height(NAV_ITEM_HEIGHT)
+        .automation_name(primary_label.as_ref())
+        .automation_id("btn-start-pause")
+        .on_click({
+            let cx = cx.clone();
+            move || {
+                {
+                    let ui = cx.shared.lock();
+                    let s = ui.state.write();
                     if !s.capture_busy {
-                        if s.auto_running {
-                            s.capture_busy = true;
+                        if s.auto_running && !s.capture_paused {
                             drop(s);
-                            let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+                            let _ = ui.cmd_tx.send(PipelineCommand::PauseCapture);
+                        } else if s.capture_paused {
+                            drop(s);
+                            let _ = ui.cmd_tx.send(PipelineCommand::ResumeCapture);
                         } else {
                             drop(s);
                             if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
@@ -168,29 +219,55 @@ pub fn capture_start_stop_button(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSna
                 cx.refresh();
             }
         });
-    if running {
-        start = start.style(ButtonStyle::Accent);
+    if running || paused {
+        primary = primary.style(ButtonStyle::Accent);
     } else if !pane_open {
-        start = start.style(ButtonStyle::Subtle);
+        primary = primary.style(ButtonStyle::Subtle);
     }
-    start = if pane_open {
-        start
+
+    if pane_open {
+        stop = stop
             .horizontal_alignment(HorizontalAlignment::Stretch)
-            .margin(Thickness::new(8.0, 4.0, 8.0, 8.0))
+            .margin(Thickness::new(8.0, 8.0, 8.0, 4.0));
+        primary = primary
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .margin(Thickness::new(8.0, 4.0, 8.0, 8.0));
     } else {
-        start
+        stop = stop
             .horizontal_content_alignment(HorizontalAlignment::Center)
             .width(NAV_ICON_BOX)
             .horizontal_alignment(HorizontalAlignment::Center)
-            .margin(Thickness::new(0.0, 4.0, 0.0, 8.0))
-    };
+            .margin(Thickness::new(0.0, 4.0, 0.0, 0.0));
+        primary = primary
+            .horizontal_content_alignment(HorizontalAlignment::Center)
+            .width(NAV_ICON_BOX)
+            .horizontal_alignment(HorizontalAlignment::Center)
+            .margin(Thickness::new(0.0, 4.0, 0.0, 8.0));
+    }
+
     let mut footer = Grid::new()
+        .rows([GridLength::Auto, GridLength::Auto])
         .horizontal_alignment(HorizontalAlignment::Stretch)
         .vertical_alignment(VerticalAlignment::Bottom);
     if !pane_open {
         footer = footer.width(48.0).horizontal_alignment(HorizontalAlignment::Center);
     }
-    footer.keyed_children([KeyedView::new(key, start.content(content).tooltip(tip))])
+    footer.keyed_children([
+        KeyedView::new(
+            format!("{key}-stop"),
+            Border::new()
+                .grid_row(0)
+                .content(stop.content(button_content("\u{EE95}", stop_label.as_ref())).tooltip(stop_tip)),
+        ),
+        KeyedView::new(
+            format!("{key}-primary"),
+            Border::new().grid_row(1).content(
+                primary
+                    .content(button_content(primary_glyph, primary_label.as_ref()))
+                    .tooltip(primary_tip),
+            ),
+        ),
+    ])
 }
 
 /// Shared Save / Reload / Discard bar for settings pages.
@@ -363,7 +440,7 @@ fn confirm_dialog(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: &Local
         .content(body.as_ref())
 }
 
-fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
+pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
     match status {
         PipelineStatus::Idle => t!("status.idle"),
         PipelineStatus::Capturing => t!("status.capturing"),
@@ -384,6 +461,7 @@ fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
         }
         PipelineStatus::Cancelled => t!("status.cancelled"),
         PipelineStatus::OverlayActive => t!("status.overlay_active"),
+        PipelineStatus::Paused => t!("status.paused"),
         PipelineStatus::Error { message } => t!("status.error", message = message),
     }
 }
