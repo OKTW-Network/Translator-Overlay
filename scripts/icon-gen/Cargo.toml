@@ -1,0 +1,12 @@
+[package]
+name = "icon-gen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone tool (not a workspace member): renders the SVG masters into app.ico + PNG previews.
+[workspace]
+
+[dependencies]
+ico = "0.5"
+resvg = "0.48"

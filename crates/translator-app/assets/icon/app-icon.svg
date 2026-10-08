@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="48" height="48" viewBox="0 0 48 48">
+  <!--
+    Translator Overlay app icon: 48x48 master, rendered for 30px and up.
+    Metaphor: a captured window whose glyphs (back layer) are covered by a translated caption (front layer).
+    Palette, neon frame and chromatic offset follow the README banner.
+    Windows 11 icon grid: 2px exterior radii, 120° gradients lit from the top-left.
+  -->
+  <defs>
+    <rect id="window" x="3" y="6" width="36" height="30" rx="2"/>
+    <rect id="caption" x="12" y="24" width="33" height="17" rx="2"/>
+    <linearGradient id="windowFill" x1="3" y1="6" x2="30" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#271a58"/>
+      <stop offset="1" stop-color="#0c0820"/>
+    </linearGradient>
+    <radialGradient id="orbCyan" cx="34" cy="10" r="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00f0ff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#00f0ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orbViolet" cx="6" cy="34" r="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c43bff" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#c43bff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="frame" x1="3" y1="6" x2="39" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5ee7ff"/>
+      <stop offset="1" stop-color="#c84bff"/>
+    </linearGradient>
+    <linearGradient id="captionFill" x1="12" y1="24" x2="40" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7afcff"/>
+      <stop offset="0.5" stop-color="#ff7ae8"/>
+      <stop offset="1" stop-color="#9d7aff"/>
+    </linearGradient>
+    <clipPath id="windowClip">
+      <use xlink:href="#window"/>
+    </clipPath>
+    <filter id="keyShadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feGaussianBlur stdDeviation="1"/>
+    </filter>
+    <filter id="ambientShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Back layer: captured window -->
+  <use xlink:href="#window" fill="url(#windowFill)"/>
+  <g clip-path="url(#windowClip)">
+    <rect x="3" y="6" width="36" height="30" fill="url(#orbCyan)"/>
+    <rect x="3" y="6" width="36" height="30" fill="url(#orbViolet)"/>
+    <rect x="3" y="6" width="36" height="5" fill="#ffffff" fill-opacity="0.08"/>
+    <!-- Source glyphs (what OCR reads) -->
+    <g fill="#9aa4c7" fill-opacity="0.7">
+      <rect x="8" y="15" width="3" height="3" rx="0.75"/>
+      <rect x="12" y="15" width="3" height="3" rx="0.75"/>
+      <rect x="16" y="15" width="3" height="3" rx="0.75"/>
+      <rect x="22" y="15" width="3" height="3" rx="0.75"/>
+      <rect x="26" y="15" width="3" height="3" rx="0.75"/>
+      <rect x="30" y="15" width="3" height="3" rx="0.75"/>
+      <rect x="8" y="20" width="3" height="3" rx="0.75"/>
+      <rect x="12" y="20" width="3" height="3" rx="0.75"/>
+      <rect x="16" y="20" width="3" height="3" rx="0.75"/>
+    </g>
+    <!-- Caption shadow, masked into the window below (separate-metaphor shadow) -->
+    <use xlink:href="#caption" transform="translate(0 1)" fill="#000000" fill-opacity="0.4" filter="url(#keyShadow)"/>
+    <use xlink:href="#caption" fill="#000000" fill-opacity="0.3" filter="url(#ambientShadow)"/>
+  </g>
+  <rect x="3.5" y="6.5" width="35" height="29" rx="1.5" fill="none" stroke="url(#frame)"/>
+
+  <!-- Front layer: translated caption with the banner's chromatic offset -->
+  <use xlink:href="#caption" transform="translate(-1 1)" fill="#ff2d6a" fill-opacity="0.55"/>
+  <use xlink:href="#caption" transform="translate(1 -1)" fill="#00f0ff" fill-opacity="0.55"/>
+  <use xlink:href="#caption" fill="url(#captionFill)"/>
+  <!-- Translated text -->
+  <g stroke="#160c33" stroke-opacity="0.85" stroke-width="2.5" stroke-linecap="round">
+    <path d="M17 30H40"/>
+    <path d="M17 35.5H30"/>
+  </g>
+</svg>

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!--
+    Translator Overlay app icon: 16x16 master, rendered for 16–24px.
+    Same metaphor as app-icon.svg, pixel-aligned, without title bar, orbs, shadows or chromatic offset.
+  -->
+  <defs>
+    <linearGradient id="windowFill" x1="1" y1="2" x2="10" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#271a58"/>
+      <stop offset="1" stop-color="#0c0820"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="0" y1="1" x2="13" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5ee7ff"/>
+      <stop offset="1" stop-color="#c84bff"/>
+    </linearGradient>
+    <linearGradient id="captionFill" x1="4" y1="7" x2="14" y2="15" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7afcff"/>
+      <stop offset="0.5" stop-color="#ff7ae8"/>
+      <stop offset="1" stop-color="#9d7aff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Back layer: captured window with one row of source glyphs -->
+  <rect x="0.5" y="1.5" width="12" height="10" rx="1" fill="url(#windowFill)" stroke="url(#frame)"/>
+  <path d="M3 4.5H5M6 4.5H8M9 4.5H10" stroke="#9aa4c7" stroke-opacity="0.85"/>
+
+  <!-- Front layer: translated caption -->
+  <rect x="4" y="7" width="12" height="7" rx="1" fill="url(#captionFill)"/>
+  <path d="M6 9.5H14M6 11.5H11" stroke="#160c33" stroke-opacity="0.9"/>
+</svg>

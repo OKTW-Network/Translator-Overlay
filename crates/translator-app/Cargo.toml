@@ -22,3 +22,6 @@ windows-collections = "0.100"
 windows-core = "0.100"
 windows-reactor = "0.100"
 windows-reference = "0.100"
+
+[build-dependencies]
+winresource = "0.1.31"
