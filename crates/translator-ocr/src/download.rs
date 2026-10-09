@@ -172,10 +172,17 @@ async fn download_one(
             .map_err(|e| OcrError::Download(format!("rename {} → {}: {e}", part.display(), dest.display()))),
         Err(e) => Err(e),
     };
-    if result.is_err() {
+    if let Err(e) = result {
         let _ = fs::remove_file(&part).await;
-    } else {
-        info!(file = art.file_name, bytes = art.expected_bytes, "OCR model download complete");
+        return Err(e);
     }
-    result
+
+    // Load only checks that the file exists, so a wrong-sized file here would never be fetched again.
+    if !std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == art.expected_bytes) {
+        let _ = fs::remove_file(&dest).await;
+        return Err(OcrError::Download(format!("{}: size check failed after rename", art.file_name)));
+    }
+
+    info!(file = art.file_name, bytes = art.expected_bytes, "OCR model download complete");
+    Ok(())
 }
