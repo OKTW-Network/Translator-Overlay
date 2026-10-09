@@ -61,8 +61,12 @@ pub async fn connect(
     };
     let mut session = AcpSession::new(rpc, session_id, false, Some((program.to_path_buf(), cwd.to_path_buf())));
 
-    if !model.trim().is_empty() {
-        session.set_config_option("model", model.trim(), cancel, timeout).await?;
+    if !model.trim().is_empty()
+        && let Err(e) = session.set_config_option("model", model.trim(), cancel, timeout).await
+    {
+        // Dropping the session would kill it and run the delete on this async worker.
+        session.close().await;
+        return Err(e);
     }
 
     if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty())
