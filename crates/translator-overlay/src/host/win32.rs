@@ -1,6 +1,6 @@
 //! Overlay ownership, client geometry, and Z-order placement.
 //!
-//! Captions own the capture target and use capture/DWM client metrics so boxes
+//! Captions are owned by the capture target and use capture/DWM client metrics so boxes
 //! stay aligned with OCR frames. The region picker stays unowned and inserts
 //! above the target (topmost only while the target is foreground). If UIPI
 //! denies insert-after, the overlay latches `HWND_TOPMOST` while the target is

@@ -11,7 +11,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU 或 DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
 - **LLM 翻譯**：OpenAI 相容 API，或本機 Grok / OpenCode / Codex / Claude Code。串流時 Overlay 與翻譯視窗會隨譯文即時更新
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
-- **顯示**：點擊可穿透的 Overlay（跟隨目標視窗，僅前景時顯示）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）
+- **顯示**：點擊可穿透的 Overlay（跟隨目標視窗，目標最小化時隱藏）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）
 - **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名設定檔（Save / Load，與區域設定集相同）
 
 ## 截圖
@@ -42,7 +42,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 ## 使用
 
-**Dashboard** 選目標視窗。可選 **Select regions** 在該視窗上框選辨識範圍（目標前景時才看得到區域選取）；空區域 = 整窗。框選結果可存成設定集再 **Load**。擷取中可 **Capture now** 立刻 OCR + 翻譯（略過穩定等待），或 **Cancel** 取消進行中的翻譯。
+**Dashboard** 選目標視窗。可選 **Select regions** 在該視窗上框選辨識範圍（開啟時會把目標視窗帶到前景）；空區域 = 整窗。框選結果可存成設定集再 **Load**。擷取中可 **Retry** 立刻 OCR + 翻譯（略過穩定等待），或 **Cancel** 取消進行中的翻譯。
 
 **Overlay** 頁開關 Overlay 與獨立翻譯視窗（即時生效）。其餘選項改完需 **Save**。
 
@@ -57,12 +57,12 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
   → 信心過濾 / 單字元過濾 / 多行合併 / block 持續追蹤
   → 穩定閘門
   → LLM 翻譯（session cache + 多輪上下文；HTTP 可串流）
-  → 點擊可穿透的 Overlay（跟隨前景視窗）+ 獨立翻譯視窗
+  → 點擊可穿透的 Overlay（跟隨目標視窗）+ 獨立翻譯視窗
 ```
 
 ## OCR 模型
 
-來源：[GreatV/oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0)。檔案須存在且大小相符才會載入。
+來源：[GreatV/oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0)。載入時只檢查檔案是否存在，大小在下載時檢查。
 
 | 尺寸 | Detection | Recognition | Dictionary |
 | --- | --- | --- | --- |

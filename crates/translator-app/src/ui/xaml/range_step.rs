@@ -1,6 +1,6 @@
 //! WinUI Slider keyboard uses `SmallChange` (default 1), not `StepFrequency`.
 //! Reactor 0.100 does not expose it, so patch native RangeBase/NumberBox over COM.
-//! [`crate::ui::xaml::apply`] re-runs [`sync`] after focus and each frame.
+//! [`crate::ui::xaml::apply`] re-runs [`sync`] after focus and for a few frames after each rebuild.
 
 #![allow(non_snake_case)]
 

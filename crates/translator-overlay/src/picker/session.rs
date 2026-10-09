@@ -36,7 +36,7 @@ impl OverlayHost {
             .unwrap_or((800, 600));
         self.picker = Some(RegionPicker::new(regions, cw, ch));
         self.presented_rect = None;
-        // Captions own the target; picker insert-above requires an unowned overlay.
+        // Captions are owned by the target; picker insert-above requires an unowned overlay.
         set_overlay_owner(self.hwnd, None);
         self.set_click_through(false);
         PICKER_HIT_TEST.store(true, Ordering::Relaxed);

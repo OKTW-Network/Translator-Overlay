@@ -116,7 +116,7 @@ pub struct AppState {
     pub settings_message: Option<String>,
     /// Wall-clock duration of the last OCR inference (ms), if any.
     pub last_ocr_ms: Option<u64>,
-    /// Number of text blocks from the last OCR pass (pre-merge raw or durable).
+    /// Number of text blocks the last OCR inference returned.
     pub last_ocr_block_count: u32,
     /// Session OCR crops (normalized client rects). Empty = whole window.
     pub ocr_regions: Vec<NormRect>,
