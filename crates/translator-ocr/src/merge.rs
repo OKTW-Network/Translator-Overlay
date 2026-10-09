@@ -91,14 +91,18 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank = vec![0u8; n];
     for i in 0..n {
+        let (a0, alen) = axis.span(blocks[i].bbox);
         let mut best: Option<(usize, f32)> = None;
         for j in 0..n {
             if i == j {
                 continue;
             }
-            let Some(gap) = gap_after(&blocks[i], &blocks[j], axis, cfg.below_mid_ratio, span) else {
+            // `j` must start past the middle of `i`, with `below_mid_ratio` of its length as slack.
+            let (b0, blen) = axis.span(blocks[j].bbox);
+            if !approx_ge((b0 + blen * cfg.below_mid_ratio - (a0 + alen * 0.5)) / span, 0.0) {
                 continue;
-            };
+            }
+            let gap = b0 - (a0 + alen);
             if !approx_le(gap.abs() / span, max_gap) || !can_link(&blocks[i], &blocks[j], axis, frame, cfg) {
                 continue;
             }
@@ -250,15 +254,6 @@ fn assign_bands(blocks: &[OcrBlock], members: &[usize], axis: Axis, band_ratio: 
         last = Some(c);
     }
     ids
-}
-
-/// Gap from the far edge of `a` to the near edge of `b` along `axis`.
-///
-/// `None` unless `b` starts past the middle of `a`, with `mid_ratio` of `b`'s length as slack.
-fn gap_after(a: &OcrBlock, b: &OcrBlock, axis: Axis, mid_ratio: f32, span: f32) -> Option<f32> {
-    let (a0, alen) = axis.span(a.bbox);
-    let (b0, blen) = axis.span(b.bbox);
-    approx_ge((b0 + blen * mid_ratio - (a0 + alen * 0.5)) / span, 0.0).then_some(b0 - (a0 + alen))
 }
 
 fn can_link(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
