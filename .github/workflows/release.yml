@@ -33,8 +33,6 @@ jobs:
   build:
     needs: version
     uses: ./.github/workflows/build.yml
-    with:
-      package: true
 
   release:
     needs: [version, build]

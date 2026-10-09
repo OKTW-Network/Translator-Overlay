@@ -7,10 +7,6 @@ on:
         description: Run clippy and tests
         type: boolean
         default: false
-      package:
-        description: Build the portable zip
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -60,7 +56,6 @@ jobs:
         run: cargo test --workspace
 
   package:
-    if: ${{ inputs.package }}
     needs: ort
     runs-on: windows-latest
     timeout-minutes: 90
