@@ -63,7 +63,11 @@ impl OverlayHost {
         }
 
         for (i, (pr, _selected)) in rects.into_iter().enumerate() {
-            self.paint_label(number_rect(pr), &(i + 1).to_string(), LabelStyle { font_px: 13, color: text, vcenter: false })?;
+            self.paint_label(number_rect(pr), &(i + 1).to_string(), LabelStyle {
+                font_px: 13,
+                color: text,
+                vcenter: false,
+            })?;
         }
         Ok(())
     }
