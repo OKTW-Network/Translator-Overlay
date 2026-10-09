@@ -2,29 +2,16 @@
 
 use std::{
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize, Serializer};
-use thiserror::Error;
 
 use crate::{
     paths::{PathError, resolve_under_exe},
+    toml_file::{TomlFileError, read_text, save_toml},
     types::{ModelTier, OcrDevice},
 };
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("path error: {0}")]
-    Path(#[from] PathError),
-    #[error("IO error for {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
-    #[error("failed to parse config TOML: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("failed to serialize config TOML: {0}")]
-    Serialize(#[from] toml::ser::Error),
-}
 
 /// Control-window language stored in `config.toml` as `en`, `zh-Hant`, or `zh-Hans`.
 ///
@@ -89,7 +76,7 @@ impl AppConfig {
     /// Load from `path`, or write defaults and return them if the file is absent.
     ///
     /// Invalid fields are skipped (see [`Self::load`]).
-    pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
+    pub fn load_or_create(path: &Path) -> Result<Self, TomlFileError> {
         if path.exists() {
             Self::load(path)
         } else {
@@ -104,35 +91,20 @@ impl AppConfig {
     /// Each TOML field is applied independently: a value that fails to parse is
     /// skipped and that field keeps its default. IO errors and TOML syntax
     /// errors still fail the whole load.
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::from_toml_lenient(&text)
+    pub fn load(path: &Path) -> Result<Self, TomlFileError> {
+        Self::from_toml_lenient(&read_text(path)?)
     }
 
     /// Parse TOML, keeping valid fields and dropping values that do not match the schema.
-    fn from_toml_lenient(text: &str) -> Result<Self, ConfigError> {
+    fn from_toml_lenient(text: &str) -> Result<Self, TomlFileError> {
         let src: toml::Table = toml::from_str(text)?;
         let mut dest = toml::Table::new();
         apply_lenient(&mut dest, &src, "");
         Ok(Self::deserialize(toml::Value::Table(dest)).unwrap_or_default())
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let text = toml::to_string_pretty(self)?;
-        fs::write(path, text).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+    pub fn save(&self, path: &Path) -> Result<(), TomlFileError> {
+        save_toml(path, self)
     }
 }
 
@@ -315,7 +287,7 @@ pub struct ApiConfig {
     #[serde(skip_serializing_if = "is_default")]
     pub http_api: HttpApi,
     /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` / `claude` on PATH.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
     /// Preferred processing tier. Ignored by providers that do not support it.
     #[serde(skip_serializing_if = "is_default")]
@@ -326,13 +298,13 @@ pub struct ApiConfig {
     pub api_key: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Request JSON Schema Structured Outputs on HTTP OpenAI-compatible APIs.
     /// Ignored for CLI providers. Turn off if the endpoint rejects `json_schema`.
@@ -418,7 +390,7 @@ pub struct TranslationConfig {
     pub cache_enabled: bool,
     /// Max unique source strings kept in the in-memory LFU cache.
     pub cache_max_entries: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
 
@@ -650,7 +622,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
 

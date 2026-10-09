@@ -47,45 +47,6 @@ impl Rect {
         let union = self.width * self.height + other.width * other.height - inter;
         if union <= 0.0 { 0.0 } else { inter / union }
     }
-
-    /// True when `candidate` is a real layout change, not detector noise.
-    ///
-    /// OCR boxes jitter a few pixels every frame on animated backgrounds even
-    /// when the readable text is unchanged. Overlay remapping must ignore that.
-    pub fn is_significant_relayout(self, candidate: Self) -> bool {
-        let prev_w = self.width.max(1.0);
-        let prev_h = self.height.max(1.0);
-        let w_ratio = candidate.width.max(1.0) / prev_w;
-        let h_ratio = candidate.height.max(1.0) / prev_h;
-        let size_changed = !(0.65..=1.55).contains(&w_ratio) || !(0.65..=1.55).contains(&h_ratio);
-
-        let iou = self.iou(candidate);
-        // Strong overlap with similar size → treat as jitter.
-        if iou >= 0.35 && !size_changed {
-            return false;
-        }
-        if size_changed && iou >= 0.15 {
-            // Merge/split or font-scale change at roughly the same spot.
-            return true;
-        }
-
-        self.center_shift_exceeds_tol(candidate)
-    }
-
-    /// Keep `self` when `candidate` is only OCR jitter; otherwise take `candidate`.
-    pub fn stabilize_against(self, candidate: Self) -> Self {
-        if self.is_significant_relayout(candidate) { candidate } else { self }
-    }
-
-    fn center_shift_exceeds_tol(self, candidate: Self) -> bool {
-        let (cx0, cy0) = self.center();
-        let (cx1, cy1) = candidate.center();
-        let dx = (cx0 - cx1).abs();
-        let dy = (cy0 - cy1).abs();
-        let tol_x = (self.width.max(candidate.width) * 0.22).max(10.0);
-        let tol_y = (self.height.max(candidate.height) * 0.40).max(8.0);
-        dx > tol_x || dy > tol_y
-    }
 }
 
 /// Axis-aligned region as fractions of the capture client area (`0..=1`).
@@ -291,20 +252,13 @@ mod tests {
     }
 
     #[test]
-    fn stabilize_keeps_jitter_and_adopts_real_relayout() {
-        let prev = Rect::new(100.0, 200.0, 180.0, 28.0);
-        let jitter = Rect::new(103.0, 197.0, 176.0, 30.0);
-        assert!(!prev.is_significant_relayout(jitter));
-        assert_eq!(prev.stabilize_against(jitter), prev);
-
-        let moved = Rect::new(100.0, 320.0, 180.0, 28.0);
-        assert!(prev.is_significant_relayout(moved));
-        assert_eq!(prev.stabilize_against(moved), moved);
-
-        let small = Rect::new(100.0, 200.0, 80.0, 24.0);
-        let merged = Rect::new(98.0, 198.0, 240.0, 72.0);
-        assert!(small.is_significant_relayout(merged));
-        assert_eq!(small.stabilize_against(merged), merged);
+    fn rect_center_and_iou() {
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(a.center(), (5.0, 5.0));
+        assert_eq!(a.iou(a), 1.0);
+        assert_eq!(a.iou(Rect::new(20.0, 0.0, 10.0, 10.0)), 0.0);
+        // Half overlap: intersection 50, union 150.
+        assert!((a.iou(Rect::new(5.0, 0.0, 10.0, 10.0)) - 1.0 / 3.0).abs() < 1e-6);
     }
 
     #[test]

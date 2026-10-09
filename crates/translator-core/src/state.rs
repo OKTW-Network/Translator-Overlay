@@ -58,45 +58,6 @@ impl PipelineStatus {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn push_history_caps_to_max_and_assigns_ids() {
-        let mut state = AppState::new(AppConfig::default());
-        for i in 0..4 {
-            state.push_history(format!("s{i}"), format!("t{i}"), 3);
-        }
-        let ids: Vec<u64> = state.history.iter().map(|h| h.id).collect();
-        assert_eq!(ids, vec![3, 2, 1]);
-        assert_eq!(state.history.front().unwrap().source_text, "s3");
-        assert_eq!(state.history.back().unwrap().source_text, "s1");
-    }
-
-    #[test]
-    fn restore_operational_status_prefers_paused() {
-        let mut state = AppState::new(AppConfig::default());
-        state.auto_running = true;
-        state.capture_paused = true;
-        state.translate_in_flight = true;
-        state.restore_operational_status();
-        assert_eq!(state.status, PipelineStatus::Paused);
-    }
-
-    #[test]
-    fn history_entry_covered_by_live_page() {
-        let entry = HistoryEntry {
-            id: 1,
-            source_text: "new line".into(),
-            translated_text: "新行".into(),
-        };
-        assert!(entry.covered_by("cached\nnew line", "快取\n新行"));
-        assert!(entry.covered_by("new line", "新行"));
-        assert!(!entry.covered_by("cached", "快取"));
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
     /// Stable UI key; assigned by [`AppState::push_history`].
@@ -129,7 +90,7 @@ pub struct PreviewInfo {
 }
 
 /// Mutable runtime state shared between UI and workers.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AppState {
     pub status: PipelineStatus,
     pub config: AppConfig,
@@ -172,32 +133,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
-        Self {
-            status: PipelineStatus::Idle,
-            config,
-            latest_ocr_blocks: Vec::new(),
-            latest_translated_blocks: Vec::new(),
-            history: VecDeque::new(),
-            target_window_title: None,
-            target_hwnd: None,
-            preview: PreviewInfo::default(),
-            auto_running: false,
-            capture_paused: false,
-            selected_hwnd: None,
-            selected_title: None,
-            capture_busy: false,
-            translate_in_flight: false,
-            last_error: None,
-            settings_message: None,
-            last_ocr_ms: None,
-            last_ocr_block_count: 0,
-            ocr_regions: Vec::new(),
-            region_select_active: false,
-            region_select_draft: Vec::new(),
-            translation_cache_len: 0,
-            attention_sent: false,
-            next_history_id: 0,
-        }
+        Self { config, ..Self::default() }
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -233,5 +169,44 @@ impl AppState {
             translated_text,
         });
         self.history.truncate(max_items.max(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_history_caps_to_max_and_assigns_ids() {
+        let mut state = AppState::new(AppConfig::default());
+        for i in 0..4 {
+            state.push_history(format!("s{i}"), format!("t{i}"), 3);
+        }
+        let ids: Vec<u64> = state.history.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![3, 2, 1]);
+        assert_eq!(state.history.front().unwrap().source_text, "s3");
+        assert_eq!(state.history.back().unwrap().source_text, "s1");
+    }
+
+    #[test]
+    fn restore_operational_status_prefers_paused() {
+        let mut state = AppState::new(AppConfig::default());
+        state.auto_running = true;
+        state.capture_paused = true;
+        state.translate_in_flight = true;
+        state.restore_operational_status();
+        assert_eq!(state.status, PipelineStatus::Paused);
+    }
+
+    #[test]
+    fn history_entry_covered_by_live_page() {
+        let entry = HistoryEntry {
+            id: 1,
+            source_text: "new line".into(),
+            translated_text: "新行".into(),
+        };
+        assert!(entry.covered_by("cached\nnew line", "快取\n新行"));
+        assert!(entry.covered_by("new line", "新行"));
+        assert!(!entry.covered_by("cached", "快取"));
     }
 }
