@@ -10,7 +10,7 @@ use windows_reactor::{ChildrenControl, LocalSender, StackPanel, View};
 use crate::ui::{
     cards::section_header,
     chrome::settings_page_shell,
-    controls::{ColorPopupParams, SliderNumberParams, card_color_popup, card_slider_number, card_toggle, note},
+    controls::{ColorPopupParams, SliderNumberParams, card_color_popup, card_slider_number, card_toggle},
     shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty, send_overlay_display},
 };
 
@@ -150,9 +150,5 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
         ),
     ));
 
-    let notes = StackPanel::new()
-        .spacing(4.0)
-        .children((section_header(t!("overlay.notes")), note(&t!("overlay.notes_body"))));
-
-    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((display, colors, notes)))
+    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((display, colors)))
 }
