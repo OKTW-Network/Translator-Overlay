@@ -46,7 +46,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 **Overlay** 頁開關 Overlay 與獨立翻譯視窗（即時生效）。其餘選項改完需 **Save**。
 
-**OBS：** Window Capture 選 `Translator Overlay Captions`，不要選控制視窗 `Translator Overlay`。Game Capture 只抓得到遊戲本身，需再加一層 Window Capture 疊譯文。
+**OBS：** Window Capture 選 `Translator Overlay Captions`（Overlay）或 `Translator Overlay Translation`（翻譯視窗），不要選控制視窗 `Translator Overlay`。擷取方式要設成 **Windows 10**，不能用 BitBlt。Game Capture 只抓得到遊戲本身，需再加一層 Window Capture 疊譯文。
 
 ## 管線
 

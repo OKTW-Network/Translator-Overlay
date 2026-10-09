@@ -14,8 +14,7 @@ use windows::{
             GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST,
             MINMAXINFO, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
             SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WM_CLOSE, WM_DESTROY,
-            WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_OVERLAPPED, WS_POPUP,
+            WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
         },
     },
     core::{PCWSTR, w},
@@ -32,6 +31,8 @@ use crate::{
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayReader.v2");
+/// Distinct from the WinUI control window (`Translator Overlay`) so OBS Window Capture can pick this HWND.
+const WINDOW_TITLE: PCWSTR = w!("Translator Overlay Translation");
 /// Shown until the app sends a localized placeholder.
 const DEFAULT_PLACEHOLDER: &str = "(no translation yet)";
 const DEFAULT_W: i32 = 440;
@@ -80,9 +81,9 @@ impl ReaderWindow {
         // Create overlapped so the window manager can cascade, then drop chrome.
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 CLASS_NAME,
-                w!("Translation"),
+                WINDOW_TITLE,
                 WS_OVERLAPPED,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -371,5 +372,40 @@ mod tests {
         assert_eq!(format_reader_text(&[]), "");
         assert_eq!(format_reader_text(&[block("  "), block("")]), "");
         assert_eq!(format_reader_text(&[block("hello"), block("  world  ")]), "hello\nworld");
+    }
+
+    #[test]
+    fn reader_hwnd_is_obs_capturable() -> Result<(), String> {
+        use translator_core::OverlayConfig;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, GetWindowTextW, IsWindowVisible, WINDOW_EX_STYLE, WS_EX_TOOLWINDOW,
+        };
+
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let mut reader = ReaderWindow::create(&OverlayConfig {
+            reader_enabled: true,
+            ..OverlayConfig::default()
+        })
+        .map_err(|e| format!("ReaderWindow::create: {e}"))?;
+
+        let mut title_buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(reader.hwnd, &mut title_buf) }.max(0) as usize;
+        let title = String::from_utf16_lossy(&title_buf[..n]);
+        let ex = WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(reader.hwnd, GWL_EXSTYLE) } as u32);
+        let visible = unsafe { IsWindowVisible(reader.hwnd) }.as_bool();
+        let toolwindow = ex.contains(WS_EX_TOOLWINDOW);
+
+        reader.teardown();
+
+        if title != "Translator Overlay Translation" {
+            return Err(format!("reader title is {title:?}, expected Translator Overlay Translation"));
+        }
+        if toolwindow {
+            return Err("reader HWND is WS_EX_TOOLWINDOW (OBS skips it)".into());
+        }
+        if !visible {
+            return Err("enabled reader HWND is not visible".into());
+        }
+        Ok(())
     }
 }
