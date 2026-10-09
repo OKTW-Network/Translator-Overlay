@@ -217,6 +217,11 @@ impl OverlayHost {
                 if let Some(hud) = self.hud.as_mut() {
                     hud.apply_snapshot(snapshot);
                 }
+                // Reader has no idle heartbeat; HUD snapshots recover it after WinUI
+                // drops independent topmost windows at launch.
+                if let Some(reader) = self.reader.as_mut() {
+                    reader.restore_topmost_if_needed();
+                }
             }
             OverlayCommand::UpdateConfig(cfg) => {
                 self.config = cfg;

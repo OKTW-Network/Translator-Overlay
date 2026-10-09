@@ -50,6 +50,31 @@ pub(crate) fn window_is_topmost(hwnd: HWND) -> bool {
     WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32).contains(WS_EX_TOPMOST)
 }
 
+/// Re-assert `HWND_TOPMOST` if this window lost always-on-top *effect*.
+///
+/// WASDK / WinUI 3 can bury other topmost windows under normal ones on launch
+/// while leaving `WS_EX_TOPMOST` set
+/// ([microsoft-ui-xaml#9990](https://github.com/microsoft/microsoft-ui-xaml/issues/9990)).
+pub(crate) fn ensure_topmost(hwnd: HWND) {
+    if hwnd.is_invalid() || (window_is_topmost(hwnd) && !normal_window_is_above(hwnd)) {
+        return;
+    }
+    if let Err(e) = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) } {
+        debug!(error = %e, "SetWindowPos(HWND_TOPMOST) restore failed");
+    }
+}
+
+fn normal_window_is_above(hwnd: HWND) -> bool {
+    let mut current = unsafe { GetWindow(hwnd, GW_HWNDPREV) }.ok().unwrap_or_default();
+    while !current.is_invalid() {
+        if unsafe { IsWindowVisible(current) }.as_bool() && !window_is_topmost(current) {
+            return true;
+        }
+        current = unsafe { GetWindow(current, GW_HWNDPREV) }.ok().unwrap_or_default();
+    }
+    false
+}
+
 pub(crate) fn overlay_owner(hwnd: HWND) -> HWND {
     if hwnd.is_invalid() {
         return HWND::default();
@@ -414,6 +439,51 @@ mod tests {
         assert!(overlay_wants_topmost(OverlayOwnership::Unowned, true, false));
         assert!(!overlay_wants_topmost(OverlayOwnership::OwnedByTarget, false, true));
         assert!(overlay_wants_topmost(OverlayOwnership::OwnedByTarget, true, false));
+    }
+
+    #[test]
+    fn ensure_topmost_restores_after_notopmost() -> Result<(), String> {
+        use windows::{
+            Win32::{
+                System::LibraryLoader::GetModuleHandleW,
+                UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SW_SHOW, ShowWindow, WS_OVERLAPPEDWINDOW},
+            },
+            core::w,
+        };
+
+        let _lock = lock_hwnd_tests();
+        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST,
+                w!("STATIC"),
+                w!("ensure-topmost"),
+                WS_OVERLAPPEDWINDOW,
+                40,
+                40,
+                240,
+                180,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+        }
+        .map_err(|e| format!("CreateWindowExW: {e}"))?;
+        let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+        let _ = unsafe { SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+        let dropped = !window_is_topmost(hwnd);
+        ensure_topmost(hwnd);
+        let restored = window_is_topmost(hwnd);
+        let _ = unsafe { DestroyWindow(hwnd) };
+        if !dropped {
+            return Err("HWND_NOTOPMOST did not drop WS_EX_TOPMOST".into());
+        }
+        if restored {
+            Ok(())
+        } else {
+            Err("ensure_topmost did not restore WS_EX_TOPMOST".into())
+        }
     }
 
     #[test]

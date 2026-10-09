@@ -27,7 +27,7 @@ use crate::{
         surface::DibSurface,
         text::{self, LabelStyle},
     },
-    host::win32::lparam_point,
+    host::win32::{ensure_topmost, lparam_point},
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayReader.v2");
@@ -143,6 +143,7 @@ impl ReaderWindow {
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
+        self.restore_topmost_if_needed();
         if text == self.text {
             return;
         }
@@ -153,6 +154,7 @@ impl ReaderWindow {
     }
 
     pub(crate) fn set_placeholder(&mut self, placeholder: String) {
+        self.restore_topmost_if_needed();
         if placeholder == self.placeholder {
             return;
         }
@@ -161,6 +163,12 @@ impl ReaderWindow {
             && let Err(e) = self.repaint()
         {
             warn!(error = %e, "reader repaint failed");
+        }
+    }
+
+    pub(crate) fn restore_topmost_if_needed(&self) {
+        if self.config.reader_enabled && !self.dismissed {
+            ensure_topmost(self.hwnd);
         }
     }
 
@@ -407,5 +415,22 @@ mod tests {
             return Err("enabled reader HWND is not visible".into());
         }
         Ok(())
+    }
+
+    #[test]
+    fn set_text_restores_topmost_without_content_change() {
+        use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos};
+
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let mut reader = ReaderWindow::create(&OverlayConfig {
+            reader_enabled: true,
+            ..OverlayConfig::default()
+        })
+        .expect("reader create");
+        let _ = unsafe { SetWindowPos(reader.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+        assert!(!crate::host::win32::window_is_topmost(reader.hwnd), "HWND_NOTOPMOST should drop WS_EX_TOPMOST");
+        reader.set_text("");
+        assert!(crate::host::win32::window_is_topmost(reader.hwnd), "set_text should restore topmost");
+        reader.teardown();
     }
 }

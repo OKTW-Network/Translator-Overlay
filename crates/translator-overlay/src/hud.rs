@@ -28,6 +28,7 @@ use crate::{
         surface::DibSurface,
         text::{self, LabelStyle},
     },
+    host::win32::ensure_topmost,
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayHud.v1");
@@ -132,6 +133,7 @@ impl HudWindow {
     }
 
     pub(crate) fn apply_snapshot(&mut self, snapshot: HudSnapshot) {
+        self.restore_topmost_if_needed();
         if self.snapshot != snapshot {
             self.snapshot = snapshot;
             if let Err(e) = self.repaint() {
@@ -168,6 +170,12 @@ impl HudWindow {
                 let _ = unsafe { UnregisterClassW(CLASS_NAME, Some(hi.into())) };
             }
             self.class_atom = 0;
+        }
+    }
+
+    fn restore_topmost_if_needed(&self) {
+        if self.config.hud_enabled && !self.dismissed {
+            ensure_topmost(self.hwnd);
         }
     }
 
@@ -482,6 +490,28 @@ mod tests {
             primary_enabled: true,
             stop_enabled: false,
         });
+        hud.teardown();
+    }
+
+    #[test]
+    fn apply_snapshot_restores_topmost_without_content_change() {
+        use windows::Win32::UI::WindowsAndMessaging::{HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos};
+
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut hud = HudWindow::create(
+            &OverlayConfig {
+                hud_enabled: true,
+                ..OverlayConfig::default()
+            },
+            tx,
+        )
+        .expect("hud create");
+        let snap = hud.snapshot.clone();
+        let _ = unsafe { SetWindowPos(hud.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+        assert!(!crate::host::win32::window_is_topmost(hud.hwnd), "HWND_NOTOPMOST should drop WS_EX_TOPMOST");
+        hud.apply_snapshot(snap);
+        assert!(crate::host::win32::window_is_topmost(hud.hwnd), "apply_snapshot should restore topmost");
         hud.teardown();
     }
 }
