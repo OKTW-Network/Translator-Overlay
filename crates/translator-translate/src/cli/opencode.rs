@@ -9,7 +9,7 @@ use crate::{
     TranslateError,
     cli::{
         TempCwd,
-        rpc::{AcpSession, JsonRpcChild, acp_initialize_params, map_auth_failure, models_after_connect},
+        rpc::{AcpSession, JsonRpcChild, acp_open, models_after_connect},
     },
 };
 
@@ -34,35 +34,20 @@ pub async fn connect(
     fs::write(cwd.join("opencode.json"), OPENCODE_JSON)
         .map_err(|e| TranslateError::CliProtocol(format!("write isolated opencode.json: {e}")))?;
     let extra_env = [("OPENCODE_DISABLE_CLAUDE_CODE", "1"), ("OPENCODE_PURE", "1")];
-    let mut rpc = JsonRpcChild::spawn(program, &["acp".into()], cwd, &extra_env, true).await?;
-    let created = async {
-        rpc.request("initialize", acp_initialize_params(), cancel, timeout)
-            .await
-            .map_err(|e| map_auth_failure(e, AUTH_HINT))?;
-        rpc.request(
-            "session/new",
-            serde_json::json!({
-                "cwd": cwd.to_string_lossy(),
-                "mcpServers": []
-            }),
-            cancel,
-            timeout,
-        )
-        .await
-        .map_err(|e| map_auth_failure(e, AUTH_HINT))
-    }
-    .await;
-    let (session_id, created) = match created.and_then(|created| AcpSession::id_from(&created).map(|id| (id, created))) {
-        Ok(pair) => pair,
-        Err(e) => {
-            rpc.kill_and_wait().await;
-            return Err(e);
-        }
-    };
+    let rpc = JsonRpcChild::spawn(program, &["acp".into()], cwd, &extra_env, true)?;
+    let session = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "mcpServers": []
+    });
+    let (rpc, session_id, created) = acp_open(rpc, session, AUTH_HINT, cancel, timeout).await?;
     let mut session = AcpSession::new(rpc, session_id, false, Some((program.to_path_buf(), cwd.to_path_buf())));
 
-    if !model.trim().is_empty() {
-        session.set_config_option("model", model.trim(), cancel, timeout).await?;
+    if !model.trim().is_empty()
+        && let Err(e) = session.set_config_option("model", model.trim(), cancel, timeout).await
+    {
+        // Dropping the session would kill it and run the delete on this async worker.
+        session.close().await;
+        return Err(e);
     }
 
     if let Some(effort) = reasoning_effort.map(str::trim).filter(|s| !s.is_empty())
@@ -85,7 +70,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::cli::rpc::is_auth_failure;
+    use crate::cli::rpc::{is_auth_failure, map_auth_failure};
 
     #[test]
     fn auth_failures_map_to_login_hint() {

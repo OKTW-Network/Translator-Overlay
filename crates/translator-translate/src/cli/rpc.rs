@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::{Map, Value};
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -184,7 +184,7 @@ fn reject_option_id(params: &Value) -> Option<&str> {
 }
 
 pub struct JsonRpcChild {
-    child: Child,
+    pub(crate) child: Child,
     stdin: ChildStdin,
     rx: mpsc::UnboundedReceiver<Incoming>,
     next_id: i64,
@@ -193,7 +193,7 @@ pub struct JsonRpcChild {
 }
 
 impl JsonRpcChild {
-    pub async fn spawn(
+    pub fn spawn(
         program: &Path,
         args: &[String],
         cwd: &Path,
@@ -205,26 +205,7 @@ impl JsonRpcChild {
         let StdioChild { child, stdin, stdout, .. } = spawn_stdio(program, args, cwd, &env)?;
 
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(line) {
-                    Ok(value) => {
-                        if let Some(incoming) = classify_rpc(value)
-                            && tx.send(incoming).is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(e) => tracing::warn!(target: "translator_translate::cli", error = %e, "ignored non-JSON stdout line"),
-                }
-            }
-        });
-
+        forward_json_lines(stdout, tx, classify_rpc);
         Ok(Self {
             child,
             stdin,
@@ -254,7 +235,7 @@ impl JsonRpcChild {
     ) -> Result<Value, TranslateError> {
         let id = Value::from(self.next_id);
         self.next_id += 1;
-        self.write_message(rpc_request(self.include_jsonrpc, id.clone(), method, params))
+        self.write_message(json!({ "id": id.clone(), "method": method, "params": params }))
             .await?;
         loop {
             match self.next_incoming(cancel, timeout).await? {
@@ -268,7 +249,7 @@ impl JsonRpcChild {
     }
 
     pub async fn notify(&mut self, method: &str, params: Value) -> Result<(), TranslateError> {
-        self.write_message(rpc_notification(self.include_jsonrpc, method, params)).await
+        self.write_message(json!({ "method": method, "params": params })).await
     }
 
     pub async fn wait_notification(
@@ -316,7 +297,7 @@ impl JsonRpcChild {
                         .await;
                 }
                 let result = deny_permission_result(&method, &params);
-                self.write_message(rpc_result(self.include_jsonrpc, id, result)).await
+                self.write_message(json!({ "id": id, "result": result })).await
             }
             Incoming::Notification { method, .. } => {
                 if is_permission_method(&method) {
@@ -331,7 +312,10 @@ impl JsonRpcChild {
         }
     }
 
-    async fn write_message(&mut self, value: Value) -> Result<(), TranslateError> {
+    async fn write_message(&mut self, mut value: Value) -> Result<(), TranslateError> {
+        if self.include_jsonrpc {
+            value["jsonrpc"] = Value::from("2.0");
+        }
         let mut line = serde_json::to_string(&value).map_err(|e| TranslateError::CliProtocol(e.to_string()))?;
         line.push('\n');
         self.stdin
@@ -342,35 +326,6 @@ impl JsonRpcChild {
             .flush()
             .await
             .map_err(|e| TranslateError::CliProtocol(format!("flush stdin: {e}")))
-    }
-
-    pub fn shutdown(&mut self) {
-        let _ = self.child.start_kill();
-    }
-
-    pub async fn kill_and_wait(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
-    }
-
-    /// Wait for a graceful exit; kill only if the child is still alive.
-    pub async fn wait_or_kill(&mut self) {
-        if matches!(timeout(Duration::from_secs(2), self.child.wait()).await, Ok(Ok(_))) {
-            return;
-        }
-        self.kill_and_wait().await;
-    }
-
-    fn kill_and_wait_blocking(&mut self) {
-        let _ = self.child.start_kill();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) if Instant::now() >= deadline => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        }
     }
 }
 
@@ -460,14 +415,16 @@ impl AcpSession {
                 Duration::from_secs(2),
             )
             .await;
-        self.rpc.wait_or_kill().await;
-        if let Some((p, cwd)) = self.cli_session_delete.take() {
-            best_effort_cli_session_delete(&p, &cwd, &self.session_id);
+        wait_or_kill(&mut self.rpc.child).await;
+        if let Some((program, cwd)) = self.cli_session_delete.take() {
+            // The delete spawns a process and polls it with `thread::sleep`; keep it off the async worker.
+            let session_id = self.session_id.clone();
+            let _ = tokio::task::spawn_blocking(move || best_effort_cli_session_delete(&program, &cwd, &session_id)).await;
         }
     }
 
     pub fn kill(&mut self) {
-        self.rpc.kill_and_wait_blocking();
+        kill_blocking(&mut self.rpc.child);
         if let Some((p, cwd)) = self.cli_session_delete.take() {
             best_effort_cli_session_delete(&p, &cwd, &self.session_id);
         }
@@ -503,35 +460,80 @@ impl Drop for AcpSession {
     }
 }
 
-fn rpc_request(include_jsonrpc: bool, id: Value, method: &str, params: Value) -> Value {
-    let mut map = Map::new();
-    if include_jsonrpc {
-        map.insert("jsonrpc".into(), Value::from("2.0"));
-    }
-    map.insert("id".into(), id);
-    map.insert("method".into(), Value::from(method));
-    map.insert("params".into(), params);
-    Value::Object(map)
+/// `CREATE_NO_WINDOW`: keep CLI children from opening console windows.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Kill `child` and wait up to 2 s for it to exit.
+pub(crate) async fn kill_and_wait(child: &mut Child) {
+    let _ = child.start_kill();
+    let _ = timeout(Duration::from_secs(2), child.wait()).await;
 }
 
-fn rpc_notification(include_jsonrpc: bool, method: &str, params: Value) -> Value {
-    let mut map = Map::new();
-    if include_jsonrpc {
-        map.insert("jsonrpc".into(), Value::from("2.0"));
+/// Wait up to 2 s for a graceful exit, then kill.
+pub(crate) async fn wait_or_kill(child: &mut Child) {
+    if !matches!(timeout(Duration::from_secs(2), child.wait()).await, Ok(Ok(_))) {
+        kill_and_wait(child).await;
     }
-    map.insert("method".into(), Value::from(method));
-    map.insert("params".into(), params);
-    Value::Object(map)
 }
 
-fn rpc_result(include_jsonrpc: bool, id: Value, result: Value) -> Value {
-    let mut map = Map::new();
-    if include_jsonrpc {
-        map.insert("jsonrpc".into(), Value::from("2.0"));
+/// Kill `child` and poll up to 2 s for it to exit, without needing an async context.
+pub(crate) fn kill_blocking(child: &mut Child) {
+    let _ = child.start_kill();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
     }
-    map.insert("id".into(), id);
-    map.insert("result".into(), result);
-    Value::Object(map)
+}
+
+/// Parse each non-empty stdout line as JSON and send `map(value)` to `tx` until the
+/// receiver goes away. Lines that are not JSON are logged and skipped.
+pub(crate) fn forward_json_lines<T: Send + 'static>(stdout: ChildStdout, tx: mpsc::UnboundedSender<T>, map: fn(Value) -> Option<T>) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Value>(line) {
+                Ok(value) => {
+                    if let Some(item) = map(value)
+                        && tx.send(item).is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => tracing::warn!(target: "translator_translate::cli", error = %e, "ignored non-JSON stdout line"),
+            }
+        }
+    });
+}
+
+/// Run the ACP `initialize` and `session/new` handshake on a freshly spawned agent.
+///
+/// Returns the session id and the `session/new` result. Kills the child on failure and maps
+/// login errors to `auth_hint`.
+pub(crate) async fn acp_open(
+    mut rpc: JsonRpcChild,
+    session_params: Value,
+    auth_hint: &str,
+    cancel: &CancellationToken,
+    timeout: Duration,
+) -> Result<(JsonRpcChild, String, Value), TranslateError> {
+    let opened = async {
+        rpc.request("initialize", acp_initialize_params(), cancel, timeout).await?;
+        let created = rpc.request("session/new", session_params, cancel, timeout).await?;
+        Ok((AcpSession::id_from(&created)?, created))
+    }
+    .await;
+    match opened {
+        Ok((id, created)) => Ok((rpc, id, created)),
+        Err(e) => {
+            kill_and_wait(&mut rpc.child).await;
+            Err(map_auth_failure(e, auth_hint))
+        }
+    }
 }
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -574,7 +576,8 @@ pub fn spawn_stdio(program: &Path, args: &[String], cwd: &Path, env: &[(&str, &s
     for (k, v) in env {
         cmd.env(k, v);
     }
-    apply_no_window(&mut cmd);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -615,15 +618,6 @@ pub fn spawn_stdio(program: &Path, args: &[String], cwd: &Path, env: &[(&str, &s
     })
 }
 
-fn apply_no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let _ = cmd;
-}
-
 /// `{program} session delete {session_id}` — OpenCode persists ACP sessions in its DB.
 fn best_effort_cli_session_delete(program: &Path, cwd: &Path, session_id: &str) {
     let mut cmd = std::process::Command::new(program);
@@ -633,11 +627,7 @@ fn best_effort_cli_session_delete(program: &Path, cwd: &Path, session_id: &str) 
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, CREATE_NO_WINDOW);
     let mut child = match cmd.spawn() {
         Err(e) => {
             tracing::warn!(error = %e, "CLI session delete failed");

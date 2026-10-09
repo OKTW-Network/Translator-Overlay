@@ -80,9 +80,7 @@ pub fn plan_turn(mirrored: &[ChatMessage], messages: &[ChatMessage]) -> Result<S
     if messages[0].role != "system" {
         return Err(TranslateError::CliProtocol("CLI translate missing system message".into()));
     }
-    let last = messages
-        .last()
-        .ok_or_else(|| TranslateError::CliProtocol("empty messages".into()))?;
+    let last = &messages[messages.len() - 1];
     if last.role != "user" {
         return Err(TranslateError::CliProtocol("CLI translate expected a trailing user turn".into()));
     }
@@ -176,6 +174,9 @@ pub struct CliBackend {
     mirrored: Vec<ChatMessage>,
     isolated_cwd: Option<PathBuf>,
     session_epoch: u64,
+    /// Threads started by [`Self::shutdown`]. `TranslateClient::close_session` joins them so
+    /// app exit does not cut a kill or an OpenCode session delete short.
+    pub(crate) teardowns: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl CliBackend {
@@ -185,29 +186,40 @@ impl CliBackend {
             mirrored: Vec::new(),
             isolated_cwd: None,
             session_epoch: 0,
+            teardowns: Vec::new(),
         }
     }
 
+    /// Drop the session without waiting for it.
+    ///
+    /// Killing the process, deleting the OpenCode session row, and removing the cwd can take
+    /// seconds, and callers run on the pipeline task. A helper thread does the teardown in that
+    /// order, so the delete still runs inside its cwd.
     pub fn shutdown(&mut self) {
-        if let Some(mut live) = self.live.take() {
-            live.kill();
+        self.mirrored.clear();
+        let live = self.live.take();
+        let cwd = self.isolated_cwd.take();
+        if live.is_none() && cwd.is_none() {
+            return;
         }
-        self.drop_cwd();
+        self.teardowns.retain(|t| !t.is_finished());
+        self.teardowns.push(std::thread::spawn(move || {
+            if let Some(mut live) = live {
+                live.kill();
+            }
+            if let Some(dir) = cwd {
+                remove_isolated_cwd(&dir);
+            }
+        }));
     }
 
     pub async fn close(&mut self) {
         if let Some(mut live) = self.live.take() {
             live.close().await;
         }
-        self.drop_cwd();
-    }
-
-    fn drop_cwd(&mut self) {
         self.mirrored.clear();
-        if let Some(dir) = self.isolated_cwd.take()
-            && let Err(e) = remove_dir_all_once(&dir)
-        {
-            tracing::warn!(path = %dir.display(), %e, "failed to remove isolated CLI cwd");
+        if let Some(dir) = self.isolated_cwd.take() {
+            remove_isolated_cwd(&dir);
         }
     }
 
@@ -224,30 +236,18 @@ impl CliBackend {
             self.close().await;
             self.session_epoch = epoch;
         }
-        let plan = plan_turn(&self.mirrored, messages)?;
-
-        match &plan {
-            SessionPlan::Append { .. } if self.live.is_some() => {}
+        let composed = match plan_turn(&self.mirrored, messages)? {
+            SessionPlan::Append { user } if self.live.is_some() => compose_user(None, &user),
             SessionPlan::Append { user } => {
-                // Process died between turns — recreate from the committed prefix.
-                let system = messages[0].content.clone();
-                let bootstrap = if messages.len() > 2 {
-                    Some(pack_bootstrap(&messages[1..messages.len() - 1]))
-                } else {
-                    None
-                };
+                // The process died between turns: recreate from the committed prefix.
+                let history = &messages[1..messages.len() - 1];
+                self.recreate(api, &messages[0].content, cancel, timeout).await?;
+                compose_user((!history.is_empty()).then(|| pack_bootstrap(history)).as_deref(), &user)
+            }
+            SessionPlan::Recreate { system, bootstrap, user } => {
                 self.recreate(api, &system, cancel, timeout).await?;
-                let composed = compose_user(bootstrap.as_deref(), user);
-                return self.run_user(api, messages, &composed, cancel, timeout, on_text).await;
+                compose_user(bootstrap.as_deref(), &user)
             }
-            SessionPlan::Recreate { system, .. } => {
-                self.recreate(api, system, cancel, timeout).await?;
-            }
-        }
-
-        let composed = match &plan {
-            SessionPlan::Append { user } => compose_user(None, user),
-            SessionPlan::Recreate { bootstrap, user, .. } => compose_user(bootstrap.as_deref(), user),
         };
         self.run_user(api, messages, &composed, cancel, timeout, on_text).await
     }
@@ -322,12 +322,12 @@ impl CliBackend {
     }
 }
 
-/// Single best-effort recursive delete; `Ok` when the dir is gone.
-pub(crate) fn remove_dir_all_once(dir: &Path) -> Result<(), std::io::Error> {
+/// Best-effort recursive delete. A missing directory counts as removed.
+fn remove_isolated_cwd(dir: &Path) {
     match std::fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(path = %dir.display(), error = %e, "failed to remove isolated CLI cwd"),
     }
 }
 
@@ -345,9 +345,7 @@ impl TempCwd {
 
 impl Drop for TempCwd {
     fn drop(&mut self) {
-        if let Err(e) = remove_dir_all_once(&self.0) {
-            tracing::warn!(path = %self.0.display(), error = %e, "failed to remove isolated cwd");
-        }
+        remove_isolated_cwd(&self.0);
     }
 }
 
@@ -360,14 +358,7 @@ fn make_isolated_cwd() -> Result<PathBuf, TranslateError> {
         .join("translator-overlay-cli")
         .join(format!("{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| TranslateError::CliProtocol(format!("create isolated cwd: {e}")))?;
-    if !isolated_cwd_is_safe(&dir) {
-        return Err(TranslateError::CliProtocol("isolated cwd unexpectedly contains project rules".into()));
-    }
     Ok(dir)
-}
-
-pub fn isolated_cwd_is_safe(cwd: &Path) -> bool {
-    !cwd.join("AGENTS.md").exists() && !cwd.join("Agents.md").exists()
 }
 
 #[cfg(test)]

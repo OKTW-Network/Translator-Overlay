@@ -1,29 +1,17 @@
 //! Application configuration loaded from `config.toml` next to the executable.
 
 use std::{
-    fs,
+    ffi::OsStr,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize, Serializer};
-use thiserror::Error;
 
 use crate::{
     paths::{PathError, resolve_under_exe},
+    toml_file::{TomlFileError, read_text, save_toml},
     types::{ModelTier, OcrDevice},
 };
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("path error: {0}")]
-    Path(#[from] PathError),
-    #[error("IO error for {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
-    #[error("failed to parse config TOML: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("failed to serialize config TOML: {0}")]
-    Serialize(#[from] toml::ser::Error),
-}
 
 /// Control-window language stored in `config.toml` as `en`, `zh-Hant`, or `zh-Hans`.
 ///
@@ -88,7 +76,7 @@ impl AppConfig {
     /// Load from `path`, or write defaults and return them if the file is absent.
     ///
     /// Invalid fields are skipped (see [`Self::load`]).
-    pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
+    pub fn load_or_create(path: &Path) -> Result<Self, TomlFileError> {
         if path.exists() {
             Self::load(path)
         } else {
@@ -103,35 +91,20 @@ impl AppConfig {
     /// Each TOML field is applied independently: a value that fails to parse is
     /// skipped and that field keeps its default. IO errors and TOML syntax
     /// errors still fail the whole load.
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::from_toml_lenient(&text)
+    pub fn load(path: &Path) -> Result<Self, TomlFileError> {
+        Self::from_toml_lenient(&read_text(path)?)
     }
 
     /// Parse TOML, keeping valid fields and dropping values that do not match the schema.
-    fn from_toml_lenient(text: &str) -> Result<Self, ConfigError> {
+    fn from_toml_lenient(text: &str) -> Result<Self, TomlFileError> {
         let src: toml::Table = toml::from_str(text)?;
         let mut dest = toml::Table::new();
         apply_lenient(&mut dest, &src, "");
         Ok(Self::deserialize(toml::Value::Table(dest)).unwrap_or_default())
     }
 
-    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let text = toml::to_string_pretty(self)?;
-        fs::write(path, text).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(())
+    pub fn save(&self, path: &Path) -> Result<(), TomlFileError> {
+        save_toml(path, self)
     }
 }
 
@@ -246,54 +219,51 @@ impl ModelProvider {
 ///
 /// Claude Code's native installer puts `claude.exe` in `%USERPROFILE%\.local\bin`, which is
 /// not always on `PATH` for GUI processes, so that location is tried last.
-pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<std::path::PathBuf> {
+pub fn resolve_cli_binary(provider: ModelProvider, cli_path: &str) -> Option<PathBuf> {
     if !provider.is_cli() {
         return None;
     }
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
     let trimmed = cli_path.trim();
     if !trimmed.is_empty() {
-        let path = std::path::PathBuf::from(trimmed);
+        let path = PathBuf::from(trimmed);
         if path.is_file() {
             return Some(path);
         }
         // Bare command names still resolve through PATH; missing absolute paths stay None.
         if path.components().count() == 1 {
-            return find_on_path(trimmed);
+            return find_on_path(trimmed, &path_var);
         }
         return None;
     }
-    find_on_path(provider.default_bin()).or_else(|| {
+    find_on_path(provider.default_bin(), &path_var).or_else(|| {
         if provider != ModelProvider::ClaudeCli {
             return None;
         }
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
         let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
-        let path = std::path::PathBuf::from(home).join(".local").join("bin").join(exe);
+        let path = PathBuf::from(home).join(".local").join("bin").join(exe);
         path.is_file().then_some(path)
     })
 }
 
-fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+/// Search the directories in `path_var` for `name`.
+///
+/// Windows runs only files with an extension, and npm writes an extensionless sh shim next to
+/// `codex.cmd`. So on Windows a name without an extension matches only `.exe`, `.cmd`, or `.bat`.
+fn find_on_path(name: &str, path_var: &OsStr) -> Option<PathBuf> {
     if name.is_empty() {
         return None;
     }
-    let path_var = std::env::var_os("PATH")?;
-    let append_ext = cfg!(windows) && !std::path::Path::new(name).extension().is_some_and(|e| !e.is_empty());
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if append_ext {
-            for ext in [".exe", ".cmd", ".bat"] {
-                let candidate = dir.join(format!("{name}{ext}"));
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
+    let names: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
+        [".exe", ".cmd", ".bat"].map(|ext| format!("{name}{ext}")).into()
+    } else {
+        vec![name.to_string()]
+    };
+    std::env::split_paths(path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
+        .find(|candidate| candidate.is_file())
 }
 
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -317,7 +287,7 @@ pub struct ApiConfig {
     #[serde(skip_serializing_if = "is_default")]
     pub http_api: HttpApi,
     /// Absolute path or bare command. Empty = look up `grok` / `opencode` / `codex` / `claude` on PATH.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub cli_path: String,
     /// Preferred processing tier. Ignored by providers that do not support it.
     #[serde(skip_serializing_if = "is_default")]
@@ -328,13 +298,13 @@ pub struct ApiConfig {
     pub api_key: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     /// Request JSON Schema Structured Outputs on HTTP OpenAI-compatible APIs.
     /// Ignored for CLI providers. Turn off if the endpoint rejects `json_schema`.
@@ -420,7 +390,7 @@ pub struct TranslationConfig {
     pub cache_enabled: bool,
     /// Max unique source strings kept in the in-memory LFU cache.
     pub cache_max_entries: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
 
@@ -652,7 +622,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
 
@@ -847,6 +820,31 @@ model = "my-model"
         assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::OpenCodeCli, r"Z:\no-such-opencode.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::ClaudeCli, r"Z:\no-such-claude.exe").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn find_on_path_skips_extensionless_npm_shim() {
+        let root = temp_config_path("path_lookup").with_extension("");
+        let npm = root.join("npm");
+        let bin = root.join("bin");
+        fs::create_dir_all(&npm).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        // npm writes `tool` (sh), `tool.cmd`, and `tool.ps1` side by side.
+        for name in ["tool", "tool.cmd", "tool.ps1", "solo"] {
+            fs::write(npm.join(name), "").unwrap();
+        }
+        fs::write(bin.join("solo.exe"), "").unwrap();
+        let path_var = std::env::join_paths([&npm, &bin]).unwrap();
+
+        assert_eq!(find_on_path("tool", &path_var), Some(npm.join("tool.cmd")));
+        // A bare file earlier on PATH loses to an executable later on PATH.
+        assert_eq!(find_on_path("solo", &path_var), Some(bin.join("solo.exe")));
+        // A name with an extension matches that file only.
+        assert_eq!(find_on_path("tool.ps1", &path_var), Some(npm.join("tool.ps1")));
+        assert_eq!(find_on_path("missing", &path_var), None);
+        assert_eq!(find_on_path("tool", OsStr::new("")), None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

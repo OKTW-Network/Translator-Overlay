@@ -3,14 +3,11 @@
 use std::sync::atomic::Ordering;
 
 use translator_core::NormRect;
-use windows::Win32::{
-    Foundation::LPARAM,
-    UI::{
-        Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
-        WindowsAndMessaging::{
-            GWL_EXSTYLE, GetWindowLongPtrW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-            SetWindowPos, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WS_EX_TRANSPARENT,
-        },
+use windows::Win32::UI::{
+    Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
+    WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, MSG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+        SetWindowPos, WINDOW_EX_STYLE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WS_EX_TRANSPARENT,
     },
 };
 
@@ -18,27 +15,16 @@ use crate::{
     command::OverlayEvent,
     host::{
         OverlayHost,
-        win32::{live_client_screen_rect, raise_target_window, set_overlay_owner},
+        win32::{live_client_screen_rect, lparam_point, raise_target_window, set_overlay_owner},
         wnd::{PICKER_HIT_TEST, set_picker_cursor},
     },
-    picker::{PickerAction, PickerCursor, RegionPicker},
+    picker::{PickerCursor, RegionPicker},
 };
 
 #[derive(Clone, Copy)]
 pub(crate) enum PickerEnd {
     Confirm,
     Cancel,
-}
-
-pub(crate) fn is_picker_message(msg: u32) -> bool {
-    matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE | WM_RBUTTONUP)
-}
-
-fn mouse_pos(lparam: LPARAM) -> (i32, i32) {
-    let v = lparam.0 as u32;
-    let x = (v & 0xFFFF) as i16 as i32;
-    let y = ((v >> 16) & 0xFFFF) as i16 as i32;
-    (x, y)
 }
 
 impl OverlayHost {
@@ -50,7 +36,7 @@ impl OverlayHost {
             .unwrap_or((800, 600));
         self.picker = Some(RegionPicker::new(regions, cw, ch));
         self.presented_rect = None;
-        // Captions own the target; picker insert-above requires an unowned overlay.
+        // Captions are owned by the target; picker insert-above requires an unowned overlay.
         set_overlay_owner(self.hwnd, None);
         self.set_click_through(false);
         PICKER_HIT_TEST.store(true, Ordering::Relaxed);
@@ -99,7 +85,7 @@ impl OverlayHost {
     }
 
     pub(crate) fn dispatch_picker_msg(&mut self, msg: &MSG) {
-        let (px, py) = mouse_pos(msg.lParam);
+        let (px, py) = lparam_point(msg.lParam);
         match msg.message {
             WM_LBUTTONDOWN => {
                 if let Some(p) = self.picker.as_mut() {
@@ -117,41 +103,21 @@ impl OverlayHost {
             }
             WM_LBUTTONUP => {
                 let _ = unsafe { ReleaseCapture() };
-                let action = self.picker.as_mut().map(|p| p.on_left_up(px, py)).unwrap_or(PickerAction::None);
-                self.apply_picker_action(action);
+                let changed = self.picker.as_mut().is_some_and(RegionPicker::on_left_up);
+                self.after_picker_edit(changed);
             }
             WM_RBUTTONUP => {
-                let action = self.picker.as_mut().map(|p| p.on_right_up(px, py)).unwrap_or(PickerAction::None);
-                self.apply_picker_action(action);
+                let changed = self.picker.as_mut().is_some_and(|p| p.on_right_up(px, py));
+                self.after_picker_edit(changed);
             }
             _ => {}
         }
     }
 
-    fn apply_picker_action(&mut self, action: PickerAction) {
-        match action {
-            PickerAction::None => self.dirty = true,
-            PickerAction::RegionsChanged => {
-                if let Some(p) = self.picker.as_ref() {
-                    let _ = self.event_tx.send(OverlayEvent::RegionSelectUpdated(p.regions.clone()));
-                }
-                self.dirty = true;
-            }
+    fn after_picker_edit(&mut self, changed: bool) {
+        if changed && let Some(p) = self.picker.as_ref() {
+            let _ = self.event_tx.send(OverlayEvent::RegionSelectUpdated(p.regions.clone()));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use windows::Win32::UI::WindowsAndMessaging::WM_KEYDOWN;
-
-    use super::*;
-
-    #[test]
-    fn picker_mouse_messages_are_all_intercepted() {
-        for message in [WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP] {
-            assert!(is_picker_message(message));
-        }
-        assert!(!is_picker_message(WM_KEYDOWN));
+        self.dirty = true;
     }
 }

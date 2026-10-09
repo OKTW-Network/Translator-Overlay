@@ -58,6 +58,120 @@ impl PipelineStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryEntry {
+    /// Stable UI key; assigned by [`AppState::push_history`].
+    pub id: u64,
+    pub source_text: String,
+    pub translated_text: String,
+}
+
+impl HistoryEntry {
+    /// True when every line of this API turn already appears on the live page.
+    pub fn covered_by(&self, live_source: &str, live_translation: &str) -> bool {
+        lines_subset(&self.source_text, live_source) && lines_subset(&self.translated_text, live_translation)
+    }
+}
+
+fn lines_subset(part: &str, whole: &str) -> bool {
+    part.lines()
+        .filter(|line| !line.is_empty())
+        .all(|line| whole.lines().any(|w| w == line))
+}
+
+/// Capture thumbnail shared with the control UI.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewInfo {
+    pub width: u32,
+    pub height: u32,
+    pub sequence: u64,
+    /// Tightly packed RGBA8 (`width * height * 4`).
+    pub rgba: Option<Bytes>,
+}
+
+/// Mutable runtime state shared between UI and workers.
+#[derive(Debug, Default)]
+pub struct AppState {
+    pub status: PipelineStatus,
+    pub config: AppConfig,
+    pub latest_ocr_blocks: Vec<OcrBlock>,
+    pub latest_translated_blocks: Vec<TranslatedBlock>,
+    pub history: VecDeque<HistoryEntry>,
+    pub target_window_title: Option<String>,
+    pub target_hwnd: Option<isize>,
+    pub preview: PreviewInfo,
+    pub auto_running: bool,
+    /// Auto OCR loop is frozen; session and last captions stay until resume / stop.
+    pub capture_paused: bool,
+    /// Last window chosen on the Dashboard (HUD Start uses this when idle).
+    pub selected_hwnd: Option<isize>,
+    pub selected_title: Option<String>,
+    /// Start/Stop locked while Stop waits for CLI session close.
+    pub capture_busy: bool,
+    /// True while an LLM request is in flight (cancellable).
+    pub translate_in_flight: bool,
+    /// Last error message (kept after status changes so the UI can show it).
+    pub last_error: Option<String>,
+    /// Settings last saved successfully (shown in UI).
+    pub settings_message: Option<String>,
+    /// Wall-clock duration of the last OCR inference (ms), if any.
+    pub last_ocr_ms: Option<u64>,
+    /// Number of text blocks the last OCR inference returned.
+    pub last_ocr_block_count: u32,
+    /// Session OCR crops (normalized client rects). Empty = whole window.
+    pub ocr_regions: Vec<NormRect>,
+    /// True while the on-target region picker is open.
+    pub region_select_active: bool,
+    /// Working copy while picking (for Dashboard count / preview outlines).
+    pub region_select_draft: Vec<NormRect>,
+    /// Unique source strings currently in the session translation cache.
+    pub translation_cache_len: usize,
+    /// True after a translate failure until a translate succeeds (one flash per streak).
+    pub attention_sent: bool,
+    next_history_id: u64,
+}
+
+impl AppState {
+    pub fn new(config: AppConfig) -> Self {
+        Self { config, ..Self::default() }
+    }
+
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.last_error = Some(message.clone());
+        self.status = PipelineStatus::Error { message };
+    }
+
+    /// Restore a non-error operational status from current flags / overlay content.
+    ///
+    /// Shared by config save, conversation reset, and similar UI-side recoveries
+    /// so status rules stay in one place.
+    pub fn restore_operational_status(&mut self) {
+        if self.capture_paused {
+            self.status = PipelineStatus::Paused;
+        } else if self.translate_in_flight {
+            self.status = PipelineStatus::Translating;
+        } else if self.auto_running {
+            self.status = PipelineStatus::Capturing;
+        } else if !self.latest_translated_blocks.is_empty() {
+            self.status = PipelineStatus::OverlayActive;
+        } else {
+            self.status = PipelineStatus::Idle;
+        }
+    }
+
+    pub fn push_history(&mut self, source_text: String, translated_text: String, max_items: usize) {
+        let id = self.next_history_id;
+        self.next_history_id += 1;
+        self.history.push_front(HistoryEntry {
+            id,
+            source_text,
+            translated_text,
+        });
+        self.history.truncate(max_items.max(1));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,144 +208,5 @@ mod tests {
         assert!(entry.covered_by("cached\nnew line", "快取\n新行"));
         assert!(entry.covered_by("new line", "新行"));
         assert!(!entry.covered_by("cached", "快取"));
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct HistoryEntry {
-    /// Stable UI key; assigned by [`AppState::push_history`].
-    pub id: u64,
-    pub source_text: String,
-    pub translated_text: String,
-}
-
-impl HistoryEntry {
-    /// True when every line of this API turn already appears on the live page.
-    pub fn covered_by(&self, live_source: &str, live_translation: &str) -> bool {
-        lines_subset(&self.source_text, live_source) && lines_subset(&self.translated_text, live_translation)
-    }
-}
-
-fn lines_subset(part: &str, whole: &str) -> bool {
-    part.lines()
-        .filter(|line| !line.is_empty())
-        .all(|line| whole.lines().any(|w| w == line))
-}
-
-/// Capture thumbnail shared with the control UI.
-#[derive(Debug, Clone, Default)]
-pub struct PreviewInfo {
-    pub width: u32,
-    pub height: u32,
-    pub sequence: u64,
-    /// Tightly packed RGBA8 (`width * height * 4`).
-    pub rgba: Option<Bytes>,
-}
-
-/// Mutable runtime state shared between UI and workers.
-#[derive(Debug)]
-pub struct AppState {
-    pub status: PipelineStatus,
-    pub config: AppConfig,
-    pub latest_ocr_blocks: Vec<OcrBlock>,
-    pub latest_translated_blocks: Vec<TranslatedBlock>,
-    pub history: VecDeque<HistoryEntry>,
-    pub target_window_title: Option<String>,
-    pub target_hwnd: Option<isize>,
-    pub preview: PreviewInfo,
-    pub auto_running: bool,
-    /// Auto OCR loop is frozen; session and last captions stay until resume / stop.
-    pub capture_paused: bool,
-    /// Last window chosen on the Dashboard (HUD Start uses this when idle).
-    pub selected_hwnd: Option<isize>,
-    pub selected_title: Option<String>,
-    /// Start/Stop locked while Stop waits for CLI session close.
-    pub capture_busy: bool,
-    /// True while an LLM request is in flight (cancellable).
-    pub translate_in_flight: bool,
-    /// Last error message (kept after status changes so the UI can show it).
-    pub last_error: Option<String>,
-    /// Settings last saved successfully (shown in UI).
-    pub settings_message: Option<String>,
-    /// Wall-clock duration of the last OCR inference (ms), if any.
-    pub last_ocr_ms: Option<u64>,
-    /// Number of text blocks from the last OCR pass (pre-merge raw or durable).
-    pub last_ocr_block_count: u32,
-    /// Session OCR crops (normalized client rects). Empty = whole window.
-    pub ocr_regions: Vec<NormRect>,
-    /// True while the on-target region picker is open.
-    pub region_select_active: bool,
-    /// Working copy while picking (for Dashboard count / preview outlines).
-    pub region_select_draft: Vec<NormRect>,
-    /// Unique source strings currently in the session translation cache.
-    pub translation_cache_len: usize,
-    /// True after a translate failure until a translate succeeds (one flash per streak).
-    pub attention_sent: bool,
-    next_history_id: u64,
-}
-
-impl AppState {
-    pub fn new(config: AppConfig) -> Self {
-        Self {
-            status: PipelineStatus::Idle,
-            config,
-            latest_ocr_blocks: Vec::new(),
-            latest_translated_blocks: Vec::new(),
-            history: VecDeque::new(),
-            target_window_title: None,
-            target_hwnd: None,
-            preview: PreviewInfo::default(),
-            auto_running: false,
-            capture_paused: false,
-            selected_hwnd: None,
-            selected_title: None,
-            capture_busy: false,
-            translate_in_flight: false,
-            last_error: None,
-            settings_message: None,
-            last_ocr_ms: None,
-            last_ocr_block_count: 0,
-            ocr_regions: Vec::new(),
-            region_select_active: false,
-            region_select_draft: Vec::new(),
-            translation_cache_len: 0,
-            attention_sent: false,
-            next_history_id: 0,
-        }
-    }
-
-    pub fn set_error(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        self.last_error = Some(message.clone());
-        self.status = PipelineStatus::Error { message };
-    }
-
-    /// Restore a non-error operational status from current flags / overlay content.
-    ///
-    /// Shared by config save, conversation reset, and similar UI-side recoveries
-    /// so status rules stay in one place.
-    pub fn restore_operational_status(&mut self) {
-        if self.capture_paused {
-            self.status = PipelineStatus::Paused;
-        } else if self.translate_in_flight {
-            self.status = PipelineStatus::Translating;
-        } else if self.auto_running {
-            self.status = PipelineStatus::Capturing;
-        } else if !self.latest_translated_blocks.is_empty() {
-            self.status = PipelineStatus::OverlayActive;
-        } else {
-            self.status = PipelineStatus::Idle;
-        }
-    }
-
-    pub fn push_history(&mut self, source_text: String, translated_text: String, max_items: usize) {
-        let id = self.next_history_id;
-        self.next_history_id += 1;
-        self.history.push_front(HistoryEntry {
-            id,
-            source_text,
-            translated_text,
-        });
-        self.history.truncate(max_items.max(1));
     }
 }

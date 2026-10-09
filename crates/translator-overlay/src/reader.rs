@@ -2,6 +2,7 @@
 
 use std::mem::size_of;
 
+use tracing::warn;
 use translator_core::{OverlayConfig, TranslatedBlock};
 use windows::{
     Win32::{
@@ -27,10 +28,12 @@ use crate::{
         surface::DibSurface,
         text::{self, LabelStyle},
     },
+    host::win32::lparam_point,
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayReader.v2");
-const EMPTY_PLACEHOLDER: &str = "(no translation yet)";
+/// Shown until the app sends a localized placeholder.
+const DEFAULT_PLACEHOLDER: &str = "(no translation yet)";
 const DEFAULT_W: i32 = 440;
 const DEFAULT_H: i32 = 200;
 const MIN_W: i32 = 160;
@@ -38,15 +41,14 @@ const MIN_H: i32 = 80;
 const EDGE: i32 = 8;
 const TEXT_INSET: i32 = 12;
 
-/// Join block translations for the reader, or a placeholder when empty.
+/// Join the non-empty block translations for the reader, one per line.
 pub fn format_reader_text(blocks: &[TranslatedBlock]) -> String {
-    let joined = blocks
+    blocks
         .iter()
         .map(|b| b.translation.trim())
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("\n");
-    if joined.is_empty() { EMPTY_PLACEHOLDER.to_string() } else { joined }
+        .join("\n")
 }
 
 pub(crate) struct ReaderWindow {
@@ -56,7 +58,8 @@ pub(crate) struct ReaderWindow {
     surface: DibSurface,
     hfont: HFONT,
     font_px: i32,
-    last_text: String,
+    text: String,
+    placeholder: String,
     dismissed: bool,
 }
 
@@ -120,7 +123,8 @@ impl ReaderWindow {
             surface,
             hfont,
             font_px,
-            last_text: EMPTY_PLACEHOLDER.to_string(),
+            text: String::new(),
+            placeholder: DEFAULT_PLACEHOLDER.to_string(),
             dismissed: false,
         });
 
@@ -138,17 +142,24 @@ impl ReaderWindow {
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
-        let display = if text.trim().is_empty() {
-            EMPTY_PLACEHOLDER.to_string()
-        } else {
-            text.to_string()
-        };
-        if display == self.last_text {
+        if text == self.text {
             return;
         }
-        self.last_text = display;
+        self.text = text.to_string();
         if let Err(e) = self.repaint() {
-            tracing::warn!(error = %e, "reader repaint failed");
+            warn!(error = %e, "reader repaint failed");
+        }
+    }
+
+    pub(crate) fn set_placeholder(&mut self, placeholder: String) {
+        if placeholder == self.placeholder {
+            return;
+        }
+        self.placeholder = placeholder;
+        if self.text.trim().is_empty()
+            && let Err(e) = self.repaint()
+        {
+            warn!(error = %e, "reader repaint failed");
         }
     }
 
@@ -165,7 +176,7 @@ impl ReaderWindow {
             self.font_px = font_px;
         }
         if let Err(e) = self.repaint() {
-            tracing::warn!(error = %e, "reader config repaint failed");
+            warn!(error = %e, "reader config repaint failed");
         }
         self.sync_visibility(config.reader_enabled);
     }
@@ -206,7 +217,7 @@ impl ReaderWindow {
             unsafe { SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) };
         let _ = unsafe { ShowWindow(self.hwnd, SW_SHOWNOACTIVATE) };
         if let Err(e) = self.present() {
-            tracing::warn!(error = %e, "reader present failed");
+            warn!(error = %e, "reader present failed");
         }
     }
 
@@ -230,32 +241,32 @@ impl ReaderWindow {
     fn repaint(&mut self) -> Result<(), OverlayError> {
         let (w, h) = self.client_size();
         self.surface.ensure(w, h)?;
-        let bg = draw::background_rgba(&self.config);
-        let fg = draw::text_rgba(&self.config);
+        let bg = draw::Rgba::from_argb(self.config.background_color_argb);
+        let fg = draw::Rgba::from_argb(self.config.text_color_argb);
         let surface = draw::SurfaceSize::new(w, h);
         {
             let buf = self
                 .surface
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("reader paint bitmap missing".into()))?;
-            draw::clear(buf);
-            draw::fill_rect(buf, surface, SurfaceRect { x: 0, y: 0, w, h }, bg);
+            buf.fill(0);
+            draw::fill_rect(buf, surface, SurfaceRect::new(0, 0, w, h), bg);
         }
 
         let inset = TEXT_INSET.min(w / 4).min(h / 4).max(0);
-        let text_box = SurfaceRect {
-            x: inset,
-            y: inset,
-            w: (w - inset * 2).max(1),
-            h: (h - inset * 2).max(1),
-        };
+        let text_box = SurfaceRect::new(inset, inset, (w - inset * 2).max(1), (h - inset * 2).max(1));
         let hdc = self.surface.hdc();
         let hfont = self.hfont;
+        let shown = if self.text.trim().is_empty() {
+            &self.placeholder
+        } else {
+            &self.text
+        };
         let buf = self
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("reader paint bitmap missing".into()))?;
-        text::draw_text_label(hdc, hfont, buf, surface, text_box, &self.last_text, LabelStyle {
+        text::draw_text_label(hdc, hfont, buf, surface, text_box, shown, LabelStyle {
             font_px: self.font_px,
             color: fg,
             vcenter: false,
@@ -273,11 +284,8 @@ impl ReaderWindow {
     }
 
     fn hit_test(&self, lparam: LPARAM) -> LRESULT {
-        // GET_X_LPARAM / GET_Y_LPARAM: signed 16-bit halves of screen coords.
-        let packed = lparam.0 as u32;
-        let sx = (packed & 0xFFFF) as i16 as i32;
-        let sy = ((packed >> 16) & 0xFFFF) as i16 as i32;
-        let mut pt = POINT { x: sx, y: sy };
+        let (x, y) = lparam_point(lparam);
+        let mut pt = POINT { x, y };
         if !unsafe { ScreenToClient(self.hwnd, &mut pt) }.as_bool() {
             return LRESULT(HTCAPTION as isize);
         }
@@ -324,7 +332,7 @@ unsafe extern "system" fn reader_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
         WM_NCHITTEST => reader.hit_test(lparam),
         WM_SIZE => {
             if let Err(e) = reader.repaint() {
-                tracing::warn!(error = %e, "reader resize paint failed");
+                warn!(error = %e, "reader resize paint failed");
             }
             LRESULT(0)
         }
@@ -360,8 +368,8 @@ mod tests {
 
     #[test]
     fn format_reader_text_joins_and_skips_empty() {
-        assert_eq!(format_reader_text(&[]), EMPTY_PLACEHOLDER);
-        assert_eq!(format_reader_text(&[block("  "), block("")]), EMPTY_PLACEHOLDER);
+        assert_eq!(format_reader_text(&[]), "");
+        assert_eq!(format_reader_text(&[block("  "), block("")]), "");
         assert_eq!(format_reader_text(&[block("hello"), block("  world  ")]), "hello\nworld");
     }
 }

@@ -12,7 +12,6 @@ const RELEASE_BASE: &str = "https://github.com/GreatV/oar-ocr/releases/download/
 /// One file required for a given model tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelArtifact {
-    pub role: ModelRole,
     pub file_name: &'static str,
     /// Exact byte length from the GreatV/oar-ocr v0.7.0 GitHub release.
     pub expected_bytes: u64,
@@ -24,72 +23,56 @@ impl ModelArtifact {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModelRole {
-    Detection = 0,
-    Recognition = 1,
-    Dictionary = 2,
-}
-
-/// Artifacts required for the given PP-OCRv6 tier.
-pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact] {
+/// Detection, recognition, and dictionary files for `tier`, in that order.
+pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {
     match tier {
-        ModelTier::Tiny => TINY,
-        ModelTier::Small => SMALL,
-        ModelTier::Medium => MEDIUM,
+        ModelTier::Tiny => &TINY,
+        ModelTier::Small => &SMALL,
+        ModelTier::Medium => &MEDIUM,
     }
 }
 
-const TINY: &[ModelArtifact] = &[
+const TINY: [ModelArtifact; 3] = [
     ModelArtifact {
-        role: ModelRole::Detection,
         file_name: "pp-ocrv6_tiny_det.onnx",
         expected_bytes: 1_780_590,
     },
     ModelArtifact {
-        role: ModelRole::Recognition,
         file_name: "pp-ocrv6_tiny_rec.onnx",
         expected_bytes: 4_462_639,
     },
     ModelArtifact {
-        role: ModelRole::Dictionary,
         file_name: "ppocrv6_tiny_dict.txt",
         expected_bytes: 27_156,
     },
 ];
 
-const SMALL: &[ModelArtifact] = &[
+const SMALL: [ModelArtifact; 3] = [
     ModelArtifact {
-        role: ModelRole::Detection,
         file_name: "pp-ocrv6_small_det.onnx",
         expected_bytes: 9_880_512,
     },
     ModelArtifact {
-        role: ModelRole::Recognition,
         file_name: "pp-ocrv6_small_rec.onnx",
         expected_bytes: 21_159_378,
     },
     ModelArtifact {
-        role: ModelRole::Dictionary,
         file_name: "ppocrv6_dict.txt",
         expected_bytes: 74_947,
     },
 ];
 
-const MEDIUM: &[ModelArtifact] = &[
+const MEDIUM: [ModelArtifact; 3] = [
     ModelArtifact {
-        role: ModelRole::Detection,
         file_name: "pp-ocrv6_medium_det.onnx",
         expected_bytes: 62_032_837,
     },
     ModelArtifact {
-        role: ModelRole::Recognition,
         file_name: "pp-ocrv6_medium_rec.onnx",
         expected_bytes: 76_554_979,
     },
+    // Small and medium recognition share the same character dictionary.
     ModelArtifact {
-        role: ModelRole::Dictionary,
-        // Small and medium recognition share the same character dictionary.
         file_name: "ppocrv6_dict.txt",
         expected_bytes: 74_947,
     },
@@ -98,7 +81,6 @@ const MEDIUM: &[ModelArtifact] = &[
 /// Resolved local paths for a tier under `models_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelPaths {
-    pub tier: ModelTier,
     pub det: PathBuf,
     pub rec: PathBuf,
     pub dict: PathBuf,
@@ -106,12 +88,8 @@ pub struct ModelPaths {
 
 impl ModelPaths {
     pub fn from_dir(models_dir: &Path, tier: ModelTier) -> Self {
-        let mut paths = [PathBuf::new(), PathBuf::new(), PathBuf::new()];
-        for a in artifacts_for_tier(tier) {
-            paths[a.role as usize] = models_dir.join(a.file_name);
-        }
-        let [det, rec, dict] = paths;
-        Self { tier, det, rec, dict }
+        let [det, rec, dict] = artifacts_for_tier(tier).each_ref().map(|a| models_dir.join(a.file_name));
+        Self { det, rec, dict }
     }
 
     /// True when every artifact exists as a regular file. Size is not checked.
@@ -133,29 +111,19 @@ mod tests {
     }
 
     #[test]
-    fn all_tiers_have_registry_names_and_sizes() {
+    fn all_tiers_list_det_rec_dict_in_order() {
         for tier in [ModelTier::Tiny, ModelTier::Small, ModelTier::Medium] {
-            let arts = artifacts_for_tier(tier);
-            assert_eq!(arts.len(), 3, "{tier:?}");
-            assert!(
-                arts.iter()
-                    .any(|a| a.file_name.ends_with(".onnx") && a.role == ModelRole::Detection),
-                "{tier:?} det"
-            );
-            assert!(
-                arts.iter()
-                    .any(|a| a.file_name.ends_with(".onnx") && a.role == ModelRole::Recognition),
-                "{tier:?} rec"
-            );
-            assert!(
-                arts.iter()
-                    .any(|a| a.file_name.ends_with(".txt") && a.role == ModelRole::Dictionary),
-                "{tier:?} dict"
-            );
-            for a in arts {
+            let [det, rec, dict] = artifacts_for_tier(tier);
+            assert!(det.file_name.ends_with("_det.onnx"), "{tier:?} det");
+            assert!(rec.file_name.ends_with("_rec.onnx"), "{tier:?} rec");
+            assert!(dict.file_name.ends_with(".txt"), "{tier:?} dict");
+            for a in artifacts_for_tier(tier) {
                 assert!(a.expected_bytes > 0, "{tier:?} {}", a.file_name);
                 assert!(a.download_url().starts_with(RELEASE_BASE));
             }
+            let paths = ModelPaths::from_dir(Path::new("m"), tier);
+            assert_eq!(paths.det, Path::new("m").join(det.file_name));
+            assert_eq!(paths.dict, Path::new("m").join(dict.file_name));
         }
     }
 

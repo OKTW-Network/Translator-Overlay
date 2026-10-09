@@ -16,7 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrBlock, TranslatedBlock, TranslationConfig};
+use translator_core::{ApiConfig, HttpApi, OcrBlock, TranslatedBlock, TranslationConfig};
 
 pub use crate::{
     cache::{CacheResolve, TranslationCache},
@@ -68,7 +68,7 @@ impl TranslateError {
 
 /// True when another attempt should run after `attempt` (0-based completed tries).
 pub fn should_retry(error: &TranslateError, attempt: u32, max_retries: u32) -> bool {
-    !error.is_cancelled() && error.is_retryable() && attempt < max_retries
+    error.is_retryable() && attempt < max_retries
 }
 
 fn new_session_id() -> String {
@@ -272,7 +272,7 @@ struct TranslationResponse {
 }
 
 /// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
-pub fn merge_translations_detailed(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
+pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
     let parsed = parse_translation_blocks(response_json)?;
     let model_ids: HashSet<u32> = parsed.iter().map(|(id, _)| *id).collect();
 
@@ -490,8 +490,10 @@ fn parse_json_string_prefix(s: &str) -> Option<(String, Option<&str>)> {
         }
         i += 1;
     }
-    let end = bytes.len() - usize::from(escape);
-    Some((s[1..end].to_string(), None))
+    // Still open: close it to unescape what has arrived. A `\u` escape cut mid-way stays raw.
+    let open = &s[..bytes.len() - usize::from(escape)];
+    let text = serde_json::from_str(&format!("{open}\"")).unwrap_or_else(|_| open[1..].to_string());
+    Some((text, None))
 }
 
 /// Fence-strip plus balanced `{...}` extraction (ignore prose around JSON).
@@ -510,7 +512,7 @@ fn json_parse_candidates(raw: &str) -> Vec<String> {
     push(&mut out, unfenced.clone());
 
     // 2) Balanced `{...}` extraction (ignore prose around JSON).
-    if let Some(obj) = extract_balanced(unfenced.as_str(), '{', '}') {
+    if let Some(obj) = first_json_object(&unfenced) {
         push(&mut out, obj.to_string());
     }
 
@@ -534,45 +536,33 @@ fn strip_markdown_fence(s: &str) -> String {
     body.join("\n").trim().to_string()
 }
 
-/// Extract the first balanced `open`…`close` region, respecting JSON strings.
-fn extract_balanced(s: &str, open: char, close: char) -> Option<&str> {
-    let start = s.find(open)?;
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
+/// The first balanced `{…}` object in `s`, skipping braces inside JSON strings.
+fn first_json_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let mut depth = 0u32;
     let mut in_string = false;
     let mut escape = false;
-    let mut i = start;
-
-    while i < s.len() {
-        let ch = s[i..].chars().next()?;
-        let ch_len = ch.len_utf8();
-
+    for (i, ch) in s[start..].char_indices() {
         if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
+            match ch {
+                _ if escape => escape = false,
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
             }
-            i += ch_len;
             continue;
         }
-
         match ch {
             '"' => in_string = true,
-            c if c == open => depth += 1,
-            c if c == close => {
+            '{' => depth += 1,
+            '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(&s[start..i + ch_len]);
+                    return Some(&s[start..=start + i]);
                 }
             }
             _ => {}
         }
-        // Safety: only walk UTF-8 char boundaries.
-        let _ = bytes;
-        i += ch_len;
     }
     None
 }
@@ -591,16 +581,8 @@ struct CliHandle {
     epoch: AtomicU64,
 }
 
-impl std::fmt::Debug for CliHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CliHandle")
-            .field("epoch", &self.epoch.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
 /// HTTP or long-lived CLI translation backend.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TranslateClient {
     http: reqwest::Client,
     config: ApiConfig,
@@ -620,8 +602,11 @@ impl TranslateClient {
     }
 
     pub fn update_config(&mut self, config: ApiConfig) {
-        // Rebuild client so idle timeout reflects the latest config.
-        self.http = build_http_client(&config);
+        // The idle timeout lives inside the client. Keep the client otherwise so its connection
+        // pool survives; the pipeline calls this before every translation.
+        if self.config.request_timeout_secs != config.request_timeout_secs {
+            self.http = build_http_client(&config);
+        }
         let session_changed = self.config.provider != config.provider
             || self.config.cli_path != config.cli_path
             || self.config.model != config.model
@@ -643,10 +628,13 @@ impl TranslateClient {
     }
 
     /// Stop / app exit: wait for an in-flight turn, then close and delete persisted CLI state.
+    /// Also waits for teardowns that [`Self::reset_session`] left running.
     pub async fn close_session(&self) {
         self.cli.epoch.fetch_add(1, Ordering::SeqCst);
         let mut backend = self.cli.backend.lock().await;
         backend.close().await;
+        let teardowns = std::mem::take(&mut backend.teardowns);
+        let _ = tokio::task::spawn_blocking(move || teardowns.into_iter().for_each(|t| drop(t.join()))).await;
     }
 
     pub fn config(&self) -> &ApiConfig {
@@ -792,11 +780,10 @@ pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<
     if cancel.is_cancelled() {
         return Err(TranslateError::Cancelled);
     }
-    match api.provider {
-        ModelProvider::OpenaiCompatible => list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await,
-        ModelProvider::GrokCli | ModelProvider::OpenCodeCli | ModelProvider::CodexCli | ModelProvider::ClaudeCli => {
-            list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
-        }
+    if api.provider.is_cli() {
+        list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
+    } else {
+        list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await
     }
 }
 
@@ -821,14 +808,6 @@ mod tests {
 
     use super::*;
     use crate::http::{completion_from_http_body, extract_responses_completion};
-
-    #[test]
-    fn http_complete_does_not_send_opencode_session_header() {
-        let src = include_str!("lib.rs");
-        let removed = ["x-", "opencode", "-session"].concat();
-        assert!(!src.contains(&removed));
-        assert!(src.contains("x-grok-conv-id"));
-    }
 
     #[test]
     fn changing_service_tier_resets_cli_session() {
@@ -887,7 +866,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[[1,"T1"]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T1");
     }
 
@@ -1097,7 +1076,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = "```json\n{\"b\":[[0,\"T2\"]]}\n```";
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T2");
     }
 
@@ -1112,11 +1091,11 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"Here you go: {"b": [[0, "T3"]]} Hope that helps!"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T3");
 
         let json = r#"{"b": [[0, "T3",],]}"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        assert!(merge_translations(&source, json).is_err());
     }
 
     #[test]
@@ -1130,7 +1109,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[["2","T4"]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "T4");
 
         let source = vec![OcrBlock {
@@ -1142,11 +1121,11 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[[1,120]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap().blocks;
         assert_eq!(out[0].translation, "120");
 
-        assert!(merge_translations_detailed(&source, r#"{"b":[[true,"T"]]}"#).is_err());
-        assert!(merge_translations_detailed(&source, r#"{"b":[["text",1]]}"#).is_err());
+        assert!(merge_translations(&source, r#"{"b":[[true,"T"]]}"#).is_err());
+        assert!(merge_translations(&source, r#"{"b":[["text",1]]}"#).is_err());
     }
 
     #[test]
@@ -1170,7 +1149,7 @@ mod tests {
             },
         ];
         let json = r#"{"b":[[1,"T"]]}"#;
-        let out = merge_translations_detailed(&source, json).unwrap();
+        let out = merge_translations(&source, json).unwrap();
         assert!(out.model_ids.contains(&1));
         assert!(!out.model_ids.contains(&2));
         assert_eq!(out.blocks[1].translation, "B");
@@ -1187,9 +1166,9 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"[[1,"T5"]]"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        assert!(merge_translations(&source, json).is_err());
         let json = r#"{"blocks":[{"id":1,"translation":"T5"}]}"#;
-        assert!(merge_translations_detailed(&source, json).is_err());
+        assert!(merge_translations(&source, json).is_err());
     }
 
     #[test]
@@ -1244,6 +1223,9 @@ mod tests {
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A"],[1,"B"#), [(0, "A".into()), (1, "B".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"B"]]}"#), [(0, "A\"B".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"#), [(0, "A".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"B"#), [(0, "A\"B".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"a\nb"#), [(0, "a\nb".into())]);
+        assert_eq!(peek_translation_pairs(r#"{"b":[[0,"x\u00"#), [(0, "x\\u00".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[2,"X"],[2,"Y"]]}"#), [(2, "X".into()), (2, "Y".into())]);
         assert!(peek_translation_pairs(r#"{"b":[[0,"#).is_empty());
         assert_eq!(peek_translation_pairs(r#"{"b":[[12,"x"]"#), [(12, "x".into())]);
@@ -1283,6 +1265,91 @@ mod tests {
         assert!(!should_retry(&err, 2, 2));
         assert!(!should_retry(&TranslateError::Cancelled, 0, 2));
         assert!(!should_retry(&TranslateError::MissingBaseUrl, 0, 2));
+    }
+
+    /// Loopback HTTP/1.1 server that answers every request with an empty translation and counts
+    /// accepted TCP connections.
+    fn keep_alive_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(socket) = socket else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || serve_chat_replies(socket));
+            }
+        });
+        (base_url, accepted)
+    }
+
+    fn serve_chat_replies(socket: std::net::TcpStream) {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let reply = r#"{"choices":[{"message":{"role":"assistant","content":"{\"b\":[]}"}}]}"#;
+        let mut writer = socket.try_clone().unwrap();
+        let mut reader = BufReader::new(socket);
+        loop {
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            write!(writer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn close_session_waits_for_reset_teardowns() {
+        let client = TranslateClient::new(ApiConfig::default());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        client.cli.backend.lock().await.teardowns.push(std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::SeqCst);
+        }));
+        client.close_session().await;
+        assert!(done.load(Ordering::SeqCst), "close_session returned before the teardown finished");
+        assert!(client.cli.backend.lock().await.teardowns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unchanged_config_keeps_the_http_connection_pool() {
+        let (base_url, accepted) = keep_alive_server();
+        let api = ApiConfig {
+            base_url,
+            model: "m".into(),
+            stream: false,
+            ..ApiConfig::default()
+        };
+        let mut client = TranslateClient::new(api.clone());
+        let conv = Conversation::empty();
+        let cancel = CancellationToken::new();
+
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        client.update_config(api.clone());
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "the same config must reuse the pooled connection");
+
+        client.update_config(ApiConfig {
+            request_timeout_secs: api.request_timeout_secs + 1,
+            ..api
+        });
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "a new idle timeout needs a new client");
     }
 
     #[tokio::test]

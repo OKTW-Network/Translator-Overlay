@@ -4,6 +4,8 @@
 //! Picker: unowned insert-above + live client rect; pure target drags use
 //! `SetWindowPos` only (no per-drag `UpdateLayeredWindow`).
 
+use std::sync::atomic::Ordering;
+
 use tracing::{debug, warn};
 use translator_capture::client_screen_rect;
 use windows::Win32::{
@@ -34,23 +36,6 @@ enum PresentationAction {
     FullPresent,
     MoveOnly,
     RestackOnly,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FollowNotice {
-    BeginMoveSize,
-    EndMoveSize,
-    Drop,
-    Apply,
-}
-
-fn classify_follow_notice(event: u32, in_movesize: bool) -> FollowNotice {
-    match event {
-        EVENT_SYSTEM_MOVESIZESTART => FollowNotice::BeginMoveSize,
-        EVENT_SYSTEM_MOVESIZEEND => FollowNotice::EndMoveSize,
-        EVENT_OBJECT_REORDER if in_movesize => FollowNotice::Drop,
-        _ => FollowNotice::Apply,
-    }
 }
 
 fn presentation_action(previous: Option<ClientRect>, current: ClientRect, content_changed: bool) -> PresentationAction {
@@ -87,49 +72,33 @@ impl OverlayHost {
 
     /// Returns whether the pump should `apply_overlay` after this notice.
     pub(crate) fn on_follow_event(&mut self, event: u32, hwnd: HWND) -> bool {
-        match classify_follow_notice(event, self.in_movesize) {
-            FollowNotice::BeginMoveSize => {
-                self.in_movesize = true;
-                true
-            }
-            FollowNotice::EndMoveSize => {
+        match event {
+            EVENT_SYSTEM_MOVESIZESTART => self.in_movesize = true,
+            EVENT_SYSTEM_MOVESIZEEND => {
                 self.in_movesize = false;
                 self.presented_rect = None;
-                true
             }
-            FollowNotice::Drop => false,
-            FollowNotice::Apply => {
-                if event == EVENT_OBJECT_DESTROY {
-                    self.on_follow_destroy(hwnd);
-                }
-                true
-            }
+            // Z-order churn during a drag: the drag path moves the overlay itself.
+            EVENT_OBJECT_REORDER if self.in_movesize => return false,
+            EVENT_OBJECT_DESTROY if self.target == Some(hwnd) => self.drop_dead_target(),
+            _ => {}
         }
+        true
     }
 
-    fn on_follow_destroy(&mut self, hwnd: HWND) {
-        if self.target != Some(hwnd) {
-            return;
-        }
-        debug!("target window gone — detaching overlay");
-        self.forget_target();
+    /// The target window is gone: detach, and cancel the picker if it is open.
+    fn drop_dead_target(&mut self) {
+        debug!("target window gone; detaching overlay");
+        self.target = None;
+        FOLLOW_TARGET.store(0, Ordering::Release);
+        self.in_movesize = false;
+        self.z_order_force_topmost = false;
         if self.picker.is_some() {
             self.presented_rect = None;
             self.finish_picker(PickerEnd::Cancel);
         } else {
             self.release_target();
         }
-    }
-
-    pub(crate) fn clear_follow_move_state(&mut self) {
-        self.in_movesize = false;
-    }
-
-    fn forget_target(&mut self) {
-        self.target = None;
-        FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-        self.in_movesize = false;
-        self.z_order_force_topmost = false;
     }
 
     /// Interactive title-bar drag / resize: live rect + one `SetWindowPos`.
@@ -139,14 +108,7 @@ impl OverlayHost {
         };
 
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
-            debug!("target window gone — detaching overlay");
-            self.forget_target();
-            if self.picker.is_some() {
-                self.presented_rect = None;
-                self.finish_picker(PickerEnd::Cancel);
-            } else {
-                self.release_target();
-            }
+            self.drop_dead_target();
             return;
         }
         if unsafe { IsIconic(target) }.as_bool() {
@@ -181,9 +143,7 @@ impl OverlayHost {
         };
 
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
-            debug!("target window gone — detaching overlay");
-            self.forget_target();
-            self.release_target();
+            self.drop_dead_target();
             return;
         }
         if unsafe { IsIconic(target) }.as_bool() {
@@ -259,10 +219,7 @@ impl OverlayHost {
         };
 
         if !unsafe { IsWindow(Some(target)) }.as_bool() {
-            debug!("target window gone — cancelling region picker");
-            self.forget_target();
-            self.presented_rect = None;
-            self.finish_picker(PickerEnd::Cancel);
+            self.drop_dead_target();
             return;
         }
         if unsafe { IsIconic(target) }.as_bool() {
@@ -440,40 +397,13 @@ mod tests {
         assert_eq!(presentation_action(Some(RECT), RECT, false), PresentationAction::RestackOnly);
     }
 
-    #[test]
-    fn follow_notice_classifies_movesize_reorder_and_location() {
-        use windows::Win32::UI::WindowsAndMessaging::EVENT_OBJECT_LOCATIONCHANGE;
-
-        assert_eq!(classify_follow_notice(EVENT_SYSTEM_MOVESIZESTART, false), FollowNotice::BeginMoveSize);
-        assert_eq!(classify_follow_notice(EVENT_SYSTEM_MOVESIZEEND, true), FollowNotice::EndMoveSize);
-        assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, true), FollowNotice::Drop);
-        assert_eq!(classify_follow_notice(EVENT_OBJECT_REORDER, false), FollowNotice::Apply);
-        assert_eq!(classify_follow_notice(EVENT_OBJECT_DESTROY, true), FollowNotice::Apply);
-        assert_eq!(classify_follow_notice(EVENT_OBJECT_LOCATIONCHANGE, false), FollowNotice::Apply);
-        assert_eq!(classify_follow_notice(EVENT_OBJECT_LOCATIONCHANGE, true), FollowNotice::Apply);
-    }
-
-    #[test]
-    fn first_picker_session_shows_a_visible_hit_testable_layer() {
-        if let Err(e) = first_picker_hwnd_smoke() {
-            panic!("{e}");
-        }
-    }
-
-    #[test]
-    fn empty_captions_stay_visible_and_clear_the_dib() {
-        if let Err(e) = empty_captions_hwnd_smoke() {
-            panic!("{e}");
-        }
-    }
-
     fn overlay_ex_style(hwnd: HWND) -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
         use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE};
 
         WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32)
     }
 
-    fn spawn_overlay_and_target() -> Result<(crate::host::OverlayHost, HWND, parking_lot::MutexGuard<'static, ()>), String> {
+    fn spawn_overlay_and_target() -> Result<(crate::host::OverlayHost, HWND, std::sync::MutexGuard<'static, ()>), String> {
         use tokio::sync::mpsc;
         use translator_core::OverlayConfig;
         use windows::{
@@ -524,7 +454,8 @@ mod tests {
         }
     }
 
-    fn first_picker_hwnd_smoke() -> Result<(), String> {
+    #[test]
+    fn first_picker_session_shows_a_visible_hit_testable_layer() -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT};
 
         use crate::command::OverlayCommand;
@@ -574,7 +505,8 @@ mod tests {
         Ok(())
     }
 
-    fn empty_captions_hwnd_smoke() -> Result<(), String> {
+    #[test]
+    fn empty_captions_stay_visible_and_clear_the_dib() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
         use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GetWindowTextW, WS_EX_TOOLWINDOW};
 

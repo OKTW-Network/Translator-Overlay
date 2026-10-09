@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
+use rust_i18n::t;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{PipelineStatus, TranslatedBlock};
+use translator_ocr::OcrEngine;
 use translator_overlay::{OverlayCommand, OverlayController};
 use translator_translate::{
-    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations_detailed, peek_translation_pairs,
+    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations, peek_translation_pairs,
 };
 
 use crate::{
@@ -27,7 +29,7 @@ impl Pipeline {
             s.latest_ocr_blocks = page.blocks.clone();
         }
 
-        if page.blocks.is_empty() || page.source_text.trim().is_empty() {
+        if page.blocks.iter().all(|b| b.text.trim().is_empty()) {
             self.last_translated_fp = None;
             self.last_page = None;
             let mut s = self.state.write();
@@ -87,7 +89,7 @@ impl Pipeline {
         // Show remembered captions now; new lines wait for the API.
         let preview = TranslationCache::hits_only(&page.blocks, &resolved.hits);
         if !preview.is_empty() {
-            apply_cached_preview(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
+            show_captions(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
         }
 
         let prepared = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
@@ -151,7 +153,7 @@ impl Pipeline {
 
     pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: Result<Completion, TranslateError>) {
         match result {
-            Ok(completion) => match merge_translations_detailed(&job.miss_blocks, &completion.text) {
+            Ok(completion) => match merge_translations(&job.miss_blocks, &completion.text) {
                 Ok(outcome) => {
                     self.conversation.commit_completion(&completion);
                     let tcfg = self.state.read().config.translation.clone();
@@ -169,7 +171,7 @@ impl Pipeline {
                         let mut s = self.state.write();
                         s.translation_cache_len = self.translation_cache.len();
                         s.push_history(
-                            job.blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n"),
+                            OcrEngine::blocks_to_text(&job.blocks),
                             blocks_to_translated_text(&translated),
                             tcfg.conversation_max_turns,
                         );
@@ -182,7 +184,7 @@ impl Pipeline {
                     // store invalid model JSON as assistant context.
                     self.conversation.rollback_user_turn();
                     self.apply_stream_preview(&job, &[]);
-                    self.fail_translate(format!("translate parse: {e}"));
+                    self.fail_translate(t!("err.translate_parse", error = e.to_string()).into_owned());
                 }
             },
             Err(e) if e.is_cancelled() => {
@@ -203,7 +205,7 @@ impl Pipeline {
                 error!(error = %e, "translation failed");
                 self.conversation.rollback_user_turn();
                 self.apply_stream_preview(&job, &[]);
-                self.fail_translate(format!("translate: {e}"));
+                self.fail_translate(t!("err.translate", error = e.to_string()).into_owned());
             }
         }
     }
@@ -224,7 +226,7 @@ impl Pipeline {
 
     pub(crate) fn apply_stream_preview(&self, job: &InflightTranslate, pairs: &[(u32, String)]) {
         if pairs.is_empty() && !job.revert_blocks.is_empty() {
-            apply_cached_preview(&self.state, self.overlay.as_ref(), job.revert_blocks.clone(), job.content_width, job.content_height);
+            show_captions(&self.state, self.overlay.as_ref(), job.revert_blocks.clone(), job.content_width, job.content_height);
             return;
         }
         let mut hits = job.cached_hits.clone();
@@ -234,12 +236,13 @@ impl Pipeline {
             }
         }
         let preview = TranslationCache::hits_only(&job.blocks, &hits);
-        apply_cached_preview(&self.state, self.overlay.as_ref(), preview, job.content_width, job.content_height);
+        show_captions(&self.state, self.overlay.as_ref(), preview, job.content_width, job.content_height);
     }
 }
 
-/// Paint cache hits immediately. Does not finish the job or append history.
-fn apply_cached_preview(
+/// Send captions to the overlay and store them on the state. Does not finish the job or
+/// append history, so it also paints cache hits and stream previews.
+fn show_captions(
     state: &SharedState,
     overlay: Option<&OverlayController>,
     translated: Vec<TranslatedBlock>,
@@ -255,14 +258,13 @@ fn apply_cached_preview(
             content_width,
             content_height,
         }) {
-            warn!(error = %e, "failed to preview cached overlay");
+            warn!(error = %e, "failed to update overlay captions");
         }
     }
-
-    let mut s = state.write();
-    s.latest_translated_blocks = translated;
+    state.write().latest_translated_blocks = translated;
 }
 
+/// Show a finished page and mark the translation done.
 fn apply_translated(
     state: &SharedState,
     overlay: Option<&OverlayController>,
@@ -270,21 +272,8 @@ fn apply_translated(
     content_width: u32,
     content_height: u32,
 ) {
-    if let Some(o) = overlay {
-        if let Some(hwnd) = state.read().target_hwnd {
-            let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
-        }
-        if let Err(e) = o.send(OverlayCommand::SetBlocks {
-            blocks: translated.clone(),
-            content_width,
-            content_height,
-        }) {
-            warn!(error = %e, "failed to update overlay");
-        }
-    }
-
+    show_captions(state, overlay, translated, content_width, content_height);
     let mut s = state.write();
-    s.latest_translated_blocks = translated;
     s.translate_in_flight = false;
     s.last_error = None;
     s.status = if s.capture_paused {

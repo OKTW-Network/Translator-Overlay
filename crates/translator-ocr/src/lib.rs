@@ -22,8 +22,6 @@ pub(crate) fn reindex(mut blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
 
 #[derive(Debug, Error)]
 pub enum OcrError {
-    #[error("OCR engine not loaded")]
-    NotLoaded,
     #[error("OCR engine error: {0}")]
     Engine(String),
     #[error("image error: {0}")]

@@ -117,6 +117,17 @@ bg_color = "背景色彩必須是 #AARRGGBB 十六進位（例如 #C8000000）�
 reload_config = "無法重新載入設定：%{error}"
 regions_required = "沒有可儲存的內容：請至少選取一個 OCR 區域。"
 preset_name_required = "必須填寫設定集名稱。"
+models_loading = "OCR 模型仍在下載或載入中。"
+engine_not_ready = "OCR 引擎尚未就緒。"
+overlay_unavailable = "Overlay 無法使用。"
+region_select = "無法開始選取區域：%{error}"
+no_frame = "尚未擷取到畫面。"
+save_config = "無法儲存設定：%{error}"
+models = "無法載入 OCR 模型：%{error}"
+models_task_ended = "OCR 模型載入意外中止。"
+ocr = "OCR 失敗：%{error}"
+translate = "翻譯失敗：%{error}"
+translate_parse = "無法解析譯文：%{error}"
 
 [api]
 profiles = "設定檔"
@@ -271,3 +282,6 @@ notes_body = "Overlay 點擊可穿透，而且只在目標視窗位於前景時�
 color_swatch_desc = "按色塊選擇色彩與透明度，或輸入 #AARRGGBB 十六進位。"
 open_picker = "開啟取色器"
 close_picker = "關閉取色器"
+
+[reader]
+placeholder = "（尚無譯文）"

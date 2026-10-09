@@ -22,8 +22,8 @@ impl OverlayHost {
         let w = self.surface_w.max(1);
         let h = self.surface_h.max(1);
         let surface = draw::SurfaceSize::new(w, h);
-        let bg = draw::background_rgba(&self.config);
-        let fg = draw::text_rgba(&self.config);
+        let bg = draw::Rgba::from_argb(self.config.background_color_argb);
+        let fg = draw::Rgba::from_argb(self.config.text_color_argb);
 
         // Layout first (needs GDI measure / font) before borrowing DIB pixels.
         let content_w = self.content_w;
@@ -56,7 +56,7 @@ impl OverlayHost {
                 .surface
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
-            draw::clear(buf);
+            buf.fill(0);
             for (rect, _, _) in &labels {
                 draw::fill_rect(buf, surface, *rect, bg);
             }
@@ -76,7 +76,7 @@ impl OverlayHost {
     /// Fixed ratios still overshoot (Segoe UI cell > requested height; vertical
     /// OCR width is padded). Shrink until ascent+descent ≤ ~90% of short side.
     fn fit_font_to_source_box(&mut self, base: SurfaceRect) -> Result<i32, OverlayError> {
-        let target = draw::char_box_px(base);
+        let target = base.w.min(base.h).max(1);
         // Leave a little air so ClearType stems don't look larger than source ink.
         let max_cell = ((target as f32) * 0.90).round().max(8.0) as i32;
         let mut px = draw::font_height_for(base);

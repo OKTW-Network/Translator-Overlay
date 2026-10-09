@@ -55,10 +55,6 @@ impl TranslationCache {
         self.map.is_empty()
     }
 
-    pub fn max_entries(&self) -> usize {
-        self.max_entries
-    }
-
     pub fn set_max(&mut self, max_entries: usize) {
         self.max_entries = max_entries.max(TRANSLATION_CACHE_MAX_MIN);
         self.evict_to_max();
@@ -364,7 +360,6 @@ mod tests {
         }
         cache.set_max(2);
         assert_eq!(cache.len(), 2);
-        assert_eq!(cache.max_entries(), 2);
     }
 
     #[test]

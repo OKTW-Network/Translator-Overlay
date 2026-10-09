@@ -1,11 +1,10 @@
 //! Free-threaded capture session that publishes the latest frame.
 
 use std::{
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering},
     time::Duration,
 };
 
-use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use tracing::{info, warn};
 use windows_capture::{
@@ -25,30 +24,12 @@ use crate::{
     resize_watch::{IN_MOVESIZE, ResizeWatch},
 };
 
-/// Latest-wins slot: the capture thread overwrites; the pipeline takes the newest frame.
-struct SharedLatest {
-    slot: ArcSwapOption<CapturedFrame>,
-}
+/// Latest-wins slot. The capture thread overwrites it and the pipeline reads the newest frame.
+/// Cloning a frame only bumps the `Bytes` refcount.
+type LatestFrame = Arc<Mutex<Option<CapturedFrame>>>;
 
-impl SharedLatest {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            slot: ArcSwapOption::empty(),
-        })
-    }
-
-    fn publish(&self, frame: CapturedFrame) {
-        self.slot.store(Some(Arc::new(frame)));
-    }
-
-    fn latest(&self) -> Option<CapturedFrame> {
-        self.slot.load_full().map(|frame| (*frame).clone())
-    }
-
-    /// Latest published sequence without cloning the frame (staleness peek).
-    fn latest_sequence(&self) -> Option<u64> {
-        self.slot.load().as_ref().map(|frame| frame.sequence)
-    }
+fn lock(latest: &LatestFrame) -> MutexGuard<'_, Option<CapturedFrame>> {
+    latest.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Copy tightly packed RGBA8 out of a mapped WGC buffer into owned [`Bytes`].
@@ -67,14 +48,14 @@ fn pack_rgba(frame: &mut Frame<'_>, scratch: &mut Vec<u8>) -> Result<Bytes, Capt
 }
 
 struct FrameHandler {
-    latest: Arc<SharedLatest>,
+    latest: LatestFrame,
     sequence: u64,
     scratch: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for FrameHandler {
     type Error = CaptureError;
-    type Flags = Arc<SharedLatest>;
+    type Flags = LatestFrame;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -99,7 +80,7 @@ impl GraphicsCaptureApiHandler for FrameHandler {
 
         let rgba = pack_rgba(frame, &mut self.scratch)?;
         self.sequence += 1;
-        self.latest.publish(CapturedFrame::new(width, height, rgba, self.sequence));
+        *lock(&self.latest) = Some(CapturedFrame::new(width, height, rgba, self.sequence));
         Ok(())
     }
 
@@ -117,7 +98,7 @@ struct CaptureTarget {
 
 struct ActiveStream {
     control: windows_capture::capture::CaptureControl<FrameHandler, CaptureError>,
-    latest: Arc<SharedLatest>,
+    latest: LatestFrame,
 }
 
 /// Active capture session.
@@ -165,7 +146,7 @@ impl CaptureSession {
     ///
     /// Lets callers detect "no new frame" before paying for client-area crop.
     pub fn latest_sequence(&self) -> Option<u64> {
-        self.stream.as_ref()?.latest.latest_sequence()
+        lock(&self.stream.as_ref()?.latest).as_ref().map(|frame| frame.sequence)
     }
 
     /// Start capturing a window by HWND.
@@ -180,7 +161,7 @@ impl CaptureSession {
             return Err(CaptureError::Window("invalid hwnd".into()));
         }
 
-        let latest = SharedLatest::new();
+        let latest = LatestFrame::default();
         let settings = Settings::new(
             window,
             CursorCaptureSettings::WithoutCursor,
@@ -259,7 +240,7 @@ impl CaptureSession {
         if self.in_movesize() {
             return None;
         }
-        let frame = self.stream.as_ref()?.latest.latest()?;
+        let frame = lock(&self.stream.as_ref()?.latest).clone()?;
         Some(self.crop_to_client(frame))
     }
 
@@ -274,26 +255,5 @@ impl CaptureSession {
 impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.stop();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn frame(seq: u64) -> CapturedFrame {
-        CapturedFrame::new(1, 1, Bytes::from_static(&[1, 2, 3, 4]), seq)
-    }
-
-    #[test]
-    fn latest_overwrites_unread() {
-        let slot = SharedLatest::new();
-        slot.publish(frame(1));
-        slot.publish(frame(2));
-        let got = slot.latest().expect("frame");
-        assert_eq!(got.sequence, 2);
-        assert_eq!(slot.latest().expect("still there").sequence, 2);
-        slot.publish(frame(3));
-        assert_eq!(slot.latest().expect("replaced").sequence, 3);
     }
 }

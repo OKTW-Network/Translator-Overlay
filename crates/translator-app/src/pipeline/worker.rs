@@ -7,12 +7,13 @@ use std::{
 
 use bytes::Bytes;
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, watch};
+use rust_i18n::t;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
-use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, OcrFingerprint, StabilityGate};
+use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{HudPrimary, HudSnapshot, OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
@@ -45,17 +46,9 @@ pub(crate) struct InflightTranslate {
     pub revert_blocks: Vec<TranslatedBlock>,
 }
 
-/// Background OCR model download + ORT session build (`watch` = latest phase only).
-pub(crate) struct InflightModelLoad {
-    pub rx: watch::Receiver<ModelLoadUpdate>,
-    pub tier: ModelTier,
-    pub device: OcrDevice,
-}
-
 #[derive(Clone)]
 pub(crate) struct PendingPage {
     pub blocks: Vec<OcrBlock>,
-    pub source_text: String,
     pub fingerprint: OcrFingerprint,
     pub content_width: u32,
     pub content_height: u32,
@@ -153,7 +146,7 @@ pub(crate) struct Pipeline {
     pub last_translated_fp: Option<OcrFingerprint>,
     pub last_page: Option<PendingPage>,
     pub inflight: Option<InflightTranslate>,
-    pub model_load: Option<InflightModelLoad>,
+    pub model_load: Option<ModelLoadTask>,
     pub ocr_tier: ModelTier,
     pub ocr_device: OcrDevice,
     pub last_raw_ocr: Option<LastRawOcr>,
@@ -217,6 +210,7 @@ impl Pipeline {
             overlay,
         };
 
+        pipeline.sync_reader_placeholder();
         // Kick off download + load without blocking the command loop / UI.
         pipeline.start_model_load();
         pipeline
@@ -405,16 +399,16 @@ impl Pipeline {
 
     fn begin_region_select(&mut self, hwnd: isize) {
         let Some(overlay) = self.overlay.as_ref() else {
-            self.state.write().set_error("overlay is not available".to_string());
+            self.state.write().set_error(t!("err.overlay_unavailable"));
             return;
         };
         if let Err(e) = overlay.send(OverlayCommand::Attach { target_hwnd: hwnd }) {
-            self.state.write().set_error(format!("region select: {e}"));
+            self.state.write().set_error(t!("err.region_select", error = e.to_string()));
             return;
         }
         let regions = self.state.read().ocr_regions.clone();
         if let Err(e) = overlay.send(OverlayCommand::BeginRegionSelect { regions: regions.clone() }) {
-            self.state.write().set_error(format!("region select: {e}"));
+            self.state.write().set_error(t!("err.region_select", error = e.to_string()));
             return;
         }
         let mut s = self.state.write();
@@ -472,9 +466,9 @@ impl Pipeline {
     fn begin_start_capture(&mut self, hwnd: isize, title: String) {
         if self.model_load.is_some() {
             warn!("start capture ignored — OCR models still loading");
-            self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+            self.state.write().last_error = Some(t!("err.models_loading").into_owned());
         } else if self.engine.is_none() {
-            self.state.write().set_error("OCR engine is not ready".to_string());
+            self.state.write().set_error(t!("err.engine_not_ready"));
         } else {
             let interval = self.state.read().config.capture.min_interval_ms;
             self.cancel_inflight();
@@ -558,7 +552,7 @@ impl Pipeline {
     }
 
     /// Reset gate / timers / captions. Optionally clear LLM conversation.
-    fn reset_ocr_session(&mut self, clear_conversation: bool) {
+    pub(crate) fn reset_ocr_session(&mut self, clear_conversation: bool) {
         self.gate.reset_all();
         self.persist.reset();
         if clear_conversation {
@@ -615,7 +609,7 @@ impl Pipeline {
         }
         if self.model_load.is_some() {
             warn!("manual capture ignored — OCR models still loading");
-            self.state.write().last_error = Some("OCR models are still downloading or loading".into());
+            self.state.write().last_error = Some(t!("err.models_loading").into_owned());
             return;
         }
         if !self.ensure_engine() {
@@ -632,7 +626,7 @@ impl Pipeline {
                 self.update_preview(&frame);
                 self.run_ocr_manual(&frame).await;
             }
-            None => self.state.write().set_error("no capture frame"),
+            None => self.state.write().set_error(t!("err.no_frame")),
         }
     }
 
@@ -700,7 +694,7 @@ enum PipelineEvent {
 async fn next_event(
     rx: &mut CmdRx,
     inflight: Option<&mut InflightTranslate>,
-    model_load: Option<&mut InflightModelLoad>,
+    model_load: Option<&mut ModelLoadTask>,
     overlay: Option<&mut OverlayController>,
     wait: Option<Duration>,
 ) -> PipelineEvent {

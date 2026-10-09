@@ -1,9 +1,6 @@
 //! Capture preview → WinUI `Image` via D2D (`CanvasImageSource`).
 
-use std::{
-    cell::{Cell, RefCell},
-    hash::{Hash, Hasher},
-};
+use std::cell::{Cell, RefCell};
 
 use bytes::Bytes;
 use rust_i18n::t;
@@ -23,22 +20,10 @@ thread_local! {
 struct CachedPreview {
     sequence: u64,
     scale_cents: u32,
-    regions_key: u64,
+    regions: Vec<NormRect>,
     source: CanvasImageSource,
     width: u32,
     height: u32,
-}
-
-fn regions_key(regions: &[NormRect]) -> u64 {
-    let mut h = std::hash::DefaultHasher::new();
-    regions.len().hash(&mut h);
-    for r in regions {
-        r.x.to_bits().hash(&mut h);
-        r.y.to_bits().hash(&mut h);
-        r.width.to_bits().hash(&mut h);
-        r.height.to_bits().hash(&mut h);
-    }
-    h.finish()
 }
 
 fn gpu_device() -> Option<GpuDevice> {
@@ -128,10 +113,7 @@ pub struct PreviewInput {
 
 impl PartialEq for PreviewInput {
     fn eq(&self, other: &Self) -> bool {
-        self.sequence == other.sequence
-            && self.width == other.width
-            && self.height == other.height
-            && regions_key(&self.regions) == regions_key(&other.regions)
+        self.sequence == other.sequence && self.width == other.width && self.height == other.height && self.regions == other.regions
     }
 }
 
@@ -184,7 +166,6 @@ impl Component for CapturePreview {
         let cents = scale_cents(scale);
         let dip_w = f64::from(dip_size(input.width, scale));
         let dip_h = f64::from(dip_size(input.height, scale));
-        let rkey = regions_key(&input.regions);
 
         let source = CACHE.with(|cell| {
             let mut cache = cell.borrow_mut();
@@ -193,7 +174,7 @@ impl Component for CapturePreview {
                 && cached.scale_cents == cents
                 && cached.width == input.width
                 && cached.height == input.height
-                && cached.regions_key == rkey
+                && cached.regions == input.regions
             {
                 return Some(cached.source.clone());
             }
@@ -202,7 +183,7 @@ impl Component for CapturePreview {
             *cache = Some(CachedPreview {
                 sequence: input.sequence,
                 scale_cents: cents,
-                regions_key: rkey,
+                regions: input.regions.clone(),
                 source: source.clone(),
                 width: input.width,
                 height: input.height,
@@ -215,7 +196,7 @@ impl Component for CapturePreview {
                 let image_ref = self.image_ref.clone();
                 let retry = self.attach_retry.get();
                 let sender = context.sender();
-                context.use_effect("preview-attach", (input.sequence, cents, rkey, retry), move || {
+                context.use_effect("preview-attach", (input.sequence, cents, input.regions.clone(), retry), move || {
                     if !src.attach(&image_ref) && retry == 0 {
                         let _ = sender.send(());
                     }

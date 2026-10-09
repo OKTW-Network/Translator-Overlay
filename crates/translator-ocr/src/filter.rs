@@ -54,9 +54,10 @@ pub struct BlockPersistenceFilter {
     /// Force-confirm thrashing tracks after this long. Zero = disabled.
     max_unstable: Duration,
     tracks: Vec<Track>,
-    /// Spatial quantize step in pixels (center matching).
-    quant: i32,
 }
+
+/// Spatial quantize step in pixels for center matching.
+const QUANT: f32 = 16.0;
 
 #[derive(Debug, Clone)]
 struct Track {
@@ -79,30 +80,21 @@ struct Track {
 }
 
 impl BlockPersistenceFilter {
-    pub fn new(persist_ms: u64, max_miss_ms: u64) -> Self {
-        Self::with_max_unstable(persist_ms, max_miss_ms, 2_000)
-    }
-
-    pub fn with_max_unstable(persist_ms: u64, max_miss_ms: u64, max_unstable_ms: u64) -> Self {
+    pub fn new(persist_ms: u64, max_miss_ms: u64, max_unstable_ms: u64) -> Self {
         Self {
             persist: Duration::from_millis(persist_ms),
             max_miss: Duration::from_millis(max_miss_ms.max(persist_ms.saturating_add(100))),
             max_unstable: Duration::from_millis(max_unstable_ms),
             tracks: Vec::new(),
-            quant: 16,
         }
     }
 
     pub fn from_config(config: &OcrConfig) -> Self {
-        Self::with_max_unstable(config.block_persist_ms, config.block_max_miss_ms, config.max_unstable_ms)
+        Self::new(config.block_persist_ms, config.block_max_miss_ms, config.max_unstable_ms)
     }
 
     pub fn reset(&mut self) {
         self.tracks.clear();
-    }
-
-    pub fn is_enabled(&self) -> bool {
-        !self.persist.is_zero()
     }
 
     /// How long to keep a track that is not currently confirmed.
@@ -121,7 +113,7 @@ impl BlockPersistenceFilter {
     ///
     /// When disabled (`block_persist_ms == 0`), returns `blocks` unchanged.
     pub fn filter(&mut self, blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-        if !self.is_enabled() {
+        if self.persist.is_zero() {
             return blocks;
         }
 
@@ -187,14 +179,8 @@ impl BlockPersistenceFilter {
                     }
                 } else {
                     // Unconfirmed text flip: restart same-text timer, keep first_seen.
-                    track.text = block.text.clone();
-                    track.bbox = block.bbox;
-                    track.first_stable_since = now;
                     track.last_seen = now;
-                    track.last_block = block;
-                    track.pending_text = None;
-                    track.pending_since = None;
-                    track.thrash_since = None;
+                    adopt_reading(track, block, now);
                 }
                 if !track.confirmed && !max_unstable.is_zero() && now.saturating_duration_since(track.first_seen) >= max_unstable {
                     track.confirmed = true;
@@ -245,23 +231,20 @@ impl BlockPersistenceFilter {
     }
 
     fn find_track(&self, block: &OcrBlock, text_key: &str, claimed: &[bool]) -> Option<usize> {
-        let cx = block.bbox.x + block.bbox.width * 0.5;
-        let cy = block.bbox.y + block.bbox.height * 0.5;
-        let q = self.quant.max(1);
+        let (cx, cy) = block.bbox.center();
 
         let mut best: Option<(usize, f32)> = None;
         for (i, track) in self.tracks.iter().enumerate() {
             if claimed[i] {
                 continue;
             }
-            let tcx = track.bbox.x + track.bbox.width * 0.5;
-            let tcy = track.bbox.y + track.bbox.height * 0.5;
+            let (tcx, tcy) = track.bbox.center();
             let dx = (cx - tcx).abs();
             let dy = (cy - tcy).abs();
             // Match by center proximity (tolerant of OCR box jitter and width
             // swings when trailing glyphs appear/disappear).
-            let max_dx = (block.bbox.width.max(track.bbox.width) * 0.65).max(q as f32 * 3.0).max(24.0);
-            let max_dy = (block.bbox.height.max(track.bbox.height) * 0.90).max(q as f32 * 2.5).max(16.0);
+            let max_dx = (block.bbox.width.max(track.bbox.width) * 0.65).max(QUANT * 3.0).max(24.0);
+            let max_dy = (block.bbox.height.max(track.bbox.height) * 0.90).max(QUANT * 2.5).max(16.0);
             if dx > max_dx || dy > max_dy {
                 continue;
             }
@@ -333,7 +316,7 @@ mod tests {
 
     #[test]
     fn persistence_drops_flickering_text() {
-        let mut f = BlockPersistenceFilter::new(80, 200);
+        let mut f = BlockPersistenceFilter::new(80, 200, 2_000);
         // Frame 1: icon noise + real text
         let out1 = f.filter(vec![block("HP", 10.0, 10.0), block("x#?", 200.0, 50.0)]);
         assert!(out1.is_empty(), "first sight should not emit");
@@ -352,7 +335,7 @@ mod tests {
 
     #[test]
     fn persistence_keeps_confirmed_across_missed_frame() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let _ = f.filter(vec![block("Menu", 10.0, 10.0)]);
         std::thread::sleep(Duration::from_millis(60));
         let confirmed = f.filter(vec![block("Menu", 12.0, 10.0)]);
@@ -366,7 +349,7 @@ mod tests {
 
     #[test]
     fn persistence_freezes_confirmed_bbox_against_jitter() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
         std::thread::sleep(Duration::from_millis(60));
         let confirmed = f.filter(vec![block("Menu", 100.0, 200.0)]);
@@ -384,7 +367,7 @@ mod tests {
 
     #[test]
     fn persistence_freezes_confirmed_bbox_on_real_move() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
         std::thread::sleep(Duration::from_millis(60));
         let confirmed = f.filter(vec![block("Menu", 100.0, 200.0)]);
@@ -400,7 +383,7 @@ mod tests {
 
     #[test]
     fn persistence_pending_text_keeps_bbox_until_adopt() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let origin = block_wh("セリフ", 100.0, 200.0, 80.0, 22.0);
         let _ = f.filter(vec![origin.clone()]);
         std::thread::sleep(Duration::from_millis(60));
@@ -424,7 +407,7 @@ mod tests {
 
     #[test]
     fn persistence_reset_drops_confirmed_tracks() {
-        let mut f = BlockPersistenceFilter::new(50, 300);
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(f.filter(vec![block("Menu", 100.0, 200.0)]).len(), 1);
@@ -438,7 +421,7 @@ mod tests {
 
     #[test]
     fn persistence_disabled_passthrough() {
-        let mut f = BlockPersistenceFilter::with_max_unstable(0, 0, 0);
+        let mut f = BlockPersistenceFilter::new(0, 0, 0);
         let blocks = vec![block("now", 0.0, 0.0)];
         let out = f.filter(blocks.clone());
         assert_eq!(out, blocks);
@@ -447,7 +430,7 @@ mod tests {
     #[test]
     fn thrashing_text_force_confirms_after_max_unstable() {
         // Persist never settles (same-text window huge); text flips every frame.
-        let mut f = BlockPersistenceFilter::with_max_unstable(10_000, 500, 80);
+        let mut f = BlockPersistenceFilter::new(10_000, 500, 80);
         let _ = f.filter(vec![block("hello!", 10.0, 10.0)]);
         assert!(f.filter(vec![block("hello", 11.0, 10.0)]).is_empty());
 
@@ -460,7 +443,7 @@ mod tests {
     #[test]
     fn thrashing_with_bbox_width_swing_still_force_confirms() {
         // Trailing glyph flicker often changes box width / center a lot.
-        let mut f = BlockPersistenceFilter::with_max_unstable(10_000, 400, 80);
+        let mut f = BlockPersistenceFilter::new(10_000, 400, 80);
         let _ = f.filter(vec![block_wh("セリフ", 100.0, 200.0, 80.0, 22.0)]);
         let _ = f.filter(vec![block_wh("セリフ。", 98.0, 199.0, 160.0, 24.0)]);
         let _ = f.filter(vec![block_wh("セリフ", 102.0, 201.0, 84.0, 20.0)]);
@@ -473,7 +456,7 @@ mod tests {
     #[test]
     fn unconfirmed_track_survives_longer_than_max_miss_for_force() {
         // max_miss is short; max_unstable is longer — track must live to force.
-        let mut f = BlockPersistenceFilter::with_max_unstable(10_000, 50, 120);
+        let mut f = BlockPersistenceFilter::new(10_000, 50, 120);
         let _ = f.filter(vec![block("a!", 10.0, 10.0)]);
         std::thread::sleep(Duration::from_millis(70)); // past max_miss, under max_unstable
         // Still matched: last_seen updates. Simulate gap then return:
@@ -481,9 +464,7 @@ mod tests {
         assert!(mid.is_empty());
         std::thread::sleep(Duration::from_millis(30));
         // Track retained because unconfirmed retain = max_unstable (120).
-        let out = f.filter(vec![block("a", 11.0, 10.0)]);
-        // first_seen ~100ms ago; may not force yet. But track should exist (no emit).
-        assert!(out.is_empty() || out.len() == 1);
+        let _ = f.filter(vec![block("a", 11.0, 10.0)]);
         std::thread::sleep(Duration::from_millis(40));
         let forced = f.filter(vec![block("a?", 10.0, 11.0)]);
         assert_eq!(forced.len(), 1, "should force after total first_seen >= 120ms");
@@ -492,7 +473,7 @@ mod tests {
     #[test]
     fn persistence_ocr_punct_fold_is_same_text() {
         for (origin_text, flicker) in [("待って…", "待って………"), ("何？", "何?"), ("そう〜", "そう~")] {
-            let mut f = BlockPersistenceFilter::new(50, 300);
+            let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
             let origin = block_wh(origin_text, 100.0, 200.0, 80.0, 22.0);
             let _ = f.filter(vec![origin.clone()]);
             std::thread::sleep(Duration::from_millis(60));
@@ -512,7 +493,7 @@ mod tests {
         // Four overlapping dialogue lines (merge off). Matching must be 1:1 per
         // frame — otherwise later lines steal earlier tracks and only the last
         // couple survive.
-        let mut f = BlockPersistenceFilter::new(50, 300);
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let lines = vec![
             block_wh("一行目です", 100.0, 200.0, 240.0, 32.0),
             block_wh("二行目です", 100.0, 228.0, 240.0, 32.0),

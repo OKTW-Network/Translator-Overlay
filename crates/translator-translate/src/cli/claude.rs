@@ -4,17 +4,13 @@
 //! refreshes or forwards Claude credentials: no `--bare` (it skips OAuth), no `CLAUDE_CONFIG_DIR`
 //! override, no auth env vars. Claude Code manages its login by itself.
 
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{path::Path, time::Duration};
 
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::AsyncWriteExt,
     process::{Child, ChildStdin},
     sync::mpsc,
-    time::timeout,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -22,7 +18,7 @@ use crate::{
     TranslateError,
     cli::{
         TempCwd,
-        rpc::{StderrTail, StdioChild, map_auth_failure, spawn_stdio},
+        rpc::{StderrTail, StdioChild, forward_json_lines, kill_blocking, map_auth_failure, spawn_stdio, wait_or_kill},
     },
 };
 
@@ -234,23 +230,7 @@ impl ClaudeSession {
         } = spawn_stdio(program, &args, cwd, &[("DISABLE_AUTOUPDATER", "1")])?;
 
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(line) {
-                    Ok(value) => {
-                        if tx.send(value).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => tracing::warn!(target: "translator_translate::cli", error = %e, "ignored non-JSON Claude Code stdout line"),
-                }
-            }
-        });
+        forward_json_lines(stdout, tx, Some);
 
         Ok(Self {
             child,
@@ -360,24 +340,12 @@ impl ClaudeSession {
     /// Close stdin so Claude Code exits on its own, then kill if it lingers.
     pub async fn close(&mut self) {
         self.stdin = None;
-        if matches!(timeout(Duration::from_secs(2), self.child.wait()).await, Ok(Ok(_))) {
-            return;
-        }
-        let _ = self.child.start_kill();
-        let _ = timeout(Duration::from_secs(2), self.child.wait()).await;
+        wait_or_kill(&mut self.child).await;
     }
 
     pub fn kill(&mut self) {
         self.stdin = None;
-        let _ = self.child.start_kill();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
-                Ok(None) if Instant::now() >= deadline => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            }
-        }
+        kill_blocking(&mut self.child);
     }
 }
 
@@ -396,7 +364,7 @@ pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Du
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, time::Instant};
 
     use super::*;
 
@@ -588,7 +556,7 @@ mod tests {
             reasoning_effort: Some("none".into()),
             ..ApiConfig::default()
         };
-        let models = super::list_models(&crate::cli::resolve_program(&api).unwrap(), &CancellationToken::new(), Duration::from_secs(30))
+        let models = list_models(&crate::cli::resolve_program(&api).unwrap(), &CancellationToken::new(), Duration::from_secs(30))
             .await
             .expect("list models");
         println!("models: {models:?}");

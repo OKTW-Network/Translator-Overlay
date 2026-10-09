@@ -7,19 +7,21 @@ mod pump;
 pub(crate) mod win32;
 pub(crate) mod wnd;
 
+use std::sync::atomic::Ordering;
+
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use translator_core::{OverlayConfig, TranslatedBlock};
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{HMODULE, HWND},
     Graphics::Gdi::{DeleteObject, HFONT},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Accessibility::HWINEVENTHOOK,
         WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, HWND_NOTOPMOST, HWND_TOPMOST, IsWindow, LoadCursorW,
-            RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, UnregisterClassW, WNDCLASSEXW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP,
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DestroyWindow, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, IsWindow,
+            LoadCursorW, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, UnregisterClassW,
+            WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
 };
@@ -75,65 +77,24 @@ pub(crate) struct OverlayHost {
 
 impl OverlayHost {
     pub fn create(config: OverlayConfig, event_tx: mpsc::UnboundedSender<OverlayEvent>) -> Result<Self, OverlayError> {
-        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
-
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(overlay_wnd_proc),
-            hInstance: hinstance.into(),
-            hCursor: unsafe { LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_ARROW) }
-                .map_err(|e| OverlayError::Other(format!("LoadCursorW: {e}")))?,
+            hInstance: module_handle()?.into(),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.map_err(|e| OverlayError::Other(format!("LoadCursorW: {e}")))?,
             lpszClassName: CLASS_NAME,
             ..Default::default()
         };
-
+        // Zero means an earlier host in this process already registered the class; creating
+        // the window still works.
         let atom = unsafe { RegisterClassExW(&wc) };
-        if atom == 0 {
-            // Class may already exist from a previous run in the same process.
-            // Continue — CreateWindowEx will still work if registered.
-        }
 
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
-                CW_USEDEFAULT,
-                0,
-                100,
-                100,
-                None,
-                None,
-                Some(hinstance.into()),
-                None,
-            )
-        }
-        .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
-
-        let surface = match DibSurface::create() {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(e);
-            }
-        };
-        let present = match DibSurface::create() {
-            Ok(s) => s,
-            Err(e) => {
-                drop(surface);
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(e);
-            }
-        };
-
+        let (hwnd, surface, present) = create_layer()?;
         let font_px = 16;
         let hfont = match text::create_segoe_font(font_px) {
             Ok(font) => font,
             Err(e) => {
-                drop(present);
-                drop(surface);
                 let _ = unsafe { DestroyWindow(hwnd) };
                 return Err(e);
             }
@@ -166,8 +127,8 @@ impl OverlayHost {
             follow_hooks: [HWINEVENTHOOK::default(); 5],
         };
 
-        HOST_TEARING_DOWN.store(false, std::sync::atomic::Ordering::Release);
-        FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+        HOST_TEARING_DOWN.store(false, Ordering::Release);
+        FOLLOW_OVERLAY.store(hwnd.0 as isize, Ordering::Release);
 
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
         host.warmup_overlay_layer();
@@ -195,12 +156,12 @@ impl OverlayHost {
         match cmd {
             OverlayCommand::Attach { target_hwnd } => {
                 self.presented_rect = None;
-                self.clear_follow_move_state();
+                self.in_movesize = false;
                 self.z_order_force_topmost = false;
                 let hwnd = HWND(target_hwnd as *mut _);
                 if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
-                    FOLLOW_TARGET.store(target_hwnd, std::sync::atomic::Ordering::Release);
+                    FOLLOW_TARGET.store(target_hwnd, Ordering::Release);
                     if !self.hwnd.is_invalid() {
                         set_overlay_owner(self.hwnd, Some(hwnd));
                     }
@@ -209,7 +170,7 @@ impl OverlayHost {
                 } else {
                     warn!(?target_hwnd, "attach ignored — invalid hwnd");
                     self.target = None;
-                    FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
+                    FOLLOW_TARGET.store(0, Ordering::Release);
                     self.release_target();
                 }
             }
@@ -218,8 +179,8 @@ impl OverlayHost {
                     self.finish_picker(PickerEnd::Cancel);
                 }
                 self.target = None;
-                FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-                self.clear_follow_move_state();
+                FOLLOW_TARGET.store(0, Ordering::Release);
+                self.in_movesize = false;
                 self.presented_rect = None;
                 self.z_order_force_topmost = false;
                 self.release_target();
@@ -268,6 +229,11 @@ impl OverlayHost {
                 }
                 if !self.config.enabled && self.picker.is_none() {
                     self.hide();
+                }
+            }
+            OverlayCommand::SetReaderPlaceholder(text) => {
+                if let Some(reader) = self.reader.as_mut() {
+                    reader.set_placeholder(text);
                 }
             }
             OverlayCommand::BeginRegionSelect { regions } => self.begin_picker(regions),
@@ -324,7 +290,7 @@ impl OverlayHost {
     }
 
     pub(crate) fn ensure_layer_alive(&mut self) -> bool {
-        if HOST_TEARING_DOWN.load(std::sync::atomic::Ordering::Acquire) {
+        if HOST_TEARING_DOWN.load(Ordering::Acquire) {
             return false;
         }
         if !self.hwnd.is_invalid() && unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
@@ -348,47 +314,13 @@ impl OverlayHost {
             let _ = unsafe { DestroyWindow(self.hwnd) };
         }
         self.hwnd = HWND::default();
-        FOLLOW_OVERLAY.store(0, std::sync::atomic::Ordering::Release);
+        FOLLOW_OVERLAY.store(0, Ordering::Release);
 
-        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))?;
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
-                CW_USEDEFAULT,
-                0,
-                100,
-                100,
-                None,
-                None,
-                Some(hinstance.into()),
-                None,
-            )
-        }
-        .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
-
-        let surface = match DibSurface::create() {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(e);
-            }
-        };
-        let present = match DibSurface::create() {
-            Ok(s) => s,
-            Err(e) => {
-                drop(surface);
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(e);
-            }
-        };
-
+        let (hwnd, surface, present) = create_layer()?;
         self.hwnd = hwnd;
         self.surface = surface;
         self.present = present;
-        FOLLOW_OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+        FOLLOW_OVERLAY.store(hwnd.0 as isize, Ordering::Release);
         self.dirty = true;
         self.replay_present = false;
         let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
@@ -425,9 +357,9 @@ impl OverlayHost {
     }
 
     pub(crate) fn teardown(&mut self) {
-        HOST_TEARING_DOWN.store(true, std::sync::atomic::Ordering::Release);
-        FOLLOW_TARGET.store(0, std::sync::atomic::Ordering::Release);
-        FOLLOW_OVERLAY.store(0, std::sync::atomic::Ordering::Release);
+        HOST_TEARING_DOWN.store(true, Ordering::Release);
+        FOLLOW_TARGET.store(0, Ordering::Release);
+        FOLLOW_OVERLAY.store(0, Ordering::Release);
         self.in_movesize = false;
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
@@ -450,7 +382,7 @@ impl OverlayHost {
         self.surface.teardown();
         self.present.teardown();
         if self.class_atom != 0 {
-            if let Ok(hi) = unsafe { GetModuleHandleW(None) } {
+            if let Ok(hi) = module_handle() {
                 let _ = unsafe { UnregisterClassW(CLASS_NAME, Some(hi.into())) };
             }
             self.class_atom = 0;
@@ -461,5 +393,37 @@ impl OverlayHost {
 impl Drop for OverlayHost {
     fn drop(&mut self) {
         self.teardown();
+    }
+}
+
+fn module_handle() -> Result<HMODULE, OverlayError> {
+    unsafe { GetModuleHandleW(None) }.map_err(|e| OverlayError::Other(format!("GetModuleHandleW: {e}")))
+}
+
+/// Create the click-through layered popup and its two DIB surfaces.
+fn create_layer() -> Result<(HWND, DibSurface, DibSurface), OverlayError> {
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            CLASS_NAME,
+            WINDOW_TITLE,
+            WS_POPUP,
+            CW_USEDEFAULT,
+            0,
+            100,
+            100,
+            None,
+            None,
+            Some(module_handle()?.into()),
+            None,
+        )
+    }
+    .map_err(|e| OverlayError::Other(format!("CreateWindowExW: {e}")))?;
+    match DibSurface::create().and_then(|surface| Ok((surface, DibSurface::create()?))) {
+        Ok((surface, present)) => Ok((hwnd, surface, present)),
+        Err(e) => {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            Err(e)
+        }
     }
 }
