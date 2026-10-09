@@ -176,6 +176,9 @@ pub struct CliBackend {
     mirrored: Vec<ChatMessage>,
     isolated_cwd: Option<PathBuf>,
     session_epoch: u64,
+    /// Threads started by [`Self::shutdown`]. `TranslateClient::close_session` joins them so
+    /// app exit does not cut a kill or an OpenCode session delete short.
+    pub(crate) teardowns: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl CliBackend {
@@ -185,6 +188,7 @@ impl CliBackend {
             mirrored: Vec::new(),
             isolated_cwd: None,
             session_epoch: 0,
+            teardowns: Vec::new(),
         }
     }
 
@@ -200,14 +204,15 @@ impl CliBackend {
         if live.is_none() && cwd.is_none() {
             return;
         }
-        std::thread::spawn(move || {
+        self.teardowns.retain(|t| !t.is_finished());
+        self.teardowns.push(std::thread::spawn(move || {
             if let Some(mut live) = live {
                 live.kill();
             }
             if let Some(dir) = cwd {
                 remove_isolated_cwd(&dir);
             }
-        });
+        }));
     }
 
     pub async fn close(&mut self) {

@@ -648,10 +648,13 @@ impl TranslateClient {
     }
 
     /// Stop / app exit: wait for an in-flight turn, then close and delete persisted CLI state.
+    /// Also waits for teardowns that [`Self::reset_session`] left running.
     pub async fn close_session(&self) {
         self.cli.epoch.fetch_add(1, Ordering::SeqCst);
         let mut backend = self.cli.backend.lock().await;
         backend.close().await;
+        let teardowns = std::mem::take(&mut backend.teardowns);
+        let _ = tokio::task::spawn_blocking(move || teardowns.into_iter().for_each(|t| drop(t.join()))).await;
     }
 
     pub fn config(&self) -> &ApiConfig {
@@ -1336,6 +1339,20 @@ mod tests {
             reader.read_exact(&mut body).unwrap();
             write!(writer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}", reply.len()).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn close_session_waits_for_reset_teardowns() {
+        let client = TranslateClient::new(ApiConfig::default());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&done);
+        client.cli.backend.lock().await.teardowns.push(std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::SeqCst);
+        }));
+        client.close_session().await;
+        assert!(done.load(Ordering::SeqCst), "close_session returned before the teardown finished");
+        assert!(client.cli.backend.lock().await.teardowns.is_empty());
     }
 
     #[tokio::test]
