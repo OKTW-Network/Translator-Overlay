@@ -1,9 +1,6 @@
 //! Free-threaded capture session that publishes the latest frame.
 
-use std::{
-    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering};
 
 use bytes::Bytes;
 use tracing::{info, warn};
@@ -105,7 +102,6 @@ struct ActiveStream {
 pub struct CaptureSession {
     stream: Option<ActiveStream>,
     target: Option<CaptureTarget>,
-    min_interval_ms: u64,
     resize: ResizeWatch,
 }
 
@@ -120,7 +116,6 @@ impl CaptureSession {
         Self {
             stream: None,
             target: None,
-            min_interval_ms: 250,
             resize: ResizeWatch::new(),
         }
     }
@@ -150,7 +145,7 @@ impl CaptureSession {
     }
 
     /// Start capturing a window by HWND.
-    pub fn start_window(&mut self, hwnd: isize, title: impl Into<String>, min_interval_ms: u64) -> Result<(), CaptureError> {
+    pub fn start_window(&mut self, hwnd: isize, title: impl Into<String>) -> Result<(), CaptureError> {
         if self.is_running() {
             return Err(CaptureError::AlreadyRunning);
         }
@@ -167,7 +162,7 @@ impl CaptureSession {
             CursorCaptureSettings::WithoutCursor,
             DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Custom(Duration::from_millis(min_interval_ms.max(50))),
+            MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
             ColorFormat::Rgba8,
             Arc::clone(&latest),
@@ -176,7 +171,6 @@ impl CaptureSession {
         let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
         let title = title.into();
         info!(%title, hwnd, "capture started");
-        self.min_interval_ms = min_interval_ms;
         self.stream = Some(ActiveStream { control, latest });
         self.target = Some(CaptureTarget { hwnd, title });
         self.resize.set_target(hwnd);
@@ -226,10 +220,9 @@ impl CaptureSession {
             .target
             .clone()
             .ok_or_else(|| CaptureError::Window("no capture target".into()))?;
-        let interval = self.min_interval_ms;
         info!(hwnd = target.hwnd, "restarting capture after target resize");
         self.stop_stream_inner(true);
-        self.start_window(target.hwnd, target.title, interval)
+        self.start_window(target.hwnd, target.title)
     }
 
     /// Latest published frame, cropped to the client area. Does not consume the slot.

@@ -470,9 +470,8 @@ impl Pipeline {
         } else if self.engine.is_none() {
             self.state.write().set_error(t!("err.engine_not_ready"));
         } else {
-            let interval = self.state.read().config.capture.min_interval_ms;
             self.cancel_inflight();
-            match self.session.start_window(hwnd, title, interval) {
+            match self.session.start_window(hwnd, title) {
                 Ok(()) => self.on_capture_started(),
                 Err(e) => {
                     error!(error = %e, "start capture failed");
