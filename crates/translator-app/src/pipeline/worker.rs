@@ -439,7 +439,6 @@ impl Pipeline {
             OverlayEvent::HudPrimary => self.on_hud_primary(),
             OverlayEvent::HudStop => {
                 if !self.state.read().capture_busy && self.state.read().auto_running {
-                    self.state.write().capture_busy = true;
                     self.stop_capture().await;
                 }
             }
@@ -529,6 +528,9 @@ impl Pipeline {
     }
 
     async fn stop_capture(&mut self) {
+        self.state.write().capture_busy = true;
+        ping_ui();
+        self.push_hud();
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
             let _ = o.send(OverlayCommand::CancelRegionSelect);
