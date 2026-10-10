@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
     frame::Frame,
-    graphics_capture_api::InternalCaptureControl,
+    graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
     settings::{
         ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings,
         SecondaryWindowSettings, Settings,
@@ -157,10 +157,22 @@ impl CaptureSession {
         }
 
         let latest = LatestFrame::default();
+        // windows-capture fails the whole Start if a non-Default setting's WinRT
+        // property is missing (IsCursorCaptureEnabled / IsBorderRequired).
+        let cursor = if GraphicsCaptureApi::is_cursor_settings_supported().unwrap_or(false) {
+            CursorCaptureSettings::WithoutCursor
+        } else {
+            CursorCaptureSettings::Default
+        };
+        let border = if GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false) {
+            DrawBorderSettings::WithoutBorder
+        } else {
+            DrawBorderSettings::Default
+        };
         let settings = Settings::new(
             window,
-            CursorCaptureSettings::WithoutCursor,
-            DrawBorderSettings::WithoutBorder,
+            cursor,
+            border,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
@@ -170,7 +182,7 @@ impl CaptureSession {
 
         let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
         let title = title.into();
-        info!(%title, hwnd, "capture started");
+        info!(%title, hwnd, ?cursor, ?border, "capture started");
         self.stream = Some(ActiveStream { control, latest });
         self.target = Some(CaptureTarget { hwnd, title });
         self.resize.set_target(hwnd);
