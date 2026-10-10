@@ -14,7 +14,7 @@
     - lib/dxil.dll              (DXIL validator used with dxcompiler)
 
   windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
-  Target machines need Windows 11 (build 22000+) and Windows App Runtime 2.4.
+  Target machines need Windows 11 21H2 (build 22000+) and Windows App Runtime 2.4.
   See: https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
   Visual C++ Redistributable may also be needed for MSVC CRT DLLs.
 
@@ -120,7 +120,7 @@ $packReadme = @"
 # Translator Overlay $Version (portable)
 
 ## Requirements
-- Windows 11 x64 (build 22000 or later)
+- Windows 11 x64 (21H2 / build 22000 or later)
 - Windows App Runtime 2.4 (framework-dependent)
   https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
 - Microsoft Visual C++ Redistributable

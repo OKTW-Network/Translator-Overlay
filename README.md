@@ -24,8 +24,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 ## 系統需求
 
-- Windows 11 **x64**（21H2 / build 22000 以上；可關掉擷取黃框）
-- Windows 10 **x64**（2004 / build 19041 以上；擷取會顯示系統黃框）
+- Windows 11 **x64**（21H2 / build 22000 以上）
 - [Windows App Runtime 2.4](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
 - Microsoft Visual C++ Redistributable（x64），若系統缺少 CRT
 
