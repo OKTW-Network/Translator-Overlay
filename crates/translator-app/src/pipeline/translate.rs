@@ -6,11 +6,11 @@ use rust_i18n::t;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use translator_core::{PipelineStatus, TranslatedBlock};
+use translator_core::{OcrBlock, PipelineStatus, TranslatedBlock};
 use translator_ocr::OcrEngine;
 use translator_overlay::{OverlayCommand, OverlayController};
 use translator_translate::{
-    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations, peek_translation_pairs,
+    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations, peek_translation_pairs, should_retry,
 };
 
 use crate::{
@@ -67,12 +67,7 @@ impl Pipeline {
             return;
         }
 
-        let (api, tcfg) = {
-            let s = self.state.read();
-            (s.config.api.clone(), s.config.translation.clone())
-        };
-        self.client.update_config(api);
-
+        let tcfg = self.state.read().config.translation.clone();
         let resolved = self.translation_cache.resolve(&page.blocks, &tcfg, force);
         let hit_count = resolved.hits.iter().filter(|h| h.is_some()).count();
         if resolved.misses.is_empty() {
@@ -85,14 +80,30 @@ impl Pipeline {
         }
 
         info!(hits = hit_count, unique_misses = resolved.misses.len(), blocks = page.blocks.len(), force, "translate cache partition");
+        self.launch_translate_job(page, resolved.hits, resolved.misses, 0);
+    }
+
+    fn launch_translate_job(
+        &mut self,
+        page: PendingPage,
+        cached_hits: Vec<Option<String>>,
+        miss_blocks: Vec<OcrBlock>,
+        start_attempt: u32,
+    ) {
+        let (api, tcfg) = {
+            let s = self.state.read();
+            (s.config.api.clone(), s.config.translation.clone())
+        };
+        let max_retries = api.max_retries;
+        self.client.update_config(api);
 
         // Show remembered captions now; new lines wait for the API.
-        let preview = TranslationCache::hits_only(&page.blocks, &resolved.hits);
+        let preview = TranslationCache::stitch(&page.blocks, &cached_hits, &[]);
         if !preview.is_empty() {
             show_captions(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
         }
 
-        let prepared = self.conversation.begin_translate_request(&tcfg, &resolved.misses);
+        let prepared = self.conversation.begin_translate_request(&tcfg, &miss_blocks);
         self.state.write().history.truncate(self.conversation.turn_count());
 
         let cancel = CancellationToken::new();
@@ -105,9 +116,17 @@ impl Pipeline {
 
         {
             let mut s = self.state.write();
-            s.status = PipelineStatus::Translating;
             s.translate_in_flight = true;
-            s.last_error = None;
+            if start_attempt == 0 {
+                s.status = PipelineStatus::Translating;
+                s.last_error = None;
+            } else {
+                s.status = PipelineStatus::RetryingTranslate {
+                    attempt: start_attempt,
+                    max_retries,
+                    message: s.last_error.clone().unwrap_or_default(),
+                };
+            }
         }
 
         tokio::spawn(async move {
@@ -115,6 +134,7 @@ impl Pipeline {
                 .complete_with_retry_on(
                     &prepared,
                     &cancel_job,
+                    start_attempt,
                     move |attempt, max_retries, error, _backoff_ms| {
                         let _ = tx_retry.send(TranslateJobMsg::Partial(Vec::new()));
                         let message = error.to_string();
@@ -145,21 +165,62 @@ impl Pipeline {
             blocks: page.blocks,
             content_width: page.content_width,
             content_height: page.content_height,
-            miss_blocks: resolved.misses,
-            cached_hits: resolved.hits,
+            miss_blocks,
+            cached_hits,
             revert_blocks,
         });
     }
 
-    pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: Result<Completion, TranslateError>) {
+    pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: Result<(Completion, u32), TranslateError>) {
         match result {
-            Ok(completion) => match merge_translations(&job.miss_blocks, &completion.text) {
-                Ok(outcome) => {
+            Ok((completion, retry_attempt)) => match merge_translations(&job.miss_blocks, &completion.text) {
+                Ok(blocks) => {
                     self.conversation.commit_completion(&completion);
-                    let tcfg = self.state.read().config.translation.clone();
-                    self.translation_cache
-                        .store_model_pairs(&job.miss_blocks, &outcome.blocks, &outcome.model_ids, &tcfg);
-                    let translated = TranslationCache::stitch(&job.blocks, &job.cached_hits, &outcome.blocks);
+                    let (tcfg, max_retries) = {
+                        let s = self.state.read();
+                        (s.config.translation.clone(), s.config.api.max_retries)
+                    };
+                    self.translation_cache.store_model_pairs(&blocks, &tcfg);
+                    let translated = TranslationCache::stitch(&job.blocks, &job.cached_hits, &blocks);
+                    let miss_blocks: Vec<OcrBlock> = job
+                        .miss_blocks
+                        .into_iter()
+                        .filter(|b| !blocks.iter().any(|t| t.id == b.id))
+                        .collect();
+                    if !miss_blocks.is_empty() {
+                        let err = TranslateError::MissingBlocks(miss_blocks.iter().map(|b| b.id).collect());
+                        let hits = should_retry(&err, retry_attempt, max_retries).then(|| {
+                            let mut hits = vec![None; job.blocks.len()];
+                            for tb in &translated {
+                                if let Some(i) = job.blocks.iter().position(|b| b.id == tb.id) {
+                                    hits[i] = Some(tb.translation.clone());
+                                }
+                            }
+                            hits
+                        });
+                        show_captions(&self.state, self.overlay.as_ref(), translated, job.content_width, job.content_height);
+                        self.state.write().translation_cache_len = self.translation_cache.len();
+                        if let Some(hits) = hits {
+                            info!(
+                                attempt = retry_attempt + 1,
+                                max_retries,
+                                error = %err,
+                                "response omitted blocks; resending"
+                            );
+                            self.state.write().last_error = Some(err.to_string());
+                            let page = PendingPage {
+                                blocks: job.blocks,
+                                fingerprint: job.fingerprint,
+                                content_width: job.content_width,
+                                content_height: job.content_height,
+                            };
+                            self.launch_translate_job(page, hits, miss_blocks, retry_attempt + 1);
+                            return;
+                        }
+                        error!(error = %err, "response omitted blocks; retries exhausted");
+                        self.fail_translate(t!("err.translate", error = err.to_string()).into_owned());
+                        return;
+                    }
                     info!(
                         blocks = translated.len(),
                         cached = job.cached_hits.iter().filter(|h| h.is_some()).count(),
@@ -235,7 +296,7 @@ impl Pipeline {
                 hits[i] = Some(text.clone());
             }
         }
-        let preview = TranslationCache::hits_only(&job.blocks, &hits);
+        let preview = TranslationCache::stitch(&job.blocks, &hits, &[]);
         show_captions(&self.state, self.overlay.as_ref(), preview, job.content_width, job.content_height);
     }
 }

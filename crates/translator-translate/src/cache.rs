@@ -155,29 +155,18 @@ impl TranslationCache {
         CacheResolve { hits, misses }
     }
 
-    /// Persist model-returned pairs only (skip ids the model omitted).
-    pub fn store_model_pairs(
-        &mut self,
-        source_blocks: &[OcrBlock],
-        translated: &[TranslatedBlock],
-        model_ids: &HashSet<u32>,
-        cfg: &TranslationConfig,
-    ) {
+    /// Persist model-returned pairs.
+    pub fn store_model_pairs(&mut self, translated: &[TranslatedBlock], cfg: &TranslationConfig) {
         if !cfg.cache_enabled {
             return;
         }
-        for src in source_blocks {
-            if !model_ids.contains(&src.id) {
-                continue;
-            }
-            let Some(tb) = translated.iter().find(|b| b.id == src.id) else {
-                continue;
-            };
-            self.insert(&src.text, &cfg.source_lang, &cfg.target_lang, &tb.translation);
+        for tb in translated {
+            self.insert(&tb.source, &cfg.source_lang, &cfg.target_lang, &tb.translation);
         }
     }
 
     /// Rebuild a full page: cache hits first, then model rows (by id, then normalized text).
+    /// Blocks with no translation yet are omitted (not filled with source text).
     pub fn stitch(source: &[OcrBlock], hits: &[Option<String>], model_blocks: &[TranslatedBlock]) -> Vec<TranslatedBlock> {
         let mut by_id: HashMap<u32, &str> = HashMap::with_capacity(model_blocks.len());
         let mut by_norm: HashMap<String, &str> = HashMap::with_capacity(model_blocks.len());
@@ -188,7 +177,7 @@ impl TranslationCache {
         source
             .iter()
             .enumerate()
-            .map(|(i, src)| {
+            .filter_map(|(i, src)| {
                 let translation = hits
                     .get(i)
                     .and_then(|h| h.clone())
@@ -199,32 +188,11 @@ impl TranslationCache {
                             return None;
                         }
                         by_norm.get(&key).map(|s| (*s).to_string())
-                    })
-                    .unwrap_or_else(|| src.text.clone());
-                TranslatedBlock {
-                    id: src.id,
-                    source: src.text.clone(),
-                    translation,
-                    confidence: src.confidence,
-                    bbox: src.bbox,
-                    source_lines: src.source_lines.max(1),
-                    source_height: src.source_height.max(src.bbox.height),
-                }
-            })
-            .collect()
-    }
-
-    /// Only blocks that already have a cached translation (misses omitted).
-    pub fn hits_only(source: &[OcrBlock], hits: &[Option<String>]) -> Vec<TranslatedBlock> {
-        source
-            .iter()
-            .enumerate()
-            .filter_map(|(i, src)| {
-                let translation = hits.get(i).and_then(|h| h.as_ref())?;
+                    })?;
                 Some(TranslatedBlock {
                     id: src.id,
                     source: src.text.clone(),
-                    translation: translation.clone(),
+                    translation,
                     confidence: src.confidence,
                     bbox: src.bbox,
                     source_lines: src.source_lines.max(1),
@@ -420,46 +388,26 @@ mod tests {
         assert_eq!(out[2].translation, "對白");
         assert_eq!(out[0].bbox, source[0].bbox);
         assert_eq!(out[0].id, 0);
+
+        let partial = TranslationCache::stitch(&source, &[Some("名字".into()), None, None], &[]);
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].id, 0);
     }
 
     #[test]
-    fn hits_only_omits_misses() {
-        let source = vec![block(0, "名前"), block(1, "台詞")];
-        let hits = vec![Some("名字".into()), None];
-        let out = TranslationCache::hits_only(&source, &hits);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, 0);
-        assert_eq!(out[0].translation, "名字");
-    }
-
-    #[test]
-    fn store_skips_ids_model_did_not_return() {
+    fn store_model_pairs_inserts_returned_rows() {
         let mut cache = TranslationCache::new(8);
         let tcfg = cfg();
-        let source = vec![block(1, "はい"), block(2, "いいえ")];
-        let translated = vec![
-            TranslatedBlock {
-                id: 1,
-                source: "はい".into(),
-                translation: "是".into(),
-                confidence: 0.9,
-                bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
-                source_lines: 1,
-                source_height: 1.0,
-            },
-            TranslatedBlock {
-                id: 2,
-                source: "いいえ".into(),
-                translation: "いいえ".into(),
-                confidence: 0.9,
-                bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
-                source_lines: 1,
-                source_height: 1.0,
-            },
-        ];
-        let mut model_ids = HashSet::new();
-        model_ids.insert(1);
-        cache.store_model_pairs(&source, &translated, &model_ids, &tcfg);
+        let translated = vec![TranslatedBlock {
+            id: 1,
+            source: "はい".into(),
+            translation: "是".into(),
+            confidence: 0.9,
+            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
+            source_height: 1.0,
+        }];
+        cache.store_model_pairs(&translated, &tcfg);
         assert_eq!(cache.lookup("はい", "ja", "zh-TW").as_deref(), Some("是"));
         assert!(cache.lookup("いいえ", "ja", "zh-TW").is_none());
     }

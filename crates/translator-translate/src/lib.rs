@@ -5,7 +5,6 @@ mod cli;
 mod http;
 
 use std::{
-    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -45,6 +44,8 @@ pub enum TranslateError {
     CliProtocol(String),
     #[error("translation cancelled")]
     Cancelled,
+    #[error("response missing block ids {0:?}")]
+    MissingBlocks(Vec<u32>),
     #[error("{0}")]
     Other(String),
 }
@@ -54,12 +55,12 @@ impl TranslateError {
         matches!(self, Self::Cancelled)
     }
 
-    /// Whether a retry might help (network / 5xx / timeout — not auth / cancel).
+    /// Whether a retry might help (network / 5xx / timeout / omitted blocks — not auth / cancel).
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             Self::ApiStatus { status, .. } => *status >= 500 || *status == 429,
-            Self::CliExit(_) => true,
+            Self::CliExit(_) | Self::MissingBlocks(_) => true,
             Self::CliProtocol(msg) => msg.contains("timed out") || msg.contains("closed stdout"),
             Self::Cancelled | Self::MissingBaseUrl | Self::CliNotFound(_) | Self::Parse(_) | Self::Other(_) => false,
         }
@@ -271,36 +272,24 @@ struct TranslationResponse {
     b: Vec<(serde_json::Value, serde_json::Value)>,
 }
 
-/// Merge LLM JSON output with original OCR blocks, plus which ids the model actually returned.
-pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<MergeOutcome, TranslateError> {
+/// Merge LLM JSON output with original OCR blocks. Omitted source ids are absent from the result.
+pub fn merge_translations(source: &[OcrBlock], response_json: &str) -> Result<Vec<TranslatedBlock>, TranslateError> {
     let parsed = parse_translation_blocks(response_json)?;
-    let model_ids: HashSet<u32> = parsed.iter().map(|(id, _)| *id).collect();
-
-    let mut blocks = Vec::with_capacity(source.len());
-    for src in source {
-        let translation = parsed
-            .iter()
-            .find(|(id, _)| *id == src.id)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_else(|| src.text.clone());
-        blocks.push(TranslatedBlock {
-            id: src.id,
-            source: src.text.clone(),
-            translation,
-            confidence: src.confidence,
-            bbox: src.bbox,
-            source_lines: src.source_lines.max(1),
-            source_height: src.source_height.max(src.bbox.height),
-        });
-    }
-    Ok(MergeOutcome { blocks, model_ids })
-}
-
-/// Parsed model translations plus the ids present in the JSON (not fallbacks).
-#[derive(Debug, Clone)]
-pub struct MergeOutcome {
-    pub blocks: Vec<TranslatedBlock>,
-    pub model_ids: HashSet<u32>,
+    Ok(source
+        .iter()
+        .filter_map(|src| {
+            let translation = parsed.iter().find(|(id, _)| *id == src.id)?.1.clone();
+            Some(TranslatedBlock {
+                id: src.id,
+                source: src.text.clone(),
+                translation,
+                confidence: src.confidence,
+                bbox: src.bbox,
+                source_lines: src.source_lines.max(1),
+                source_height: src.source_height.max(src.bbox.height),
+            })
+        })
+        .collect())
 }
 
 fn parse_translation_blocks(response_json: &str) -> Result<Vec<(u32, String)>, TranslateError> {
@@ -338,6 +327,11 @@ fn parse_translation_blocks(response_json: &str) -> Result<Vec<(u32, String)>, T
         }
     }
 
+    let peeked = peek_pairs(response_json, false);
+    if !peeked.is_empty() {
+        return Ok(peeked);
+    }
+
     let snippet = truncate_for_error(response_json.trim(), 240);
     Err(TranslateError::Parse(format!("{last_err}; content snippet: {snippet:?}")))
 }
@@ -347,12 +341,16 @@ fn parse_translation_blocks(response_json: &str) -> Result<Vec<(u32, String)>, T
 /// Complete tuples are included as soon as the string closes. The last unfinished
 /// `[id, "partial` is included so the current block can paint while it grows.
 pub fn peek_translation_pairs(partial: &str) -> Vec<(u32, String)> {
+    peek_pairs(partial, true)
+}
+
+fn peek_pairs(partial: &str, include_open: bool) -> Vec<(u32, String)> {
     let s = partial.trim().trim_start_matches('\u{feff}');
     let s = strip_markdown_fence(s);
     let Some(inner) = b_array_inner(&s) else {
         return Vec::new();
     };
-    parse_pairs_from_array(inner)
+    parse_pairs_from_array(inner, include_open)
 }
 
 fn b_array_inner(s: &str) -> Option<&str> {
@@ -374,7 +372,7 @@ fn b_array_inner(s: &str) -> Option<&str> {
     None
 }
 
-fn parse_pairs_from_array(mut s: &str) -> Vec<(u32, String)> {
+fn parse_pairs_from_array(mut s: &str, include_open: bool) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     loop {
         s = s.trim_start();
@@ -419,7 +417,7 @@ fn parse_pairs_from_array(mut s: &str) -> Vec<(u32, String)> {
                 }
             }
             None => {
-                if !text.is_empty() {
+                if include_open && !text.is_empty() {
                     out.push((id, text));
                 }
                 break;
@@ -740,16 +738,17 @@ impl TranslateClient {
         &self,
         conv: &Conversation,
         cancel: &CancellationToken,
+        start_attempt: u32,
         mut on_retry: impl FnMut(u32, u32, &TranslateError, u64),
         on_text: &mut impl FnMut(&str),
-    ) -> Result<Completion, TranslateError> {
+    ) -> Result<(Completion, u32), TranslateError> {
         let max_retries = self.config.max_retries;
         let mut backoff_ms = self.config.retry_backoff_ms.max(50);
-        let mut attempt = 0u32;
+        let mut attempt = start_attempt;
 
         loop {
             match self.complete_cancellable(conv, cancel, on_text).await {
-                Ok(content) => return Ok(content),
+                Ok(content) => return Ok((content, attempt)),
                 Err(e) if should_retry(&e, attempt, max_retries) => {
                     attempt += 1;
                     tracing::warn!(
@@ -866,7 +865,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[[1,"T1"]]}"#;
-        let out = merge_translations(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "T1");
     }
 
@@ -1076,12 +1075,12 @@ mod tests {
             source_height: 1.0,
         }];
         let json = "```json\n{\"b\":[[0,\"T2\"]]}\n```";
-        let out = merge_translations(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "T2");
     }
 
     #[test]
-    fn merge_tolerates_prose_but_rejects_trailing_commas() {
+    fn merge_tolerates_prose_and_trailing_commas() {
         let source = vec![OcrBlock {
             id: 0,
             text: "Hi".into(),
@@ -1091,11 +1090,33 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"Here you go: {"b": [[0, "T3"]]} Hope that helps!"#;
-        let out = merge_translations(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "T3");
 
         let json = r#"{"b": [[0, "T3",],]}"#;
-        assert!(merge_translations(&source, json).is_err());
+        let out = merge_translations(&source, json).unwrap();
+        assert_eq!(out[0].translation, "T3");
+    }
+
+    #[test]
+    fn merge_uses_peek_when_json_is_truncated() {
+        let source = vec![OcrBlock {
+            id: 0,
+            text: "Hi".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
+            source_height: 1.0,
+        }];
+        for json in [
+            r#"{"b":[[0,"text"]]"#,
+            r#"{"b":[[0,"text"]"#,
+            r#"Here: {"b":[[0,"text"]]"#,
+            "```json\n{\"b\":[[0,\"text\"]]\n```",
+        ] {
+            let out = merge_translations(&source, json).unwrap();
+            assert_eq!(out[0].translation, "text", "{json}");
+        }
     }
 
     #[test]
@@ -1109,7 +1130,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[["2","T4"]]}"#;
-        let out = merge_translations(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "T4");
 
         let source = vec![OcrBlock {
@@ -1121,7 +1142,7 @@ mod tests {
             source_height: 1.0,
         }];
         let json = r#"{"b":[[1,120]]}"#;
-        let out = merge_translations(&source, json).unwrap().blocks;
+        let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "120");
 
         assert!(merge_translations(&source, r#"{"b":[[true,"T"]]}"#).is_err());
@@ -1129,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_detailed_reports_model_ids() {
+    fn merge_keeps_only_returned_blocks() {
         let source = vec![
             OcrBlock {
                 id: 1,
@@ -1148,11 +1169,27 @@ mod tests {
                 source_height: 1.0,
             },
         ];
-        let json = r#"{"b":[[1,"T"]]}"#;
-        let out = merge_translations(&source, json).unwrap();
-        assert!(out.model_ids.contains(&1));
-        assert!(!out.model_ids.contains(&2));
-        assert_eq!(out.blocks[1].translation, "B");
+        let out = merge_translations(&source, r#"{"b":[[1,"T"]]}"#).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, 1);
+        assert_eq!(out[0].translation, "T");
+
+        let empty = merge_translations(&source, r#"{"b":[]}"#).unwrap();
+        assert!(empty.is_empty());
+        let truncated = merge_translations(&source, r#"{"b":[[1,"T"],[2,"#).unwrap();
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].id, 1);
+
+        let cut = merge_translations(&source, r#"{"b":[[1,"T"],[2,"Wor"#).unwrap();
+        assert_eq!(cut.len(), 1);
+        assert_eq!(cut[0].id, 1);
+        assert_eq!(cut[0].translation, "T");
+        assert_eq!(peek_translation_pairs(r#"{"b":[[1,"T"],[2,"Wor"#), [(1, "T".into()), (2, "Wor".into())]);
+        assert!(merge_translations(&source, r#"{"b":[[1,"Wor"#).is_err());
+
+        let out = merge_translations(&source, r#"{"b":[[1,"T"],[2,"U"]]}"#).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].translation, "U");
     }
 
     #[test]
@@ -1252,6 +1289,9 @@ mod tests {
         assert!(TranslateError::CliExit("closed stdout".into()).is_retryable());
         assert!(TranslateError::CliProtocol("CLI turn timed out".into()).is_retryable());
         assert!(!TranslateError::CliProtocol("Grok session invoked a tool".into()).is_retryable());
+        assert!(TranslateError::MissingBlocks(vec![1]).is_retryable());
+        assert!(should_retry(&TranslateError::MissingBlocks(vec![1]), 0, 2));
+        assert!(!should_retry(&TranslateError::MissingBlocks(vec![1]), 2, 2));
     }
 
     #[test]

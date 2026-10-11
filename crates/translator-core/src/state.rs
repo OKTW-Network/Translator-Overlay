@@ -30,7 +30,7 @@ pub enum PipelineStatus {
     /// Building the ONNX Runtime session after files are on disk.
     LoadingModels,
     Translating,
-    /// Auto-retry after a transient translate API / network / CLI error.
+    /// Auto-retry after a transient translate API / network / CLI error, or omitted blocks.
     RetryingTranslate {
         /// 1-based retry about to run.
         attempt: u32,

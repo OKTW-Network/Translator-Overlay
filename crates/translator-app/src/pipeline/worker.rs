@@ -28,7 +28,7 @@ pub type CmdTx = mpsc::UnboundedSender<PipelineCommand>;
 
 pub(crate) enum TranslateJobMsg {
     Partial(Vec<(u32, String)>),
-    Done(Result<Completion, TranslateError>),
+    Done(Result<(Completion, u32), TranslateError>),
 }
 
 pub(crate) struct InflightTranslate {
@@ -40,7 +40,7 @@ pub(crate) struct InflightTranslate {
     pub content_height: u32,
     /// Unique miss blocks actually sent to the model (ids preserved).
     pub miss_blocks: Vec<OcrBlock>,
-    /// Per-source-block cache hits (`None` = wait for the model / fallback).
+    /// Per-source-block cache hits (`None` = wait for the model).
     pub cached_hits: Vec<Option<String>>,
     /// Overlay at job start (cache-hit preview or last committed page). Restored on retry / fail.
     pub revert_blocks: Vec<TranslatedBlock>,
