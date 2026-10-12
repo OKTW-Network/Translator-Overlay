@@ -12,12 +12,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
-use translator_core::{AppState, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
+use translator_core::{AppState, HotkeyAction, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrFingerprint, StabilityGate};
 use translator_overlay::{HudPrimary, HudSnapshot, OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
 use crate::{
+    hotkey,
     pipeline::{PipelineCommand, ping_ui},
     ui::status_text,
 };
@@ -225,8 +226,7 @@ impl Pipeline {
             }
 
             self.drive_capture().await;
-            ping_ui();
-            self.push_hud();
+            self.beat_ui();
             let wait = self.next_wait();
             match next_event(&mut rx, self.inflight.as_mut(), self.model_load.as_mut(), self.overlay.as_mut(), wait).await {
                 PipelineEvent::Command(None) => return,
@@ -263,9 +263,14 @@ impl Pipeline {
                 }
                 PipelineEvent::Tick => continue,
             }
-            ping_ui();
-            self.push_hud();
+            self.beat_ui();
         }
+    }
+
+    fn beat_ui(&mut self) {
+        hotkey::sync_state(&self.state.read());
+        ping_ui();
+        self.push_hud();
     }
 
     fn next_wait(&self) -> Option<Duration> {
@@ -343,17 +348,38 @@ impl Pipeline {
             }
             PipelineCommand::StartCapture { hwnd, title } => self.begin_start_capture(hwnd, title),
             PipelineCommand::ManualCapture => self.manual_capture().await,
-            PipelineCommand::ResetConversation => {
-                self.conversation.clear();
-                self.client.reset_session();
-                self.last_translated_fp = None;
-                self.state.write().history.clear();
-                info!("LLM conversation reset");
-                // Leave Downloading/Loading alone while models are still loading.
-                if self.model_load.is_none() {
-                    self.state.write().restore_operational_status();
+            PipelineCommand::ResetConversation => self.reset_conversation(),
+            PipelineCommand::Hotkey(_) if !self.state.read().config.hotkeys.enabled => {}
+            PipelineCommand::Hotkey(HotkeyAction::StartPause) => self.on_hud_primary(),
+            PipelineCommand::Hotkey(HotkeyAction::Stop) => {
+                if !self.state.read().capture_busy && self.state.read().auto_running {
+                    self.stop_capture().await;
                 }
             }
+            PipelineCommand::Hotkey(HotkeyAction::SelectRegion) => {
+                let (active, hwnd) = {
+                    let s = self.state.read();
+                    let hwnd = if s.auto_running { s.target_hwnd } else { s.selected_hwnd };
+                    (s.region_select_active, hwnd)
+                };
+                if active {
+                    if let Some(overlay) = self.overlay.as_ref() {
+                        let _ = overlay.send(OverlayCommand::ConfirmRegionSelect);
+                    }
+                } else if let Some(hwnd) = hwnd {
+                    self.begin_region_select(hwnd);
+                }
+            }
+            PipelineCommand::Hotkey(HotkeyAction::Retry) => {
+                let ready = {
+                    let s = self.state.read();
+                    s.auto_running && !s.translate_in_flight && !s.capture_busy
+                };
+                if ready {
+                    self.manual_capture().await;
+                }
+            }
+            PipelineCommand::Hotkey(HotkeyAction::ClearHistory) => self.reset_conversation(),
             PipelineCommand::ClearTranslationCache => {
                 self.translation_cache.clear();
                 self.state.write().translation_cache_len = 0;
@@ -445,6 +471,18 @@ impl Pipeline {
         }
     }
 
+    fn reset_conversation(&mut self) {
+        self.conversation.clear();
+        self.client.reset_session();
+        self.last_translated_fp = None;
+        self.state.write().history.clear();
+        info!("LLM conversation reset");
+        // Leave Downloading/Loading alone while models are still loading.
+        if self.model_load.is_none() {
+            self.state.write().restore_operational_status();
+        }
+    }
+
     fn on_hud_primary(&mut self) {
         let (busy, paused, running, hwnd, title) = {
             let s = self.state.read();
@@ -529,6 +567,7 @@ impl Pipeline {
 
     async fn stop_capture(&mut self) {
         self.state.write().capture_busy = true;
+        hotkey::sync_state(&self.state.read());
         ping_ui();
         self.push_hud();
         if let Some(o) = self.overlay.as_ref() {

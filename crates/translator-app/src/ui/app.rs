@@ -24,8 +24,8 @@ use crate::{
     taskbar_guard::restore_taskbar_zorder,
     ui::{
         chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome, ui_language_combo},
-        pages::{api_page, dashboard_page, ocr_page, overlay_page, translation_page},
-        shared::{AppMsg, UiShared, make_shared, take_chrome},
+        pages::{api_page, dashboard_page, hotkeys_page, ocr_page, overlay_page, translation_page},
+        shared::{AppMsg, UiShared, apply_hotkey_capture, make_shared, stop_hotkey_edit, take_chrome},
         xaml,
     },
 };
@@ -137,9 +137,15 @@ impl Component for AppRoot {
     fn update(&mut self, message: AppMsg, context: &ComponentContext<Self>) {
         match message {
             AppMsg::Refresh => {}
-            AppMsg::PipelineWake => self.arm_pipeline_ping(context),
+            AppMsg::PipelineWake => {
+                apply_hotkey_capture(&mut self.shared.lock());
+                self.arm_pipeline_ping(context);
+            }
             AppMsg::SelectPage(tag) => {
                 if !tag.is_empty() && tag != self.page_tag {
+                    if self.page_tag == "hotkeys" {
+                        stop_hotkey_edit(&mut self.shared.lock());
+                    }
                     self.page_tag = tag;
                 }
             }
@@ -193,6 +199,7 @@ impl Component for AppRoot {
             "translation" => translation_page(&self.shared, &chrome, bump),
             "ocr" => ocr_page(&self.shared, &chrome, bump),
             "overlay" => overlay_page(&self.shared, &chrome, bump),
+            "hotkeys" => hotkeys_page(&self.shared, &chrome, bump),
             _ => dashboard_page(&self.shared, &chrome, bump),
         };
 
@@ -201,6 +208,7 @@ impl Component for AppRoot {
             "translation" => Some(t!("nav.translation")),
             "ocr" => Some(t!("nav.ocr")),
             "overlay" => Some(t!("nav.overlay")),
+            "hotkeys" => Some(t!("nav.hotkeys")),
             _ => None,
         };
 
@@ -245,6 +253,7 @@ impl Component for AppRoot {
             ("nav-translation", nav_item("translation", &t!("nav.translation"), Symbol::Globe, page_tag == "translation")),
             ("nav-ocr", nav_item("ocr", &t!("nav.ocr"), Symbol::Camera, page_tag == "ocr")),
             ("nav-overlay", nav_item("overlay", &t!("nav.overlay"), Symbol::ViewAll, page_tag == "overlay")),
+            ("nav-hotkeys", nav_item("hotkeys", &t!("nav.hotkeys"), Symbol::Keyboard, page_tag == "hotkeys")),
         ];
 
         let nav = NavigationView::new()

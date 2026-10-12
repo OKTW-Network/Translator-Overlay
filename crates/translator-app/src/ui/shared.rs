@@ -6,13 +6,14 @@ use parking_lot::Mutex;
 use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
-    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage,
+    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, HotkeyAction, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage,
     api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
 };
 use windows_reactor::LocalSender;
 
 use crate::{
     APP_HANDLES,
+    hotkey::{self, Captured},
     pipeline::{CmdTx, PipelineCommand, SharedState},
     ui::locale::apply_ui_locale,
 };
@@ -242,6 +243,11 @@ pub struct UiShared {
     pub model_list_loading: bool,
     pub model_list_fp: String,
     pub model_list_gen: u64,
+    /// Row waiting for one key. `hotkey_listen_gen` must match the hook before a chord is kept.
+    pub hotkey_listen: Option<HotkeyAction>,
+    pub hotkey_listen_gen: u64,
+    /// Duplicate-chord message shown under one row.
+    pub hotkey_error: Option<(HotkeyAction, String)>,
 }
 
 pub fn make_shared() -> Arc<Mutex<UiShared>> {
@@ -281,6 +287,9 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         model_list_loading: false,
         model_list_fp: String::new(),
         model_list_gen: 0,
+        hotkey_listen: None,
+        hotkey_listen_gen: 0,
+        hotkey_error: None,
     }));
     if let Some(msg) = preset_load_error.or(api_profile_load_error) {
         shared.lock().state.write().set_error(msg);
@@ -458,6 +467,54 @@ pub fn mark_dirty(ui: &mut UiShared) {
     ui.state.write().settings_message = None;
 }
 
+/// Label for a shortcut row. Reuses the dashboard and action names.
+pub fn hotkey_action_label(action: HotkeyAction) -> Cow<'static, str> {
+    match action {
+        HotkeyAction::StartPause => t!("hotkeys.start_pause"),
+        HotkeyAction::Stop => t!("action.stop"),
+        HotkeyAction::SelectRegion => t!("dash.select_regions"),
+        HotkeyAction::Retry => t!("action.retry"),
+        HotkeyAction::ClearHistory => t!("dash.clear_chat"),
+    }
+}
+
+/// Apply a chord the hook captured, when it still belongs to the open listen.
+pub fn apply_hotkey_capture(ui: &mut UiShared) {
+    let Some(captured) = hotkey::take_capture() else {
+        return;
+    };
+    let (generation, bind) = match captured {
+        Captured::Bind { action, chord, generation } => (generation, Some((action, chord))),
+        Captured::Cancel { generation } => (generation, None),
+    };
+    if ui.hotkey_listen.is_none() || generation != ui.hotkey_listen_gen {
+        return;
+    }
+    let listening = ui.hotkey_listen.take();
+    let Some((action, chord)) = bind else {
+        return;
+    };
+    if listening != Some(action) {
+        return;
+    }
+    match ui.draft.hotkeys.assign(action, chord) {
+        Ok(()) => {
+            ui.hotkey_error = None;
+            mark_dirty(ui);
+        }
+        Err(other) => {
+            ui.hotkey_error = Some((action, t!("hotkeys.duplicate", action = hotkey_action_label(other)).into_owned()));
+        }
+    }
+}
+
+/// Drop an in-progress bind. Chords already in the draft stay.
+pub fn stop_hotkey_edit(ui: &mut UiShared) {
+    ui.hotkey_listen = None;
+    ui.hotkey_error = None;
+    hotkey::cancel_listen();
+}
+
 /// Soft validation issues that should block Save.
 pub fn form_validation_error(ui: &UiShared) -> Option<Cow<'static, str>> {
     // Optional numbers always have a value; toggle off = omit. No empty checks.
@@ -476,6 +533,7 @@ pub fn form_validation_error(ui: &UiShared) -> Option<Cow<'static, str>> {
 }
 
 pub fn do_reload_from_disk(ui: &mut UiShared) {
+    stop_hotkey_edit(ui);
     let path = match config_path() {
         Ok(p) => p,
         Err(e) => {
@@ -507,6 +565,7 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
 }
 
 pub fn do_discard(ui: &mut UiShared) {
+    stop_hotkey_edit(ui);
     reload_draft_from_state(ui);
     apply_ui_locale(ui.draft.ui.language);
     ui.form_error = None;

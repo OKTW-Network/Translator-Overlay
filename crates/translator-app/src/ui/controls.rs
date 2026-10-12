@@ -39,7 +39,7 @@ pub fn wrap_tooltip(text: &str) -> Tooltip {
     )
 }
 
-fn compact_toggle(is_on: bool, enabled: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
+pub(crate) fn compact_toggle(is_on: bool, enabled: bool, on_toggled: impl Fn(bool) + 'static) -> ToggleSwitch {
     ToggleSwitch::new()
         .is_on(is_on)
         .is_enabled(enabled)

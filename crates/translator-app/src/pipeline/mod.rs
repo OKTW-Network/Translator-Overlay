@@ -7,7 +7,7 @@ mod worker;
 
 use std::sync::OnceLock;
 
-use translator_core::{AppConfig, NormRect, UiLanguage};
+use translator_core::{AppConfig, HotkeyAction, NormRect, UiLanguage};
 
 pub use crate::pipeline::worker::{CmdTx, SharedState, spawn_pipeline};
 
@@ -64,6 +64,8 @@ pub enum PipelineCommand {
     },
     ConfirmRegionSelect,
     ClearRegionSelect,
+    /// Run one shortcut. The hook gated fire/swallow; the handler must still no-op if the action is no longer valid.
+    Hotkey(HotkeyAction),
     /// Replace session OCR crops (empty = whole window). Not persisted.
     SetCaptureRegions {
         regions: Vec<NormRect>,

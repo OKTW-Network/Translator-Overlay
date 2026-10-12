@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
+    hotkey::HotkeyConfig,
     paths::{PathError, resolve_under_exe},
     toml_file::{TomlFileError, read_text, save_toml},
     types::{ModelTier, OcrDevice},
@@ -70,6 +71,7 @@ pub struct AppConfig {
     pub capture: CaptureConfig,
     pub overlay: OverlayConfig,
     pub ui: UiConfig,
+    pub hotkeys: HotkeyConfig,
 }
 
 impl AppConfig {
@@ -628,10 +630,56 @@ mod tests {
     };
 
     use super::*;
+    use crate::hotkey::HotkeyConfig;
 
     fn temp_config_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("translator_overlay_{name}_{nanos}.toml"))
+    }
+
+    #[test]
+    fn hotkey_bad_chord_is_dropped_and_the_rest_kept() {
+        let config = AppConfig::from_toml_lenient(
+            r#"
+[hotkeys]
+enabled = true
+only_when_target_focused = false
+start_pause = "ctrl+f8"
+stop = "lwin"
+select_region = "lbutton"
+retry = "esc"
+clear_history = "ctrl"
+"#,
+        )
+        .unwrap();
+        assert!(config.hotkeys.enabled);
+        assert!(!config.hotkeys.only_when_target_focused);
+        assert_eq!(config.hotkeys.start_pause.unwrap().to_token(), "ctrl+f8");
+        assert!(config.hotkeys.stop.is_none());
+        assert!(config.hotkeys.select_region.is_none());
+        assert!(config.hotkeys.retry.is_none());
+        assert!(config.hotkeys.clear_history.is_none());
+    }
+
+    #[test]
+    fn omitted_hotkeys_use_defaults() {
+        let config = AppConfig::from_toml_lenient("[api]\nmodel = \"x\"\n").unwrap();
+        assert_eq!(config.hotkeys, HotkeyConfig::default());
+    }
+
+    #[test]
+    fn omitted_hotkey_focus_flag_stays_on() {
+        let config = AppConfig::from_toml_lenient(
+            r#"
+[hotkeys]
+enabled = true
+start_pause = "f8"
+"#,
+        )
+        .unwrap();
+        assert!(config.hotkeys.enabled);
+        assert!(config.hotkeys.only_when_target_focused);
+        assert_eq!(config.hotkeys.start_pause.unwrap().to_token(), "f8");
     }
 
     #[test]

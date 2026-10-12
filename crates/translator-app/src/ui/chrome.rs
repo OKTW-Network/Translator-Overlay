@@ -18,7 +18,7 @@ use crate::{
         locale::UI_LANGUAGES,
         shared::{
             AppMsg, ChromeSnap, ConfirmAction, UiCx, UiShared, do_discard, do_reload_from_disk, effective_draft, form_validation_error,
-            is_settings_dirty, send_ui_language,
+            is_settings_dirty, send_ui_language, stop_hotkey_edit,
         },
     },
 };
@@ -294,6 +294,7 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: 
             move || {
                 {
                     let mut ui = cx.shared.lock();
+                    stop_hotkey_edit(&mut ui);
                     if let Some(err) = form_validation_error(&ui) {
                         ui.form_error = Some(err);
                         drop(ui);
@@ -352,6 +353,7 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: 
                 let cx = cx.clone();
                 move || {
                     cx.with_mut(|ui| {
+                        stop_hotkey_edit(ui);
                         if is_settings_dirty(ui) {
                             ui.confirm = ConfirmAction::Reload;
                         } else {
@@ -367,6 +369,7 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: 
                 let cx = cx.clone();
                 move || {
                     cx.with_mut(|ui| {
+                        stop_hotkey_edit(ui);
                         if is_settings_dirty(ui) {
                             ui.confirm = ConfirmAction::Discard;
                         } else {

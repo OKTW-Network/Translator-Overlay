@@ -1,6 +1,7 @@
 //! Translator Overlay — WinUI 3 control app (windows-reactor).
 
 mod attention;
+mod hotkey;
 mod pipeline;
 mod taskbar_guard;
 mod ui;
@@ -88,12 +89,14 @@ async fn main() {
     let (cmd_tx, pipeline) = spawn_pipeline(state.clone());
 
     APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
+    hotkey::install(&state.read(), cmd_tx.clone());
 
     // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
     // `block_on`s this future on that thread — do not move render off-thread.
     // 0.100 inlines WASDK framework bootstrap (no Bootstrap.dll / setup crate).
     let result = App::run_component::<AppRoot>(());
 
+    hotkey::shutdown();
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
     let _ = pipeline.await;
 
