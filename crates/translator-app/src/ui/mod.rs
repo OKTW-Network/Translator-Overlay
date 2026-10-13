@@ -4,6 +4,7 @@ mod app;
 mod cards;
 mod chrome;
 mod controls;
+mod dictionary;
 mod locale;
 mod named;
 mod pages;

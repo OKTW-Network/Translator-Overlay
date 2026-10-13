@@ -19,7 +19,7 @@ use translator_translate::{Completion, Conversation, TranslateClient, TranslateE
 
 use crate::{
     hotkey,
-    pipeline::{PipelineCommand, ping_ui},
+    pipeline::{PipelineCommand, config_apply::apply_dictionary_profile, ping_ui},
     ui::status_text,
 };
 
@@ -212,6 +212,7 @@ impl Pipeline {
         };
 
         pipeline.sync_reader_placeholder();
+        apply_dictionary_profile(&mut pipeline.state.write());
         // Kick off download + load without blocking the command loop / UI.
         pipeline.start_model_load();
         pipeline

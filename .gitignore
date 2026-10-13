@@ -13,6 +13,7 @@ config.toml
 !.cargo/config.toml
 region-presets.toml
 api-profiles.toml
+dictionaries/
 .idea/
 .vscode/
 __pycache__/

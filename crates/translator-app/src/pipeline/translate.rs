@@ -90,9 +90,9 @@ impl Pipeline {
         miss_blocks: Vec<OcrBlock>,
         start_attempt: u32,
     ) {
-        let (api, tcfg) = {
+        let (api, tcfg, glossary) = {
             let s = self.state.read();
-            (s.config.api.clone(), s.config.translation.clone())
+            (s.config.api.clone(), s.config.translation.clone(), s.dictionary_pairs.clone())
         };
         let max_retries = api.max_retries;
         self.client.update_config(api);
@@ -103,7 +103,7 @@ impl Pipeline {
             show_captions(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
         }
 
-        let prepared = self.conversation.begin_translate_request(&tcfg, &miss_blocks);
+        let prepared = self.conversation.begin_translate_request(&tcfg, &miss_blocks, &glossary);
         self.state.write().history.truncate(self.conversation.turn_count());
 
         let cancel = CancellationToken::new();

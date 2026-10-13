@@ -301,8 +301,8 @@ pub fn settings_actions(shared: &Arc<Mutex<UiShared>>, snap: &ChromeSnap, bump: 
                         cx.refresh();
                         return;
                     }
-                    ui.draft = effective_draft(&ui);
-                    let cfg = ui.draft.clone();
+                    *ui.draft = effective_draft(&ui);
+                    let cfg = ui.draft.as_ref().clone();
                     ui.form_error = None;
                     {
                         let mut s = ui.state.write();

@@ -2,6 +2,7 @@
 
 mod api_profiles;
 mod config;
+mod dictionaries;
 mod hotkey;
 mod paths;
 mod region_presets;
@@ -12,6 +13,7 @@ mod types;
 pub use crate::{
     api_profiles::*,
     config::*,
+    dictionaries::*,
     hotkey::{HotkeyAction, HotkeyChord, HotkeyConfig, is_modifier_vk, is_win_vk},
     paths::*,
     region_presets::*,

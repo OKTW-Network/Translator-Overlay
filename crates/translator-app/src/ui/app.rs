@@ -25,7 +25,7 @@ use crate::{
     ui::{
         chrome::{app_status_strip, capture_start_stop_button, settings_sticky_chrome, ui_language_combo},
         pages::{api_page, dashboard_page, hotkeys_page, ocr_page, overlay_page, translation_page},
-        shared::{AppMsg, UiShared, apply_hotkey_capture, make_shared, stop_hotkey_edit, take_chrome},
+        shared::{AppMsg, UiShared, apply_hotkey_capture, make_shared, prepare_dictionary_editor, stop_hotkey_edit, take_chrome},
         xaml,
     },
 };
@@ -168,6 +168,13 @@ impl Component for AppRoot {
                 if generation == ui.model_list_gen {
                     ui.model_catalog = ids;
                     ui.model_list_loading = false;
+                }
+            }
+            AppMsg::OpenDictionaryEditor => {
+                let mut ui = self.shared.lock();
+                if !ui.dictionary.editor_open {
+                    prepare_dictionary_editor(&mut ui);
+                    ui.dictionary.editor_open = true;
                 }
             }
         }

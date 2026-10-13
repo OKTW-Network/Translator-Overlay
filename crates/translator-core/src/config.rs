@@ -394,6 +394,9 @@ pub struct TranslationConfig {
     pub cache_max_entries: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Stem of the active `dictionaries/{name}.toml`. Pairs stay in that file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dictionary_profile: Option<String>,
 }
 
 impl Default for TranslationConfig {
@@ -406,6 +409,7 @@ impl Default for TranslationConfig {
             cache_enabled: true,
             cache_max_entries: TRANSLATION_CACHE_MAX_DEFAULT,
             system_prompt: None,
+            dictionary_profile: None,
         }
     }
 }

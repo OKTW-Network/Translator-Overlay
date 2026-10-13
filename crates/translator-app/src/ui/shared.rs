@@ -6,8 +6,9 @@ use parking_lot::Mutex;
 use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
-    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, HotkeyAction, NormRect, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage,
-    api_profiles_path, config_path, format_argb_hex, parse_argb_hex, region_presets_path,
+    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, DictionaryPair, HotkeyAction, NormRect, PipelineStatus, RegionPreset,
+    RegionPresetFile, UiLanguage, api_profiles_path, config_path, delete_profile, dictionaries_dir, format_argb_hex,
+    list_dictionary_names_default, load_profile_pairs, parse_argb_hex, region_presets_path, sanitize_pairs, save_profile_pairs,
 };
 use windows_reactor::LocalSender;
 
@@ -56,6 +57,7 @@ pub enum AppMsg {
         generation: u64,
         ids: Vec<String>,
     },
+    OpenDictionaryEditor,
 }
 
 /// Shared UI handle for event closures. Clone once per handler (cheap Arc bumps).
@@ -169,6 +171,107 @@ pub const REGION_PRESETS: NamedStore = NamedStore {
     delete_body: "dash.delete_preset_body",
 };
 
+/// Glossary editor and the settings apply combo. Live pairs for translate live on `AppState`.
+#[derive(Clone, Default)]
+pub struct DictionaryUi {
+    pub names: Vec<String>,
+    pub pick: NamedPick,
+    pub pairs: Vec<DictionaryPair>,
+    pub saved_pairs: Vec<DictionaryPair>,
+    /// File currently in the editor buffer.
+    pub loaded: Option<String>,
+    /// ComboBox fires SelectionChanged when the names list is rewritten.
+    pub suppress_combo: bool,
+    /// Next editor view after a names rewrite; then `suppress_combo` is cleared.
+    pub combo_armed: bool,
+    /// Settings apply combo remounts on every Translation page render.
+    pub settings_suppress: bool,
+    /// Next Translation page view; then `settings_suppress` is cleared.
+    pub settings_armed: bool,
+    pub editor_open: bool,
+}
+
+impl DictionaryUi {
+    pub fn dirty(&self) -> bool {
+        sanitize_pairs(&self.pairs) != self.saved_pairs
+    }
+
+    pub fn selected_name(&self) -> Option<String> {
+        self.pick.selected.and_then(|i| self.names.get(i)).cloned()
+    }
+
+    pub fn revert(&mut self) {
+        self.pairs.clone_from(&self.saved_pairs);
+    }
+
+    pub fn close_editor(&mut self) {
+        self.editor_open = false;
+        self.pick.dialog = NamedDialog::None;
+        self.suppress_combo = false;
+        self.combo_armed = false;
+    }
+}
+
+pub const DICTIONARIES: NamedStore = NamedStore {
+    pick: |ui| &mut ui.dictionary.pick,
+    names: |ui| ui.dictionary.names.clone(),
+    commit: |ui, name| {
+        if !translator_core::is_valid_profile_name(name) {
+            return Err(t!("err.dictionary_name_invalid").into_owned());
+        }
+        let dir = dictionaries_dir().map_err(|e| t!("err.save_dictionary", error = e.to_string()).into_owned())?;
+        let pairs = sanitize_pairs(&ui.dictionary.pairs);
+        save_profile_pairs(&dir, name, &pairs).map_err(|e| t!("err.save_dictionary", error = e.to_string()).into_owned())?;
+        ui.dictionary.pairs = pairs.clone();
+        ui.dictionary.saved_pairs = pairs;
+        ui.dictionary.loaded = Some(name.to_string());
+        ui.dictionary.suppress_combo = true;
+        refresh_dictionary_names(ui);
+        if ui.draft.translation.dictionary_profile.as_deref() == Some(name) {
+            mark_dirty(ui);
+        }
+        crate::pipeline::ping_ui();
+        Ok(())
+    },
+    delete: |ui, name| {
+        let dir = dictionaries_dir().map_err(|e| t!("err.delete_dictionary", error = e.to_string()).into_owned())?;
+        delete_profile(&dir, name).map_err(|e| t!("err.delete_dictionary", error = e.to_string()).into_owned())?;
+        if ui.dictionary.loaded.as_deref() == Some(name) {
+            ui.dictionary.pairs.clear();
+            ui.dictionary.saved_pairs.clear();
+            ui.dictionary.loaded = None;
+        }
+        ui.dictionary.suppress_combo = true;
+        refresh_dictionary_names(ui);
+        if ui.draft.translation.dictionary_profile.as_deref() == Some(name) {
+            ui.draft.translation.dictionary_profile = None;
+            mark_dirty(ui);
+        }
+        // Discard restores live config. Drop the name there too so a deleted
+        // in-use profile cannot come back, and persist so restart matches.
+        let apply_live = {
+            let mut s = ui.state.write();
+            if s.config.translation.dictionary_profile.as_deref() == Some(name) {
+                s.config.translation.dictionary_profile = None;
+                Some(s.config.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(cfg) = apply_live {
+            let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
+        }
+        crate::pipeline::ping_ui();
+        Ok(())
+    },
+    on_cancel: |_| {},
+    name_required: "err.dictionary_name_required",
+    overwrite_title: "tr.overwrite_dictionary_title",
+    overwrite_body: "tr.overwrite_dictionary_body",
+    delete_title: "tr.delete_dictionary_title",
+    delete_body: "tr.delete_dictionary_body",
+};
+
 pub const API_PROFILES: NamedStore = NamedStore {
     pick: |ui| &mut ui.profiles,
     names: |ui| ui.api_profiles.iter().map(|p| p.name.clone()).collect(),
@@ -216,9 +319,9 @@ pub struct UiShared {
     /// `None` until the user picks a window (ComboBox placeholder).
     pub selected_idx: Option<usize>,
     /// Editable draft of settings (committed on Save).
-    pub draft: AppConfig,
+    pub draft: Box<AppConfig>,
     /// Optional API numbers (kept while toggle is off so re-enable restores).
-    pub optional: OptionalApiState,
+    pub optional: Box<OptionalApiState>,
     pub text_argb_str: String,
     pub bg_argb_str: String,
     /// ColorPicker panel open (text / background). Only one should be true.
@@ -238,6 +341,7 @@ pub struct UiShared {
     /// Named API connection profiles (`api-profiles.toml`).
     pub api_profiles: Vec<ApiProfile>,
     pub profiles: NamedPick,
+    pub dictionary: Box<DictionaryUi>,
     /// Cached model ids for the API settings AutoSuggestBox.
     pub model_catalog: Vec<String>,
     pub model_list_loading: bool,
@@ -264,13 +368,16 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         .and_then(|path| ApiProfileFile::load_or_empty_at(&path).map_err(|e| t!("err.load_api_profiles", error = e.to_string())))
         .map(|file| file.profiles)
         .map_or_else(|message| (Vec::new(), Some(message)), |profiles| (profiles, None));
+    let (dictionary_names, dictionary_load_error) = list_dictionary_names_default()
+        .map_err(|e| t!("err.load_dictionary", error = e.to_string()))
+        .map_or_else(|message| (Vec::new(), Some(message)), |names| (names, None));
     let shared = Arc::new(Mutex::new(UiShared {
         state,
         cmd_tx,
         windows: list_windows().unwrap_or_default(),
         selected_idx: None,
-        draft,
-        optional,
+        draft: Box::new(draft),
+        optional: Box::new(optional),
         text_argb_str,
         bg_argb_str,
         text_color_picker_open: false,
@@ -283,6 +390,10 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         pending_save_regions: Vec::new(),
         api_profiles,
         profiles: NamedPick::default(),
+        dictionary: Box::new(DictionaryUi {
+            names: dictionary_names,
+            ..DictionaryUi::default()
+        }),
         model_catalog: Vec::new(),
         model_list_loading: false,
         model_list_fp: String::new(),
@@ -291,7 +402,7 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         hotkey_listen_gen: 0,
         hotkey_error: None,
     }));
-    if let Some(msg) = preset_load_error.or(api_profile_load_error) {
+    if let Some(msg) = preset_load_error.or(api_profile_load_error).or(dictionary_load_error) {
         shared.lock().state.write().set_error(msg);
     }
     shared
@@ -352,6 +463,104 @@ fn save_api_profiles(ui: &mut UiShared, profiles: Vec<ApiProfile>) -> Result<(),
     Ok(())
 }
 
+pub fn refresh_dictionary_names(ui: &mut UiShared) {
+    match list_dictionary_names_default() {
+        Ok(names) => {
+            let keep = ui
+                .dictionary
+                .loaded
+                .clone()
+                .or_else(|| ui.dictionary.pick.selected.and_then(|i| ui.dictionary.names.get(i)).cloned());
+            ui.dictionary.names = names;
+            if let Some(name) = keep {
+                ui.dictionary.pick.selected = ui.dictionary.names.iter().position(|n| *n == name);
+            }
+        }
+        Err(e) => ui.state.write().set_error(t!("err.load_dictionary", error = e.to_string())),
+    }
+}
+
+/// Combo pick: save the buffer into the loaded profile, then load the new one.
+pub fn select_dictionary_profile(ui: &mut UiShared, idx: Option<usize>) {
+    let count = ui.dictionary.names.len();
+    if ui.dictionary.suppress_combo {
+        // Rewrite emits None then sometimes 0; the editor view clears this on the next frame.
+        ui.dictionary.pick.selected = ui
+            .dictionary
+            .loaded
+            .as_ref()
+            .and_then(|name| ui.dictionary.names.iter().position(|n| n == name));
+        return;
+    }
+    let Some(idx) = idx.filter(|&i| i < count) else {
+        return;
+    };
+    let next_name = ui.dictionary.names.get(idx).cloned();
+    if next_name.as_deref() == ui.dictionary.loaded.as_deref() {
+        ui.dictionary.pick.selected = Some(idx);
+        return;
+    }
+    if let Some(loaded) = ui.dictionary.loaded.clone()
+        && ui.dictionary.dirty()
+    {
+        commit_named(ui, &DICTIONARIES, loaded);
+        if ui.dictionary.dirty() {
+            return;
+        }
+    }
+    ui.dictionary.pick.selected = Some(idx);
+    if let Some(name) = next_name
+        && let Err(e) = load_dictionary_into_editor(ui, &name)
+    {
+        ui.state.write().set_error(e);
+    }
+}
+
+/// Save the loaded profile, then open the 新建 name row.
+pub fn start_new_dictionary(ui: &mut UiShared) {
+    if let Some(loaded) = ui.dictionary.loaded.clone() {
+        commit_named(ui, &DICTIONARIES, loaded);
+        if ui.dictionary.dirty() {
+            return;
+        }
+    }
+    ui.dictionary.pick.name_draft.clear();
+    ui.dictionary.pick.dialog = NamedDialog::SaveName;
+}
+
+pub fn load_dictionary_into_editor(ui: &mut UiShared, name: &str) -> Result<(), String> {
+    let dir = dictionaries_dir().map_err(|e| t!("err.load_dictionary", error = e.to_string()).into_owned())?;
+    let pairs = load_profile_pairs(&dir, name).map_err(|e| t!("err.load_dictionary", error = e.to_string()).into_owned())?;
+    ui.dictionary.pairs = pairs.clone();
+    ui.dictionary.saved_pairs = pairs;
+    ui.dictionary.loaded = Some(name.to_string());
+    ui.dictionary.pick.selected = ui.dictionary.names.iter().position(|n| n == name);
+    ui.dictionary.pick.dialog = NamedDialog::None;
+    Ok(())
+}
+
+/// Fill the editor from the settings combo when there is nothing unsaved.
+pub fn prepare_dictionary_editor(ui: &mut UiShared) {
+    refresh_dictionary_names(ui);
+    if ui.dictionary.dirty() {
+        return;
+    }
+    let Some(name) = ui.draft.translation.dictionary_profile.clone() else {
+        ui.dictionary.pairs.clear();
+        ui.dictionary.saved_pairs.clear();
+        ui.dictionary.loaded = None;
+        ui.dictionary.pick.selected = None;
+        ui.dictionary.pick.name_draft.clear();
+        if ui.dictionary.names.is_empty() {
+            ui.dictionary.pick.dialog = NamedDialog::SaveName;
+        }
+        return;
+    };
+    if let Err(e) = load_dictionary_into_editor(ui, &name) {
+        ui.state.write().set_error(e);
+    }
+}
+
 /// Copy the selected profile into the API form. Does not apply until Settings Save.
 pub fn load_api_profile(ui: &mut UiShared) -> Result<(), String> {
     let profile = selected_api_profile(ui)
@@ -395,7 +604,7 @@ pub fn overlay_color_strings(cfg: &AppConfig) -> (String, String) {
 }
 
 pub fn reload_draft_from_state(ui: &mut UiShared) {
-    ui.draft = ui.state.read().config.clone();
+    *ui.draft = ui.state.read().config.clone();
     apply_optional_from_config(ui);
     let (ta, ba) = overlay_color_strings(&ui.draft);
     ui.text_argb_str = ta;
@@ -403,12 +612,12 @@ pub fn reload_draft_from_state(ui: &mut UiShared) {
 }
 
 pub fn apply_optional_from_config(ui: &mut UiShared) {
-    ui.optional = optional_api_state(&ui.draft);
+    *ui.optional = optional_api_state(&ui.draft);
 }
 
 /// Merge optional / overlay free-form fields into a config snapshot (pure).
 pub fn effective_draft(ui: &UiShared) -> AppConfig {
-    let mut cfg = ui.draft.clone();
+    let mut cfg = ui.draft.as_ref().clone();
     let o = &ui.optional;
     cfg.api.temperature = if o.temp_enabled {
         Some(o.temp_val.clamp(0.0, 2.0) as f32)
@@ -548,7 +757,7 @@ pub fn do_reload_from_disk(ui: &mut UiShared) {
                 cfg.ui.language = Some(UiLanguage::from_locale_name(&crate::ui::system_locale_name()));
             }
             apply_ui_locale(cfg.ui.language);
-            ui.draft = cfg.clone();
+            *ui.draft = cfg.clone();
             let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
             apply_optional_from_config(ui);
             let (ta, ba) = overlay_color_strings(&ui.draft);
@@ -613,5 +822,14 @@ pub fn take_chrome(shared: &Arc<Mutex<UiShared>>) -> ChromeSnap {
         form_error: ui.form_error.clone(),
         settings_message: s.settings_message.clone(),
         confirm: ui.confirm,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ui_shared_stays_under_1kb() {
+        let n = std::mem::size_of::<super::UiShared>();
+        assert!(n <= 1024, "UiShared is {n} bytes; box another large field");
     }
 }

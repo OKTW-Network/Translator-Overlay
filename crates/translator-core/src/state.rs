@@ -6,6 +6,7 @@ use bytes::Bytes;
 
 use crate::{
     config::AppConfig,
+    dictionaries::DictionaryPair,
     types::{NormRect, OcrBlock, TranslatedBlock},
 };
 
@@ -126,6 +127,8 @@ pub struct AppState {
     pub region_select_draft: Vec<NormRect>,
     /// Unique source strings currently in the session translation cache.
     pub translation_cache_len: usize,
+    /// Active dictionary pairs loaded from `dictionaries/{dictionary_profile}.toml`.
+    pub dictionary_pairs: Vec<DictionaryPair>,
     /// True after a translate failure until a translate succeeds (one flash per streak).
     pub attention_sent: bool,
     next_history_id: u64,

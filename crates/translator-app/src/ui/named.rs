@@ -4,9 +4,9 @@ use std::borrow::Cow;
 
 use rust_i18n::t;
 use windows_reactor::{
-    Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontWeight,
-    HorizontalAlignment, LayoutControl, Orientation, StackPanel, TextBlock, TextBox, ThemeBrush, Thickness, TooltipExt, VerticalAlignment,
-    View,
+    AutomationExt, Border, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, ContentDialog, ContentDialogResult, FontWeight,
+    HorizontalAlignment, LayoutControl, Orientation, StackPanel, TextBlock, TextBox, TextWrapping, ThemeBrush, Thickness, TooltipExt,
+    VerticalAlignment, View,
 };
 
 use crate::ui::shared::{NamedDialog, NamedPick, NamedStore, UiCx, UiShared, commit_named};
@@ -85,11 +85,13 @@ pub fn name_entry_row(cx: &UiCx, store: &'static NamedStore, snap: &NamedSnap) -
                 cx.with_mut(|ui| (store.pick)(ui).name_draft = text);
             }
         })
+        .automation_id("txt-named-name")
         .width(180.0)
         .vertical_alignment(VerticalAlignment::Center);
 
     let save = Button::new()
         .style(ButtonStyle::Accent)
+        .automation_id("btn-named-save")
         .on_click({
             let cx = cx.clone();
             move || {
@@ -141,6 +143,29 @@ pub fn name_entry_row(cx: &UiCx, store: &'static NamedStore, snap: &NamedSnap) -
         )
 }
 
+fn resolve_named_dialog(ui: &mut UiShared, store: &NamedStore, action: NamedDialog, primary: bool) {
+    if !primary {
+        if matches!(action, NamedDialog::Overwrite { .. }) {
+            (store.pick)(ui).dialog = NamedDialog::SaveName;
+        }
+        return;
+    }
+    match action {
+        NamedDialog::Overwrite { name } => commit_named(ui, store, name),
+        NamedDialog::Delete { name } => {
+            {
+                let pick = (store.pick)(ui);
+                pick.selected = None;
+                pick.name_draft.clear();
+            }
+            if let Err(e) = (store.delete)(ui, &name) {
+                ui.state.write().set_error(e);
+            }
+        }
+        NamedDialog::None | NamedDialog::SaveName => {}
+    }
+}
+
 /// Overwrite or delete confirmation. Cancelling an overwrite returns to the name row.
 pub fn named_confirm_dialog(cx: &UiCx, store: &'static NamedStore, snap: &NamedSnap) -> View {
     let (open, title, body, primary) = match &snap.pick.dialog {
@@ -158,27 +183,76 @@ pub fn named_confirm_dialog(cx: &UiCx, store: &'static NamedStore, snap: &NamedS
             let cx = cx.clone();
             move |result: ContentDialogResult| {
                 cx.with_mut(|ui| {
-                    let pick = (store.pick)(ui);
-                    let action = std::mem::take(&mut pick.dialog);
-                    if result != ContentDialogResult::Primary {
-                        if matches!(action, NamedDialog::Overwrite { .. }) {
-                            pick.dialog = NamedDialog::SaveName;
-                        }
-                        return;
-                    }
-                    match action {
-                        NamedDialog::Overwrite { name } => commit_named(ui, store, name),
-                        NamedDialog::Delete { name } => {
-                            pick.selected = None;
-                            pick.name_draft.clear();
-                            if let Err(e) = (store.delete)(ui, &name) {
-                                ui.state.write().set_error(e);
-                            }
-                        }
-                        NamedDialog::None | NamedDialog::SaveName => {}
-                    }
+                    let action = std::mem::take(&mut (store.pick)(ui).dialog);
+                    resolve_named_dialog(ui, store, action, result == ContentDialogResult::Primary);
                 });
             }
         })
         .content(body.as_ref())
+}
+
+/// Same overwrite/delete confirm as [`named_confirm_dialog`], as a card. Use this inside another ContentDialog.
+pub fn named_confirm_inline(cx: &UiCx, store: &'static NamedStore, snap: &NamedSnap) -> View {
+    let (title, body, primary) = match &snap.pick.dialog {
+        NamedDialog::Overwrite { name } => (t!(store.overwrite_title), t!(store.overwrite_body, name = name), t!("action.overwrite")),
+        NamedDialog::Delete { name } => (t!(store.delete_title), t!(store.delete_body, name = name), t!("action.delete")),
+        NamedDialog::None | NamedDialog::SaveName => return View::empty(),
+    };
+
+    confirm_strip(
+        title,
+        body,
+        primary,
+        {
+            let cx = cx.clone();
+            move || {
+                cx.with_mut(|ui| {
+                    let action = std::mem::take(&mut (store.pick)(ui).dialog);
+                    resolve_named_dialog(ui, store, action, true);
+                });
+            }
+        },
+        {
+            let cx = cx.clone();
+            move || {
+                cx.with_mut(|ui| {
+                    let action = std::mem::take(&mut (store.pick)(ui).dialog);
+                    resolve_named_dialog(ui, store, action, false);
+                });
+            }
+        },
+    )
+}
+
+pub(crate) fn confirm_strip(
+    title: Cow<'static, str>,
+    body: Cow<'static, str>,
+    primary: Cow<'static, str>,
+    on_primary: impl Fn() + 'static,
+    on_cancel: impl Fn() + 'static,
+) -> View {
+    let primary_btn = Button::new()
+        .style(ButtonStyle::Accent)
+        .on_click(on_primary)
+        .content(primary.as_ref());
+    let cancel_btn = Button::new().on_click(on_cancel).content(t!("action.cancel").as_ref());
+
+    Border::new()
+        .background(ThemeBrush::CardBackground)
+        .border_brush(ThemeBrush::CardStroke)
+        .border_thickness(Thickness::uniform(1.0))
+        .corner_radius(4.0)
+        .padding(Thickness::new(8.0, 8.0, 8.0, 8.0))
+        .horizontal_alignment(HorizontalAlignment::Stretch)
+        .content(
+            StackPanel::new().spacing(8.0).children((
+                TextBlock::new().text(title).font_weight(FontWeight::SEMI_BOLD),
+                TextBlock::new().text(body).text_wrapping(TextWrapping::Wrap),
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(8.0)
+                    .horizontal_alignment(HorizontalAlignment::Right)
+                    .children((primary_btn, cancel_btn)),
+            )),
+        )
 }

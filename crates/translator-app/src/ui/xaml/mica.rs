@@ -1,5 +1,6 @@
 //! NavigationView has no `resource_overrides` in reactor 0.100, so patch
-//! `Application.Current.Resources` (content fill + border, title-bar drag strip).
+//! `Application.Current.Resources` (content fill + border, title-bar drag strip,
+//! ContentDialog max width).
 
 #![allow(non_snake_case)]
 
@@ -80,6 +81,10 @@ pub fn apply() -> Result<()> {
     let drag_key: IInspectable = IReference::<HSTRING>::from(HSTRING::from("TitleBarMinDragRegionWidth")).into();
     let drag_width: IInspectable = IReference::<f64>::from(8.0).into();
     map.Insert(&drag_key, &drag_width)?;
+    // Default 548 is too narrow for the two-column glossary editor.
+    let dialog_key: IInspectable = IReference::<HSTRING>::from(HSTRING::from("ContentDialogMaxWidth")).into();
+    let dialog_width: IInspectable = IReference::<f64>::from(720.0).into();
+    map.Insert(&dialog_key, &dialog_width)?;
     Ok(())
 }
 

@@ -42,6 +42,11 @@ pub fn api_profiles_path() -> Result<PathBuf, PathError> {
     Ok(exe_dir()?.join("api-profiles.toml"))
 }
 
+/// Directory of per-profile dictionary files next to the executable.
+pub fn dictionaries_dir() -> Result<PathBuf, PathError> {
+    Ok(exe_dir()?.join("dictionaries"))
+}
+
 /// Resolve a path that may be relative to the executable directory.
 pub fn resolve_under_exe(path: impl AsRef<Path>) -> Result<PathBuf, PathError> {
     let path = path.as_ref();

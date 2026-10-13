@@ -6,7 +6,8 @@ use parking_lot::Mutex;
 use rust_i18n::t;
 use translator_core::{TRANSLATION_CACHE_MAX_CAP, TRANSLATION_CACHE_MAX_MIN};
 use windows_reactor::{
-    Button, ChildrenControl, ContentControl, LayoutControl, LocalSender, StackPanel, TextBox, TextWrapping, TooltipExt, View,
+    AutomationExt, Button, ButtonStyle, ChildrenControl, ComboBox, ContentControl, FontIcon, HorizontalAlignment, LayoutControl,
+    LocalSender, Orientation, StackPanel, TextBox, TextWrapping, TooltipExt, VerticalAlignment, View,
 };
 
 use crate::{
@@ -15,17 +16,30 @@ use crate::{
         cards::{section_header, settings_card, settings_card_stack},
         chrome::settings_page_shell,
         controls::{SliderNumberParams, card_slider_number, card_text, card_toggle},
+        dictionary::dictionary_editor_dialog,
         shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty},
     },
 };
 
 pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
     let cx = UiCx::new(shared, bump);
-    let (translation, cache_len) = {
-        let ui = shared.lock();
+    let (translation, cache_len, dictionary_names, combo_settle) = {
+        let mut ui = shared.lock();
+        let combo_settle = if ui.dictionary.settings_armed {
+            ui.dictionary.settings_suppress = false;
+            ui.dictionary.settings_armed = false;
+            false
+        } else {
+            ui.dictionary.settings_suppress = true;
+            ui.dictionary.settings_armed = true;
+            true
+        };
         let cache_len = ui.state.read().translation_cache_len;
-        (ui.draft.translation.clone(), cache_len)
+        (ui.draft.translation.clone(), cache_len, ui.dictionary.names.clone(), combo_settle)
     };
+    if combo_settle {
+        let _ = bump.send(AppMsg::Refresh);
+    }
 
     let source_desc = t!("tr.source_desc");
     let target_desc = t!("tr.target_desc");
@@ -142,8 +156,76 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         ),
     ));
 
+    let mut dictionary_items = vec![t!("tr.dictionary_none").into_owned()];
+    dictionary_items.extend(dictionary_names.iter().cloned());
+    let dictionary_index = translation
+        .dictionary_profile
+        .as_ref()
+        .and_then(|name| dictionary_names.iter().position(|n| n == name).map(|i| i + 1))
+        .unwrap_or(0);
+    let dictionary_desc = t!("tr.dictionary_desc");
+    let dictionary_card = settings_card(
+        "tr-dictionary",
+        t!("tr.dictionary"),
+        Some(&dictionary_desc),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .horizontal_alignment(HorizontalAlignment::Right)
+            .children((
+                ComboBox::new()
+                    .items_source(dictionary_items)
+                    .selected_index(Some(dictionary_index))
+                    .on_selection_changed({
+                        let cx = cx.clone();
+                        move |idx: Option<usize>| {
+                            let Some(idx) = idx else {
+                                return;
+                            };
+                            let mut ui = cx.shared.lock();
+                            if ui.dictionary.settings_suppress {
+                                return;
+                            }
+                            let name = if idx == 0 {
+                                None
+                            } else {
+                                ui.dictionary.names.get(idx - 1).cloned()
+                            };
+                            if ui.draft.translation.dictionary_profile != name {
+                                ui.draft.translation.dictionary_profile = name;
+                                mark_dirty(&mut ui);
+                                drop(ui);
+                                cx.refresh();
+                            }
+                        }
+                    })
+                    .width(180.0)
+                    .min_width(140.0)
+                    .vertical_alignment(VerticalAlignment::Center),
+                Button::new()
+                    .style(ButtonStyle::Subtle)
+                    .min_width(36.0)
+                    .min_height(36.0)
+                    .horizontal_content_alignment(HorizontalAlignment::Center)
+                    .vertical_content_alignment(VerticalAlignment::Center)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .on_click({
+                        let bump = bump.clone();
+                        move || {
+                            let _ = bump.send(AppMsg::OpenDictionaryEditor);
+                        }
+                    })
+                    .automation_id("btn-edit-dictionary")
+                    .automation_name(t!("tr.edit_dictionary_tip"))
+                    .content(FontIcon::new().glyph("\u{E70F}"))
+                    .tooltip(t!("tr.edit_dictionary_tip")),
+            )),
+    );
+
     let prompt = StackPanel::new().spacing(4.0).children((
         section_header(t!("tr.prompt")),
+        dictionary_card,
         settings_card_stack(
             "tr-system-prompt",
             t!("tr.system_prompt"),
@@ -167,5 +249,8 @@ pub fn translation_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump
         ),
     ));
 
-    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((languages, context, cache, prompt)))
+    StackPanel::new().children((
+        settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((languages, context, cache, prompt))),
+        dictionary_editor_dialog(shared, bump),
+    ))
 }

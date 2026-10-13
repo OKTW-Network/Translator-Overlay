@@ -4,11 +4,21 @@ use std::path::PathBuf;
 
 use rust_i18n::t;
 use tracing::{error, info};
-use translator_core::{AppConfig, UiLanguage, config_path};
+use translator_core::{AppConfig, AppState, UiLanguage, config_path, load_active_dictionary};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, StabilityGate};
 use translator_overlay::OverlayCommand;
 
 use crate::pipeline::worker::Pipeline;
+
+pub(crate) fn apply_dictionary_profile(state: &mut AppState) {
+    match load_active_dictionary(state.config.translation.dictionary_profile.as_deref()) {
+        Ok(pairs) => state.dictionary_pairs = pairs,
+        Err(e) => {
+            state.dictionary_pairs.clear();
+            state.set_error(t!("err.load_dictionary", error = e.to_string()));
+        }
+    }
+}
 
 impl Pipeline {
     /// Resolve the default config path; on failure record `save config:` and return `None`.
@@ -104,12 +114,22 @@ impl Pipeline {
             return;
         }
 
-        {
+        let old_pairs = self.state.read().dictionary_pairs.clone();
+        let glossary_changed = {
             let mut s = self.state.write();
-            s.translation_cache_len = self.translation_cache.len();
             s.settings_message = Some(translator_core::SETTINGS_SAVED.into());
             s.last_error = None;
+            apply_dictionary_profile(&mut s);
+            s.dictionary_pairs != old_pairs
+        };
+        if glossary_changed {
+            self.cancel_inflight();
+            self.conversation.clear();
+            self.client.reset_session();
+            self.translation_cache.clear();
+            self.last_translated_fp = None;
         }
+        self.state.write().translation_cache_len = self.translation_cache.len();
         info!("config applied and saved");
 
         if engine_reload {

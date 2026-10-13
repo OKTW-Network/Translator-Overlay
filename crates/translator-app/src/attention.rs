@@ -1,5 +1,4 @@
-//! Flash the control window's taskbar button when a translate API error lands
-//! while the dashboard is not focused. Never steals foreground.
+//! Control-window HWND helpers: taskbar flash.
 
 use std::mem::size_of;
 
