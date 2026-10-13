@@ -36,20 +36,24 @@ use crate::{
 };
 
 const CLASS_NAME: PCWSTR = w!("TranslatorOverlayHud.v1");
-const PAD: i32 = 10;
-const BTN: i32 = 48;
-const GAP: i32 = 10;
-const STATUS_W: i32 = 280;
+// Fluent standard sizing, in 96 DPI epx: 40px targets, 8px between buttons,
+// 12px before the status label, 14px body text.
+const PAD: i32 = 8;
+const BTN: i32 = 40;
+const GAP: i32 = 8;
+const LABEL_GAP: i32 = 12;
+const STATUS_W: i32 = 200;
 const BAR_H: i32 = PAD * 2 + BTN;
-const BAR_W: i32 = PAD + BTN + GAP + BTN + GAP + STATUS_W + PAD;
-const FONT_PX: i32 = 20;
+const BAR_W: i32 = PAD + BTN + GAP + BTN + LABEL_GAP + STATUS_W + PAD;
+const FONT_PX: i32 = 14;
 
-/// Design pixels are the on-screen size at `base_dpi`. Scale is `dpi / base_dpi`.
+/// Design pixels are 96 DPI. On-screen size is `dpi / USER_DEFAULT_SCREEN_DPI`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HudLayout {
     pad: i32,
     btn: i32,
     gap: i32,
+    label_gap: i32,
     bar_w: i32,
     bar_h: i32,
     font_px: i32,
@@ -75,7 +79,7 @@ impl HudLayout {
     }
 
     fn status(self) -> SurfaceRect {
-        let x = self.pad + self.btn + self.gap + self.btn + self.gap;
+        let x = self.pad + self.btn + self.gap + self.btn + self.label_gap;
         SurfaceRect {
             x,
             y: self.pad,
@@ -85,24 +89,26 @@ impl HudLayout {
     }
 }
 
-fn scale_px(px: i32, dpi: u32, base_dpi: u32) -> i32 {
-    let base = i64::from(base_dpi.max(1));
+fn scale_px(px: i32, dpi: u32) -> i32 {
+    let base = i64::from(USER_DEFAULT_SCREEN_DPI);
     let v = (i64::from(px) * i64::from(dpi.max(1)) + base / 2) / base;
     i32::try_from(v).unwrap_or(i32::MAX).max(1)
 }
 
-fn hud_layout(dpi: u32, base_dpi: u32) -> HudLayout {
-    let pad = scale_px(PAD, dpi, base_dpi);
-    let btn = scale_px(BTN, dpi, base_dpi);
-    let gap = scale_px(GAP, dpi, base_dpi);
-    let status_w = scale_px(STATUS_W, dpi, base_dpi);
+fn hud_layout(dpi: u32) -> HudLayout {
+    let pad = scale_px(PAD, dpi);
+    let btn = scale_px(BTN, dpi);
+    let gap = scale_px(GAP, dpi);
+    let label_gap = scale_px(LABEL_GAP, dpi);
+    let status_w = scale_px(STATUS_W, dpi);
     HudLayout {
         pad,
         btn,
         gap,
-        bar_w: pad + btn + gap + btn + gap + status_w + pad,
+        label_gap,
+        bar_w: pad + btn + gap + btn + label_gap + status_w + pad,
         bar_h: pad * 2 + btn,
-        font_px: scale_px(FONT_PX, dpi, base_dpi),
+        font_px: scale_px(FONT_PX, dpi),
     }
 }
 
@@ -119,8 +125,6 @@ pub(crate) struct HudWindow {
     config: OverlayConfig,
     surface: DibSurface,
     hfont: HFONT,
-    /// DPI the design pixels already match. Do not scale those pixels by `dpi / 96`.
-    base_dpi: u32,
     dpi: u32,
     layout: HudLayout,
     snapshot: HudSnapshot,
@@ -162,10 +166,10 @@ impl HudWindow {
         }
         .map_err(|e| OverlayError::Other(format!("CreateWindowExW(hud): {e}")))?;
         unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as isize) };
-        let (x, y) = default_hud_origin();
-        let _ = unsafe { SetWindowPos(hwnd, None, x, y, BAR_W, BAR_H, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
         let dpi = window_dpi(hwnd);
-        let layout = hud_layout(dpi, dpi);
+        let layout = hud_layout(dpi);
+        let (x, y) = default_hud_origin(layout.bar_w);
+        let _ = unsafe { SetWindowPos(hwnd, None, x, y, layout.bar_w, layout.bar_h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
 
         let surface = match DibSurface::create() {
             Ok(s) => s,
@@ -174,7 +178,7 @@ impl HudWindow {
                 return Err(e);
             }
         };
-        let hfont = match text::create_segoe_font(FONT_PX) {
+        let hfont = match text::create_segoe_font(layout.font_px) {
             Ok(font) => font,
             Err(e) => {
                 drop(surface);
@@ -189,7 +193,6 @@ impl HudWindow {
             config: config.clone(),
             surface,
             hfont,
-            base_dpi: dpi,
             dpi,
             layout,
             snapshot: HudSnapshot {
@@ -332,7 +335,7 @@ impl HudWindow {
             return;
         }
         self.dpi = dpi;
-        self.layout = hud_layout(dpi, self.base_dpi);
+        self.layout = hud_layout(dpi);
         self.replace_font(self.layout.font_px);
         let (mut x, mut y) = self.window_origin();
         if !suggested.is_null() {
@@ -350,7 +353,7 @@ impl HudWindow {
         if size.is_null() {
             return false;
         }
-        let layout = hud_layout(dpi.max(1), self.base_dpi);
+        let layout = hud_layout(dpi.max(1));
         unsafe {
             (*size).cx = layout.bar_w;
             (*size).cy = layout.bar_h;
@@ -372,7 +375,7 @@ impl HudWindow {
     fn window_origin(&self) -> (i32, i32) {
         let mut wnd = RECT::default();
         if unsafe { GetWindowRect(self.hwnd, &mut wnd) }.is_err() {
-            return default_hud_origin();
+            return default_hud_origin(self.layout.bar_w);
         }
         (wnd.left, wnd.top)
     }
@@ -434,9 +437,9 @@ fn contains(r: SurfaceRect, x: i32, y: i32) -> bool {
     x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h
 }
 
-fn default_hud_origin() -> (i32, i32) {
+fn default_hud_origin(bar_w: i32) -> (i32, i32) {
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let x = (screen_w - BAR_W).max(0) / 2;
+    let x = (screen_w - bar_w).max(0) / 2;
     (x, 12)
 }
 
@@ -571,11 +574,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_stays_design_size_until_dpi_changes() {
-        let here = hud_layout(144, 144);
+    fn layout_scales_from_96_dpi() {
+        let here = hud_layout(USER_DEFAULT_SCREEN_DPI);
         assert_eq!((here.bar_w, here.bar_h, here.font_px), (BAR_W, BAR_H, FONT_PX));
-        let up = hud_layout(288, 144);
+        let up = hud_layout(USER_DEFAULT_SCREEN_DPI * 2);
         assert_eq!((up.bar_w, up.bar_h, up.font_px), (BAR_W * 2, BAR_H * 2, FONT_PX * 2));
+    }
+
+    #[test]
+    fn layout_rounds_fractional_dpi() {
+        // 14px at 125% is 17.5 and rounds to 18. At 175% it is 24.5 and rounds to 25.
+        let at_125 = hud_layout(120);
+        assert_eq!((at_125.pad, at_125.btn, at_125.gap, at_125.label_gap, at_125.font_px), (10, 50, 10, 15, 18));
+        assert_eq!((at_125.bar_w, at_125.bar_h), (395, 70));
+
+        let at_150 = hud_layout(144);
+        assert_eq!((at_150.pad, at_150.btn, at_150.gap, at_150.label_gap, at_150.font_px), (12, 60, 12, 18, 21));
+        assert_eq!((at_150.bar_w, at_150.bar_h), (474, 84));
+
+        let at_175 = hud_layout(168);
+        assert_eq!((at_175.pad, at_175.btn, at_175.gap, at_175.label_gap, at_175.font_px), (14, 70, 14, 21, 25));
+        assert_eq!((at_175.bar_w, at_175.bar_h), (553, 98));
     }
 
     #[test]
@@ -624,14 +643,16 @@ mod tests {
     }
 
     #[test]
-    fn dpi_change_scales_from_creation_dpi() {
+    fn dpi_change_scales_from_96_dpi() {
         let _lock = crate::host::win32::lock_hwnd_tests();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut hud = HudWindow::create(&OverlayConfig::default(), tx).expect("hud create");
-        assert_eq!(hud.surface.size(), (BAR_W, BAR_H));
-        let next = hud.base_dpi.saturating_mul(2);
+        let created = hud_layout(hud.dpi);
+        assert_eq!(hud.surface.size(), (created.bar_w, created.bar_h));
+        let next = hud.dpi.saturating_mul(2);
         hud.on_dpi_changed(next, std::ptr::null());
-        assert_eq!(hud.surface.size(), (BAR_W * 2, BAR_H * 2));
+        let scaled = hud_layout(next);
+        assert_eq!(hud.surface.size(), (scaled.bar_w, scaled.bar_h));
         hud.teardown();
     }
 }
