@@ -6,15 +6,19 @@ use tokio::sync::mpsc;
 use translator_core::OverlayConfig;
 use windows::{
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{DeleteObject, HFONT, ScreenToClient},
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetSystemMetrics,
-            GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassExW, SM_CXSCREEN,
-            SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-            SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_NCHITTEST, WNDCLASSEXW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+        UI::{
+            HiDpi::GetDpiForWindow,
+            WindowsAndMessaging::{
+                CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GWLP_USERDATA, GetSystemMetrics,
+                GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassExW, SM_CXSCREEN,
+                SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, USER_DEFAULT_SCREEN_DPI, UnregisterClassW, WM_CLOSE, WM_DESTROY,
+                WM_DPICHANGED, WM_GETDPISCALEDSIZE, WM_LBUTTONUP, WM_NCHITTEST, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+            },
         },
     },
     core::{PCWSTR, w},
@@ -40,12 +44,85 @@ const BAR_H: i32 = PAD * 2 + BTN;
 const BAR_W: i32 = PAD + BTN + GAP + BTN + GAP + STATUS_W + PAD;
 const FONT_PX: i32 = 20;
 
+/// Design pixels are the on-screen size at `base_dpi`. Scale is `dpi / base_dpi`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HudLayout {
+    pad: i32,
+    btn: i32,
+    gap: i32,
+    bar_w: i32,
+    bar_h: i32,
+    font_px: i32,
+}
+
+impl HudLayout {
+    fn primary(self) -> SurfaceRect {
+        SurfaceRect {
+            x: self.pad,
+            y: self.pad,
+            w: self.btn,
+            h: self.btn,
+        }
+    }
+
+    fn stop(self) -> SurfaceRect {
+        SurfaceRect {
+            x: self.pad + self.btn + self.gap,
+            y: self.pad,
+            w: self.btn,
+            h: self.btn,
+        }
+    }
+
+    fn status(self) -> SurfaceRect {
+        let x = self.pad + self.btn + self.gap + self.btn + self.gap;
+        SurfaceRect {
+            x,
+            y: self.pad,
+            w: (self.bar_w - x - self.pad).max(1),
+            h: self.btn,
+        }
+    }
+}
+
+fn scale_px(px: i32, dpi: u32, base_dpi: u32) -> i32 {
+    let base = i64::from(base_dpi.max(1));
+    let v = (i64::from(px) * i64::from(dpi.max(1)) + base / 2) / base;
+    i32::try_from(v).unwrap_or(i32::MAX).max(1)
+}
+
+fn hud_layout(dpi: u32, base_dpi: u32) -> HudLayout {
+    let pad = scale_px(PAD, dpi, base_dpi);
+    let btn = scale_px(BTN, dpi, base_dpi);
+    let gap = scale_px(GAP, dpi, base_dpi);
+    let status_w = scale_px(STATUS_W, dpi, base_dpi);
+    HudLayout {
+        pad,
+        btn,
+        gap,
+        bar_w: pad + btn + gap + btn + gap + status_w + pad,
+        bar_h: pad * 2 + btn,
+        font_px: scale_px(FONT_PX, dpi, base_dpi),
+    }
+}
+
+fn window_dpi(hwnd: HWND) -> u32 {
+    match unsafe { GetDpiForWindow(hwnd) } {
+        0 => USER_DEFAULT_SCREEN_DPI,
+        dpi => dpi,
+    }
+}
+
 pub(crate) struct HudWindow {
     hwnd: HWND,
     class_atom: u16,
     config: OverlayConfig,
     surface: DibSurface,
     hfont: HFONT,
+    /// DPI the design pixels already match. Do not scale those pixels by `dpi / 96`.
+    base_dpi: u32,
+    dpi: u32,
+    layout: HudLayout,
     snapshot: HudSnapshot,
     dismissed: bool,
     event_tx: mpsc::UnboundedSender<OverlayEvent>,
@@ -87,6 +164,8 @@ impl HudWindow {
         unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, WS_POPUP.0 as isize) };
         let (x, y) = default_hud_origin();
         let _ = unsafe { SetWindowPos(hwnd, None, x, y, BAR_W, BAR_H, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
+        let dpi = window_dpi(hwnd);
+        let layout = hud_layout(dpi, dpi);
 
         let surface = match DibSurface::create() {
             Ok(s) => s,
@@ -110,6 +189,9 @@ impl HudWindow {
             config: config.clone(),
             surface,
             hfont,
+            base_dpi: dpi,
+            dpi,
+            layout,
             snapshot: HudSnapshot {
                 label: String::new(),
                 primary: HudPrimary::Play,
@@ -209,49 +291,11 @@ impl HudWindow {
         self.hide();
     }
 
-    fn client_size(&self) -> (i32, i32) {
-        let mut client = RECT::default();
-        if unsafe { GetClientRect(self.hwnd, &mut client) }.is_err() {
-            return (BAR_W, BAR_H);
-        }
-        ((client.right - client.left).max(1), (client.bottom - client.top).max(1))
-    }
-
-    fn primary_rect() -> SurfaceRect {
-        SurfaceRect {
-            x: PAD,
-            y: PAD,
-            w: BTN,
-            h: BTN,
-        }
-    }
-
-    fn stop_rect() -> SurfaceRect {
-        SurfaceRect {
-            x: PAD + BTN + GAP,
-            y: PAD,
-            w: BTN,
-            h: BTN,
-        }
-    }
-
-    fn status_rect(w: i32, h: i32) -> SurfaceRect {
-        let x = PAD + BTN + GAP + BTN + GAP;
-        SurfaceRect {
-            x,
-            y: PAD,
-            w: (w - x - PAD).max(1),
-            h: (h - PAD * 2).max(1),
-        }
-    }
-
     fn hit_button(&self, pt: POINT) -> Option<OverlayEvent> {
-        let p = Self::primary_rect();
-        if contains(p, pt.x, pt.y) {
+        if contains(self.layout.primary(), pt.x, pt.y) {
             return self.snapshot.primary_enabled.then_some(OverlayEvent::HudPrimary);
         }
-        let s = Self::stop_rect();
-        if contains(s, pt.x, pt.y) {
+        if contains(self.layout.stop(), pt.x, pt.y) {
             return self.snapshot.stop_enabled.then_some(OverlayEvent::HudStop);
         }
         None
@@ -274,17 +318,68 @@ impl HudWindow {
         if !unsafe { ScreenToClient(self.hwnd, &mut pt) }.as_bool() {
             return LRESULT(HTCAPTION as isize);
         }
-        let p = Self::primary_rect();
-        let s = Self::stop_rect();
-        if contains(p, pt.x, pt.y) || contains(s, pt.x, pt.y) {
+        let layout = self.layout;
+        if contains(layout.primary(), pt.x, pt.y) || contains(layout.stop(), pt.x, pt.y) {
             LRESULT(HTCLIENT as isize)
         } else {
             LRESULT(HTCAPTION as isize)
         }
     }
 
+    fn on_dpi_changed(&mut self, dpi: u32, suggested: *const RECT) {
+        let dpi = dpi.max(1);
+        if dpi == self.dpi {
+            return;
+        }
+        self.dpi = dpi;
+        self.layout = hud_layout(dpi, self.base_dpi);
+        self.replace_font(self.layout.font_px);
+        let (mut x, mut y) = self.window_origin();
+        if !suggested.is_null() {
+            let rc = unsafe { *suggested };
+            x = rc.left;
+            y = rc.top;
+        }
+        let _ = unsafe { SetWindowPos(self.hwnd, None, x, y, self.layout.bar_w, self.layout.bar_h, SWP_NOZORDER | SWP_NOACTIVATE) };
+        if let Err(e) = self.repaint() {
+            tracing::warn!(error = %e, "hud dpi repaint failed");
+        }
+    }
+
+    fn on_get_dpi_scaled_size(&self, dpi: u32, size: *mut SIZE) -> bool {
+        if size.is_null() {
+            return false;
+        }
+        let layout = hud_layout(dpi.max(1), self.base_dpi);
+        unsafe {
+            (*size).cx = layout.bar_w;
+            (*size).cy = layout.bar_h;
+        }
+        true
+    }
+
+    fn replace_font(&mut self, px: i32) {
+        let Ok(font) = text::create_segoe_font(px) else {
+            tracing::warn!(px, "hud font recreate failed");
+            return;
+        };
+        if !self.hfont.is_invalid() {
+            let _ = unsafe { DeleteObject(self.hfont.into()) };
+        }
+        self.hfont = font;
+    }
+
+    fn window_origin(&self) -> (i32, i32) {
+        let mut wnd = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd, &mut wnd) }.is_err() {
+            return default_hud_origin();
+        }
+        (wnd.left, wnd.top)
+    }
+
     fn repaint(&mut self) -> Result<(), OverlayError> {
-        let (w, h) = self.client_size();
+        let layout = self.layout;
+        let (w, h) = (layout.bar_w, layout.bar_h);
         self.surface.ensure(w, h)?;
         let bg = draw::Rgba::from_argb(self.config.background_color_argb);
         let fg = draw::Rgba::from_argb(self.config.text_color_argb);
@@ -296,13 +391,13 @@ impl HudWindow {
                 .ok_or_else(|| OverlayError::Other("hud paint bitmap missing".into()))?;
             buf.fill(0);
             draw::fill_rect(buf, surface, SurfaceRect { x: 0, y: 0, w, h }, bg);
-            paint_button(buf, surface, Self::primary_rect(), fg, self.snapshot.primary_enabled, |buf, surface, r, c| {
+            paint_button(buf, surface, layout.primary(), fg, self.snapshot.primary_enabled, |buf, surface, r, c| {
                 match self.snapshot.primary {
                     HudPrimary::Play => paint_play(buf, surface, r, c),
                     HudPrimary::Pause => paint_pause(buf, surface, r, c),
                 }
             });
-            paint_button(buf, surface, Self::stop_rect(), fg, self.snapshot.stop_enabled, paint_stop);
+            paint_button(buf, surface, layout.stop(), fg, self.snapshot.stop_enabled, paint_stop);
         }
 
         let hdc = self.surface.hdc();
@@ -311,8 +406,8 @@ impl HudWindow {
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("hud paint bitmap missing".into()))?;
-        text::draw_text_label(hdc, hfont, buf, surface, Self::status_rect(w, h), &self.snapshot.label, LabelStyle {
-            font_px: FONT_PX,
+        text::draw_text_label(hdc, hfont, buf, surface, layout.status(), &self.snapshot.label, LabelStyle {
+            font_px: layout.font_px,
             color: fg,
             vcenter: true,
         })?;
@@ -400,9 +495,9 @@ fn paint_play(buf: &mut [u8], surface: draw::SurfaceSize, rect: SurfaceRect, col
 fn paint_pause(buf: &mut [u8], surface: draw::SurfaceSize, rect: SurfaceRect, color: Rgba) {
     let cx = rect.x + rect.w / 2;
     let cy = rect.y + rect.h / 2;
-    let bar_w = 3;
-    let bar_h = (rect.h / 3).max(8);
-    let gap = 3;
+    let bar_w = (rect.w / 16).max(2);
+    let bar_h = (rect.h / 3).max(bar_w * 2);
+    let gap = bar_w;
     draw::fill_rect(
         buf,
         surface,
@@ -449,6 +544,11 @@ unsafe extern "system" fn hud_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
     }
     let hud = unsafe { &mut *(ptr as *mut HudWindow) };
     match msg {
+        WM_GETDPISCALEDSIZE => LRESULT(i32::from(hud.on_get_dpi_scaled_size(wparam.0 as u32, lparam.0 as *mut SIZE)) as isize),
+        WM_DPICHANGED => {
+            hud.on_dpi_changed((wparam.0 as u32) & 0xFFFF, lparam.0 as *const RECT);
+            LRESULT(0)
+        }
         WM_NCHITTEST => hud.hit_test(lparam),
         WM_LBUTTONUP => {
             hud.on_click(lparam);
@@ -469,6 +569,14 @@ unsafe extern "system" fn hud_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_stays_design_size_until_dpi_changes() {
+        let here = hud_layout(144, 144);
+        assert_eq!((here.bar_w, here.bar_h, here.font_px), (BAR_W, BAR_H, FONT_PX));
+        let up = hud_layout(288, 144);
+        assert_eq!((up.bar_w, up.bar_h, up.font_px), (BAR_W * 2, BAR_H * 2, FONT_PX * 2));
+    }
 
     #[test]
     fn contains_button_rect() {
@@ -512,6 +620,18 @@ mod tests {
         assert!(!crate::host::win32::window_is_topmost(hud.hwnd), "HWND_NOTOPMOST should drop WS_EX_TOPMOST");
         hud.apply_snapshot(snap);
         assert!(crate::host::win32::window_is_topmost(hud.hwnd), "apply_snapshot should restore topmost");
+        hud.teardown();
+    }
+
+    #[test]
+    fn dpi_change_scales_from_creation_dpi() {
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut hud = HudWindow::create(&OverlayConfig::default(), tx).expect("hud create");
+        assert_eq!(hud.surface.size(), (BAR_W, BAR_H));
+        let next = hud.base_dpi.saturating_mul(2);
+        hud.on_dpi_changed(next, std::ptr::null());
+        assert_eq!(hud.surface.size(), (BAR_W * 2, BAR_H * 2));
         hud.teardown();
     }
 }
