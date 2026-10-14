@@ -3131,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "translator-app"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "parking_lot",
@@ -3156,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "translator-capture"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "thiserror",
@@ -3167,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "translator-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "serde",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "translator-ocr"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "image",
  "oar-ocr",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "translator-overlay"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "thiserror",
  "tokio",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "translator-translate"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "reqwest",
  "serde",
