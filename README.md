@@ -71,7 +71,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 ## 從原始碼建置
 
-需要 Rust 1.95+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.30（DirectML + WebGPU）：
+需要 Rust 1.95+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU）：
 
 ```powershell
 .\scripts\build-onnxruntime.ps1
@@ -79,7 +79,7 @@ cargo build --release -p translator-app
 .\scripts\package-portable.ps1
 ```
 
-產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（`translator-app.exe` 與 `lib/` 內的 `onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`、`dxil.dll`）。目標機器仍需 Windows App Runtime 2.4。
+產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（`translator-app.exe` 與 `lib/` 內的 `onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`）。目標機器仍需 Windows App Runtime 2.4。
 
 開發時格式與 lint：
 

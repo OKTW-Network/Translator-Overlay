@@ -11,7 +11,6 @@
     - lib/DirectML.dll          (DirectML EP)
     - lib/webgpu_dawn.dll       (WebGPU EP / Dawn)
     - lib/dxcompiler.dll        (Dawn D3D12 shader compiler)
-    - lib/dxil.dll              (DXIL validator used with dxcompiler)
 
   windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
   Target machines need Windows 11 21H2 (build 22000+) and Windows App Runtime 2.4.
@@ -93,11 +92,13 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Missing $ExePath — run without -SkipBuild or build first."
 }
 
-$SidecarDlls = @("onnxruntime.dll", "DirectML.dll", "webgpu_dawn.dll", "dxcompiler.dll", "dxil.dll")
+# cargo does not copy these. build-onnxruntime.ps1 stages them here.
+$OrtDir = Join-Path $Root "third_party\onnxruntime-win-x64"
+$SidecarDlls = @("onnxruntime.dll", "DirectML.dll", "webgpu_dawn.dll", "dxcompiler.dll")
 foreach ($name in $SidecarDlls) {
-    $src = Join-Path $ReleaseDir $name
+    $src = Join-Path $OrtDir $name
     if (-not (Test-Path -LiteralPath $src)) {
-        throw "Missing $name in $ReleaseDir (required by the ONNX Runtime DirectML/WebGPU build)."
+        throw "Missing $name in $OrtDir. Run scripts/build-onnxruntime.ps1 first."
     }
 }
 
@@ -113,7 +114,7 @@ Copy-Item -LiteralPath $ExePath -Destination (Join-Path $StageDir "translator-ap
 $LibDir = Join-Path $StageDir "lib"
 New-Item -ItemType Directory -Force -Path $LibDir | Out-Null
 foreach ($name in $SidecarDlls) {
-    Copy-Item -LiteralPath (Join-Path $ReleaseDir $name) -Destination (Join-Path $LibDir $name)
+    Copy-Item -LiteralPath (Join-Path $OrtDir $name) -Destination (Join-Path $LibDir $name)
 }
 
 $packReadme = @"

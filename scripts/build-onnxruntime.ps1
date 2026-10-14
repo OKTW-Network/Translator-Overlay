@@ -2,14 +2,13 @@ param([switch]$Force)
 
 $ErrorActionPreference = "Stop"
 
-$OrtTag = "v1.30.0"
+$OrtTag = "v1.31.0"
 $RequiredNames = @(
     "onnxruntime.dll",
     "onnxruntime.lib",
     "DirectML.dll",
     "webgpu_dawn.dll",
-    "dxcompiler.dll",
-    "dxil.dll"
+    "dxcompiler.dll"
 )
 
 function Test-Staged {
@@ -29,7 +28,7 @@ function Test-Staged {
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $OutDir = Join-Path $Root "third_party\onnxruntime-win-x64"
 $SourceDir = Join-Path $Root "third_party\onnxruntime-src"
-# ORT 1.30 Dawn checks DXC out at third_party/directx-shader-compiler/src
+# Dawn checks DXC out at third_party/directx-shader-compiler/src
 # (1.28 used third_party/dxc). That extra path under GHA
 # D:\a\Translator-Overlay\Translator-Overlay\... overflows MAX_PATH, so
 # utils/llvm-build/llvm-build is missing and CMake reports ENOENT.
@@ -117,11 +116,17 @@ try {
     }
 
     Write-Host "==> Building ONNX Runtime (DirectML + WebGPU)..."
-    # Flags match pykeio/ort-artifacts Windows WebGPU (ORT 1.30 option names).
+    # pykeio/ort-artifacts Windows WebGPU (--webgpu --vs2026) sets Dawn as a
+    # shared library and turns delay-load off. 1.31 dropped
+    # onnxruntime_BUILD_WEBGPU_EP_STATIC_LIB; --use_webgpu is that internal EP.
+    # 1.31 build.bat no longer passes --no_telemetry.
+    # Their job is a static library. This one stays shared: the app delay-loads
+    # onnxruntime.dll, with DirectML and WebGPU in the same build.
     $buildArgs = @(
         "--config", "Release",
         "--parallel",
         "--skip_tests",
+        "--no_telemetry",
         "--use_dml",
         "--use_webgpu",
         "--build_shared_lib",
