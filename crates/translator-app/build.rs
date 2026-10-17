@@ -5,6 +5,7 @@ use std::{
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
+    println!("cargo:rerun-if-changed=locales");
     println!("cargo:rustc-link-arg=/DELAYLOAD:onnxruntime.dll");
     println!("cargo:rustc-link-lib=delayimp");
 

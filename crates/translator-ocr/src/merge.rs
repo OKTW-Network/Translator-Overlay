@@ -7,7 +7,7 @@
 //! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
 //! 4. **Reading order** — row-major or column-major join / emit order.
 
-use translator_core::{LineMergeConfig, LineMergeOrder, OcrBlock, Rect};
+use translator_core::{LineJoin, LineMergeConfig, LineMergeOrder, OcrBlock, Rect};
 
 use crate::reindex;
 
@@ -30,7 +30,7 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, fram
 
     if merge_all {
         let members: Vec<usize> = (0..blocks.len()).collect();
-        return reindex(vec![assemble_group(&blocks, members, cfg, frame)]);
+        return reindex(vec![assemble_group(&blocks, members, cfg, frame, None)]);
     }
 
     let rows = join_nearest(blocks, cfg, frame, Axis::X);
@@ -124,7 +124,7 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis
     groups
         .into_iter()
         .filter(|g| !g.is_empty())
-        .map(|members| assemble_group(&blocks, members, cfg, frame))
+        .map(|members| assemble_group(&blocks, members, cfg, frame, Some(axis)))
         .collect()
 }
 
@@ -154,7 +154,7 @@ fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
     }
 }
 
-fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeConfig, frame: Frame) -> OcrBlock {
+fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeConfig, frame: Frame, along: Option<Axis>) -> OcrBlock {
     sort_indices(blocks, &mut members, cfg, frame);
 
     let mut text = String::new();
@@ -167,11 +167,27 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
 
     for (k, &idx) in members.iter().enumerate() {
         let b = &blocks[idx];
-        text = if k == 0 {
-            b.text.clone()
+        if k == 0 {
+            text = b.text.clone();
         } else {
-            join_text(&text, &b.text, cfg.join_with_space)
-        };
+            // X-pass is already same-row (stagger included). Y-pass is stacked.
+            // merge_all mixes both: still going right *and* overlap on Y.
+            let prev = &blocks[members[k - 1]];
+            let same_row = match along {
+                Some(Axis::X) => true,
+                Some(Axis::Y) => false,
+                None => {
+                    b.bbox.x >= prev.bbox.x + prev.bbox.width * 0.25
+                        && (prev.bbox.y + prev.bbox.height).min(b.bbox.y + b.bbox.height) > prev.bbox.y.max(b.bbox.y)
+                }
+            };
+            let join = if cfg.join == LineJoin::Newline && same_row {
+                LineJoin::Space
+            } else {
+                cfg.join
+            };
+            text = join_text(&text, &b.text, join);
+        }
         conf += b.confidence;
         x0 = x0.min(b.bbox.x);
         y0 = y0.min(b.bbox.y);
@@ -332,7 +348,7 @@ fn median_f32(mut vals: Vec<f32>) -> f32 {
     vals[vals.len() / 2]
 }
 
-fn join_text(a: &str, b: &str, with_space: bool) -> String {
+fn join_text(a: &str, b: &str, join: LineJoin) -> String {
     let a = a.trim_end();
     let b = b.trim_start();
     if a.is_empty() {
@@ -341,7 +357,11 @@ fn join_text(a: &str, b: &str, with_space: bool) -> String {
     if b.is_empty() {
         return a.to_string();
     }
-    if with_space { format!("{a} {b}") } else { format!("{a}{b}") }
+    match join {
+        LineJoin::None => format!("{a}{b}"),
+        LineJoin::Space => format!("{a} {b}"),
+        LineJoin::Newline => format!("{a}\n{b}"),
+    }
 }
 
 #[cfg(test)]
@@ -376,10 +396,18 @@ mod tests {
         let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "Hello world");
+        assert_eq!(merged[0].text, "Hello\nworld");
         assert!(merged[0].bbox.height <= 22.0, "h={}", merged[0].bbox.height);
         assert_eq!(merged[0].source_lines, 2, "merged block tracks line count");
         assert!((merged[0].source_height - 40.0).abs() < 0.5, "cover span should be the ink union, got {}", merged[0].source_height);
+    }
+
+    #[test]
+    fn stacked_12px_lines_join_with_newline_on_1080p() {
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 80.0, 12.0), line(1, "world", 10.0, 22.0, 70.0, 12.0)];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hello\nworld");
     }
 
     #[test]
@@ -394,15 +422,26 @@ mod tests {
     }
 
     #[test]
-    fn join_without_space_concatenates() {
+    fn join_none_concatenates() {
         let cfg = LineMergeConfig {
-            join_with_space: false,
+            join: LineJoin::None,
             ..Default::default()
         };
         let blocks = vec![line(0, "甲乙", 10.0, 10.0, 100.0, 20.0), line(1, "丙丁", 10.0, 34.0, 80.0, 20.0)];
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "甲乙丙丁");
+    }
+
+    #[test]
+    fn join_space_inserts_a_space() {
+        let cfg = LineMergeConfig {
+            join: LineJoin::Space,
+            ..Default::default()
+        };
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
+        let merged = merge_with(blocks, cfg, false);
+        assert_eq!(merged[0].text, "Hello world");
     }
 
     #[test]
@@ -427,7 +466,7 @@ mod tests {
         ];
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "short much longer body");
+        assert_eq!(merged[0].text, "short\nmuch longer body");
     }
 
     #[test]
@@ -452,7 +491,7 @@ mod tests {
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
-        assert_eq!(merged[0].text, "Hi there this line is long wraps.");
+        assert_eq!(merged[0].text, "Hi there this line is long\nwraps.");
         assert_eq!(merged[1].text, "Next paragraph here");
     }
 
@@ -471,7 +510,7 @@ mod tests {
         ];
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "Hi there this line is long wraps. Next paragraph here");
+        assert_eq!(merged[0].text, "Hi there this line is long\nwraps.\nNext paragraph here");
     }
 
     #[test]
@@ -484,7 +523,7 @@ mod tests {
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
-        assert_eq!(merged[0].text, "Long first line of paragraph short wrap");
+        assert_eq!(merged[0].text, "Long first line of paragraph\nshort wrap");
         assert_eq!(merged[1].text, "Long next paragraph line");
     }
 
@@ -498,7 +537,7 @@ mod tests {
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
-        assert_eq!(merged[0].text, "This is a long first line middle wraps shorter last line a bit longer.");
+        assert_eq!(merged[0].text, "This is a long first line\nmiddle wraps shorter\nlast line a bit longer.");
     }
 
     #[test]
@@ -514,7 +553,7 @@ mod tests {
         assert_eq!(merged.len(), 1, "{:?}", merged.iter().map(|b| &b.text).collect::<Vec<_>>());
         assert_eq!(
             merged[0].text,
-            "Line one of a long paragraph Line two of a long paragraph Line three of a long paragraph Line four of a long paragraph"
+            "Line one of a long paragraph\nLine two of a long paragraph\nLine three of a long paragraph\nLine four of a long paragraph"
         );
     }
 
@@ -528,7 +567,7 @@ mod tests {
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "This is a long paragraph that wraps across three lines.");
+        assert_eq!(merged[0].text, "This is a long\nparagraph that wraps\nacross three lines.");
         assert!((merged[0].bbox.height - h).abs() < 1.0);
     }
 
@@ -542,6 +581,14 @@ mod tests {
     #[test]
     fn merges_side_by_side_when_gap_small() {
         let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 55.0, 12.0, 40.0, 18.0)];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Left Right");
+    }
+
+    #[test]
+    fn merges_side_by_side_when_vertically_staggered() {
+        let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 55.0, 20.0, 40.0, 18.0)];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Left Right");
@@ -618,7 +665,7 @@ mod tests {
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].text, "Line one Line two");
+        assert_eq!(merged[0].text, "Line one\nLine two");
         assert_eq!(merged[1].text, "Next block");
     }
 
@@ -633,8 +680,8 @@ mod tests {
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 2);
         let texts: Vec<_> = merged.iter().map(|b| b.text.as_str()).collect();
-        assert!(texts.contains(&"L1 L2"));
-        assert!(texts.contains(&"R1 R2"));
+        assert!(texts.contains(&"L1\nL2"));
+        assert!(texts.contains(&"R1\nR2"));
     }
 
     #[test]
@@ -647,7 +694,7 @@ mod tests {
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].text, "L1 L2");
+        assert_eq!(merged[0].text, "L1\nL2");
     }
 
     #[test]
@@ -674,7 +721,7 @@ mod tests {
         let blocks = vec![line(0, "A", 100.0, 10.0, 15.0, 18.0), line(1, "B", 110.0, 32.0, 200.0, 18.0)];
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A B");
+        assert_eq!(merged[0].text, "A\nB");
     }
 
     #[test]
@@ -759,7 +806,7 @@ mod tests {
         ];
         let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A C B D");
+        assert_eq!(merged[0].text, "A\nC\nB\nD");
     }
 
     #[test]
@@ -772,6 +819,23 @@ mod tests {
         ];
         let merged = merge_with(blocks, LineMergeConfig::default(), true);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A B C D");
+        assert_eq!(merged[0].text, "A B\nC D");
+    }
+
+    #[test]
+    fn whole_region_stacked_12px_lines_join_with_newline() {
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 80.0, 12.0), line(1, "world", 10.0, 22.0, 70.0, 12.0)];
+        let merged = merge_with(blocks, LineMergeConfig::default(), true);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hello\nworld");
+    }
+
+    #[test]
+    fn whole_region_padded_wrap_joins_with_newline() {
+        // 18px OCR boxes on 16px pitch overlap on Y; same x is still a wrap.
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 10.0, 26.0, 90.0, 18.0)];
+        let merged = merge_with(blocks, LineMergeConfig::default(), true);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hello\nworld");
     }
 }

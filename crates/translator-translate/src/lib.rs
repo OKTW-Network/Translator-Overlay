@@ -245,12 +245,13 @@ pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
          Start with {{\"b\": and include every input id, in the same order:\n\
          {{\"b\":[[id,\"translation\"],...]}}\n\
          Keep the same ids. Do not drop, merge, split, or invent ids.\n\
-         Escape quotes and backslashes inside strings. No trailing commas.\n\
+         Escape quotes and backslashes inside strings. Write a line break as \\n. No trailing commas.\n\
          \n\
          Translation:\n\
          - Write natural {dst}. Match the source register: short UI labels stay short; dialogue stays spoken.\n\
          - Prefer concise wording that fits the original on-screen space. Do not pad or explain.\n\
          - Translate each block on its own. Blocks are separate screen regions, not one paragraph.\n\
+         - Keep line breaks that are already in the source.\n\
          - Keep proper nouns, character names, titles, and recurring UI terms consistent with earlier turns. Leave them untranslated when that is conventional in {dst}.\n\
          - If a block is already {dst}, copy it through unchanged.\n\
          - Source may contain OCR errors (wrong glyphs, missing punctuation, glued words). Recover the intended wording when it is obvious; do not invent missing content.\n\
@@ -508,15 +509,22 @@ fn parse_json_string_prefix(s: &str) -> Option<(String, Option<&str>)> {
             continue;
         }
         if b == b'"' {
-            let text = serde_json::from_str(&s[..=i]).ok()?;
+            let text = unescape_json_quoted(&s[..=i])?;
             return Some((text, Some(&s[i + 1..])));
         }
         i += 1;
     }
     // Still open: close it to unescape what has arrived. A `\u` escape cut mid-way stays raw.
     let open = &s[..bytes.len() - usize::from(escape)];
-    let text = serde_json::from_str(&format!("{open}\"")).unwrap_or_else(|_| open[1..].to_string());
+    let text = unescape_json_quoted(&format!("{open}\"")).unwrap_or_else(|| open[1..].to_string());
     Some((text, None))
+}
+
+/// Models sometimes put a real newline inside a JSON string. serde_json rejects that.
+fn unescape_json_quoted(quoted: &str) -> Option<String> {
+    serde_json::from_str(quoted)
+        .ok()
+        .or_else(|| serde_json::from_str(&quoted.replace('\n', "\\n").replace('\r', "\\r")).ok())
 }
 
 /// Fence-strip plus balanced `{...}` extraction (ignore prose around JSON).
@@ -1212,6 +1220,9 @@ mod tests {
         assert_eq!(peek_translation_pairs(r#"{"b":[[1,"T"],[2,"Wor"#), [(1, "T".into()), (2, "Wor".into())]);
         assert!(merge_translations(&source, r#"{"b":[[1,"Wor"#).is_err());
 
+        let out = merge_translations(&source, "{\"b\":[[1,\"你好\n世界\"],[2,\"U\"]]}").unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].translation, "你好\n世界");
         let out = merge_translations(&source, r#"{"b":[[1,"T"],[2,"U"]]}"#).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[1].translation, "U");
@@ -1253,6 +1264,8 @@ mod tests {
         let default = default_system_prompt(&TranslationConfig::default());
         assert!(default.contains(r#"{"b":[[id,"translation"],...]}"#), "{default}");
         assert!(default.contains("台灣正體"), "{default}");
+        assert!(default.contains("Keep line breaks that are already in the source."), "{default}");
+        assert!(default.contains("Write a line break as \\n."), "{default}");
 
         let ja_en = TranslationConfig {
             source_lang: "ja".into(),
@@ -1306,6 +1319,7 @@ mod tests {
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"#), [(0, "A".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"A\"B"#), [(0, "A\"B".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"a\nb"#), [(0, "a\nb".into())]);
+        assert_eq!(peek_translation_pairs("{\"b\":[[0,\"a\nb\"]]}"), [(0, "a\nb".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[0,"x\u00"#), [(0, "x\\u00".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[2,"X"],[2,"Y"]]}"#), [(2, "X".into()), (2, "Y".into())]);
         assert!(peek_translation_pairs(r#"{"b":[[0,"#).is_empty());

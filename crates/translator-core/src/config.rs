@@ -475,6 +475,19 @@ pub enum LineMergeOrder {
     LeftToRightTopToBottom,
 }
 
+/// What to put between lines inside a merged block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineJoin {
+    /// Nothing. The lines are glued together.
+    None,
+    /// A single space.
+    Space,
+    /// A line break.
+    #[default]
+    Newline,
+}
+
 /// Tunable multi-line OCR merge (geometry + join style).
 ///
 /// Distance thresholds are fractions of the **full capture frame** (not line
@@ -508,8 +521,8 @@ pub struct LineMergeConfig {
     /// When [`Self::reject_short_long`] is on, a shorter upper line stays separate
     /// if `(w_lower − w_upper) / w_lower` is at least this.
     pub width_delta_ratio: f32,
-    /// Insert a space between joined lines (`false` concatenates).
-    pub join_with_space: bool,
+    /// Inserted between joined lines.
+    pub join: LineJoin,
 }
 
 impl Default for LineMergeConfig {
@@ -528,7 +541,7 @@ impl Default for LineMergeConfig {
             below_mid_ratio: 0.25,
             reject_short_long: true,
             width_delta_ratio: 0.25,
-            join_with_space: true,
+            join: LineJoin::default(),
         }
     }
 }
@@ -938,8 +951,18 @@ align_overlap_ratio = 0.9
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
         assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
         assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
-        assert!(config.ocr.line_merge.join_with_space);
+        assert_eq!(config.ocr.line_merge.join, LineJoin::Newline);
         assert!(config.ocr.line_merge.reject_short_long);
+    }
+
+    #[test]
+    fn line_join_parses_and_defaults_to_newline() {
+        let omitted: AppConfig = toml::from_str("[ocr.line_merge]\nenabled = true\n").unwrap();
+        assert_eq!(omitted.ocr.line_merge.join, LineJoin::Newline);
+        for (raw, join) in [("none", LineJoin::None), ("space", LineJoin::Space), ("newline", LineJoin::Newline)] {
+            let config: AppConfig = toml::from_str(&format!("[ocr.line_merge]\njoin = \"{raw}\"\n")).unwrap();
+            assert_eq!(config.ocr.line_merge.join, join);
+        }
     }
 
     #[test]
@@ -1059,7 +1082,7 @@ join_with_space = false
 "#;
         let config = AppConfig::from_toml_lenient(text).unwrap();
         assert!(!config.ocr.line_merge.enabled);
-        assert!(!config.ocr.line_merge.join_with_space);
+        assert_eq!(config.ocr.line_merge.join, LineJoin::Newline, "legacy join_with_space is ignored");
         assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
     }
 

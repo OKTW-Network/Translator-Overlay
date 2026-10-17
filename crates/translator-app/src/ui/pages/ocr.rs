@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rust_i18n::t;
-use translator_core::{LineMergeConfig, LineMergeOrder, ModelTier, OcrDevice};
+use translator_core::{LineJoin, LineMergeConfig, LineMergeOrder, ModelTier, OcrDevice};
 use windows_reactor::{
-    ChildrenControl, HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel, TooltipExt, VerticalAlignment, View,
+    ChildrenControl, ComboBox, HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel, TooltipExt, VerticalAlignment,
+    View,
 };
 
 use crate::ui::{
@@ -284,14 +285,33 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 }
             },
         ),
-        card_toggle("ocr-merge-join-space", t!("ocr.join_space"), Some(&t!("ocr.join_space_desc")), ocr.line_merge.join_with_space, {
-            let cx = cx.clone();
-            move |v| {
-                cx.with_mut(|ui| {
-                    ui.draft.ocr.line_merge.join_with_space = v;
-                    mark_dirty(ui);
-                });
-            }
+        settings_card("ocr-merge-join", t!("ocr.join"), Some(&t!("ocr.join_desc")), {
+            ComboBox::new()
+                .items_source(vec![
+                    t!("ocr.join_none").into_owned(),
+                    t!("ocr.join_space").into_owned(),
+                    t!("ocr.join_newline").into_owned(),
+                ])
+                .selected_index(Some(ocr.line_merge.join as usize))
+                .on_selection_changed({
+                    let cx = cx.clone();
+                    move |idx: Option<usize>| {
+                        let choice = match idx {
+                            Some(0) => LineJoin::None,
+                            Some(1) => LineJoin::Space,
+                            Some(2) => LineJoin::Newline,
+                            _ => return,
+                        };
+                        cx.with_mut(|ui| {
+                            if ui.draft.ocr.line_merge.join != choice {
+                                ui.draft.ocr.line_merge.join = choice;
+                                mark_dirty(ui);
+                            }
+                        });
+                    }
+                })
+                .width(160.0)
+                .vertical_alignment(VerticalAlignment::Center)
         }),
     ));
 
