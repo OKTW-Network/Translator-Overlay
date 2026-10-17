@@ -133,6 +133,7 @@ $packReadme = @"
 3. Configure API key in the UI and Save.
 
 OCR DLLs live in lib/. config.toml and models/ are created next to the executable on first run.
+Logs: translator-app.log (this run) and translator-app.prev.log (previous run).
 "@
 Set-Content -LiteralPath (Join-Path $StageDir "README.txt") -Value $packReadme -Encoding utf8
 

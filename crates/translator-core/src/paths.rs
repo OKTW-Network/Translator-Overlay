@@ -32,6 +32,16 @@ pub fn config_path() -> Result<PathBuf, PathError> {
     Ok(exe_dir()?.join("config.toml"))
 }
 
+/// Path to this run's log next to the executable.
+pub fn log_path() -> Result<PathBuf, PathError> {
+    Ok(exe_dir()?.join("translator-app.log"))
+}
+
+/// Path to the previous run's log next to the executable.
+pub fn prev_log_path() -> Result<PathBuf, PathError> {
+    Ok(exe_dir()?.join("translator-app.prev.log"))
+}
+
 /// Path to `region-presets.toml` next to the executable.
 pub fn region_presets_path() -> Result<PathBuf, PathError> {
     Ok(exe_dir()?.join("region-presets.toml"))

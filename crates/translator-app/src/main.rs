@@ -1,5 +1,7 @@
 //! Translator Overlay — WinUI 3 control app (windows-reactor).
 
+#![windows_subsystem = "windows"]
+
 mod attention;
 mod hotkey;
 mod pipeline;
@@ -9,15 +11,16 @@ mod ui;
 rust_i18n::i18n!("locales", fallback = "en");
 
 use std::{
-    env,
+    env, fs,
+    io::{self, Write},
     os::windows::ffi::OsStrExt,
     process,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use parking_lot::RwLock;
 use tracing::{error, info};
-use translator_core::{AppConfig, AppState, UiLanguage, config_path};
+use translator_core::{AppConfig, AppState, UiLanguage, config_path, log_path, prev_log_path};
 use windows::{
     Win32::{
         System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW},
@@ -46,12 +49,7 @@ async fn main() {
     // set an awareness, which is fine.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn")),
-        )
-        .init();
+    init_tracing();
 
     info!("Translator Overlay starting");
 
@@ -104,6 +102,39 @@ async fn main() {
         error!(error = %e, "App::run_component failed");
         process::exit(1);
     }
+}
+
+fn init_tracing() {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn"));
+    let file = log_path().ok().and_then(|current| {
+        if let Ok(previous) = prev_log_path()
+            && current.exists()
+        {
+            let _ = fs::remove_file(&previous);
+            let _ = fs::rename(&current, &previous);
+        }
+        fs::File::create(current).ok()
+    });
+    let subscriber = tracing_subscriber::fmt().with_env_filter(env_filter).with_ansi(false);
+    match file {
+        Some(file) => subscriber.with_writer(Mutex::new(file)).init(),
+        None => subscriber.init(),
+    }
+    std::panic::set_hook(Box::new(|info| {
+        let mut msg = format!("panic: {info}\n");
+        let bt = std::backtrace::Backtrace::capture();
+        if bt.status() == std::backtrace::BacktraceStatus::Captured {
+            msg.push_str(&format!("{bt}\n"));
+        }
+        if let Ok(path) = log_path()
+            && let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = file.write_all(msg.as_bytes());
+            let _ = file.flush();
+        }
+        let _ = io::stderr().write_all(msg.as_bytes());
+    }));
 }
 
 /// Load our ORT before WinUI maps Windows App Runtime's copy.
