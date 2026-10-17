@@ -6,9 +6,10 @@ use parking_lot::Mutex;
 use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
-    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, DictionaryPair, HotkeyAction, NormRect, PipelineStatus, RegionPreset,
-    RegionPresetFile, UiLanguage, api_profiles_path, config_path, delete_profile, dictionaries_dir, format_argb_hex,
-    list_dictionary_names_default, load_profile_pairs, parse_argb_hex, region_presets_path, sanitize_pairs, save_profile_pairs,
+    ApiConfig, ApiProfile, ApiProfileFile, AppConfig, DictionaryPair, HotkeyAction, NormRect, OVERLAY_FONT_PX_DEFAULT, OVERLAY_FONT_PX_MAX,
+    OVERLAY_FONT_PX_MIN, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage, api_profiles_path, config_path, delete_profile,
+    dictionaries_dir, format_argb_hex, list_dictionary_names_default, load_profile_pairs, parse_argb_hex, region_presets_path,
+    sanitize_pairs, save_profile_pairs,
 };
 use windows_reactor::LocalSender;
 
@@ -324,6 +325,9 @@ pub struct UiShared {
     pub optional: Box<OptionalApiState>,
     pub text_argb_str: String,
     pub bg_argb_str: String,
+    /// Overlay caption size slider (kept while the override toggle is off).
+    pub overlay_font_val: f64,
+    pub overlay_font_enabled: bool,
     /// ColorPicker panel open (text / background). Only one should be true.
     pub text_color_picker_open: bool,
     pub bg_color_picker_open: bool,
@@ -359,6 +363,8 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
     let draft = state.read().config.clone();
     let optional = optional_api_state(&draft);
     let (text_argb_str, bg_argb_str) = overlay_color_strings(&draft);
+    let overlay_font_enabled = draft.overlay.font_px.is_some();
+    let overlay_font_val = f64::from(draft.overlay.font_px.unwrap_or(OVERLAY_FONT_PX_DEFAULT));
     let (region_presets, preset_load_error) = region_presets_path()
         .map_err(|e| t!("err.load_region_presets", error = e.to_string()))
         .and_then(|path| RegionPresetFile::load_or_empty_at(&path).map_err(|e| t!("err.load_region_presets", error = e.to_string())))
@@ -380,6 +386,8 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         optional: Box::new(optional),
         text_argb_str,
         bg_argb_str,
+        overlay_font_val,
+        overlay_font_enabled,
         text_color_picker_open: false,
         bg_color_picker_open: false,
         api_key_revealed: false,
@@ -609,6 +617,8 @@ pub fn reload_draft_from_state(ui: &mut UiShared) {
     let (ta, ba) = overlay_color_strings(&ui.draft);
     ui.text_argb_str = ta;
     ui.bg_argb_str = ba;
+    ui.overlay_font_enabled = ui.draft.overlay.font_px.is_some();
+    ui.overlay_font_val = f64::from(ui.draft.overlay.font_px.unwrap_or(OVERLAY_FONT_PX_DEFAULT));
 }
 
 pub fn apply_optional_from_config(ui: &mut UiShared) {
@@ -646,6 +656,15 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
     if let Some(v) = parse_argb_hex(&ui.bg_argb_str) {
         cfg.overlay.background_color_argb = v;
     }
+    cfg.overlay.font_px = if ui.overlay_font_enabled {
+        Some(
+            ui.overlay_font_val
+                .round()
+                .clamp(f64::from(OVERLAY_FONT_PX_MIN), f64::from(OVERLAY_FONT_PX_MAX)) as u32,
+        )
+    } else {
+        None
+    };
     cfg
 }
 

@@ -107,7 +107,8 @@ impl OverlayHost {
     ///
     /// - Merged paragraph (`source_lines > 1`): lock width to OCR column; wrap.
     /// - Single line: shrink font (down to ~70%) to fit source width, then allow
-    ///   width growth up to 1.75x if the translation is still longer.
+    ///   width growth up to 1.75x if the translation is still longer. A user
+    ///   `font_px` override skips the shrink.
     /// - Height is at least `source_span_h` so a short translation still covers
     ///   every original line.
     fn layout_label(
@@ -120,20 +121,26 @@ impl OverlayHost {
     ) -> Result<(SurfaceRect, i32), OverlayError> {
         let max_w = (surface.width - base.x).max(1);
         let source_w = base.w.clamp(1, max_w);
-        let mut font_px = self.fit_font_to_source_box(base)?;
+        let override_px = self.config.font_px_clamped();
+        let mut font_px = match override_px {
+            Some(px) => px,
+            None => self.fit_font_to_source_box(base)?,
+        };
         let min_h = source_span_h.max(base.h);
 
         if source_lines <= 1 {
             // 1) Shrink font so the translation can stay one line inside source_w.
-            let min_font = ((font_px as f32) * 0.70).round().max(8.0) as i32;
-            loop {
-                let pad = label_pad(font_px);
-                let natural = self.measure_single_line(text, font_px)?;
-                let need_w = natural.0 + pad * 2;
-                if need_w <= source_w || font_px <= min_font {
-                    break;
+            if override_px.is_none() {
+                let min_font = ((font_px as f32) * 0.70).round().max(8.0) as i32;
+                loop {
+                    let pad = label_pad(font_px);
+                    let natural = self.measure_single_line(text, font_px)?;
+                    let need_w = natural.0 + pad * 2;
+                    if need_w <= source_w || font_px <= min_font {
+                        break;
+                    }
+                    font_px = (font_px - 1).max(min_font);
                 }
-                font_px = (font_px - 1).max(min_font);
             }
 
             // 2) If still wider than source at min font, grow width (cap 1.75×).

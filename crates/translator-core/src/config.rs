@@ -575,6 +575,9 @@ pub struct OverlayConfig {
     pub hud_enabled: bool,
     /// Translation-window font size in pixels (Segoe UI). Clamped when applied.
     pub reader_font_px: u32,
+    /// Overlay caption size in pixels. `None` = fit to the source OCR box.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_px: Option<u32>,
     /// Text colour including alpha (`#AARRGGBB` in config.toml).
     #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
     pub text_color_argb: u32,
@@ -590,6 +593,7 @@ impl Default for OverlayConfig {
             reader_enabled: false,
             hud_enabled: false,
             reader_font_px: READER_FONT_PX_DEFAULT,
+            font_px: None,
             text_color_argb: 0xFFFF_FFFF,
             background_color_argb: 0xC800_0000,
         }
@@ -602,11 +606,22 @@ pub const READER_FONT_PX_MIN: u32 = 8;
 pub const READER_FONT_PX_MAX: u32 = 72;
 /// Default translation-window font.
 pub const READER_FONT_PX_DEFAULT: u32 = 20;
+/// Smallest overlay caption size when the user overrides auto-fit.
+pub const OVERLAY_FONT_PX_MIN: u32 = 8;
+/// Largest overlay caption size when the user overrides auto-fit.
+pub const OVERLAY_FONT_PX_MAX: u32 = 72;
+/// Slider value shown when the overlay caption override is first turned on.
+pub const OVERLAY_FONT_PX_DEFAULT: u32 = 20;
 
 impl OverlayConfig {
     /// Font size used by the translation window (clamped).
     pub fn reader_font_px_clamped(&self) -> i32 {
         self.reader_font_px.clamp(READER_FONT_PX_MIN, READER_FONT_PX_MAX) as i32
+    }
+
+    /// Overlay caption size when the user overrode auto-fit (clamped).
+    pub fn font_px_clamped(&self) -> Option<i32> {
+        self.font_px.map(|px| px.clamp(OVERLAY_FONT_PX_MIN, OVERLAY_FONT_PX_MAX) as i32)
     }
 }
 
@@ -1044,6 +1059,39 @@ text_color_argb = "#FFFFFFFF"
         assert!(!config.overlay.reader_enabled);
         assert!(!config.overlay.hud_enabled);
         assert_eq!(config.overlay.reader_font_px, READER_FONT_PX_DEFAULT);
+        assert_eq!(config.overlay.font_px, None);
+    }
+
+    #[test]
+    fn overlay_font_px_optional_roundtrip_and_clamp() {
+        let omitted: AppConfig = toml::from_str("[overlay]\nenabled = true\n").unwrap();
+        assert_eq!(omitted.overlay.font_px, None);
+        let dumped = toml::to_string(&AppConfig::default()).unwrap();
+        assert!(
+            !dumped.lines().any(|line| line.trim_start().starts_with("font_px")),
+            "unset overlay font_px must be omitted, got:\n{dumped}"
+        );
+
+        let set: AppConfig = toml::from_str("[overlay]\nfont_px = 18\n").unwrap();
+        assert_eq!(set.overlay.font_px, Some(18));
+        let mut stored = AppConfig::default();
+        stored.overlay.font_px = Some(18);
+        let text = toml::to_string(&stored).unwrap();
+        assert!(text.contains("font_px = 18"), "got:\n{text}");
+
+        let mut overlay = OverlayConfig {
+            font_px: Some(0),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(overlay.font_px_clamped(), Some(OVERLAY_FONT_PX_MIN as i32));
+        overlay.font_px = Some(200);
+        assert_eq!(overlay.font_px_clamped(), Some(OVERLAY_FONT_PX_MAX as i32));
+        overlay.font_px = None;
+        assert_eq!(overlay.font_px_clamped(), None);
+
+        let bad = AppConfig::from_toml_lenient("[overlay]\nfont_px = \"nope\"\nenabled = false\n").unwrap();
+        assert_eq!(bad.overlay.font_px, None);
+        assert!(!bad.overlay.enabled);
     }
 
     #[test]
