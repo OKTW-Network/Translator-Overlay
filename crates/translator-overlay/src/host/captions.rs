@@ -58,7 +58,7 @@ impl OverlayHost {
                 .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
             buf.fill(0);
             for (rect, _, _) in &labels {
-                draw::fill_rect(buf, surface, *rect, bg);
+                draw::fill_rect_replace(buf, surface, *rect, bg);
             }
         }
         for (rect, text, font_px) in &labels {

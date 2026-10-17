@@ -165,6 +165,28 @@ pub fn fill_rect(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect, color:
     }
 }
 
+/// Fill a rectangle by replacing pixels (no source-over). Overlapping same-colour
+/// fills stay one layer of opacity.
+pub fn fill_rect_replace(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect, color: Rgba) {
+    let Some(rect) = rect.clamp_to(surface.width, surface.height) else {
+        return;
+    };
+    let a = color.a as u32;
+    let pixel = [
+        ((color.b as u32 * a) / 255) as u8,
+        ((color.g as u32 * a) / 255) as u8,
+        ((color.r as u32 * a) / 255) as u8,
+        color.a,
+    ];
+    for y in rect.y..(rect.y + rect.h) {
+        let row = y as usize * surface.stride;
+        for x in rect.x..(rect.x + rect.w) {
+            let idx = row + x as usize * 4;
+            buf[idx..idx + 4].copy_from_slice(&pixel);
+        }
+    }
+}
+
 /// Initial CreateFontW character-height estimate from the OCR line box.
 ///
 /// Conservative on purpose: GDI/Segoe UI glyphs read larger than the raw
@@ -227,6 +249,21 @@ mod tests {
         assert_eq!(buf[i + 2], 128); // premultiplied red
         // pixel (0,0) untouched
         assert_eq!(buf[3], 0);
+    }
+
+    #[test]
+    fn fill_rect_replace_overlap_keeps_single_alpha() {
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        let surface = SurfaceSize::new(4, 4);
+        let color = Rgba::new(255, 0, 0, 128);
+        fill_rect_replace(&mut buf, surface, SurfaceRect { x: 0, y: 0, w: 3, h: 3 }, color);
+        fill_rect_replace(&mut buf, surface, SurfaceRect { x: 1, y: 1, w: 3, h: 3 }, color);
+        // pixel (1,1): row stride 16, 4 bytes per pixel
+        let overlap = 16 + 4;
+        assert_eq!(buf[overlap + 3], 128);
+        assert_eq!(buf[overlap + 2], 128);
+        assert_eq!(buf[3], 128);
+        assert_eq!(buf[2], 128);
     }
 
     #[test]
