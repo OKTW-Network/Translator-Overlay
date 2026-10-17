@@ -211,12 +211,8 @@ impl Conversation {
     }
 }
 
-/// Build default system prompt for structured block translation.
+/// Build system prompt: locked I/O protocol and language settings, plus overridable style.
 pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
-    if let Some(custom) = &cfg.system_prompt {
-        return custom.clone();
-    }
-
     let src = cfg.source_lang.trim();
     let dst = cfg.target_lang.trim();
     let task = if src.is_empty() || src.eq_ignore_ascii_case("auto") {
@@ -227,15 +223,35 @@ pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
     let dst_norm = dst.to_ascii_lowercase().replace('_', "-");
     let locale = match dst_norm.as_str() {
         "zh-tw" | "zh-hant" | "zh-hant-tw" => {
-            "- Use Traditional Chinese as written in Taiwan (台灣正體). Do not mix in Simplified characters.\n"
+            "Use Traditional Chinese as written in Taiwan (台灣正體). Do not mix in Simplified characters.\n"
         }
-        "zh-cn" | "zh-hans" | "zh-hans-cn" => "- Use Simplified Chinese. Do not mix in Traditional characters.\n",
+        "zh-cn" | "zh-hans" | "zh-hans-cn" => "Use Simplified Chinese. Do not mix in Traditional characters.\n",
         _ => "",
     };
+    let style = cfg
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "Translation:\n\
+                 - Write natural {dst}. Match the source register: short UI labels stay short; dialogue stays spoken.\n\
+                 - Prefer concise wording that fits the original on-screen space. Do not pad or explain.\n\
+                 - Translate each block on its own. Blocks are separate screen regions, not one paragraph.\n\
+                 - Keep proper nouns, character names, titles, and recurring UI terms consistent with earlier turns. Leave them untranslated when that is conventional in {dst}.\n\
+                 - If a block is already {dst}, copy it through unchanged.\n\
+                 - Source may contain OCR errors (wrong glyphs, missing punctuation, glued words). Recover the intended wording when it is obvious; do not invent missing content.\n\
+                 - Translate fully. Do not mix leftover source-language sentences into the output unless you are preserving a name or term.\n\
+                 - Do not add romanization, parenthetical glosses, or labels such as (note).\n"
+            )
+        });
 
     format!(
         "You are a translation engine for a live on-screen overlay.\n\
          {task}\n\
+         {locale}\
          \n\
          Input is JSON of OCR blocks from a captured window (games, apps, subtitles, UI):\n\
          {{\"b\":[[id,\"source\"],...]}}\n\
@@ -246,18 +262,9 @@ pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
          {{\"b\":[[id,\"translation\"],...]}}\n\
          Keep the same ids. Do not drop, merge, split, or invent ids.\n\
          Escape quotes and backslashes inside strings. Write a line break as \\n. No trailing commas.\n\
+         Keep line breaks that are already in the source.\n\
          \n\
-         Translation:\n\
-         - Write natural {dst}. Match the source register: short UI labels stay short; dialogue stays spoken.\n\
-         - Prefer concise wording that fits the original on-screen space. Do not pad or explain.\n\
-         - Translate each block on its own. Blocks are separate screen regions, not one paragraph.\n\
-         - Keep line breaks that are already in the source.\n\
-         - Keep proper nouns, character names, titles, and recurring UI terms consistent with earlier turns. Leave them untranslated when that is conventional in {dst}.\n\
-         - If a block is already {dst}, copy it through unchanged.\n\
-         - Source may contain OCR errors (wrong glyphs, missing punctuation, glued words). Recover the intended wording when it is obvious; do not invent missing content.\n\
-         - Translate fully. Do not mix leftover source-language sentences into the output unless you are preserving a name or term.\n\
-         - Do not add romanization, parenthetical glosses, or labels such as (note).\n\
-         {locale}"
+         {style}"
     )
 }
 
@@ -1286,7 +1293,19 @@ mod tests {
             system_prompt: Some("custom".into()),
             ..ja_cn
         };
-        assert_eq!(default_system_prompt(&custom), "custom");
+        let custom_prompt = default_system_prompt(&custom);
+        assert!(custom_prompt.contains("custom"), "{custom_prompt}");
+        assert!(custom_prompt.contains(r#"{"b":[[id,"translation"],...]}"#), "{custom_prompt}");
+        assert!(custom_prompt.contains("Translate each block from ja into zh-CN."), "{custom_prompt}");
+        assert!(custom_prompt.contains("Simplified Chinese"), "{custom_prompt}");
+        assert!(custom_prompt.contains("Keep line breaks that are already in the source."), "{custom_prompt}");
+        assert!(!custom_prompt.contains("Write natural"), "{custom_prompt}");
+
+        let blank = TranslationConfig {
+            system_prompt: Some("  ".into()),
+            ..TranslationConfig::default()
+        };
+        assert!(default_system_prompt(&blank).contains("Write natural zh-TW."));
     }
 
     #[test]

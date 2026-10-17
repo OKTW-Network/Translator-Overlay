@@ -236,7 +236,7 @@ term_source = "Source"
 term_target = "Translation"
 editor_title = "Glossary"
 system_prompt = "System prompt"
-system_prompt_desc = "Leave empty for the built-in prompt. Custom text must reply {\"b\":[[id,\"translation\"],...]}."
+system_prompt_desc = "Leave empty for the built-in style. Custom text replaces style only; output format and languages stay."
 prompt_placeholder = "Built-in prompt"
 
 [ocr]

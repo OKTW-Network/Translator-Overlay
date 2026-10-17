@@ -225,7 +225,7 @@ term_source = "原文"
 term_target = "译文"
 editor_title = "翻译对照"
 system_prompt = "系统提示"
-system_prompt_desc = "留空使用内置提示。自定义文字必须回复 {\"b\":[[id,\"translation\"],...]}。"
+system_prompt_desc = "留空使用内置风格。自定义文字只覆盖风格；输出格式与语言设置仍会套用。"
 prompt_placeholder = "内置提示"
 
 [ocr]
