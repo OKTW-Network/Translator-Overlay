@@ -17,7 +17,7 @@ use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     System::Threading::GetCurrentThreadId,
     UI::{
-        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT},
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT},
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GA_ROOT, GetAncestor, GetForegroundWindow, GetMessageW, KBDLLHOOKSTRUCT, LLKHF_UP, MSG,
             PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
@@ -34,6 +34,8 @@ pub(crate) struct HotkeySnap {
     pub hotkeys: HotkeyConfig,
     pub focus_hwnd: Option<isize>,
     pub can: [bool; 5],
+    /// Picker is open: Esc confirms even when shortcuts are off.
+    pub region_select_active: bool,
     capturing: Option<HotkeyAction>,
 }
 
@@ -74,6 +76,7 @@ impl HotkeySnap {
             hotkeys: HotkeyConfig::default(),
             focus_hwnd: None,
             can: [false; 5],
+            region_select_active: false,
             capturing: None,
         }
     }
@@ -107,6 +110,7 @@ pub(crate) fn snapshot(state: &AppState) -> HotkeySnap {
         hotkeys: state.config.hotkeys.clone(),
         focus_hwnd,
         can,
+        region_select_active: state.region_select_active,
         capturing: None,
     }
 }
@@ -194,7 +198,7 @@ fn step_capture(inner: &mut HookInner, key: &KeyIn) -> Step {
     if is_win_vk(key.vk) || is_modifier_vk(key.vk) {
         return Step::Swallow;
     }
-    if key.vk == 0x1B {
+    if key.vk == VK_ESCAPE.0 {
         let generation = inner.listen_gen;
         inner.snap.capturing = None;
         return Step::CancelListen { generation };
@@ -208,6 +212,9 @@ fn step_capture(inner: &mut HookInner, key: &KeyIn) -> Step {
 }
 
 fn step_live(inner: &HookInner, key: &KeyIn, target_focused: bool) -> Step {
+    if inner.snap.region_select_active && key.vk == VK_ESCAPE.0 && !key.win && !key.ctrl && !key.alt && !key.shift {
+        return Step::Fire(HotkeyAction::SelectRegion);
+    }
     if !inner.snap.hotkeys.enabled || key.win || is_win_vk(key.vk) || is_modifier_vk(key.vk) {
         return Step::Pass;
     }
@@ -592,7 +599,27 @@ mod tests {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.capturing = Some(HotkeyAction::Retry);
         inner.listen_gen = 9;
-        assert!(matches!(step(&mut inner, key(0x1B, false, false), false), Step::CancelListen { generation: 9 }));
+        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::CancelListen { generation: 9 }));
         assert!(inner.snap.capturing.is_none());
+    }
+
+    #[test]
+    fn escape_confirms_region_select_when_hotkeys_are_off() {
+        let mut inner = inner_with(HotkeySnap::idle());
+        inner.snap.region_select_active = true;
+        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::Fire(HotkeyAction::SelectRegion)));
+    }
+
+    #[test]
+    fn escape_passes_when_not_selecting() {
+        let mut inner = inner_with(HotkeySnap::idle());
+        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), true), Step::Pass));
+    }
+
+    #[test]
+    fn escape_with_ctrl_does_not_confirm_select() {
+        let mut inner = inner_with(HotkeySnap::idle());
+        inner.snap.region_select_active = true;
+        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, true), true), Step::Pass));
     }
 }
