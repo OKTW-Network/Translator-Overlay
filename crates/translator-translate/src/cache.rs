@@ -197,6 +197,7 @@ impl TranslationCache {
                     bbox: src.bbox,
                     source_lines: src.source_lines.max(1),
                     source_height: src.source_height.max(src.bbox.height),
+                    source_width: src.source_width.max(src.bbox.width),
                 })
             })
             .collect()
@@ -249,6 +250,7 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
             source_height: 10.0,
+            source_width: 10.0,
         }
     }
 
@@ -381,6 +383,7 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
             source_height: 10.0,
+            source_width: 10.0,
         }];
         let out = TranslationCache::stitch(&source, &hits, &model);
         assert_eq!(out[0].translation, "名字");
@@ -406,6 +409,7 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
             source_lines: 1,
             source_height: 1.0,
+            source_width: 1.0,
         }];
         cache.store_model_pairs(&translated, &tcfg);
         assert_eq!(cache.lookup("はい", "ja", "zh-TW").as_deref(), Some("是"));

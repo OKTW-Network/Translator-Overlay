@@ -107,14 +107,15 @@ impl OcrEngine {
             if self.filter_single_char && is_single_latin_or_digit(&text) {
                 continue;
             }
-            let bbox = aabb_to_rect(&region.bounding_box);
+            let (bbox, cover_h, cover_w) = region_box(&region.bounding_box);
             blocks.push(OcrBlock {
                 id: i as u32,
                 text,
                 confidence,
                 bbox,
                 source_lines: 1,
-                source_height: bbox.height,
+                source_height: cover_h,
+                source_width: cover_w,
             });
         }
 
@@ -188,8 +189,101 @@ fn execution_providers(device: OcrDevice) -> Vec<OrtExecutionProvider> {
     }
 }
 
-fn aabb_to_rect(bb: &BoundingBox) -> Rect {
+/// Overlay glyph box plus AABB cover (tilt inflates AABB on the short axis).
+///
+/// AABB height of a slightly rotated line is `h·cosθ + w·sinθ`, so a 3° tilt on
+/// a 200×20 run adds ~10px and the overlay font jumps. The min-area quad's
+/// short edges stay at the ink size. Keep AABB on the long axis so the caption
+/// still covers the run.
+fn region_box(bb: &BoundingBox) -> (Rect, f32, f32) {
     let (x_min, y_min, x_max, y_max) = bb.aabb();
-    // `f32::max` turns a NaN extent from a degenerate polygon into 0.
-    Rect::new(x_min.min(x_max), y_min.min(y_max), (x_max - x_min).abs().max(0.0), (y_max - y_min).abs().max(0.0))
+    let x = x_min.min(x_max);
+    let y = y_min.min(y_max);
+    let aabb_w = (x_max - x_min).abs().max(0.0);
+    let aabb_h = (y_max - y_min).abs().max(0.0);
+    let short = quad_short_side(bb).unwrap_or_else(|| aabb_w.min(aabb_h));
+    let (w, h) = if aabb_h > aabb_w * 1.5 {
+        (short.min(aabb_w).max(0.0), aabb_h)
+    } else {
+        (aabb_w, short.min(aabb_h).max(0.0))
+    };
+    let bbox = Rect::new(x, y, w, h);
+    (bbox, aabb_h.max(bbox.height), aabb_w.max(bbox.width))
+}
+
+/// Mean of the two shortest edges of a 4-point detection/recognition quad.
+fn quad_short_side(bb: &BoundingBox) -> Option<f32> {
+    let p = &bb.points;
+    if p.len() != 4 {
+        return None;
+    }
+    let dist = |i: usize, j: usize| {
+        let dx = p[i].x - p[j].x;
+        let dy = p[i].y - p[j].y;
+        (dx * dx + dy * dy).sqrt()
+    };
+    let mut edges = [dist(0, 1), dist(1, 2), dist(2, 3), dist(3, 0)];
+    edges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let short = (edges[0] + edges[1]) * 0.5;
+    if short.is_finite() && short > 0.0 { Some(short) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use oar_ocr::processors::Point;
+
+    use super::*;
+
+    fn quad(points: [(f32, f32); 4]) -> BoundingBox {
+        BoundingBox::new(points.into_iter().map(|(x, y)| Point::new(x, y)).collect())
+    }
+
+    #[test]
+    fn axis_aligned_quad_matches_aabb() {
+        let bb = BoundingBox::from_coords(10.0, 20.0, 110.0, 40.0);
+        let r = region_box(&bb).0;
+        assert!((r.x - 10.0).abs() < 0.01);
+        assert!((r.y - 20.0).abs() < 0.01);
+        assert!((r.width - 100.0).abs() < 0.01);
+        assert!((r.height - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn tilted_line_height_uses_quad_short_side() {
+        // 100×20 parallelogram with 10px of vertical shear. AABB is 30px tall.
+        let bb = quad([(0.0, 10.0), (100.0, 20.0), (100.0, 40.0), (0.0, 30.0)]);
+        let (x0, y0, x1, y1) = bb.aabb();
+        assert!((y1 - y0 - 30.0).abs() < 0.01, "AABB height should be 30");
+        let r = region_box(&bb).0;
+        assert!((r.width - (x1 - x0)).abs() < 0.01, "keep AABB width, got {}", r.width);
+        assert!((r.height - 20.0).abs() < 0.5, "glyph box is 20px, got {}", r.height);
+    }
+
+    #[test]
+    fn vertical_run_width_uses_quad_short_side() {
+        let bb = BoundingBox::from_coords(10.0, 0.0, 30.0, 200.0);
+        let r = region_box(&bb).0;
+        assert!((r.width - 20.0).abs() < 0.01);
+        assert!((r.height - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cover_height_keeps_aabb_when_line_is_tilted() {
+        let bb = quad([(0.0, 10.0), (100.0, 20.0), (100.0, 40.0), (0.0, 30.0)]);
+        let (bbox, cover_h, cover_w) = region_box(&bb);
+        assert!((bbox.height - 20.0).abs() < 0.5, "h={}", bbox.height);
+        assert!((cover_h - 30.0).abs() < 0.5, "cover_h={}", cover_h);
+        assert!((cover_w - 100.0).abs() < 0.5, "cover_w={}", cover_w);
+    }
+
+    #[test]
+    fn cover_width_keeps_aabb_when_column_is_tilted() {
+        // 20-wide × 200-tall parallelogram with 10px of horizontal shear. AABB is 30px wide.
+        let bb = quad([(10.0, 0.0), (30.0, 0.0), (40.0, 200.0), (20.0, 200.0)]);
+        let (bbox, cover_h, cover_w) = region_box(&bb);
+        assert!((bbox.width - 20.0).abs() < 0.5, "w={}", bbox.width);
+        assert!((bbox.height - 200.0).abs() < 0.5, "h={}", bbox.height);
+        assert!((cover_w - 30.0).abs() < 0.5, "cover_w={}", cover_w);
+        assert!((cover_h - 200.0).abs() < 0.5, "cover_h={}", cover_h);
+    }
 }

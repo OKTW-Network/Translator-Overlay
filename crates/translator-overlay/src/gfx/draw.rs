@@ -187,19 +187,27 @@ pub fn fill_rect_replace(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect
     }
 }
 
+/// Glyph-box side and whether the OCR rect is a tall vertical run.
+///
+/// Horizontal uses height (a 16×22 CJK cell sizes from 22, same as a 120×22
+/// line). Vertical uses width so a column is not sized from its full height.
+pub fn glyph_box(rect: SurfaceRect) -> (i32, bool) {
+    let w = rect.w.max(1) as f32;
+    let h = rect.h.max(1) as f32;
+    let vertical = h > w * 1.5;
+    let side = if vertical { w.round() as i32 } else { h.round() as i32 };
+    (side, vertical)
+}
+
 /// Initial CreateFontW character-height estimate from the OCR line box.
 ///
 /// Conservative on purpose: GDI/Segoe UI glyphs read larger than the raw
 /// CreateFont height suggests, and vertical OCR boxes are often padded.
 /// The overlay host further shrinks with GetTextMetrics so the cell fits.
 pub fn font_height_for(rect: SurfaceRect) -> i32 {
-    let w = rect.w.max(1) as f32;
-    let h = rect.h.max(1) as f32;
-    let char_box = w.min(h);
-    // Tall thin = vertical run; detector width is usually looser than ink.
-    let vertical = h > w * 1.5;
+    let (char_box, vertical) = glyph_box(rect);
     let fill = if vertical { 0.58 } else { 0.68 };
-    let px = (char_box * fill).round();
+    let px = (char_box as f32 * fill).round();
     px.clamp(8.0, 128.0) as i32
 }
 
@@ -283,6 +291,16 @@ mod tests {
         let title = SurfaceRect { x: 0, y: 0, w: 300, h: 64 };
         let title_px = font_height_for(title);
         assert!((40..=50).contains(&title_px), "title line → ~43px font, got {title_px}");
+    }
+
+    #[test]
+    fn font_height_horizontal_uses_height_not_width() {
+        let short = SurfaceRect { x: 0, y: 0, w: 16, h: 22 };
+        let long = SurfaceRect { x: 0, y: 0, w: 120, h: 22 };
+        let short_px = font_height_for(short);
+        let long_px = font_height_for(long);
+        assert_eq!(short_px, long_px, "same line height must same font, got {short_px} vs {long_px}");
+        assert!(short_px > 12, "must size from 22px height, got {short_px}");
     }
 
     #[test]

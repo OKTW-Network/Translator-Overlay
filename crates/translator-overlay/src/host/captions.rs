@@ -28,7 +28,7 @@ impl OverlayHost {
         // Layout first (needs GDI measure / font) before borrowing DIB pixels.
         let content_w = self.content_w;
         let content_h = self.content_h;
-        let pending: Vec<(SurfaceRect, String, u32, i32)> = self
+        let pending: Vec<(SurfaceRect, String, u32, i32, i32)> = self
             .blocks
             .iter()
             .filter_map(|block| {
@@ -37,16 +37,19 @@ impl OverlayHost {
                     return None;
                 }
                 let base = draw::map_rect_to_surface(block.bbox, content_w, content_h, w, h)?;
-                let bbox_h = block.bbox.height.max(1.0);
-                let span = block.source_height.max(bbox_h);
-                let source_span_h = ((span / bbox_h) * base.h as f32).round().max(base.h as f32) as i32;
-                Some((base, text.to_string(), block.source_lines.max(1), source_span_h))
+                let cover = |ink: f32, glyph: f32, side: i32| {
+                    let glyph = glyph.max(1.0);
+                    ((ink.max(glyph) / glyph) * side as f32).round().max(side as f32) as i32
+                };
+                let source_span_h = cover(block.source_height, block.bbox.height, base.h);
+                let source_span_w = cover(block.source_width, block.bbox.width, base.w);
+                Some((base, text.to_string(), block.source_lines.max(1), source_span_h, source_span_w))
             })
             .collect();
 
         let mut labels: Vec<(SurfaceRect, String, i32)> = Vec::with_capacity(pending.len());
-        for (base, text, source_lines, source_span_h) in pending {
-            let (expanded, font_px) = self.layout_label(base, &text, source_lines, source_span_h, surface)?;
+        for (base, text, source_lines, source_span_h, source_span_w) in pending {
+            let (expanded, font_px) = self.layout_label(base, &text, source_lines, source_span_h, source_span_w, surface)?;
             labels.push((expanded, text, font_px));
         }
 
@@ -74,9 +77,9 @@ impl OverlayHost {
     /// Pick CreateFont height so the GDI cell fits inside the OCR glyph box.
     ///
     /// Fixed ratios still overshoot (Segoe UI cell > requested height; vertical
-    /// OCR width is padded). Shrink until ascent+descent ≤ ~90% of short side.
+    /// OCR width is padded). Shrink until ascent+descent ≤ ~90% of the glyph side.
     fn fit_font_to_source_box(&mut self, base: SurfaceRect) -> Result<i32, OverlayError> {
-        let target = base.w.min(base.h).max(1);
+        let target = draw::glyph_box(base).0.max(1);
         // Leave a little air so ClearType stems don't look larger than source ink.
         let max_cell = ((target as f32) * 0.90).round().max(8.0) as i32;
         let mut px = draw::font_height_for(base);
@@ -106,21 +109,24 @@ impl OverlayHost {
     /// Layout one overlay label.
     ///
     /// - Merged paragraph (`source_lines > 1`): lock width to OCR column; wrap.
-    /// - Single line: shrink font (down to ~70%) to fit source width, then allow
-    ///   width growth up to 1.75x if the translation is still longer. A user
-    ///   `font_px` override skips the shrink.
+    /// - Single line: keep the source-box font; grow width up to 1.75× if the
+    ///   translation is longer. If it still overflows that cap, shrink the font
+    ///   to 8px, then wrap down within the cap. Translation is never clipped.
+    ///   A user `font_px` override sets the size and skips the shrink.
     /// - Height is at least `source_span_h` so a short translation still covers
-    ///   every original line.
-    fn layout_label(
+    ///   every original line. Width is at least `source_span_w` so a tilted
+    ///   vertical run still covers its AABB.
+    pub(crate) fn layout_label(
         &mut self,
         base: SurfaceRect,
         text: &str,
         source_lines: u32,
         source_span_h: i32,
+        source_span_w: i32,
         surface: draw::SurfaceSize,
     ) -> Result<(SurfaceRect, i32), OverlayError> {
         let max_w = (surface.width - base.x).max(1);
-        let source_w = base.w.clamp(1, max_w);
+        let source_w = source_span_w.max(base.w).clamp(1, max_w);
         let override_px = self.config.font_px_clamped();
         let mut font_px = match override_px {
             Some(px) => px,
@@ -129,34 +135,38 @@ impl OverlayHost {
         let min_h = source_span_h.max(base.h);
 
         if source_lines <= 1 {
-            // 1) Shrink font so the translation can stay one line inside source_w.
+            let expand_cap = ((source_w as f32) * 1.75).round() as i32;
+            let cap = expand_cap.min(max_w).max(source_w);
+            let mut pad = label_pad(font_px);
+            let mut natural = self.measure_single_line(text, font_px)?;
             if override_px.is_none() {
-                let min_font = ((font_px as f32) * 0.70).round().max(8.0) as i32;
                 loop {
-                    let pad = label_pad(font_px);
-                    let natural = self.measure_single_line(text, font_px)?;
                     let need_w = natural.0 + pad * 2;
-                    if need_w <= source_w || font_px <= min_font {
+                    if need_w <= cap || font_px <= 8 {
                         break;
                     }
-                    font_px = (font_px - 1).max(min_font);
+                    font_px -= 1;
+                    pad = label_pad(font_px);
+                    natural = self.measure_single_line(text, font_px)?;
                 }
             }
-
-            // 2) If still wider than source at min font, grow width (cap 1.75×).
-            let pad = label_pad(font_px);
-            let natural = self.measure_single_line(text, font_px)?;
             let need_w = (natural.0 + pad * 2).max(1);
-            let expand_cap = ((source_w as f32) * 1.75).round() as i32;
-            let box_w = if need_w <= source_w {
-                source_w
-            } else {
-                need_w.min(expand_cap).min(max_w).max(source_w)
-            };
+            if need_w <= cap {
+                let box_w = if need_w <= source_w {
+                    source_w
+                } else {
+                    need_w.min(cap).max(source_w)
+                };
 
-            // Stay one line so the caption cannot cover the OCR line below.
-            // Wrapping then clipping the rect is what chopped glyphs.
-            let box_h = (natural.1 + pad * 2).max(font_px + pad * 2).max(min_h);
+                // Stay one line so the caption cannot cover the OCR line below.
+                let box_h = (natural.1 + pad * 2).max(font_px + pad * 2).max(min_h);
+                return Ok((place_label(base, box_w, box_h, surface), font_px));
+            }
+
+            // Overflow after shrink: wrap within the cap so nothing is clipped.
+            let box_w = cap;
+            let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
+            let box_h = (text_h + pad * 2).max(font_px + pad * 2).max(min_h);
             return Ok((place_label(base, box_w, box_h, surface), font_px));
         }
 

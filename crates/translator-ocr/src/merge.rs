@@ -67,6 +67,14 @@ impl Axis {
         }
     }
 
+    /// Ink AABB, not the shrunk glyph box — tilt must not inflate the gap.
+    fn cover_span(self, b: &OcrBlock) -> (f32, f32) {
+        match self {
+            Self::X => (b.bbox.x, b.bbox.width.max(b.source_width)),
+            Self::Y => (b.bbox.y, b.bbox.height.max(b.source_height)),
+        }
+    }
+
     /// Frame size along this axis.
     fn extent(self, frame: Frame) -> f32 {
         match self {
@@ -91,14 +99,14 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank = vec![0u8; n];
     for i in 0..n {
-        let (a0, alen) = axis.span(blocks[i].bbox);
+        let (a0, alen) = axis.cover_span(&blocks[i]);
         let mut best: Option<(usize, f32)> = None;
         for j in 0..n {
             if i == j {
                 continue;
             }
             // `j` must start past the middle of `i`, with `below_mid_ratio` of its length as slack.
-            let (b0, blen) = axis.span(blocks[j].bbox);
+            let (b0, blen) = axis.cover_span(&blocks[j]);
             if !approx_ge((b0 + blen * cfg.below_mid_ratio - (a0 + alen * 0.5)) / span, 0.0) {
                 continue;
             }
@@ -163,6 +171,7 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
     let mut y0 = f32::MAX;
     let mut x1 = f32::MIN;
     let mut y1 = f32::MIN;
+    let mut cover_x1 = f32::MIN;
     let mut heights: Vec<f32> = Vec::with_capacity(members.len());
 
     for (k, &idx) in members.iter().enumerate() {
@@ -192,17 +201,19 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
         x0 = x0.min(b.bbox.x);
         y0 = y0.min(b.bbox.y);
         x1 = x1.max(b.bbox.x + b.bbox.width);
+        cover_x1 = cover_x1.max(b.bbox.x + b.bbox.width.max(b.source_width));
         y1 = y1.max(b.bbox.y + b.source_height.max(b.bbox.height));
         heights.push(b.bbox.height.max(1.0));
     }
     conf /= members.len() as f32;
 
     // One-line-tall anchor so overlay font tracks a single glyph row.
-    // `source_height` is the ink union; overlay uses it as min cover height.
+    // `source_height` / `source_width` are the ink union; overlay uses them as min cover.
     let line_h = median_f32(heights);
     let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
     let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
     let source_height = (y1 - y0).max(line_h);
+    let source_width = (cover_x1 - x0).max(bbox.width);
 
     OcrBlock {
         id: 0,
@@ -211,6 +222,7 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
         bbox,
         source_lines,
         source_height,
+        source_width,
     }
 }
 
@@ -308,16 +320,16 @@ fn aligned(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMerge
 /// and lines up with both of them across it.
 fn has_intervening(blocks: &[OcrBlock], first: usize, second: usize, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
     let (a, b) = (&blocks[first], &blocks[second]);
-    let (a0, alen) = axis.span(a.bbox);
+    let (a0, alen) = axis.cover_span(a);
     let start = a0 + alen;
-    let end = axis.span(b.bbox).0;
+    let end = axis.cover_span(b).0;
     let span = axis.extent(frame);
     if approx_le((end - start) / span, 0.0) {
         return false;
     }
     let cross = axis.cross();
     blocks.iter().enumerate().any(|(k, m)| {
-        let (m0, mlen) = axis.span(m.bbox);
+        let (m0, mlen) = axis.cover_span(m);
         let mid = m0 + mlen * 0.5;
         k != first
             && k != second
@@ -384,6 +396,7 @@ mod tests {
             bbox: Rect::new(x, y, w, h),
             source_lines: 1,
             source_height: h,
+            source_width: w,
         }
     }
 
@@ -400,6 +413,31 @@ mod tests {
         assert!(merged[0].bbox.height <= 22.0, "h={}", merged[0].bbox.height);
         assert_eq!(merged[0].source_lines, 2, "merged block tracks line count");
         assert!((merged[0].source_height - 40.0).abs() < 0.5, "cover span should be the ink union, got {}", merged[0].source_height);
+    }
+
+    #[test]
+    fn stacked_vertical_keeps_short_width_and_aabb_cover() {
+        let mut a = line(0, "上", 100.0, 50.0, 20.0, 80.0);
+        a.source_width = 30.0;
+        let mut b = line(1, "下", 100.0, 140.0, 20.0, 80.0);
+        b.source_width = 30.0;
+        let merged = merge_line_blocks(vec![a, b]);
+        assert_eq!(merged.len(), 1);
+        assert!((merged[0].bbox.width - 20.0).abs() < 0.5, "glyph box must stay the short side, got {}", merged[0].bbox.width);
+        assert!((merged[0].source_width - 30.0).abs() < 0.5, "cover must keep AABB width, got {}", merged[0].source_width);
+    }
+
+    #[test]
+    fn stacked_tilted_lines_join_on_aabb_gap_not_glyph_gap() {
+        // Glyph 20px, AABB 30px: shear inflates glyph-to-glyph gap by 10px.
+        // AABB gap 8px < 16.2 (0.015×1080); glyph gap 18px would miss.
+        let mut a = line(0, "Hello", 10.0, 10.0, 200.0, 20.0);
+        a.source_height = 30.0;
+        let mut b = line(1, "world", 10.0, 48.0, 200.0, 20.0);
+        b.source_height = 30.0;
+        let merged = merge_line_blocks(vec![a, b]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hello\nworld");
     }
 
     #[test]

@@ -537,6 +537,7 @@ mod tests {
                 bbox: Rect::new(20.0, 20.0, 200.0, 40.0),
                 source_lines: 1,
                 source_height: 40.0,
+                source_width: 200.0,
             }],
             content_width: 400,
             content_height: 300,
@@ -575,6 +576,102 @@ mod tests {
         }
         if !blank_clear {
             return Err("Clear left non-zero pixels in the overlay DIB".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn long_single_line_translation_shrinks_past_seventy_percent() -> Result<(), String> {
+        use translator_core::{Rect, TranslatedBlock};
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        use crate::{
+            command::OverlayCommand,
+            gfx::draw::{self, SurfaceRect},
+        };
+
+        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        host.handle(OverlayCommand::SetBlocks {
+            blocks: vec![TranslatedBlock {
+                id: 1,
+                source: "了解".into(),
+                translation: "I understand completely and will proceed with the request as written".into(),
+                confidence: 1.0,
+                bbox: Rect::new(20.0, 20.0, 40.0, 28.0),
+                source_lines: 1,
+                source_height: 28.0,
+                source_width: 40.0,
+            }],
+            content_width: 400,
+            content_height: 300,
+        });
+        host.apply_overlay(true);
+
+        let fitted = draw::font_height_for(SurfaceRect {
+            x: 20,
+            y: 20,
+            w: 40,
+            h: 28,
+        });
+        let painted = host.font_px;
+        let surface = draw::SurfaceSize::new(host.surface_w.max(1), host.surface_h.max(1));
+        let long = "I understand completely and will proceed with the request as written";
+        let (rect_h, font_h) = host
+            .layout_label(
+                SurfaceRect {
+                    x: 20,
+                    y: 20,
+                    w: 40,
+                    h: 28,
+                },
+                long,
+                1,
+                28,
+                40,
+                surface,
+            )
+            .map_err(|e| e.to_string())?;
+        let (rect_v, _) = host
+            .layout_label(
+                SurfaceRect {
+                    x: 20,
+                    y: 20,
+                    w: 20,
+                    h: 200,
+                },
+                long,
+                1,
+                200,
+                20,
+                surface,
+            )
+            .map_err(|e| e.to_string())?;
+        host.teardown();
+        let _ = unsafe { DestroyWindow(target) };
+
+        if painted >= fitted {
+            return Err(format!("expected shrink below fitted {fitted}px, got {painted}"));
+        }
+        if painted > 8 {
+            return Err(format!("expected shrink to the 8px floor past the old 70% stop, got {painted}"));
+        }
+        if font_h > 8 {
+            return Err(format!("expected wrapped label to stay at the 8px floor, got {font_h}"));
+        }
+        // Never clipped: overflow wraps within the 1.75× width cap, so the box
+        // grows taller instead of ending in "…".
+        if rect_h.w != 70 {
+            return Err(format!("expected wrapped width at the 1.75× cap (70px), got {}", rect_h.w));
+        }
+        if rect_h.h <= 28 {
+            return Err(format!("expected wrapped height taller than the source line, got {}", rect_h.h));
+        }
+        if rect_v.h <= 28 {
+            return Err(format!("expected vertical run to wrap taller than one line, got {}", rect_v.h));
         }
         Ok(())
     }

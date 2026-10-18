@@ -372,6 +372,7 @@ mod tests {
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
             source_height: 10.0,
+            source_width: 10.0,
         }
     }
 

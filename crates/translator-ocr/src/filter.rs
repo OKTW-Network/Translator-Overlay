@@ -284,6 +284,7 @@ mod tests {
             bbox: Rect::new(x, y, 80.0, 20.0),
             source_lines: 1,
             source_height: 20.0,
+            source_width: 80.0,
         }
     }
 
@@ -295,6 +296,7 @@ mod tests {
             bbox: Rect::new(x, y, w, h),
             source_lines: 1,
             source_height: h,
+            source_width: w,
         }
     }
 

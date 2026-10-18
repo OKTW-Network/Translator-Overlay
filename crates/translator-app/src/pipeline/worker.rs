@@ -809,6 +809,7 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
         let tb = &translated[ti];
         let bbox = if content_resized { ob.bbox } else { tb.bbox };
         let source_height = if content_resized { ob.source_height } else { tb.source_height };
+        let source_width = if content_resized { ob.source_width } else { tb.source_width };
         out.push(TranslatedBlock {
             id: i as u32,
             source: tb.source.clone(),
@@ -817,6 +818,7 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
             bbox,
             source_lines: tb.source_lines.max(1),
             source_height: source_height.max(bbox.height),
+            source_width: source_width.max(bbox.width),
         });
     }
     out
@@ -838,7 +840,7 @@ pub(crate) fn translated_geometry_changed(previous: &[TranslatedBlock], remapped
         else {
             return true;
         };
-        if a.bbox != b.bbox || a.source_height != b.source_height {
+        if a.bbox != b.bbox || a.source_height != b.source_height || a.source_width != b.source_width {
             return true;
         }
     }
@@ -924,6 +926,7 @@ mod tests {
             bbox,
             source_lines: 1,
             source_height: bbox.height,
+            source_width: bbox.width,
         }
     }
 
@@ -936,6 +939,7 @@ mod tests {
             bbox,
             source_lines: 1,
             source_height: bbox.height,
+            source_width: bbox.width,
         }
     }
 
@@ -949,6 +953,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].translation, "line");
         assert_eq!(out[0].bbox, prev_box);
+        assert_eq!(out[0].source_width, prev_box.width, "frozen box must keep prior cover width");
     }
 
     #[test]
