@@ -110,9 +110,9 @@ impl OverlayHost {
     ///
     /// - Merged paragraph (`source_lines > 1`): lock width to OCR column; wrap.
     /// - Single line: keep the source-box font; grow width up to 1.75× if the
-    ///   translation is longer. If it still overflows that cap, shrink the font
-    ///   to 8px, then wrap down within the cap. Translation is never clipped.
-    ///   A user `font_px` override sets the size and skips the shrink.
+    ///   translation is longer, then wrap down within that cap. Font never
+    ///   shrinks to fit, so font size depends only on the source box.
+    ///   A user `font_px` override sets the size.
     /// - Height is at least `source_span_h` so a short translation still covers
     ///   every original line. Width is at least `source_span_w` so a tilted
     ///   vertical run still covers its AABB.
@@ -128,7 +128,7 @@ impl OverlayHost {
         let max_w = (surface.width - base.x).max(1);
         let source_w = source_span_w.max(base.w).clamp(1, max_w);
         let override_px = self.config.font_px_clamped();
-        let mut font_px = match override_px {
+        let font_px = match override_px {
             Some(px) => px,
             None => self.fit_font_to_source_box(base)?,
         };
@@ -137,19 +137,8 @@ impl OverlayHost {
         if source_lines <= 1 {
             let expand_cap = ((source_w as f32) * 1.75).round() as i32;
             let cap = expand_cap.min(max_w).max(source_w);
-            let mut pad = label_pad(font_px);
-            let mut natural = self.measure_single_line(text, font_px)?;
-            if override_px.is_none() {
-                loop {
-                    let need_w = natural.0 + pad * 2;
-                    if need_w <= cap || font_px <= 8 {
-                        break;
-                    }
-                    font_px -= 1;
-                    pad = label_pad(font_px);
-                    natural = self.measure_single_line(text, font_px)?;
-                }
-            }
+            let pad = label_pad(font_px);
+            let natural = self.measure_single_line(text, font_px)?;
             let need_w = (natural.0 + pad * 2).max(1);
             if need_w <= cap {
                 let box_w = if need_w <= source_w {
@@ -163,7 +152,7 @@ impl OverlayHost {
                 return Ok((place_label(base, box_w, box_h, surface), font_px));
             }
 
-            // Overflow after shrink: wrap within the cap so nothing is clipped.
+            // Overflow: wrap within the cap at the same font so neighbours stay one size.
             let box_w = cap;
             let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
             let box_h = (text_h + pad * 2).max(font_px + pad * 2).max(min_h);

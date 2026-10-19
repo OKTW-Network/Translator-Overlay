@@ -192,27 +192,28 @@ fn execution_providers(device: OcrDevice) -> Vec<OrtExecutionProvider> {
 /// Overlay glyph box plus AABB cover (tilt inflates AABB on the short axis).
 ///
 /// AABB height of a slightly rotated line is `h·cosθ + w·sinθ`, so a 3° tilt on
-/// a 200×20 run adds ~10px and the overlay font jumps. The min-area quad's
-/// short edges stay at the ink size. Keep AABB on the long axis so the caption
-/// still covers the run.
+/// a 200×20 run adds ~10px and the overlay font jumps. The detector's min-area
+/// quad wobbles a few degrees even on axis-aligned text; its edges stay at the
+/// ink size. Keep AABB on the long axis so the caption still covers the run.
 fn region_box(bb: &BoundingBox) -> (Rect, f32, f32) {
     let (x_min, y_min, x_max, y_max) = bb.aabb();
     let x = x_min.min(x_max);
     let y = y_min.min(y_max);
     let aabb_w = (x_max - x_min).abs().max(0.0);
     let aabb_h = (y_max - y_min).abs().max(0.0);
-    let short = quad_short_side(bb).unwrap_or_else(|| aabb_w.min(aabb_h));
+    let (quad_w, quad_h) = quad_sides(bb).unwrap_or((aabb_w, aabb_h));
     let (w, h) = if aabb_h > aabb_w * 1.5 {
-        (short.min(aabb_w).max(0.0), aabb_h)
+        (quad_w.min(aabb_w).max(0.0), aabb_h)
     } else {
-        (aabb_w, short.min(aabb_h).max(0.0))
+        (aabb_w, quad_h.min(aabb_h).max(0.0))
     };
     let bbox = Rect::new(x, y, w, h);
     (bbox, aabb_h.max(bbox.height), aabb_w.max(bbox.width))
 }
 
-/// Mean of the two shortest edges of a 4-point detection/recognition quad.
-fn quad_short_side(bb: &BoundingBox) -> Option<f32> {
+/// Quad (width, height): mean of the near-horizontal and near-vertical opposite
+/// edge pairs. Picks by direction, not length, so a 16×22 cell keeps height 22.
+fn quad_sides(bb: &BoundingBox) -> Option<(f32, f32)> {
     let p = &bb.points;
     if p.len() != 4 {
         return None;
@@ -222,10 +223,11 @@ fn quad_short_side(bb: &BoundingBox) -> Option<f32> {
         let dy = p[i].y - p[j].y;
         (dx * dx + dy * dy).sqrt()
     };
-    let mut edges = [dist(0, 1), dist(1, 2), dist(2, 3), dist(3, 0)];
-    edges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let short = (edges[0] + edges[1]) * 0.5;
-    if short.is_finite() && short > 0.0 { Some(short) } else { None }
+    let a = (dist(0, 1) + dist(2, 3)) * 0.5;
+    let b = (dist(1, 2) + dist(3, 0)) * 0.5;
+    let a_horizontal = (p[1].x - p[0].x).abs() >= (p[1].y - p[0].y).abs();
+    let (w, h) = if a_horizontal { (a, b) } else { (b, a) };
+    (w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0).then_some((w, h))
 }
 
 #[cfg(test)]
@@ -257,6 +259,15 @@ mod tests {
         let r = region_box(&bb).0;
         assert!((r.width - (x1 - x0)).abs() < 0.01, "keep AABB width, got {}", r.width);
         assert!((r.height - 20.0).abs() < 0.5, "glyph box is 20px, got {}", r.height);
+    }
+
+    #[test]
+    fn narrow_horizontal_cell_keeps_height() {
+        // w < h but not a vertical run: height must not come from the shorter width.
+        let bb = BoundingBox::from_coords(0.0, 0.0, 16.0, 22.0);
+        let r = region_box(&bb).0;
+        assert!((r.width - 16.0).abs() < 0.01, "w={}", r.width);
+        assert!((r.height - 22.0).abs() < 0.01, "h={}", r.height);
     }
 
     #[test]

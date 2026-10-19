@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn long_single_line_translation_shrinks_past_seventy_percent() -> Result<(), String> {
+    fn long_single_line_translation_wraps_at_source_font() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
@@ -611,13 +611,6 @@ mod tests {
         });
         host.apply_overlay(true);
 
-        let fitted = draw::font_height_for(SurfaceRect {
-            x: 20,
-            y: 20,
-            w: 40,
-            h: 28,
-        });
-        let painted = host.font_px;
         let surface = draw::SurfaceSize::new(host.surface_w.max(1), host.surface_h.max(1));
         let long = "I understand completely and will proceed with the request as written";
         let (rect_h, font_h) = host
@@ -629,6 +622,21 @@ mod tests {
                     h: 28,
                 },
                 long,
+                1,
+                28,
+                40,
+                surface,
+            )
+            .map_err(|e| e.to_string())?;
+        let (_, font_short) = host
+            .layout_label(
+                SurfaceRect {
+                    x: 20,
+                    y: 20,
+                    w: 40,
+                    h: 28,
+                },
+                "OK",
                 1,
                 28,
                 40,
@@ -653,14 +661,9 @@ mod tests {
         host.teardown();
         let _ = unsafe { DestroyWindow(target) };
 
-        if painted >= fitted {
-            return Err(format!("expected shrink below fitted {fitted}px, got {painted}"));
-        }
-        if painted > 8 {
-            return Err(format!("expected shrink to the 8px floor past the old 70% stop, got {painted}"));
-        }
-        if font_h > 8 {
-            return Err(format!("expected wrapped label to stay at the 8px floor, got {font_h}"));
+        // Font depends only on the source box, not on translation length.
+        if font_h != font_short {
+            return Err(format!("long translation must keep the source font {font_short}px, got {font_h}"));
         }
         // Never clipped: overflow wraps within the 1.75× width cap, so the box
         // grows taller instead of ending in "…".

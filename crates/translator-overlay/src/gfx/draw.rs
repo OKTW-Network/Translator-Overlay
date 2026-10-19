@@ -187,16 +187,18 @@ pub fn fill_rect_replace(buf: &mut [u8], surface: SurfaceSize, rect: SurfaceRect
     }
 }
 
-/// Glyph-box side and whether the OCR rect is a tall vertical run.
+/// Glyph-box side and how vertical the OCR rect is (`0.0` = line, `1.0` = column).
 ///
 /// Horizontal uses height (a 16×22 CJK cell sizes from 22, same as a 120×22
 /// line). Vertical uses width so a column is not sized from its full height.
-pub fn glyph_box(rect: SurfaceRect) -> (i32, bool) {
+/// Blends across h/w 1.4–2.0 so a box near the cutoff cannot flip font size
+/// between frames.
+pub fn glyph_box(rect: SurfaceRect) -> (i32, f32) {
     let w = rect.w.max(1) as f32;
     let h = rect.h.max(1) as f32;
-    let vertical = h > w * 1.5;
-    let side = if vertical { w.round() as i32 } else { h.round() as i32 };
-    (side, vertical)
+    let t = ((h / w - 1.4) / 0.6).clamp(0.0, 1.0);
+    let line_side = h.min(w * 1.4);
+    ((line_side + (w - line_side) * t).round() as i32, t)
 }
 
 /// Initial CreateFontW character-height estimate from the OCR line box.
@@ -206,7 +208,7 @@ pub fn glyph_box(rect: SurfaceRect) -> (i32, bool) {
 /// The overlay host further shrinks with GetTextMetrics so the cell fits.
 pub fn font_height_for(rect: SurfaceRect) -> i32 {
     let (char_box, vertical) = glyph_box(rect);
-    let fill = if vertical { 0.58 } else { 0.68 };
+    let fill = 0.68 - 0.10 * vertical;
     let px = (char_box as f32 * fill).round();
     px.clamp(8.0, 128.0) as i32
 }
@@ -301,6 +303,16 @@ mod tests {
         let long_px = font_height_for(long);
         assert_eq!(short_px, long_px, "same line height must same font, got {short_px} vs {long_px}");
         assert!(short_px > 12, "must size from 22px height, got {short_px}");
+    }
+
+    #[test]
+    fn font_height_has_no_jump_near_vertical_cutoff() {
+        let mut prev = font_height_for(SurfaceRect { x: 0, y: 0, w: 40, h: 40 });
+        for h in 41..=100 {
+            let px = font_height_for(SurfaceRect { x: 0, y: 0, w: 40, h });
+            assert!((px - prev).abs() <= 1, "1px taller box jumped font {prev} → {px} at h={h}");
+            prev = px;
+        }
     }
 
     #[test]
