@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     paths::{PathError, dictionaries_dir},
-    toml_file::{TomlFileError, read_text, write_toml_str},
+    toml_file::{TomlFileError, parse_file, write_toml_str},
 };
 
 const FORBIDDEN_NAME_CHARS: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
@@ -145,11 +145,7 @@ pub fn load_active_dictionary(profile: Option<&str>) -> Result<Vec<DictionaryPai
 }
 
 fn parse_pairs_file(path: &Path) -> Result<Vec<DictionaryPair>, DictionaryError> {
-    let text = read_text(path)?;
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let table: toml::Table = toml::from_str(&text).map_err(TomlFileError::from)?;
+    let table: toml::Table = parse_file(path, |text| Ok(toml::from_str(text)?))?;
     let mut pairs = Vec::new();
     for (source, value) in table {
         let Some(target) = value.as_str() else {

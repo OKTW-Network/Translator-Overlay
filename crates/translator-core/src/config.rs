@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::{
     hotkey::HotkeyConfig,
     paths::{PathError, resolve_under_exe},
-    toml_file::{TomlFileError, read_text, save_toml},
+    toml_file::{TomlFileError, parse_file, save_toml},
     types::{ModelTier, OcrDevice},
 };
 
@@ -92,9 +92,9 @@ impl AppConfig {
     ///
     /// Each TOML field is applied independently: a value that fails to parse is
     /// skipped and that field keeps its default. IO errors and TOML syntax
-    /// errors still fail the whole load.
+    /// errors still fail the whole load; a file with a syntax error is moved aside.
     pub fn load(path: &Path) -> Result<Self, TomlFileError> {
-        Self::from_toml_lenient(&read_text(path)?)
+        parse_file(path, Self::from_toml_lenient)
     }
 
     /// Parse TOML, keeping valid fields and dropping values that do not match the schema.
