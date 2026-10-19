@@ -154,10 +154,10 @@ impl AppState {
             self.status = PipelineStatus::Paused;
         } else if self.translate_in_flight {
             self.status = PipelineStatus::Translating;
-        } else if self.auto_running {
-            self.status = PipelineStatus::Capturing;
         } else if !self.latest_translated_blocks.is_empty() {
             self.status = PipelineStatus::OverlayActive;
+        } else if self.auto_running {
+            self.status = PipelineStatus::Capturing;
         } else {
             self.status = PipelineStatus::Idle;
         }
@@ -199,6 +199,26 @@ mod tests {
         state.translate_in_flight = true;
         state.restore_operational_status();
         assert_eq!(state.status, PipelineStatus::Paused);
+    }
+
+    #[test]
+    fn restore_operational_status_shows_captions_while_capturing() {
+        let mut state = AppState::new(AppConfig::default());
+        state.auto_running = true;
+        state.restore_operational_status();
+        assert_eq!(state.status, PipelineStatus::Capturing);
+        state.latest_translated_blocks.push(TranslatedBlock {
+            id: 0,
+            source: "a".into(),
+            translation: "b".into(),
+            confidence: 1.0,
+            bbox: crate::types::Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
+            source_height: 1.0,
+            source_width: 1.0,
+        });
+        state.restore_operational_status();
+        assert_eq!(state.status, PipelineStatus::OverlayActive);
     }
 
     #[test]

@@ -32,17 +32,12 @@ impl Pipeline {
         if page.blocks.iter().all(|b| b.text.trim().is_empty()) {
             self.last_translated_fp = None;
             self.last_page = None;
-            let mut s = self.state.write();
-            s.latest_translated_blocks.clear();
-            s.translate_in_flight = false;
-            if s.capture_paused {
-                s.status = PipelineStatus::Paused;
-            } else if s.auto_running {
-                s.status = PipelineStatus::Capturing;
-            } else {
-                s.status = PipelineStatus::Idle;
+            {
+                let mut s = self.state.write();
+                s.latest_translated_blocks.clear();
+                s.translate_in_flight = false;
+                s.restore_operational_status();
             }
-            drop(s);
             // Manual / empty-page path must also wipe the live overlay window.
             if let Some(o) = self.overlay.as_ref()
                 && let Err(e) = o.send(OverlayCommand::Clear)
@@ -57,13 +52,7 @@ impl Pipeline {
             info!(?page.fingerprint, "skip translate — content unchanged");
             let mut s = self.state.write();
             s.translate_in_flight = false;
-            if s.capture_paused {
-                s.status = PipelineStatus::Paused;
-            } else if !s.latest_translated_blocks.is_empty() {
-                s.status = PipelineStatus::OverlayActive;
-            } else if s.auto_running {
-                s.status = PipelineStatus::Capturing;
-            }
+            s.restore_operational_status();
             return;
         }
 
@@ -343,4 +332,97 @@ fn apply_translated(
         PipelineStatus::OverlayActive
     };
     s.attention_sent = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use parking_lot::RwLock;
+    use translator_capture::CaptureSession;
+    use translator_core::{AppConfig, AppState, Rect};
+    use translator_ocr::{BlockPersistenceFilter, OcrFingerprint, StabilityGate};
+    use translator_translate::{Conversation, TranslateClient};
+
+    use super::*;
+
+    fn block(id: u32, text: &str) -> OcrBlock {
+        OcrBlock {
+            id,
+            text: text.into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }
+    }
+
+    fn pipeline(max_retries: u32) -> Pipeline {
+        let mut config = AppConfig::default();
+        config.api.max_retries = max_retries;
+        Pipeline {
+            session: CaptureSession::new(),
+            gate: StabilityGate::from_config(&config.ocr),
+            persist: BlockPersistenceFilter::from_config(&config.ocr),
+            engine: None,
+            conversation: Conversation::empty(),
+            translation_cache: TranslationCache::new(config.translation.cache_max_entries_clamped()),
+            client: TranslateClient::new(config.api.clone()),
+            last_translated_fp: None,
+            last_page: None,
+            inflight: None,
+            model_load: None,
+            ocr_tier: config.ocr.model_tier,
+            ocr_device: config.ocr.device,
+            last_raw_ocr: None,
+            preview_seq_bias: 0,
+            raw_empty_since: None,
+            raw_content_since: None,
+            remap_miss_since: None,
+            overlay: None,
+            state: Arc::new(RwLock::new(AppState::new(config))),
+        }
+    }
+
+    fn reply(text: &str, attempt: u32) -> Result<(Completion, u32), TranslateError> {
+        Ok((
+            Completion {
+                text: text.into(),
+                replay_items: Vec::new(),
+            },
+            attempt,
+        ))
+    }
+
+    #[tokio::test]
+    async fn omitted_block_is_resent_alone_then_fails_when_retries_run_out() {
+        let mut p = pipeline(1);
+        let blocks = vec![block(1, "A"), block(2, "B")];
+        p.start_translate(
+            PendingPage {
+                fingerprint: OcrFingerprint::from_blocks(&blocks),
+                blocks,
+                content_width: 100,
+                content_height: 100,
+            },
+            false,
+        );
+
+        // First reply omits block 2: keep block 1, resend only block 2 as attempt 1.
+        let job = p.inflight.take().expect("first job");
+        p.finish_translate(job, reply(r#"{"b":[[1,"T1"]]}"#, 0));
+        let retry = p.inflight.as_ref().expect("retry job for the omitted block");
+        assert_eq!(retry.miss_blocks.iter().map(|b| b.id).collect::<Vec<_>>(), [2]);
+        assert_eq!(retry.cached_hits, [Some("T1".to_string()), None]);
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1);
+        assert!(matches!(p.state.read().status, PipelineStatus::RetryingTranslate { attempt: 1, .. }));
+
+        // Retry omits block 2 again with the budget spent: fail instead of looping.
+        let job = p.inflight.take().expect("retry job");
+        p.finish_translate(job, reply(r#"{"b":[]}"#, 1));
+        assert!(p.inflight.is_none(), "exhausted retries must not launch another job");
+        let s = p.state.read();
+        assert!(matches!(s.status, PipelineStatus::Error { .. }), "{:?}", s.status);
+        assert!(!s.translate_in_flight);
+        assert_eq!(p.translation_cache.len(), 1, "the translated block stays cached");
+    }
 }
