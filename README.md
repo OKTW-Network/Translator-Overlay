@@ -67,6 +67,8 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 較小較快，較大較準。換尺寸或裝置後 **Save** 會重新載入。
 
+多行合併選版面分析時另需 `pp-doclayoutv3_fp16.onnx`（本 repo [models-v1](https://github.com/OKTW-Network/Translator-Overlay/releases/tag/models-v1)）：官方 [PaddlePaddle/PP-DocLayoutV3_onnx](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx) 經 `uv run scripts/optimize-doclayout.py inference.onnx pp-doclayoutv3_fp16.onnx` 轉成 FP16 並移除未使用的 mask 輸出。
+
 ## 從原始碼建置
 
 需要 Rust 1.95+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU）：

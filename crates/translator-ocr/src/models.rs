@@ -7,21 +7,21 @@ use std::path::{Path, PathBuf};
 
 use translator_core::ModelTier;
 
-const RELEASE_BASE: &str = "https://github.com/GreatV/oar-ocr/releases/download";
+const OAR_V070: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0";
 
 /// One file required for a given model tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelArtifact {
     pub file_name: &'static str,
-    /// GreatV/oar-ocr release tag that hosts the file.
-    pub tag: &'static str,
+    /// GitHub release download prefix that hosts the file.
+    pub release: &'static str,
     /// Exact byte length from that GitHub release.
     pub expected_bytes: u64,
 }
 
 impl ModelArtifact {
     pub fn download_url(&self) -> String {
-        format!("{RELEASE_BASE}/{}/{}", self.tag, self.file_name)
+        format!("{}/{}", self.release, self.file_name)
     }
 }
 
@@ -37,17 +37,17 @@ pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {
 const TINY: [ModelArtifact; 3] = [
     ModelArtifact {
         file_name: "pp-ocrv6_tiny_det.onnx",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 1_780_590,
     },
     ModelArtifact {
         file_name: "pp-ocrv6_tiny_rec.onnx",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 4_462_639,
     },
     ModelArtifact {
         file_name: "ppocrv6_tiny_dict.txt",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 27_156,
     },
 ];
@@ -55,17 +55,17 @@ const TINY: [ModelArtifact; 3] = [
 const SMALL: [ModelArtifact; 3] = [
     ModelArtifact {
         file_name: "pp-ocrv6_small_det.onnx",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 9_880_512,
     },
     ModelArtifact {
         file_name: "pp-ocrv6_small_rec.onnx",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 21_159_378,
     },
     ModelArtifact {
         file_name: "ppocrv6_dict.txt",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 74_947,
     },
 ];
@@ -73,27 +73,28 @@ const SMALL: [ModelArtifact; 3] = [
 const MEDIUM: [ModelArtifact; 3] = [
     ModelArtifact {
         file_name: "pp-ocrv6_medium_det.onnx",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 62_032_837,
     },
     ModelArtifact {
         file_name: "pp-ocrv6_medium_rec.onnx",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 76_554_979,
     },
     // Small and medium recognition share the same character dictionary.
     ModelArtifact {
         file_name: "ppocrv6_dict.txt",
-        tag: "v0.7.0",
+        release: OAR_V070,
         expected_bytes: 74_947,
     },
 ];
 
-/// PP-DocLayoutV3 for [`translator_core::LineMergeMode::Layout`] (only in the v0.6.0 release).
+/// PP-DocLayoutV3 for [`translator_core::LineMergeMode::Layout`]: the official
+/// Hugging Face ONNX run through `scripts/optimize-doclayout.py` (fp16, box output only).
 pub const LAYOUT_ARTIFACT: ModelArtifact = ModelArtifact {
-    file_name: "pp-doclayoutv3.onnx",
-    tag: "v0.6.0",
-    expected_bytes: 129_955_811,
+    file_name: "pp-doclayoutv3_fp16.onnx",
+    release: "https://github.com/OKTW-Network/Translator-Overlay/releases/download/models-v1",
+    expected_bytes: 65_090_091,
 };
 
 /// Resolved local paths for a tier under `models_dir`.
@@ -137,7 +138,7 @@ mod tests {
             assert!(dict.file_name.ends_with(".txt"), "{tier:?} dict");
             for a in artifacts_for_tier(tier) {
                 assert!(a.expected_bytes > 0, "{tier:?} {}", a.file_name);
-                assert!(a.download_url().starts_with(RELEASE_BASE));
+                assert!(a.download_url().starts_with(OAR_V070));
             }
             let paths = ModelPaths::from_dir(Path::new("m"), tier);
             assert_eq!(paths.det, Path::new("m").join(det.file_name));

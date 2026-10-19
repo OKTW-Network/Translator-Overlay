@@ -26,6 +26,9 @@ use crate::{
 /// Layout classes whose lines stay single (pictures / tables, not prose).
 const NON_TEXT_LAYOUT: [&str; 6] = ["image", "chart", "table", "seal", "header_image", "footer_image"];
 
+/// PP-DocLayoutV3's fixed square input side (no aspect-ratio keep).
+const LAYOUT_SIDE: u32 = 800;
+
 /// One page of OCR lines plus layout boxes (crop coords; empty without layout).
 type Page = (Vec<TextRegion>, Vec<Rect>);
 
@@ -113,17 +116,27 @@ impl OcrEngine {
         let layout = self.layout.clone();
         tokio::task::spawn_blocking(move || {
             let boxes: Vec<Vec<Rect>> = match &layout {
+                // Pre-shrink with the area filter (~3 ms per 1080p frame vs ~15 ms for
+                // oar-ocr's CatmullRom); a same-size resize inside oar-ocr is a plain copy.
                 Some(layout) => layout
-                    .predict(images.clone())
+                    .predict(
+                        images
+                            .iter()
+                            .map(|img| image::imageops::thumbnail(img, LAYOUT_SIDE, LAYOUT_SIDE))
+                            .collect(),
+                    )
                     .map_err(|e| OcrError::Engine(e.to_string()))?
                     .elements
                     .into_iter()
-                    .map(|page| {
+                    .zip(&images)
+                    .map(|(page, img)| {
+                        let sx = img.width() as f32 / LAYOUT_SIDE as f32;
+                        let sy = img.height() as f32 / LAYOUT_SIDE as f32;
                         page.into_iter()
                             .filter(|e| !NON_TEXT_LAYOUT.contains(&e.element_type.as_str()))
                             .map(|e| {
                                 let (x0, y0, x1, y1) = e.bbox.aabb();
-                                Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+                                Rect::new(x0.min(x1) * sx, y0.min(y1) * sy, (x1 - x0).abs() * sx, (y1 - y0).abs() * sy)
                             })
                             .collect()
                     })
