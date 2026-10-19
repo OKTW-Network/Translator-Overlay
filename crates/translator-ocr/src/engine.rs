@@ -1,11 +1,13 @@
-//! PP-OCRv6 engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
+//! PP-OCRv6 (+ optional PP-DocLayoutV3) engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
 
 use std::sync::Arc;
 
 use image::RgbImage;
 use oar_ocr::{
     core::config::{OrtExecutionProvider, OrtSessionConfig},
-    oarocr::{OAROCR, OAROCRResult},
+    domain::tasks::LayoutDetectionConfig,
+    oarocr::{OAROCR, TextRegion},
+    predictors::LayoutDetectionPredictor,
     prelude::OAROCRBuilder,
     processors::BoundingBox,
 };
@@ -17,14 +19,22 @@ use crate::{
     crop::{Rgb8Crop, crop_to_rgb8},
     filter::{filter_single_char_blocks, is_single_latin_or_digit},
     merge::merge_line_blocks_with,
-    models::ModelPaths,
+    models::{LAYOUT_ARTIFACT, ModelPaths},
     reindex,
 };
+
+/// Layout classes whose lines stay single (pictures / tables, not prose).
+const NON_TEXT_LAYOUT: [&str; 6] = ["image", "chart", "table", "seal", "header_image", "footer_image"];
+
+/// One page of OCR lines plus layout boxes (crop coords; empty without layout).
+type Page = (Vec<TextRegion>, Vec<Rect>);
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
 #[derive(Clone)]
 pub struct OcrEngine {
     inner: Arc<OAROCR>,
+    /// PP-DocLayoutV3, loaded only for [`translator_core::LineMergeMode::Layout`].
+    layout: Option<Arc<LayoutDetectionPredictor>>,
     confidence_threshold: f32,
     filter_single_char: bool,
     line_merge: LineMergeConfig,
@@ -38,7 +48,9 @@ impl OcrEngine {
     pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
         let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
-        if !paths.all_present() {
+        let layout_path = models_dir.join(LAYOUT_ARTIFACT.file_name);
+        let use_layout = config.uses_layout();
+        if !paths.all_present() || (use_layout && !layout_path.is_file()) {
             return Err(OcrError::Other(format!("OCR models missing under {} (run ensure_models first)", models_dir.display())));
         }
 
@@ -47,13 +59,24 @@ impl OcrEngine {
         let dict = paths.dict.to_string_lossy().into_owned();
         let ort = OrtSessionConfig::new().with_execution_providers(execution_providers(config.device));
 
-        let inner = tokio::task::spawn_blocking(move || {
-            OAROCRBuilder::new(det, rec, dict)
+        let (inner, layout) = tokio::task::spawn_blocking(move || {
+            let layout = use_layout
+                .then(|| {
+                    LayoutDetectionPredictor::builder()
+                        .model_name("pp_doclayoutv3")
+                        .with_config(LayoutDetectionConfig::with_pp_doclayoutv3_defaults())
+                        .with_ort_config(ort.clone())
+                        .build(layout_path)
+                })
+                .transpose()
+                .map_err(|e| OcrError::Engine(e.to_string()))?;
+            let ocr = OAROCRBuilder::new(det, rec, dict)
                 .region_batch_size(4)
                 .image_batch_size(4)
                 .ort_session(ort)
                 .build()
-                .map_err(|e| OcrError::Engine(e.to_string()))
+                .map_err(|e| OcrError::Engine(e.to_string()))?;
+            Ok((Arc::new(ocr), layout.map(Arc::new)))
         })
         .await
         .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR load task: {e}"))))?;
@@ -63,11 +86,13 @@ impl OcrEngine {
             rec = %paths.rec.display(),
             dict = %paths.dict.display(),
             device = ?config.device,
+            layout = use_layout,
             "PP-OCRv6 engine loaded (oar-ocr / ONNX Runtime)"
         );
 
         Ok(Self {
-            inner: Arc::new(inner),
+            inner,
+            layout,
             confidence_threshold: config.confidence_threshold,
             filter_single_char: config.filter_single_char,
             line_merge: config.line_merge.clone(),
@@ -81,18 +106,45 @@ impl OcrEngine {
         self.line_merge = config.line_merge.clone();
     }
 
-    /// One batched inference call across all images (det + rec batch on the GPU).
-    async fn predict_batch(&self, images: Vec<RgbImage>) -> Result<Vec<OAROCRResult>, OcrError> {
+    /// One batched inference call across all images (det + rec batch on the GPU),
+    /// preceded by one batched layout pass when the layout model is loaded.
+    async fn predict_batch(&self, images: Vec<RgbImage>) -> Result<Vec<Page>, OcrError> {
         let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || inner.predict(images).map_err(|e| OcrError::Engine(e.to_string())))
-            .await
-            .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR task: {e}"))))
+        let layout = self.layout.clone();
+        tokio::task::spawn_blocking(move || {
+            let boxes: Vec<Vec<Rect>> = match &layout {
+                Some(layout) => layout
+                    .predict(images.clone())
+                    .map_err(|e| OcrError::Engine(e.to_string()))?
+                    .elements
+                    .into_iter()
+                    .map(|page| {
+                        page.into_iter()
+                            .filter(|e| !NON_TEXT_LAYOUT.contains(&e.element_type.as_str()))
+                            .map(|e| {
+                                let (x0, y0, x1, y1) = e.bbox.aabb();
+                                Rect::new(x0.min(x1), y0.min(y1), (x1 - x0).abs(), (y1 - y0).abs())
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            let pages = inner.predict(images).map_err(|e| OcrError::Engine(e.to_string()))?;
+            let mut boxes = boxes.into_iter();
+            Ok(pages
+                .into_iter()
+                .map(|p| (p.text_regions, boxes.next().unwrap_or_default()))
+                .collect())
+        })
+        .await
+        .unwrap_or_else(|e| Err(OcrError::Other(format!("OCR task: {e}"))))
     }
 
     /// Threshold / filter / merge one OCR page into blocks.
-    fn blocks_from_page(&self, page: OAROCRResult, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
+    fn blocks_from_page(&self, (regions, layout): Page, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
         let mut blocks = Vec::new();
-        for (i, region) in page.text_regions.into_iter().enumerate() {
+        for (i, region) in regions.into_iter().enumerate() {
             let Some((text, confidence)) = region.text_with_confidence() else {
                 continue;
             };
@@ -119,8 +171,8 @@ impl OcrEngine {
             });
         }
 
-        // Reading order + merge stacked lines that share column / height / gap.
-        let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all);
+        // Reading order + merge lines by geometry rules or layout boxes.
+        let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all, &layout);
 
         // Re-apply after merge in case a merge edge case left a single token.
         if self.filter_single_char {

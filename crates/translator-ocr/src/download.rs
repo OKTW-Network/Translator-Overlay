@@ -1,4 +1,4 @@
-//! PP-OCRv6 model download (GitHub Releases → `models_dir`) and load orchestration.
+//! PP-OCRv6 / PP-DocLayoutV3 model download (GitHub Releases → `models_dir`) and load orchestration.
 
 use std::path::Path;
 
@@ -8,7 +8,7 @@ use translator_core::{ModelTier, OcrConfig, OcrDevice, PipelineStatus};
 
 use crate::{
     OcrEngine, OcrError,
-    models::{ModelArtifact, artifacts_for_tier},
+    models::{LAYOUT_ARTIFACT, ModelArtifact, artifacts_for_tier},
 };
 
 /// Latest download / ORT-load phase (`watch` coalesces to the newest value).
@@ -25,6 +25,8 @@ pub struct ModelLoadTask {
     pub rx: watch::Receiver<ModelLoadUpdate>,
     pub tier: ModelTier,
     pub device: OcrDevice,
+    /// Built with PP-DocLayoutV3 ([`OcrConfig::uses_layout`]).
+    pub layout: bool,
 }
 
 impl OcrEngine {
@@ -35,9 +37,10 @@ impl OcrEngine {
     pub fn start_load(config: OcrConfig) -> ModelLoadTask {
         let tier = config.model_tier;
         let device = config.device;
+        let layout = config.uses_layout();
         let initial = match config.models_dir_path() {
             Ok(dir) => {
-                let missing = missing_artifacts(&dir, tier);
+                let missing = missing_artifacts(&dir, &config);
                 ModelLoadUpdate::Progress(match missing.first() {
                     Some(first) => downloading(first.file_name, 0, missing.len(), 0),
                     None => PipelineStatus::LoadingModels,
@@ -55,7 +58,7 @@ impl OcrEngine {
             let _ = tx.send(update);
         });
 
-        ModelLoadTask { rx, tier, device }
+        ModelLoadTask { rx, tier, device, layout }
     }
 }
 
@@ -71,7 +74,7 @@ fn downloading(file: &str, index: usize, count: usize, percent: u8) -> PipelineS
 
 async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdate>) -> Result<OcrEngine, OcrError> {
     let models_dir = config.models_dir_path()?;
-    let missing = missing_artifacts(&models_dir, config.model_tier);
+    let missing = missing_artifacts(&models_dir, config);
     if !missing.is_empty() {
         fs::create_dir_all(&models_dir)
             .await
@@ -96,9 +99,11 @@ async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdat
     OcrEngine::load(config).await
 }
 
-fn missing_artifacts(models_dir: &Path, tier: ModelTier) -> Vec<&'static ModelArtifact> {
-    artifacts_for_tier(tier)
+fn missing_artifacts(models_dir: &Path, config: &OcrConfig) -> Vec<&'static ModelArtifact> {
+    let layout = config.uses_layout().then_some(&LAYOUT_ARTIFACT);
+    artifacts_for_tier(config.model_tier)
         .iter()
+        .chain(layout)
         .filter(|a| !models_dir.join(a.file_name).is_file())
         .collect()
 }

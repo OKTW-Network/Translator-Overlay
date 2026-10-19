@@ -6,8 +6,10 @@
 //!    long line becomes one box before stacking).
 //! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
 //! 4. **Reading order** — row-major or column-major join / emit order.
+//!
+//! [`LineMergeMode::Layout`] skips 1–2 and joins lines that share a layout box.
 
-use translator_core::{LineJoin, LineMergeConfig, LineMergeOrder, OcrBlock, Rect};
+use translator_core::{LineJoin, LineMergeConfig, LineMergeMode, LineMergeOrder, OcrBlock, Rect};
 
 use crate::reindex;
 
@@ -18,8 +20,16 @@ const RATIO_EPS: f32 = 1e-5;
 ///
 /// `frame_w` / `frame_h` are the **full capture** size even when `blocks` came
 /// from a crop. `merge_all` joins every remaining line (whole selected region).
-pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
-    if !cfg.enabled || blocks.len() <= 1 {
+/// `layout` holds the layout boxes in the same coordinates as `blocks` (Layout mode).
+pub fn merge_line_blocks_with(
+    blocks: Vec<OcrBlock>,
+    cfg: &LineMergeConfig,
+    frame_w: u32,
+    frame_h: u32,
+    merge_all: bool,
+    layout: &[Rect],
+) -> Vec<OcrBlock> {
+    if cfg.mode == LineMergeMode::Off || blocks.len() <= 1 {
         return reindex(blocks);
     }
 
@@ -33,9 +43,39 @@ pub fn merge_line_blocks_with(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, fram
         return reindex(vec![assemble_group(&blocks, members, cfg, frame, None)]);
     }
 
+    if cfg.mode == LineMergeMode::Layout {
+        return reindex(sort_blocks(join_by_layout(blocks, layout, cfg, frame), cfg, frame));
+    }
+
     let rows = join_nearest(blocks, cfg, frame, Axis::X);
     let merged = join_nearest(rows, cfg, frame, Axis::Y);
     reindex(sort_blocks(merged, cfg, frame))
+}
+
+/// Join lines whose center falls in the same layout box (the smallest one when nested).
+/// Lines outside every box stay single.
+fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[Rect], cfg: &LineMergeConfig, frame: Frame) -> Vec<OcrBlock> {
+    let mut groups: Vec<Vec<usize>> = vec![Vec::new(); layout.len()];
+    let mut singles = Vec::new();
+    for (i, b) in blocks.iter().enumerate() {
+        let (cx, cy) = (b.bbox.x + b.bbox.width * 0.5, b.bbox.y + b.bbox.height * 0.5);
+        let owner = layout
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| cx >= r.x && cx <= r.x + r.width && cy >= r.y && cy <= r.y + r.height)
+            .min_by(|(_, a), (_, b)| (a.width * a.height).total_cmp(&(b.width * b.height)))
+            .map(|(k, _)| k);
+        match owner {
+            Some(k) => groups[k].push(i),
+            None => singles.push(i),
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|g| !g.is_empty())
+        .chain(singles.into_iter().map(|i| vec![i]))
+        .map(|members| assemble_group(&blocks, members, cfg, frame, None))
+        .collect()
 }
 
 /// Full capture size in pixels, at least 1 on each side.
@@ -385,7 +425,7 @@ mod tests {
     const DEFAULT_FRAME_H: u32 = 1080;
 
     fn merge_line_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-        merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_W, DEFAULT_FRAME_H, false)
+        merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &[])
     }
 
     fn line(id: u32, text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrBlock {
@@ -401,7 +441,7 @@ mod tests {
     }
 
     fn merge_with(blocks: Vec<OcrBlock>, cfg: LineMergeConfig, merge_all: bool) -> Vec<OcrBlock> {
-        merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, merge_all)
+        merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, merge_all, &[])
     }
 
     #[test]
@@ -451,7 +491,7 @@ mod tests {
     #[test]
     fn merge_disabled_passthrough() {
         let cfg = LineMergeConfig {
-            enabled: false,
+            mode: LineMergeMode::Off,
             ..Default::default()
         };
         let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
@@ -802,8 +842,8 @@ mod tests {
         ];
         let cfg = LineMergeConfig::default();
         // 20px / 1080 ≈ 0.0185 > 0.015 → no merge; 20px / 2000 = 0.01 < 0.015 → merge.
-        let tall = merge_line_blocks_with(blocks.clone(), &cfg, 1920, 2000, false);
-        let short = merge_line_blocks_with(blocks, &cfg, 1920, 1080, false);
+        let tall = merge_line_blocks_with(blocks.clone(), &cfg, 1920, 2000, false, &[]);
+        let short = merge_line_blocks_with(blocks, &cfg, 1920, 1080, false, &[]);
         assert_eq!(tall.len(), 1, "larger frame makes 20px a small relative gap");
         assert_eq!(short.len(), 2, "1080p treats 20px as too far");
     }
@@ -875,5 +915,30 @@ mod tests {
         let merged = merge_with(blocks, LineMergeConfig::default(), true);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Hello\nworld");
+    }
+
+    #[test]
+    fn layout_mode_joins_lines_per_box_and_keeps_outsiders() {
+        let cfg = LineMergeConfig {
+            mode: LineMergeMode::Layout,
+            ..LineMergeConfig::default()
+        };
+        // Far apart on purpose: the rules would never join these.
+        let blocks = vec![
+            line(0, "B2", 600.0, 400.0, 100.0, 18.0),
+            line(1, "A1", 10.0, 10.0, 100.0, 18.0),
+            line(2, "lone", 10.0, 900.0, 60.0, 18.0),
+            line(3, "A2", 10.0, 200.0, 100.0, 18.0),
+            line(4, "B1", 600.0, 300.0, 100.0, 18.0),
+        ];
+        let layout = [Rect::new(0.0, 0.0, 300.0, 250.0), Rect::new(590.0, 290.0, 200.0, 150.0)];
+        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
+        let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, [
+            "A1
+A2", "B1
+B2", "lone"
+        ]);
+        assert_eq!(merged[0].source_lines, 2);
     }
 }

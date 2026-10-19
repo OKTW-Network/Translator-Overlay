@@ -152,8 +152,8 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             .spacing(12.0)
             .vertical_alignment(VerticalAlignment::Center)
             .children((
-                radio("api-http-api", &t!("api.chat_completions"), Some(168.0), idx == 0, pick(0)),
-                radio("api-http-api", &t!("api.responses"), Some(120.0), idx == 1, pick(1)),
+                radio("api-http-api", &t!("api.chat_completions"), Some(168.0), idx == 0, true, pick(0)),
+                radio("api-http-api", &t!("api.responses"), Some(120.0), idx == 1, true, pick(1)),
             ))
     });
 

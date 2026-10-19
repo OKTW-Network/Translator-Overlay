@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rust_i18n::t;
-use translator_core::{LineJoin, LineMergeConfig, LineMergeOrder, ModelTier, OcrDevice};
+use translator_core::{LineJoin, LineMergeConfig, LineMergeMode, LineMergeOrder, ModelTier, OcrDevice};
 use windows_reactor::{
     ChildrenControl, ComboBox, HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel, TooltipExt, VerticalAlignment,
     View,
@@ -13,7 +13,7 @@ use windows_reactor::{
 use crate::ui::{
     cards::{section_header, settings_card, subsection_header},
     chrome::settings_page_shell,
-    controls::{SliderNumberParams, card_slider_number, card_toggle, radio, wrap_tooltip},
+    controls::{SliderNumberParams, card_slider_number, card_slider_number_enabled, card_toggle, compact_toggle, radio, wrap_tooltip},
     shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty},
 };
 
@@ -24,10 +24,10 @@ fn set_merge_f32(cx: &UiCx, set: impl FnOnce(&mut LineMergeConfig, f32), v: f64)
     });
 }
 
-fn card_merge_pct(cx: &UiCx, p: SliderNumberParams, set: impl Fn(&mut LineMergeConfig, f32) + Copy + 'static) -> View {
+fn card_merge_pct(cx: &UiCx, p: SliderNumberParams, enabled: bool, set: impl Fn(&mut LineMergeConfig, f32) + Copy + 'static) -> View {
     let lo = (p.min / 100.0) as f32;
     let hi = (p.max / 100.0) as f32;
-    card_slider_number(p, {
+    card_slider_number_enabled(p, enabled, {
         let cx = cx.clone();
         move |v| set_merge_f32(&cx, |m, x| set(m, (x / 100.0).clamp(lo, hi)), v)
     })
@@ -67,9 +67,9 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .spacing(12.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
-                    radio("ocr-model-tier", &t!("ocr.tiny"), Some(64.0), idx == 0, pick(0)),
-                    radio("ocr-model-tier", &t!("ocr.small"), Some(72.0), idx == 1, pick(1)),
-                    radio("ocr-model-tier", &t!("ocr.medium"), Some(84.0), idx == 2, pick(2)),
+                    radio("ocr-model-tier", &t!("ocr.tiny"), Some(64.0), idx == 0, true, pick(0)),
+                    radio("ocr-model-tier", &t!("ocr.small"), Some(72.0), idx == 1, true, pick(1)),
+                    radio("ocr-model-tier", &t!("ocr.medium"), Some(84.0), idx == 2, true, pick(2)),
                 ))
         }),
         settings_card("ocr-device", t!("ocr.device"), Some(&t!("ocr.device_desc")), {
@@ -97,10 +97,11 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .spacing(12.0)
                 .vertical_alignment(VerticalAlignment::Center)
                 .children((
-                    radio("ocr-device", &t!("ocr.webgpu"), Some(84.0), idx == 0, pick(0)).tooltip_with(wrap_tooltip(&t!("ocr.webgpu_tip"))),
-                    radio("ocr-device", &t!("ocr.directml"), Some(96.0), idx == 1, pick(1))
+                    radio("ocr-device", &t!("ocr.webgpu"), Some(84.0), idx == 0, true, pick(0))
+                        .tooltip_with(wrap_tooltip(&t!("ocr.webgpu_tip"))),
+                    radio("ocr-device", &t!("ocr.directml"), Some(96.0), idx == 1, true, pick(1))
                         .tooltip_with(wrap_tooltip(&t!("ocr.directml_tip"))),
-                    radio("ocr-device", &t!("ocr.cpu"), Some(64.0), idx == 2, pick(2)).tooltip_with(wrap_tooltip(&t!("ocr.cpu_tip"))),
+                    radio("ocr-device", &t!("ocr.cpu"), Some(64.0), idx == 2, true, pick(2)).tooltip_with(wrap_tooltip(&t!("ocr.cpu_tip"))),
                 ))
         }),
     ));
@@ -259,23 +260,45 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         }),
     ));
 
+    // `Off` ignores every merge knob; Layout groups by detected boxes, so rule thresholds only apply to `Rules`.
+    let merging = ocr.line_merge.mode != LineMergeMode::Off;
+    let rules_only = ocr.line_merge.mode == LineMergeMode::Rules;
     let merge_join = StackPanel::new().spacing(4.0).children((
         section_header(t!("ocr.line_merge")),
-        card_toggle("ocr-line-merge", t!("ocr.merge_lines"), Some(&t!("ocr.merge_lines_desc")), ocr.line_merge.enabled, {
-            let cx = cx.clone();
-            move |v| {
-                cx.with_mut(|ui| {
-                    ui.draft.ocr.line_merge.enabled = v;
-                    mark_dirty(ui);
-                });
-            }
+        settings_card("ocr-line-merge", t!("ocr.merge_lines"), Some(&t!("ocr.merge_lines_desc")), {
+            ComboBox::new()
+                .items_source(vec![
+                    t!("ocr.merge_mode_off").into_owned(),
+                    t!("ocr.merge_mode_rules").into_owned(),
+                    t!("ocr.merge_mode_layout").into_owned(),
+                ])
+                // Item order must match `LineMergeMode` declaration order.
+                .selected_index(Some(ocr.line_merge.mode as usize))
+                .on_selection_changed({
+                    let cx = cx.clone();
+                    move |idx: Option<usize>| {
+                        let choice = match idx {
+                            Some(0) => LineMergeMode::Off,
+                            Some(1) => LineMergeMode::Rules,
+                            Some(2) => LineMergeMode::Layout,
+                            _ => return,
+                        };
+                        cx.with_mut(|ui| {
+                            if ui.draft.ocr.line_merge.mode != choice {
+                                ui.draft.ocr.line_merge.mode = choice;
+                                mark_dirty(ui);
+                            }
+                        });
+                    }
+                })
+                .width(160.0)
+                .vertical_alignment(VerticalAlignment::Center)
         }),
-        card_toggle(
+        settings_card(
             "ocr-merge-whole-region",
             t!("ocr.merge_region"),
             Some(&t!("ocr.merge_region_desc")),
-            ocr.line_merge.merge_whole_region,
-            {
+            compact_toggle(ocr.line_merge.merge_whole_region, merging, {
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
@@ -283,7 +306,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                         mark_dirty(ui);
                     });
                 }
-            },
+            }),
         ),
         settings_card("ocr-merge-join", t!("ocr.join"), Some(&t!("ocr.join_desc")), {
             ComboBox::new()
@@ -310,6 +333,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                         });
                     }
                 })
+                .is_enabled(merging)
                 .width(160.0)
                 .vertical_alignment(VerticalAlignment::Center)
         }),
@@ -325,8 +349,8 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .spacing(4.0)
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .children((
-                    radio("ocr-merge-order", &t!("ocr.order_rows"), None, order_idx == 1, pick_order(1)),
-                    radio("ocr-merge-order", &t!("ocr.order_cols"), None, order_idx == 0, pick_order(0)),
+                    radio("ocr-merge-order", &t!("ocr.order_rows"), None, order_idx == 1, merging, pick_order(1)),
+                    radio("ocr-merge-order", &t!("ocr.order_cols"), None, order_idx == 0, merging, pick_order(0)),
                 )),
         ),
         card_merge_pct(
@@ -340,6 +364,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 5.0,
                 step: 0.1,
             },
+            merging,
             |m, x| m.order_band_ratio = x,
         ),
     ));
@@ -357,6 +382,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 8.0,
                 step: 0.1,
             },
+            rules_only,
             |m, x| m.gap_ratio = x,
         ),
         card_merge_pct(
@@ -370,6 +396,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 50.0,
                 step: 1.0,
             },
+            rules_only,
             |m, x| m.below_mid_ratio = x,
         ),
         card_merge_pct(
@@ -383,6 +410,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 90.0,
                 step: 1.0,
             },
+            rules_only,
             |m, x| m.height_delta_ratio = x,
         ),
     ));
@@ -400,6 +428,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 8.0,
                 step: 0.1,
             },
+            rules_only,
             |m, x| m.horizontal_gap_ratio = x,
         ),
         card_merge_pct(
@@ -413,18 +442,18 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 5.0,
                 step: 0.1,
             },
+            rules_only,
             |m, x| m.align_ratio = x,
         ),
     ));
 
     let merge_short = StackPanel::new().spacing(4.0).children((
         subsection_header(t!("ocr.short")),
-        card_toggle(
+        settings_card(
             "ocr-merge-reject-short",
             t!("ocr.reject_short"),
             Some(&t!("ocr.reject_short_desc")),
-            ocr.line_merge.reject_short_long,
-            {
+            compact_toggle(ocr.line_merge.reject_short_long, rules_only, {
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
@@ -432,7 +461,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                         mark_dirty(ui);
                     });
                 }
-            },
+            }),
         ),
         card_merge_pct(
             &cx,
@@ -445,6 +474,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 max: 90.0,
                 step: 1.0,
             },
+            rules_only,
             |m, x| m.width_delta_ratio = x,
         ),
     ));

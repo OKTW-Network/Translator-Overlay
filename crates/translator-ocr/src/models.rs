@@ -7,19 +7,21 @@ use std::path::{Path, PathBuf};
 
 use translator_core::ModelTier;
 
-const RELEASE_BASE: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0";
+const RELEASE_BASE: &str = "https://github.com/GreatV/oar-ocr/releases/download";
 
 /// One file required for a given model tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelArtifact {
     pub file_name: &'static str,
-    /// Exact byte length from the GreatV/oar-ocr v0.7.0 GitHub release.
+    /// GreatV/oar-ocr release tag that hosts the file.
+    pub tag: &'static str,
+    /// Exact byte length from that GitHub release.
     pub expected_bytes: u64,
 }
 
 impl ModelArtifact {
     pub fn download_url(&self) -> String {
-        format!("{RELEASE_BASE}/{}", self.file_name)
+        format!("{RELEASE_BASE}/{}/{}", self.tag, self.file_name)
     }
 }
 
@@ -35,14 +37,17 @@ pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {
 const TINY: [ModelArtifact; 3] = [
     ModelArtifact {
         file_name: "pp-ocrv6_tiny_det.onnx",
+        tag: "v0.7.0",
         expected_bytes: 1_780_590,
     },
     ModelArtifact {
         file_name: "pp-ocrv6_tiny_rec.onnx",
+        tag: "v0.7.0",
         expected_bytes: 4_462_639,
     },
     ModelArtifact {
         file_name: "ppocrv6_tiny_dict.txt",
+        tag: "v0.7.0",
         expected_bytes: 27_156,
     },
 ];
@@ -50,14 +55,17 @@ const TINY: [ModelArtifact; 3] = [
 const SMALL: [ModelArtifact; 3] = [
     ModelArtifact {
         file_name: "pp-ocrv6_small_det.onnx",
+        tag: "v0.7.0",
         expected_bytes: 9_880_512,
     },
     ModelArtifact {
         file_name: "pp-ocrv6_small_rec.onnx",
+        tag: "v0.7.0",
         expected_bytes: 21_159_378,
     },
     ModelArtifact {
         file_name: "ppocrv6_dict.txt",
+        tag: "v0.7.0",
         expected_bytes: 74_947,
     },
 ];
@@ -65,18 +73,28 @@ const SMALL: [ModelArtifact; 3] = [
 const MEDIUM: [ModelArtifact; 3] = [
     ModelArtifact {
         file_name: "pp-ocrv6_medium_det.onnx",
+        tag: "v0.7.0",
         expected_bytes: 62_032_837,
     },
     ModelArtifact {
         file_name: "pp-ocrv6_medium_rec.onnx",
+        tag: "v0.7.0",
         expected_bytes: 76_554_979,
     },
     // Small and medium recognition share the same character dictionary.
     ModelArtifact {
         file_name: "ppocrv6_dict.txt",
+        tag: "v0.7.0",
         expected_bytes: 74_947,
     },
 ];
+
+/// PP-DocLayoutV3 for [`translator_core::LineMergeMode::Layout`] (only in the v0.6.0 release).
+pub const LAYOUT_ARTIFACT: ModelArtifact = ModelArtifact {
+    file_name: "pp-doclayoutv3.onnx",
+    tag: "v0.6.0",
+    expected_bytes: 129_955_811,
+};
 
 /// Resolved local paths for a tier under `models_dir`.
 #[derive(Debug, Clone, PartialEq, Eq)]

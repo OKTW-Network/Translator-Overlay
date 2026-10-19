@@ -150,6 +150,7 @@ pub(crate) struct Pipeline {
     pub model_load: Option<ModelLoadTask>,
     pub ocr_tier: ModelTier,
     pub ocr_device: OcrDevice,
+    pub ocr_layout: bool,
     pub last_raw_ocr: Option<LastRawOcr>,
     /// Raise-on-restart offset added to frame sequences in preview state, so a
     /// renumbered stream never reuses a sequence the preview skip / UI cache saw.
@@ -177,6 +178,7 @@ impl Pipeline {
         let ocr_cfg = state.read().config.ocr.clone();
         let ocr_tier = ocr_cfg.model_tier;
         let ocr_device = ocr_cfg.device;
+        let ocr_layout = ocr_cfg.uses_layout();
         let client = TranslateClient::new(state.read().config.api.clone());
         let cache_max = state.read().config.translation.cache_max_entries_clamped();
         let overlay_cfg = state.read().config.overlay.clone();
@@ -203,6 +205,7 @@ impl Pipeline {
             model_load: None,
             ocr_tier,
             ocr_device,
+            ocr_layout,
             last_raw_ocr: None,
             preview_seq_bias: 0,
             raw_empty_since: None,

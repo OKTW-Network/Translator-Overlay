@@ -373,6 +373,7 @@ mod tests {
             model_load: None,
             ocr_tier: config.ocr.model_tier,
             ocr_device: config.ocr.device,
+            ocr_layout: config.ocr.uses_layout(),
             last_raw_ocr: None,
             preview_seq_bias: 0,
             raw_empty_since: None,

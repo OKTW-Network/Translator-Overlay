@@ -476,6 +476,19 @@ pub enum LineMergeOrder {
     LeftToRightTopToBottom,
 }
 
+/// How OCR lines are grouped into blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineMergeMode {
+    /// Every OCR line stays its own block.
+    Off,
+    /// Geometry rules (gap / alignment / height).
+    #[default]
+    Rules,
+    /// Lines inside the same PP-DocLayoutV3 box join.
+    Layout,
+}
+
 /// What to put between lines inside a merged block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -497,8 +510,8 @@ pub enum LineJoin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineMergeConfig {
-    /// Master switch. `false` keeps every OCR line as its own block.
-    pub enabled: bool,
+    /// Off, geometry rules, or layout detection.
+    pub mode: LineMergeMode,
     /// When hand-drawn OCR regions exist, join every line in each region.
     /// Ignored for whole-window OCR (rules still apply).
     pub merge_whole_region: bool,
@@ -529,7 +542,7 @@ pub struct LineMergeConfig {
 impl Default for LineMergeConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            mode: LineMergeMode::default(),
             merge_whole_region: false,
             order: LineMergeOrder::default(),
             // ~16px on 1080p — below typical UI list pitch, above wrap leading.
@@ -550,6 +563,11 @@ impl Default for LineMergeConfig {
 impl OcrConfig {
     pub fn models_dir_path(&self) -> Result<PathBuf, PathError> {
         resolve_under_exe(&self.models_dir)
+    }
+
+    /// The engine also needs PP-DocLayoutV3 ([`LineMergeMode::Layout`]).
+    pub fn uses_layout(&self) -> bool {
+        self.line_merge.mode == LineMergeMode::Layout
     }
 }
 
@@ -956,7 +974,7 @@ model = "my-model"
     fn line_merge_legacy_keys_ignored_and_order_parses() {
         let text = r#"
 [ocr.line_merge]
-enabled = true
+mode = "layout"
 gap_slack = 9.9
 list_min_peers = 99
 keep_speaker_separate = true
@@ -969,7 +987,7 @@ overlap_ratio_min = 0.9
 align_overlap_ratio = 0.9
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
-        assert!(config.ocr.line_merge.enabled);
+        assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Layout);
         assert!(config.ocr.line_merge.merge_whole_region);
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
         assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
@@ -980,7 +998,7 @@ align_overlap_ratio = 0.9
 
     #[test]
     fn line_join_parses_and_defaults_to_newline() {
-        let omitted: AppConfig = toml::from_str("[ocr.line_merge]\nenabled = true\n").unwrap();
+        let omitted: AppConfig = toml::from_str("[ocr.line_merge]\nmode = \"rules\"\n").unwrap();
         assert_eq!(omitted.ocr.line_merge.join, LineJoin::Newline);
         for (raw, join) in [("none", LineJoin::None), ("space", LineJoin::Space), ("newline", LineJoin::Newline)] {
             let config: AppConfig = toml::from_str(&format!("[ocr.line_merge]\njoin = \"{raw}\"\n")).unwrap();
@@ -992,7 +1010,7 @@ align_overlap_ratio = 0.9
     fn line_merge_omitted_order_defaults_left_to_right() {
         let text = r#"
 [ocr.line_merge]
-enabled = true
+mode = "rules"
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::LeftToRightTopToBottom);
@@ -1132,12 +1150,12 @@ history_max_items = "nope"
     fn nested_invalid_field_keeps_siblings() {
         let text = r#"
 [ocr.line_merge]
-enabled = false
+mode = "off"
 gap_ratio = "bad"
 join_with_space = false
 "#;
         let config = AppConfig::from_toml_lenient(text).unwrap();
-        assert!(!config.ocr.line_merge.enabled);
+        assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Off);
         assert_eq!(config.ocr.line_merge.join, LineJoin::Newline, "legacy join_with_space is ignored");
         assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
     }

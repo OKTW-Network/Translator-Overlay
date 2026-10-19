@@ -84,7 +84,8 @@ impl Pipeline {
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
         // Threshold / filter / merge knobs change how raw blocks are derived.
         self.last_raw_ocr = None;
-        let engine_reload = self.ocr_tier != cfg.ocr.model_tier || self.ocr_device != cfg.ocr.device;
+        let engine_reload =
+            (self.ocr_tier, self.ocr_device, self.ocr_layout) != (cfg.ocr.model_tier, cfg.ocr.device, cfg.ocr.uses_layout());
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         if self.session.set_min_interval(cfg.capture.frame_interval()) {
@@ -138,6 +139,7 @@ impl Pipeline {
         if engine_reload {
             self.ocr_tier = cfg.ocr.model_tier;
             self.ocr_device = cfg.ocr.device;
+            self.ocr_layout = cfg.ocr.uses_layout();
             self.engine = None;
             self.start_model_load();
         } else if let Some(eng) = self.engine.as_mut() {
@@ -171,12 +173,12 @@ impl Pipeline {
     pub(crate) fn start_model_load(&mut self) {
         let desired = self.state.read().config.ocr.clone();
         if let Some(job) = self.model_load.as_ref() {
-            if (job.tier, job.device) == (desired.model_tier, desired.device) {
-                info!(tier = ?desired.model_tier, device = ?desired.device, "OCR model load already in progress");
+            if (job.tier, job.device, job.layout) == (desired.model_tier, desired.device, desired.uses_layout()) {
+                info!(tier = ?desired.model_tier, device = ?desired.device, layout = job.layout, "OCR model load already in progress");
             } else {
                 info!(
-                    in_flight = ?(job.tier, job.device),
-                    desired = ?(desired.model_tier, desired.device),
+                    in_flight = ?(job.tier, job.device, job.layout),
+                    desired = ?(desired.model_tier, desired.device, desired.uses_layout()),
                     "OCR model load already in progress for another engine; will restart after it finishes"
                 );
             }
@@ -187,7 +189,8 @@ impl Pipeline {
         let task = OcrEngine::start_load(desired);
         self.ocr_tier = task.tier;
         self.ocr_device = task.device;
-        info!(tier = ?task.tier, device = ?task.device, "OCR model load started");
+        self.ocr_layout = task.layout;
+        info!(tier = ?task.tier, device = ?task.device, layout = task.layout, "OCR model load started");
         self.model_load = Some(task);
         self.sync_model_load();
     }
@@ -198,7 +201,7 @@ impl Pipeline {
             return;
         };
         let sender_gone = job.rx.has_changed().is_err();
-        let (tier, device) = (job.tier, job.device);
+        let (tier, device, layout) = (job.tier, job.device, job.layout);
         let finished = match job.rx.borrow_and_update().clone() {
             ModelLoadUpdate::Progress(status) if !sender_gone => {
                 self.state.write().status = status;
@@ -210,10 +213,10 @@ impl Pipeline {
         // The job is done, or its task ended without a result.
         self.model_load = None;
         let desired = self.state.read().config.ocr.clone();
-        if (tier, device) != (desired.model_tier, desired.device) {
+        if (tier, device, layout) != (desired.model_tier, desired.device, desired.uses_layout()) {
             info!(
-                finished = ?(tier, device),
-                desired = ?(desired.model_tier, desired.device),
+                finished = ?(tier, device, layout),
+                desired = ?(desired.model_tier, desired.device, desired.uses_layout()),
                 "OCR load ended for a stale engine; starting the desired one"
             );
             self.start_model_load();

@@ -12,10 +12,11 @@ use windows_reactor::{
 
 use crate::ui::cards::{settings_card, settings_card_with_below};
 
-pub fn radio(group: &'static str, label: &str, width: Option<f64>, checked: bool, on: impl Fn() + 'static) -> View {
+pub fn radio(group: &'static str, label: &str, width: Option<f64>, checked: bool, enabled: bool, on: impl Fn() + 'static) -> View {
     let mut rb = RadioButton::new()
         .group_name(group)
         .is_checked(checked)
+        .is_enabled(enabled)
         .on_checked(move |is_checked: bool| {
             if is_checked {
                 on();
@@ -254,7 +255,12 @@ fn slider_and_box(
 
 /// Slider + NumberBox on one row (labels left, controls flush-right) — standalone card.
 pub fn card_slider_number(p: SliderNumberParams, on_changed: impl Fn(f64) + Clone + 'static) -> View {
-    let (slider, number_box) = slider_and_box((p.value, p.min, p.max, p.step), true, (180.0, 140.0, 100.0), on_changed);
+    card_slider_number_enabled(p, true, on_changed)
+}
+
+/// [`card_slider_number`] that can be greyed out.
+pub fn card_slider_number_enabled(p: SliderNumberParams, enabled: bool, on_changed: impl Fn(f64) + Clone + 'static) -> View {
+    let (slider, number_box) = slider_and_box((p.value, p.min, p.max, p.step), enabled, (180.0, 140.0, 100.0), on_changed);
     let controls = StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(12.0)
