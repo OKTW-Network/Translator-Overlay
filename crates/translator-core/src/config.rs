@@ -487,6 +487,8 @@ pub enum LineMergeMode {
     Rules,
     /// Lines inside the same PP-DocLayoutV3 box join.
     Layout,
+    /// Every line in each hand-drawn OCR region joins; whole-window OCR uses [`Self::Rules`].
+    Region,
 }
 
 /// What to put between lines inside a merged block.
@@ -510,11 +512,8 @@ pub enum LineJoin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineMergeConfig {
-    /// Off, geometry rules, or layout detection.
+    /// Off, geometry rules, layout detection, or whole region.
     pub mode: LineMergeMode,
-    /// When hand-drawn OCR regions exist, join every line in each region.
-    /// Ignored for whole-window OCR (rules still apply).
-    pub merge_whole_region: bool,
     /// Join order inside a merged group.
     pub order: LineMergeOrder,
     /// Allowed `|vertical gap|` as a fraction of frame height (paragraph mode).
@@ -543,7 +542,6 @@ impl Default for LineMergeConfig {
     fn default() -> Self {
         Self {
             mode: LineMergeMode::default(),
-            merge_whole_region: false,
             order: LineMergeOrder::default(),
             // ~16px on 1080p — below typical UI list pitch, above wrap leading.
             gap_ratio: 0.015,
@@ -988,12 +986,23 @@ align_overlap_ratio = 0.9
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Layout);
-        assert!(config.ocr.line_merge.merge_whole_region);
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
         assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
         assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
         assert_eq!(config.ocr.line_merge.join, LineJoin::Newline);
         assert!(config.ocr.line_merge.reject_short_long);
+    }
+
+    #[test]
+    fn line_merge_region_mode_parses() {
+        let config: AppConfig = toml::from_str(
+            "[ocr.line_merge]
+mode = \"region\"
+",
+        )
+        .unwrap();
+        assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Region);
+        assert!(!config.ocr.uses_layout());
     }
 
     #[test]

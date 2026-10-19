@@ -12,7 +12,7 @@ use oar_ocr::{
     processors::BoundingBox,
 };
 use tracing::info;
-use translator_core::{LineMergeConfig, OcrBlock, OcrConfig, OcrDevice, Rect};
+use translator_core::{LineMergeConfig, LineMergeMode, OcrBlock, OcrConfig, OcrDevice, Rect};
 
 use crate::{
     OcrError,
@@ -196,7 +196,7 @@ impl OcrEngine {
         let (regions, merge_all) = if regions.is_empty() {
             (&whole_frame[..], false)
         } else {
-            (regions, self.line_merge.merge_whole_region)
+            (regions, self.line_merge.mode == LineMergeMode::Region)
         };
         // Crop every region first, then one batched inference for all of them —
         // oar-ocr batches detection across images and pools recognition crops.

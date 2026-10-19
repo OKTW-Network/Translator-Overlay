@@ -260,7 +260,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         }),
     ));
 
-    // `Off` ignores every merge knob; Layout groups by detected boxes, so rule thresholds only apply to `Rules`.
+    // `Off` ignores every merge knob; Layout and Region group by boxes, so rule thresholds only apply to `Rules`.
     let merging = ocr.line_merge.mode != LineMergeMode::Off;
     let rules_only = ocr.line_merge.mode == LineMergeMode::Rules;
     let merge_join = StackPanel::new().spacing(4.0).children((
@@ -271,6 +271,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                     t!("ocr.merge_mode_off").into_owned(),
                     t!("ocr.merge_mode_rules").into_owned(),
                     t!("ocr.merge_mode_layout").into_owned(),
+                    t!("ocr.merge_mode_region").into_owned(),
                 ])
                 // Item order must match `LineMergeMode` declaration order.
                 .selected_index(Some(ocr.line_merge.mode as usize))
@@ -281,6 +282,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                             Some(0) => LineMergeMode::Off,
                             Some(1) => LineMergeMode::Rules,
                             Some(2) => LineMergeMode::Layout,
+                            Some(3) => LineMergeMode::Region,
                             _ => return,
                         };
                         cx.with_mut(|ui| {
@@ -294,20 +296,6 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .width(160.0)
                 .vertical_alignment(VerticalAlignment::Center)
         }),
-        settings_card(
-            "ocr-merge-whole-region",
-            t!("ocr.merge_region"),
-            Some(&t!("ocr.merge_region_desc")),
-            compact_toggle(ocr.line_merge.merge_whole_region, merging, {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.ocr.line_merge.merge_whole_region = v;
-                        mark_dirty(ui);
-                    });
-                }
-            }),
-        ),
         settings_card("ocr-merge-join", t!("ocr.join"), Some(&t!("ocr.join_desc")), {
             ComboBox::new()
                 .items_source(vec![

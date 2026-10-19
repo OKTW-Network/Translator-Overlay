@@ -4,7 +4,8 @@
 //! 1. **Frame-relative `|gap|`** — vertical vs height, horizontal vs width.
 //! 2. **Same-row first** — nearest-right fragments, then nearest-below (a split
 //!    long line becomes one box before stacking).
-//! 3. **Whole region** — join every line in the crop (caller sets `merge_all`).
+//! 3. **Whole region** — join every line in the crop (caller sets `merge_all`
+//!    for [`LineMergeMode::Region`] with drawn regions).
 //! 4. **Reading order** — row-major or column-major join / emit order.
 //!
 //! [`LineMergeMode::Layout`] skips 1–2 and joins lines that share a layout box.
@@ -862,7 +863,7 @@ mod tests {
     #[test]
     fn whole_region_without_merge_all_stays_paragraph() {
         let cfg = LineMergeConfig {
-            merge_whole_region: true,
+            mode: LineMergeMode::Region,
             ..Default::default()
         };
         let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 200.0, 12.0, 40.0, 18.0)];
