@@ -87,6 +87,9 @@ impl Pipeline {
         let engine_reload = self.ocr_tier != cfg.ocr.model_tier || self.ocr_device != cfg.ocr.device;
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
+        if self.session.set_min_interval(cfg.capture.frame_interval()) {
+            self.absorb_preview_sequence();
+        }
         let identity_changed = {
             let prev = self.client.config();
             prev.model != cfg.api.model || prev.http_api != cfg.api.http_api || prev.provider != cfg.api.provider

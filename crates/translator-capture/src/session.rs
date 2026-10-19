@@ -1,11 +1,21 @@
 //! Free-threaded capture session that publishes the latest frame.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering};
+use std::{
+    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering},
+    time::Duration,
+};
 
-use bytes::Bytes;
 use tracing::{info, warn};
+use windows::{
+    Win32::Graphics::Direct3D11::{
+        D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11DeviceContext,
+        ID3D11Multithread, ID3D11Texture2D,
+    },
+    core::Interface,
+};
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
+    d3d11::StagingTexture,
     frame::Frame,
     graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
     settings::{
@@ -21,33 +31,74 @@ use crate::{
     resize_watch::{IN_MOVESIZE, ResizeWatch},
 };
 
-/// Latest-wins slot. The capture thread overwrites it and the pipeline reads the newest frame.
-/// Cloning a frame only bumps the `Bytes` refcount.
-type LatestFrame = Arc<Mutex<Option<CapturedFrame>>>;
-
-fn lock(latest: &LatestFrame) -> MutexGuard<'_, Option<CapturedFrame>> {
-    latest.lock().unwrap_or_else(PoisonError::into_inner)
+/// Last WGC frame, copied GPU→GPU so it outlives the frame pool buffer.
+struct GpuFrame {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    texture: ID3D11Texture2D,
+    desc: D3D11_TEXTURE2D_DESC,
 }
 
-/// Copy tightly packed RGBA8 out of a mapped WGC buffer into owned [`Bytes`].
-///
-/// Mapped GPU memory cannot be retained. When the crate copies rows into `scratch`
-/// (padded pitch), that allocation is frozen into `Bytes` to avoid a second copy.
-fn pack_rgba(frame: &mut Frame<'_>, scratch: &mut Vec<u8>) -> Result<Bytes, CaptureError> {
-    let buffer = frame.buffer().map_err(|e| CaptureError::Frame(e.to_string()))?;
-    if buffer.has_padding() {
-        let n = buffer.as_nopadding_buffer(scratch).len();
-        scratch.truncate(n);
-        Ok(Bytes::from(std::mem::take(scratch)))
-    } else {
-        Ok(Bytes::copy_from_slice(buffer.as_nopadding_buffer(scratch)))
+/// Latest-wins slot. The capture thread only does a GPU copy per frame; the
+/// CPU readback runs when the pipeline asks, at most once per sequence.
+#[derive(Default)]
+struct Slot {
+    gpu: Option<GpuFrame>,
+    staging: Option<StagingTexture>,
+    sequence: u64,
+    /// Last readback; current while its sequence equals `sequence`.
+    frame: Option<CapturedFrame>,
+}
+
+impl Slot {
+    /// Newest frame as tightly packed RGBA8. Cloning only bumps the `Bytes` refcount.
+    fn read(&mut self) -> Result<Option<CapturedFrame>, CaptureError> {
+        if let Some(frame) = self.frame.as_ref().filter(|f| f.sequence == self.sequence) {
+            return Ok(Some(frame.clone()));
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return Ok(None);
+        };
+        let (width, height) = (gpu.desc.Width, gpu.desc.Height);
+        let staging = match &mut self.staging {
+            Some(staging) => staging,
+            None => self
+                .staging
+                .insert(StagingTexture::new(&gpu.device, width, height, gpu.desc.Format).map_err(|e| CaptureError::Frame(e.to_string()))?),
+        };
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: both textures belong to `gpu.device` and share size and format;
+        // `staging` is CPU-readable and unmapped outside this block.
+        unsafe {
+            gpu.context.CopyResource(staging.texture(), &gpu.texture);
+            gpu.context.Map(staging.texture(), 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        }
+        .map_err(|e| CaptureError::Frame(e.to_string()))?;
+        let pitch = mapped.RowPitch as usize;
+        let row = width as usize * 4;
+        let mut rgba = Vec::with_capacity(row * height as usize);
+        for y in 0..height as usize {
+            // SAFETY: the mapping spans `height` rows of `RowPitch` bytes, and `row <= RowPitch`.
+            rgba.extend_from_slice(unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>().add(y * pitch), row) });
+        }
+        // SAFETY: mapped above on the same context.
+        unsafe { gpu.context.Unmap(staging.texture(), 0) };
+
+        let frame = CapturedFrame::new(width, height, rgba, self.sequence);
+        self.frame = Some(frame.clone());
+        Ok(Some(frame))
     }
+}
+
+type LatestFrame = Arc<Mutex<Slot>>;
+
+fn lock(latest: &LatestFrame) -> MutexGuard<'_, Slot> {
+    latest.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 struct FrameHandler {
     latest: LatestFrame,
-    sequence: u64,
-    scratch: Vec<u8>,
 }
 
 impl GraphicsCaptureApiHandler for FrameHandler {
@@ -55,15 +106,11 @@ impl GraphicsCaptureApiHandler for FrameHandler {
     type Flags = LatestFrame;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            latest: ctx.flags,
-            sequence: 0,
-            scratch: Vec::new(),
-        })
+        Ok(Self { latest: ctx.flags })
     }
 
     fn on_frame_arrived(&mut self, frame: &mut Frame<'_>, _capture_control: InternalCaptureControl) -> Result<(), Self::Error> {
-        // Title-bar / edge drag: do not map or copy the WGC buffer. Overlay
+        // Title-bar / edge drag: do not copy the WGC buffer. Overlay
         // follow keeps the last captions; OCR waits until MOVESIZEEND.
         if IN_MOVESIZE.load(Ordering::Acquire) {
             return Ok(());
@@ -75,9 +122,40 @@ impl GraphicsCaptureApiHandler for FrameHandler {
             return Ok(());
         }
 
-        let rgba = pack_rgba(frame, &mut self.scratch)?;
-        self.sequence += 1;
-        *lock(&self.latest) = Some(CapturedFrame::new(width, height, rgba, self.sequence));
+        let mut slot = lock(&self.latest);
+        if slot.gpu.as_ref().is_none_or(|g| g.desc.Width != width || g.desc.Height != height) {
+            let context = frame.device_context().clone();
+            // The pipeline thread reads back on this same immediate context.
+            let multithread = context
+                .cast::<ID3D11Multithread>()
+                .map_err(|e| CaptureError::Frame(e.to_string()))?;
+            // SAFETY: plain flag toggle on a live context.
+            let _ = unsafe { multithread.SetMultithreadProtected(true) };
+            let desc = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: 0,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                ..*frame.desc()
+            };
+            let device = frame.device().clone();
+            let mut texture = None;
+            // SAFETY: `desc` is a valid single-mip 2D texture description.
+            unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.map_err(|e| CaptureError::Frame(e.to_string()))?;
+            let texture = texture.ok_or_else(|| CaptureError::Frame("CreateTexture2D returned no texture".into()))?;
+            slot.gpu = Some(GpuFrame {
+                device,
+                context,
+                texture,
+                desc,
+            });
+            slot.staging = None;
+        }
+        if let Some(gpu) = slot.gpu.as_ref() {
+            // SAFETY: same device, size, and format as the frame texture.
+            unsafe { gpu.context.CopyResource(&gpu.texture, frame.as_raw_texture()) };
+        }
+        slot.sequence += 1;
         Ok(())
     }
 
@@ -91,6 +169,7 @@ impl GraphicsCaptureApiHandler for FrameHandler {
 struct CaptureTarget {
     hwnd: isize,
     title: String,
+    min_interval: Duration,
 }
 
 struct ActiveStream {
@@ -141,11 +220,14 @@ impl CaptureSession {
     ///
     /// Lets callers detect "no new frame" before paying for client-area crop.
     pub fn latest_sequence(&self) -> Option<u64> {
-        lock(&self.stream.as_ref()?.latest).as_ref().map(|frame| frame.sequence)
+        let sequence = lock(&self.stream.as_ref()?.latest).sequence;
+        (sequence > 0).then_some(sequence)
     }
 
     /// Start capturing a window by HWND.
-    pub fn start_window(&mut self, hwnd: isize, title: impl Into<String>) -> Result<(), CaptureError> {
+    ///
+    /// `min_interval` throttles WGC frame delivery where the OS supports it.
+    pub fn start_window(&mut self, hwnd: isize, title: impl Into<String>, min_interval: Duration) -> Result<(), CaptureError> {
         if self.is_running() {
             return Err(CaptureError::AlreadyRunning);
         }
@@ -169,12 +251,17 @@ impl CaptureSession {
         } else {
             DrawBorderSettings::Default
         };
+        let interval = if GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
+            MinimumUpdateIntervalSettings::Custom(min_interval)
+        } else {
+            MinimumUpdateIntervalSettings::Default
+        };
         let settings = Settings::new(
             window,
             cursor,
             border,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            interval,
             DirtyRegionSettings::Default,
             ColorFormat::Rgba8,
             Arc::clone(&latest),
@@ -182,9 +269,9 @@ impl CaptureSession {
 
         let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
         let title = title.into();
-        info!(%title, hwnd, ?cursor, ?border, "capture started");
+        info!(%title, hwnd, ?cursor, ?border, ?interval, "capture started");
         self.stream = Some(ActiveStream { control, latest });
-        self.target = Some(CaptureTarget { hwnd, title });
+        self.target = Some(CaptureTarget { hwnd, title, min_interval });
         self.resize.set_target(hwnd);
         Ok(())
     }
@@ -227,14 +314,35 @@ impl CaptureSession {
         }
     }
 
+    /// Apply a new WGC frame throttle, restarting a running stream when it changed.
+    ///
+    /// Returns `true` when the stream restarted (frame sequence renumbered).
+    pub fn set_min_interval(&mut self, min_interval: Duration) -> bool {
+        let Some(target) = self.target.as_mut().filter(|t| t.min_interval != min_interval) else {
+            return false;
+        };
+        target.min_interval = min_interval;
+        // Unsupported OS: the stream ignores the interval, so a restart buys nothing.
+        if !self.is_running() || !GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
+            return false;
+        }
+        match self.restart_stream() {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(error = %e, "failed to restart capture after interval change");
+                false
+            }
+        }
+    }
+
     fn restart_stream(&mut self) -> Result<(), CaptureError> {
         let target = self
             .target
             .clone()
             .ok_or_else(|| CaptureError::Window("no capture target".into()))?;
-        info!(hwnd = target.hwnd, "restarting capture after target resize");
+        info!(hwnd = target.hwnd, "restarting capture");
         self.stop_stream_inner(true);
-        self.start_window(target.hwnd, target.title)
+        self.start_window(target.hwnd, target.title, target.min_interval)
     }
 
     /// Latest published frame, cropped to the client area. Does not consume the slot.
@@ -245,7 +353,13 @@ impl CaptureSession {
         if self.in_movesize() {
             return None;
         }
-        let frame = lock(&self.stream.as_ref()?.latest).clone()?;
+        let frame = match lock(&self.stream.as_ref()?.latest).read() {
+            Ok(frame) => frame?,
+            Err(e) => {
+                warn!(error = %e, "capture frame readback failed");
+                return None;
+            }
+        };
         Some(self.crop_to_client(frame))
     }
 
@@ -260,5 +374,63 @@ impl CaptureSession {
 impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Graphics::{
+        Direct3D11::D3D11_SUBRESOURCE_DATA,
+        Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC},
+    };
+    use windows_capture::d3d11::create_d3d_device;
+
+    use super::*;
+
+    #[test]
+    fn read_unpads_rows_and_caches_per_sequence() {
+        let (device, context) = create_d3d_device().expect("d3d device");
+        // 3 px wide → 12-byte rows; staging pitch is padded well past that.
+        let (width, height) = (3u32, 2u32);
+        let pixels: Vec<u8> = (0..(width * height * 4) as u8).collect();
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            ..Default::default()
+        };
+        let init = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: width * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        unsafe { device.CreateTexture2D(&desc, Some(&init), Some(&mut texture)) }.expect("texture");
+        let mut slot = Slot {
+            gpu: Some(GpuFrame {
+                device,
+                context,
+                texture: texture.expect("texture"),
+                desc,
+            }),
+            sequence: 1,
+            ..Slot::default()
+        };
+
+        let first = slot.read().expect("read").expect("frame");
+        assert_eq!((first.width, first.height, first.sequence), (width, height, 1));
+        assert_eq!(&first.rgba[..], &pixels[..]);
+
+        let again = slot.read().expect("read").expect("frame");
+        assert_eq!(again.rgba.as_ptr(), first.rgba.as_ptr(), "same sequence must not read back again");
+
+        slot.sequence = 2;
+        let next = slot.read().expect("read").expect("frame");
+        assert_eq!(next.sequence, 2);
+        assert_eq!(&next.rgba[..], &pixels[..]);
     }
 }

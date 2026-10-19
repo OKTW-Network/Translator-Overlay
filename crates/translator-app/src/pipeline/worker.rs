@@ -509,7 +509,8 @@ impl Pipeline {
             self.state.write().set_error(t!("err.engine_not_ready"));
         } else {
             self.cancel_inflight();
-            match self.session.start_window(hwnd, title) {
+            let interval = self.state.read().config.capture.frame_interval();
+            match self.session.start_window(hwnd, title, interval) {
                 Ok(()) => self.on_capture_started(),
                 Err(e) => {
                     error!(error = %e, "start capture failed");
@@ -638,7 +639,7 @@ impl Pipeline {
     /// Absorb the last published preview sequence into the bias: a renumbered
     /// stream's frames then publish strictly higher sequences, so the preview
     /// skip and the UI preview cache never match a stale entry.
-    fn absorb_preview_sequence(&mut self) {
+    pub(crate) fn absorb_preview_sequence(&mut self) {
         let last = self.state.read().preview.sequence;
         self.preview_seq_bias = self.preview_seq_bias.saturating_add(last);
     }

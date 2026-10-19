@@ -3,6 +3,7 @@
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -561,6 +562,13 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self { min_interval_ms: 250 }
+    }
+}
+
+impl CaptureConfig {
+    /// WGC frame throttle: half the pipeline tick, so phase drift never adds a whole extra interval.
+    pub fn frame_interval(&self) -> Duration {
+        Duration::from_millis(self.min_interval_ms.max(50) / 2)
     }
 }
 
