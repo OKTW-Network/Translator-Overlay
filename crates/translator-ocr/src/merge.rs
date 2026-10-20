@@ -59,6 +59,10 @@ pub fn merge_line_blocks_with(
 /// Join lines whose center falls in the same layout box (the smallest one when nested).
 /// Lines outside every box stay single. A `vertical_text` box (`true`) reads as columns
 /// even when its lines are too short to look vertical.
+///
+/// A group never skips a line: one sitting between two of its lines (and beside them)
+/// pulls its own group in, or the joined block would cover that line. Nested boxes from
+/// a stretched, very wide crop otherwise join lines 1 + 3 around line 2.
 fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[(Rect, bool)], cfg: &LineMergeConfig, frame: Frame) -> Vec<OcrBlock> {
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); layout.len()];
     let mut singles = Vec::new();
@@ -75,11 +79,50 @@ fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[(Rect, bool)], cfg: &LineMerg
             None => singles.push(i),
         }
     }
-    groups
+    let mut groups: Vec<(Vec<usize>, bool)> = groups
         .into_iter()
         .zip(layout.iter().map(|(_, vertical)| *vertical))
         .filter(|(g, _)| !g.is_empty())
         .chain(singles.into_iter().map(|i| (vec![i], false)))
+        .collect();
+
+    // Index of a group with a line between two lines of group `g` (reading axis) that
+    // overlaps `g` across it.
+    let skipped = |groups: &[(Vec<usize>, bool)], g: usize| {
+        let (members, vertical) = &groups[g];
+        let (axis, cross) = if *vertical || mostly_vertical(&blocks, members) {
+            (Axis::X, Axis::Y)
+        } else {
+            (Axis::Y, Axis::X)
+        };
+        let mid = |i: usize| {
+            let (start, len) = axis.span(blocks[i].bbox);
+            start + len * 0.5
+        };
+        let (lo, hi) = members
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(mid(i)), hi.max(mid(i))));
+        let (c0, c1) = members.iter().fold((f32::MAX, f32::MIN), |(c0, c1), &i| {
+            let (start, len) = cross.span(blocks[i].bbox);
+            (c0.min(start), c1.max(start + len))
+        });
+        (0..groups.len()).find(|&h| {
+            h != g
+                && groups[h].0.iter().any(|&m| {
+                    let (start, len) = cross.span(blocks[m].bbox);
+                    mid(m) > lo && mid(m) < hi && start < c1 && start + len > c0
+                })
+        })
+    };
+    while let Some((g, h)) = (0..groups.len()).find_map(|g| skipped(&groups, g).map(|h| (g, h))) {
+        let (taken, vertical) = std::mem::take(&mut groups[h]);
+        groups[g].0.extend(taken);
+        groups[g].1 |= vertical;
+    }
+
+    groups
+        .into_iter()
+        .filter(|(g, _)| !g.is_empty())
         .map(|(members, vertical)| assemble_group(&blocks, members, cfg, frame, None, vertical))
         .collect()
 }
@@ -999,6 +1042,30 @@ A2", "B1
 B2", "lone"
         ]);
         assert_eq!(merged[0].source_lines, 2);
+    }
+
+    #[test]
+    fn layout_group_pulls_in_the_line_it_would_skip() {
+        let cfg = LineMergeConfig {
+            mode: LineMergeMode::Layout,
+            ..LineMergeConfig::default()
+        };
+        // A 1313×268 dialog crop squashed to 800×800: one box over everything, smaller
+        // nested boxes over lines 2 and 4, so the smallest-box rule leaves 1 + 3 together.
+        let blocks = vec![
+            line(0, "L1", 25.0, 7.0, 374.0, 68.0),
+            line(1, "L2", 46.0, 74.0, 1141.0, 62.0),
+            line(2, "L3", 48.0, 138.0, 486.0, 65.0),
+            line(3, "L4", 47.0, 202.0, 851.0, 61.0),
+        ];
+        let layout = [
+            (Rect::new(33.0, 9.4, 1189.0, 255.8), false),
+            (Rect::new(43.6, 76.2, 1143.6, 57.8), false),
+            (Rect::new(48.4, 203.2, 841.0, 62.6), false),
+        ];
+        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
+        let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["L1\nL2\nL3", "L4"]);
     }
 
     /// Three top-aligned columns, 24px glyphs, 10px column gap; the left one is short.
