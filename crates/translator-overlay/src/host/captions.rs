@@ -64,12 +64,13 @@ impl OverlayHost {
                 draw::fill_rect_replace(buf, surface, *rect, bg);
             }
         }
+        let locale = self.locale.clone();
         for (rect, text, font_px, vertical) in &labels {
             self.paint_label(*rect, text, LabelStyle {
                 font_px: *font_px,
                 color: fg,
                 vcenter: false,
-                vertical: *vertical,
+                vertical: vertical.then_some(locale.as_str()),
             })?;
         }
         Ok(())
@@ -144,10 +145,8 @@ impl OverlayHost {
             let cjk = |c: &char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}');
             let letters = text.chars().filter(|c| c.is_alphanumeric());
             if letters.clone().filter(cjk).count() * 2 > letters.count() {
-                let adv = text::vertical_advance(font_px);
-                let per_col = ((min_h - pad * 2) / adv).max(1) as usize;
-                let cols = text::vertical_columns(text, per_col).len().max(1) as i32;
-                let box_w = (cols * adv + pad * 2).max(source_w);
+                let cols_w = text::measure_columns(text, font_px, &self.locale, min_h - pad * 2, surface.width)?;
+                let box_w = (cols_w + pad * 2).max(source_w);
                 let at = SurfaceRect {
                     x: base.x + source_w - box_w,
                     ..base
@@ -252,7 +251,7 @@ impl OverlayHost {
         Ok(())
     }
 
-    pub(crate) fn paint_label(&mut self, rect: SurfaceRect, text: &str, style: LabelStyle) -> Result<(), OverlayError> {
+    pub(crate) fn paint_label(&mut self, rect: SurfaceRect, text: &str, style: LabelStyle<'_>) -> Result<(), OverlayError> {
         self.ensure_font(style.font_px)?;
         let hdc = self.surface.hdc();
         let hfont = self.hfont;

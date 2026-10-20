@@ -539,6 +539,7 @@ mod tests {
                 source_height: 40.0,
                 source_width: 200.0,
             }],
+            locale: "zh-TW".into(),
             content_width: 400,
             content_height: 300,
         });
@@ -587,7 +588,10 @@ mod tests {
 
         use crate::{
             command::OverlayCommand,
-            gfx::draw::{self, SurfaceRect},
+            gfx::{
+                draw::{self, SurfaceRect},
+                text::LabelStyle,
+            },
         };
 
         let (mut host, target, _lock) = spawn_overlay_and_target()?;
@@ -606,6 +610,7 @@ mod tests {
                 source_height: 28.0,
                 source_width: 40.0,
             }],
+            locale: "zh-TW".into(),
             content_width: 400,
             content_height: 300,
         });
@@ -668,6 +673,29 @@ mod tests {
             .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", 1, 120, 20, surface)
             .map_err(|e| e.to_string())?;
         let (_, _, vertical_short) = host.layout_label(column, "嗯？", 1, 120, 20, surface).map_err(|e| e.to_string())?;
+
+        // Five 16px glyphs fit one column: all ink lands at the right edge of a wide label.
+        let label = SurfaceRect {
+            x: 100,
+            y: 20,
+            w: 120,
+            h: 120,
+        };
+        host.surface.ensure(surface.width, surface.height).map_err(|e| e.to_string())?;
+        host.surface.pixels().ok_or("paint bitmap missing")?.fill(0);
+        host.paint_label(label, "我完全了解", LabelStyle {
+            font_px: 16,
+            color: draw::Rgba::from_argb(0xFFFF_FFFF),
+            vcenter: false,
+            vertical: Some("zh-TW"),
+        })
+        .map_err(|e| e.to_string())?;
+        let buf = host.surface.pixels().ok_or("paint bitmap missing")?;
+        let ink_x: Vec<i32> = (label.y..label.y + label.h)
+            .flat_map(|y| (label.x..label.x + label.w).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[y as usize * surface.stride + x as usize * 4 + 3] > 0)
+            .map(|(x, _)| x)
+            .collect();
         host.teardown();
         let _ = unsafe { DestroyWindow(target) };
 
@@ -677,6 +705,10 @@ mod tests {
         }
         if rect_cjk.h != 120 || rect_cjk.x + rect_cjk.w != 220 || rect_cjk.w <= 20 {
             return Err(format!("expected extra columns to the left at 120px tall, got {rect_cjk:?}"));
+        }
+        if ink_x.len() < 50 || ink_x.iter().any(|&x| x < label.x + label.w - 40) {
+            let min_x = ink_x.iter().min();
+            return Err(format!("expected one column of ink at the right edge, got {} px from x={min_x:?}", ink_x.len()));
         }
         if rect_v.w <= 20 {
             return Err(format!("expected English over a column to widen, got {}", rect_v.w));

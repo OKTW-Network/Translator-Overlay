@@ -47,6 +47,8 @@ pub(crate) struct OverlayHost {
     pub(crate) config: OverlayConfig,
     pub(crate) target: Option<HWND>,
     pub(crate) blocks: Vec<TranslatedBlock>,
+    /// BCP-47 tag of `blocks`' translations (column captions).
+    pub(crate) locale: String,
     pub(crate) content_w: u32,
     pub(crate) content_h: u32,
     /// Paint buffer size in **OCR / capture content** pixels (not screen client).
@@ -106,6 +108,7 @@ impl OverlayHost {
             config,
             target: None,
             blocks: Vec::new(),
+            locale: String::new(),
             content_w: 0,
             content_h: 0,
             surface_w: 0,
@@ -187,11 +190,13 @@ impl OverlayHost {
             }
             OverlayCommand::SetBlocks {
                 blocks,
+                locale,
                 content_width,
                 content_height,
             } => {
                 let size_changed = self.content_w != content_width || self.content_h != content_height;
                 self.blocks = blocks;
+                self.locale = locale;
                 self.content_w = content_width;
                 self.content_h = content_height;
                 if size_changed {

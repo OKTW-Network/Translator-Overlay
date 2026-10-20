@@ -1,16 +1,32 @@
 //! Shared Segoe UI label painting (overlay captions + translation window).
 
+use std::cell::RefCell;
+
 use windows::{
     Win32::{
         Foundation::{COLORREF, RECT},
-        Graphics::Gdi::{
-            CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_EDITCONTROL,
-            DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_VCENTER, DT_WORDBREAK, DrawTextW, FF_DONTCARE, FW_NORMAL, HDC,
-            HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+        Graphics::{
+            Direct2D::{
+                Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT},
+                D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
+                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory,
+            },
+            DirectWrite::{
+                DWRITE_FACTORY_TYPE_SHARED, DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_READING_DIRECTION_TOP_TO_BOTTOM, DWRITE_TEXT_METRICS,
+                DWRITE_VERTICAL_GLYPH_ORIENTATION_STACKED, DWriteCreateFactory, IDWriteFactory, IDWriteTextLayout, IDWriteTextLayout2,
+            },
+            Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            Gdi::{
+                CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DT_EDITCONTROL, DT_END_ELLIPSIS,
+                DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_VCENTER, DT_WORDBREAK, DrawTextW, FF_DONTCARE, FW_NORMAL, HDC, HFONT,
+                HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            },
         },
     },
-    core::w,
+    core::{HSTRING, Interface, w},
 };
+use windows_numerics::Vector2;
 
 use crate::{
     error::OverlayError,
@@ -18,57 +34,105 @@ use crate::{
 };
 
 /// Font size + text colour for one painted label.
-pub(crate) struct LabelStyle {
+pub(crate) struct LabelStyle<'a> {
     pub font_px: i32,
     pub color: Rgba,
     /// Single-line, vertically centered (HUD status). Overlay captions stay top-aligned wrap.
     pub vcenter: bool,
-    /// Upright glyphs in columns, right to left (CJK captions over vertical source text).
-    pub vertical: bool,
+    /// Columns right to left in this BCP-47 locale (CJK captions over vertical source text).
+    /// DirectWrite picks the vertical punctuation and CJK fallback font for the locale.
+    pub vertical: Option<&'a str>,
 }
 
-/// Cell side for one upright glyph in a vertical column (also the column pitch).
-pub(crate) fn vertical_advance(font_px: i32) -> i32 {
-    font_px + (font_px / 8).max(1)
+/// DirectWrite / Direct2D for column captions, made on first use on the painting thread.
+struct Columns {
+    dwrite: IDWriteFactory,
+    target: ID2D1DCRenderTarget,
 }
 
-/// Split `text` into columns of at most `per_col` glyphs; `\n` starts a new column.
-/// Brackets, colons, ellipses and dashes map to their vertical presentation form;
-/// `，、。！？` stay as-is (centered in the cell, as in Taiwan vertical text).
-pub(crate) fn vertical_columns(text: &str, per_col: usize) -> Vec<Vec<char>> {
-    let per_col = per_col.max(1);
-    let mut cols = Vec::new();
-    for line in text.lines() {
-        let glyphs: Vec<char> = line
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .map(|c| match c {
-                ',' => '，',
-                '!' => '！',
-                '?' => '？',
-                '：' | ':' => '︓',
-                '；' | ';' => '︔',
-                '…' => '︙',
-                '‥' => '︰',
-                '「' => '﹁',
-                '」' => '﹂',
-                '『' => '﹃',
-                '』' => '﹄',
-                '（' | '(' => '︵',
-                '）' | ')' => '︶',
-                '【' => '︻',
-                '】' => '︼',
-                '《' => '︽',
-                '》' => '︾',
-                '〈' => '︿',
-                '〉' => '﹀',
-                'ー' | '—' | '―' | '－' => '︱',
-                c => c,
-            })
-            .collect();
-        cols.extend(glyphs.chunks(per_col).map(<[char]>::to_vec));
+thread_local! {
+    static COLUMNS: RefCell<Option<Columns>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with the thread's [`Columns`]; a failure drops them so the next call starts fresh
+/// (e.g. after `D2DERR_RECREATE_TARGET`).
+fn with_columns<T>(f: impl FnOnce(&Columns) -> windows::core::Result<T>) -> Result<T, OverlayError> {
+    COLUMNS
+        .with_borrow_mut(|slot| {
+            let columns = match slot.take() {
+                Some(columns) => columns,
+                None => unsafe {
+                    let d2d: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+                    let target = d2d.CreateDCRenderTarget(&D2D1_RENDER_TARGET_PROPERTIES {
+                        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                        },
+                        // 1 DIP = 1 surface pixel, like the GDI font sizes.
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                        usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+                    })?;
+                    Columns {
+                        dwrite: DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?,
+                        target,
+                    }
+                },
+            };
+            let result = f(&columns);
+            if result.is_ok() {
+                *slot = Some(columns);
+            }
+            result
+        })
+        .map_err(|e| OverlayError::Other(format!("vertical text: {e}")))
+}
+
+/// `text` read top to bottom, columns right to left, inside a `w × h` box.
+fn column_layout(
+    dwrite: &IDWriteFactory,
+    text: &str,
+    font_px: i32,
+    locale: &str,
+    w: f32,
+    h: f32,
+) -> windows::core::Result<IDWriteTextLayout> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let format = |locale: &str| {
+            dwrite.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                font_px as f32,
+                &HSTRING::from(locale),
+            )
+        };
+        // A free-form target ("繁體中文") is not a locale name: fall back to the system default.
+        let format = format(locale).or_else(|_| format(""))?;
+        format.SetReadingDirection(DWRITE_READING_DIRECTION_TOP_TO_BOTTOM)?;
+        format.SetFlowDirection(DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT)?;
+        let layout = dwrite.CreateTextLayout(&wide, &format, w, h)?;
+        // Upright Latin and `!?` too; the default lays them on their side (UAX #50).
+        layout
+            .cast::<IDWriteTextLayout2>()?
+            .SetVerticalGlyphOrientation(DWRITE_VERTICAL_GLYPH_ORIENTATION_STACKED)?;
+        Ok(layout)
     }
-    cols
+}
+
+/// Width of `text` laid out in columns `height` tall (at most `max_w` before overflowing).
+pub(crate) fn measure_columns(text: &str, font_px: i32, locale: &str, height: i32, max_w: i32) -> Result<i32, OverlayError> {
+    with_columns(|c| {
+        let layout = column_layout(&c.dwrite, text, font_px, locale, max_w.max(1) as f32, height.max(1) as f32)?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe { layout.GetMetrics(&mut metrics)? };
+        Ok(metrics.width.ceil() as i32)
+    })
 }
 
 pub(crate) fn create_segoe_font(px: i32) -> Result<HFONT, OverlayError> {
@@ -108,7 +172,7 @@ pub(crate) fn draw_text_label(
     surface: SurfaceSize,
     rect: SurfaceRect,
     text: &str,
-    style: LabelStyle,
+    style: LabelStyle<'_>,
 ) -> Result<(), OverlayError> {
     if text.is_empty() {
         return Ok(());
@@ -157,25 +221,29 @@ pub(crate) fn draw_text_label(
     }
 
     let _ = unsafe { SetTextColor(hdc, COLORREF(0x00FF_FFFF)) };
-    if style.vertical {
-        let adv = vertical_advance(style.font_px);
-        let per_col = (rh as i32 / adv).max(1) as usize;
-        for (k, col) in vertical_columns(text, per_col).iter().enumerate() {
-            let left = text_rect.right - (k as i32 + 1) * adv;
-            for (i, ch) in col.iter().enumerate() {
-                let top = text_rect.top + i as i32 * adv;
-                let mut cell = RECT {
-                    left,
-                    top,
-                    right: left + adv,
-                    bottom: top + adv,
-                };
-                let mut buf16 = [0u16; 2];
-                // Clipped to the cell: ink outside `text_rect` would skip the coverage pass below.
-                let flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
-                unsafe { DrawTextW(hdc, ch.encode_utf16(&mut buf16), &mut cell, flags) };
-            }
-        }
+    if let Some(locale) = style.vertical {
+        // White on black like the GDI path, clipped to `text_rect` so the coverage pass sees all ink.
+        with_columns(|c| unsafe {
+            let layout = column_layout(&c.dwrite, text, style.font_px, locale, rw as f32, rh as f32)?;
+            c.target.BindDC(hdc, &text_rect)?;
+            let white = c.target.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
+            c.target.BeginDraw();
+            c.target.Clear(Some(&D2D1_COLOR_F {
+                a: 1.0,
+                ..Default::default()
+            }));
+            c.target
+                .DrawTextLayout(Vector2 { X: 0.0, Y: 0.0 }, &layout, &white, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            c.target.EndDraw(None, None)
+        })?;
     } else {
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let flags = if style.vcenter {
@@ -215,9 +283,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vertical_columns_split_lines_and_map_punctuation() {
-        let cols = vertical_columns("「你好」，世界。\n再見——", 4);
-        let as_str: Vec<String> = cols.iter().map(|c| c.iter().collect()).collect();
-        assert_eq!(as_str, ["﹁你好﹂", "，世界。", "再見︱︱"]);
+    fn columns_grow_sideways_as_height_shrinks() {
+        let text = "一二三四五六";
+        let one = measure_columns(text, 20, "zh-TW", 1000, 1000).unwrap();
+        let two = measure_columns(text, 20, "zh-TW", 70, 1000).unwrap();
+        assert!((15..=40).contains(&one), "one column of 20px glyphs, got {one}");
+        assert!(two > one * 3 / 2, "two columns must be wider than one: {two} vs {one}");
+    }
+
+    #[test]
+    fn latin_punctuation_stays_upright_in_columns() {
+        let mut dib = crate::gfx::surface::DibSurface::create().unwrap();
+        dib.ensure(80, 160).unwrap();
+        let surface = SurfaceSize::new(80, 160);
+        let font = create_segoe_font(40).unwrap();
+        let hdc = dib.hdc();
+        let buf = dib.pixels().unwrap();
+        buf.fill(0);
+        let rect = SurfaceRect { x: 0, y: 0, w: 80, h: 160 };
+        let style = LabelStyle {
+            font_px: 40,
+            color: Rgba::from_argb(0xFFFF_FFFF),
+            vcenter: false,
+            vertical: Some("zh-TW"),
+        };
+        draw_text_label(hdc, font, buf, surface, rect, "!!!", style).unwrap();
+        let ink_x: Vec<usize> = (0..160 * 80)
+            .filter(|i| buf[i / 80 * surface.stride + i % 80 * 4 + 3] > 64)
+            .map(|i| i % 80)
+            .collect();
+        let width = ink_x.iter().max().unwrap() - ink_x.iter().min().unwrap();
+        // Upright `!` is a thin stroke; on its side it spans most of the em.
+        assert!(width < 12, "`!` must stand upright, ink is {width}px wide");
+    }
+
+    #[test]
+    fn free_form_target_language_still_lays_out() {
+        // DirectWrite rejects non-locale names with E_INVALIDARG.
+        assert!(measure_columns("一二三", 20, "繁體中文", 1000, 1000).is_ok());
     }
 }

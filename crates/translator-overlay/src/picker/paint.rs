@@ -67,7 +67,7 @@ impl OverlayHost {
                 font_px: 13,
                 color: text,
                 vcenter: false,
-                vertical: false,
+                vertical: None,
             })?;
         }
         Ok(())

@@ -25,6 +25,9 @@ pub enum OverlayCommand {
     Detach,
     SetBlocks {
         blocks: Vec<TranslatedBlock>,
+        /// BCP-47 tag of the translations (target language): picks the CJK font and
+        /// vertical punctuation for column captions.
+        locale: String,
         content_width: u32,
         content_height: u32,
     },

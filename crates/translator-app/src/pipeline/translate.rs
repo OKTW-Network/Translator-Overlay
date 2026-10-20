@@ -305,6 +305,7 @@ fn show_captions(
         }
         if let Err(e) = o.send(OverlayCommand::SetBlocks {
             blocks: translated.clone(),
+            locale: state.read().config.translation.target_lang.clone(),
             content_width,
             content_height,
         }) {

@@ -3199,6 +3199,7 @@ dependencies = [
  "translator-capture",
  "translator-core",
  "windows",
+ "windows-numerics 0.3.1",
 ]
 
 [[package]]

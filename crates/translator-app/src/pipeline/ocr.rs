@@ -364,6 +364,7 @@ impl Pipeline {
             }
             if let Err(e) = o.send(OverlayCommand::SetBlocks {
                 blocks: remapped.clone(),
+                locale: self.state.read().config.translation.target_lang.clone(),
                 content_width: frame_w,
                 content_height: frame_h,
             }) {
