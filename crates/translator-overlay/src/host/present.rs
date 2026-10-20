@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn long_single_line_translation_wraps_at_source_font() -> Result<(), String> {
+    fn long_translation_widens_then_shrinks_then_wraps() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
@@ -627,9 +627,39 @@ mod tests {
                     h: 28,
                 },
                 long,
-                1,
                 28,
                 40,
+                &[],
+                surface,
+            )
+            .map_err(|e| e.to_string())?;
+        // Room to the right ends at x=70 and below at y=90.
+        let obstacles = [
+            SurfaceRect {
+                x: 70,
+                y: 20,
+                w: 100,
+                h: 28,
+            },
+            SurfaceRect {
+                x: 0,
+                y: 90,
+                w: 300,
+                h: 28,
+            },
+        ];
+        let (rect_boxed, font_boxed, _) = host
+            .layout_label(
+                SurfaceRect {
+                    x: 20,
+                    y: 20,
+                    w: 40,
+                    h: 28,
+                },
+                "I understand completely",
+                28,
+                40,
+                &obstacles,
                 surface,
             )
             .map_err(|e| e.to_string())?;
@@ -642,9 +672,9 @@ mod tests {
                     h: 28,
                 },
                 "OK",
-                1,
                 28,
                 40,
+                &[],
                 surface,
             )
             .map_err(|e| e.to_string())?;
@@ -657,9 +687,9 @@ mod tests {
                     h: 200,
                 },
                 long,
-                1,
                 200,
                 20,
+                &[],
                 surface,
             )
             .map_err(|e| e.to_string())?;
@@ -670,9 +700,11 @@ mod tests {
             h: 120,
         };
         let (rect_cjk, _, vertical_cjk) = host
-            .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", 1, 120, 20, surface)
+            .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", 120, 20, &[], surface)
             .map_err(|e| e.to_string())?;
-        let (_, _, vertical_short) = host.layout_label(column, "嗯？", 1, 120, 20, surface).map_err(|e| e.to_string())?;
+        let (_, _, vertical_short) = host
+            .layout_label(column, "嗯？", 120, 20, &[], surface)
+            .map_err(|e| e.to_string())?;
 
         // Five 16px glyphs fit one column: all ink lands at the right edge of a wide label.
         let label = SurfaceRect {
@@ -714,12 +746,20 @@ mod tests {
             return Err(format!("expected English over a column to widen, got {}", rect_v.w));
         }
 
-        // Font depends only on the source box, not on translation length.
-        if font_h != font_short {
-            return Err(format!("long translation must keep the source font {font_short}px, got {font_h}"));
+        // Too long for the 1.75× width cap: the font shrinks before wrapping.
+        if font_h >= font_short {
+            return Err(format!("long translation must shrink below the source font {font_short}px, got {font_h}"));
         }
-        // Never clipped: overflow wraps within the 1.75× width cap, so the box
-        // grows taller instead of ending in "…".
+        if font_boxed >= font_short {
+            return Err(format!("boxed-in translation must shrink below {font_short}px, got {font_boxed}"));
+        }
+        if let Some(hit) = obstacles.iter().find(|o| {
+            rect_boxed.x < o.x + o.w && o.x < rect_boxed.x + rect_boxed.w && rect_boxed.y < o.y + o.h && o.y < rect_boxed.y + rect_boxed.h
+        }) {
+            return Err(format!("caption {rect_boxed:?} overlaps neighbour {hit:?}"));
+        }
+        // Never clipped: past the font floor the text wraps within the width
+        // cap, so the box grows taller instead of ending in "…".
         if rect_h.w != 70 {
             return Err(format!("expected wrapped width at the 1.75× cap (70px), got {}", rect_h.w));
         }

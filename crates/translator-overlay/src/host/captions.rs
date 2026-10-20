@@ -28,7 +28,7 @@ impl OverlayHost {
         // Layout first (needs GDI measure / font) before borrowing DIB pixels.
         let content_w = self.content_w;
         let content_h = self.content_h;
-        let pending: Vec<(SurfaceRect, String, u32, i32, i32)> = self
+        let mut pending: Vec<(SurfaceRect, String, i32, i32)> = self
             .blocks
             .iter()
             .filter_map(|block| {
@@ -43,13 +43,23 @@ impl OverlayHost {
                 };
                 let source_span_h = cover(block.source_height, block.bbox.height, base.h);
                 let source_span_w = cover(block.source_width, block.bbox.width, base.w);
-                Some((base, text.to_string(), block.source_lines.max(1), source_span_h, source_span_w))
+                Some((base, text.to_string(), source_span_h, source_span_w))
             })
             .collect();
+        // Top to bottom, so each caption grows only into room no earlier caption took.
+        pending.sort_by_key(|(base, ..)| (base.y, base.x));
+        let sources: Vec<SurfaceRect> = pending.iter().map(|(base, ..)| *base).collect();
 
         let mut labels: Vec<(SurfaceRect, String, i32, bool)> = Vec::with_capacity(pending.len());
-        for (base, text, source_lines, source_span_h, source_span_w) in pending {
-            let (expanded, font_px, vertical) = self.layout_label(base, &text, source_lines, source_span_h, source_span_w, surface)?;
+        for (i, (base, text, source_span_h, source_span_w)) in pending.into_iter().enumerate() {
+            let obstacles: Vec<SurfaceRect> = sources
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, r)| *r)
+                .chain(labels.iter().map(|(rect, ..)| *rect))
+                .collect();
+            let (expanded, font_px, vertical) = self.layout_label(base, &text, source_span_h, source_span_w, &obstacles, surface)?;
             labels.push((expanded, text, font_px, vertical));
         }
 
@@ -110,11 +120,12 @@ impl OverlayHost {
 
     /// Layout one overlay label.
     ///
-    /// - Merged paragraph (`source_lines > 1`): lock width to OCR column; wrap.
-    /// - Single line: keep the source-box font; grow width up to 1.75× if the
-    ///   translation is longer, then wrap down within that cap. Font never
-    ///   shrinks to fit, so font size depends only on the source box.
-    ///   A user `font_px` override sets the size.
+    /// - Line source: start at the source-box font (or the user `font_px`
+    ///   override) and fit the source line count by first widening up to 1.75×,
+    ///   then shrinking the font to 70%; only then wrap onto extra lines,
+    ///   shrinking further (down to 8px) while that would reach the next
+    ///   obstacle below. Widening stops at the next obstacle on the right.
+    ///   Obstacles are the other source boxes and the captions placed so far.
     /// - Height is at least `source_span_h` so a short translation still covers
     ///   every original line. Width is at least `source_span_w` so a tilted
     ///   vertical run still covers its AABB.
@@ -125,9 +136,9 @@ impl OverlayHost {
         &mut self,
         base: SurfaceRect,
         text: &str,
-        source_lines: u32,
         source_span_h: i32,
         source_span_w: i32,
+        obstacles: &[SurfaceRect],
         surface: draw::SurfaceSize,
     ) -> Result<(SurfaceRect, i32, bool), OverlayError> {
         let max_w = (surface.width - base.x).max(1);
@@ -168,37 +179,44 @@ impl OverlayHost {
             return Ok((place_label(at, box_w, text_h.max(min_h), surface), font_px, false));
         }
 
-        if source_lines <= 1 {
-            let expand_cap = ((source_w as f32) * 1.75).round() as i32;
-            let cap = expand_cap.min(max_w).max(source_w);
-            let pad = label_pad(font_px);
-            let natural = self.measure_single_line(text, font_px)?;
-            let need_w = (natural.0 + pad * 2).max(1);
-            if need_w <= cap {
-                let box_w = if need_w <= source_w {
-                    source_w
-                } else {
-                    need_w.min(cap).max(source_w)
-                };
+        let right = obstacles
+            .iter()
+            .filter(|o| o.y < base.y + min_h && o.y + o.h > base.y && o.x > base.x)
+            .fold(surface.width, |r, o| r.min(o.x));
+        let bottom = obstacles
+            .iter()
+            .filter(|o| o.x < right && o.x + o.w > base.x && o.y > base.y)
+            .fold(surface.height, |b, o| b.min(o.y));
+        let room_h = (bottom - base.y).max(min_h);
+        let cap = (((source_w as f32) * 1.75).round() as i32).min(right - base.x).max(source_w);
+        let floor = (font_px * 7 / 10).max(8);
 
-                // Stay one line so the caption cannot cover the OCR line below.
-                let box_h = (natural.1 + pad * 2).max(font_px + pad * 2).max(min_h);
-                return Ok((place_label(base, box_w, box_h, surface), font_px, false));
+        let mut px = font_px;
+        loop {
+            let pad = label_pad(px);
+            let line_h = self.measure_single_line(text, px)?.1;
+            let source_text_h = (min_h - pad * 2).max(line_h);
+            let mut box_w = source_w;
+            let (text_w, text_h) = loop {
+                let (text_w, text_h) = self.measure_wrapped(text, px, (box_w - pad * 2).max(8))?;
+                if text_h <= source_text_h || box_w >= cap {
+                    break (text_w, text_h);
+                }
+                box_w = (box_w + px * 2).min(cap);
+            };
+            // Extra lines only once the font is at its floor, and only down to the next obstacle.
+            let limit = if px > floor {
+                source_text_h
+            } else {
+                (room_h - pad * 2).max(line_h)
+            };
+            if text_h <= limit || px <= 8 {
+                let box_w = (text_w + pad * 2).max(source_w).min(cap);
+                let box_h = (text_h + pad * 2).max(px + pad * 2).max(min_h);
+                return Ok((place_label(base, box_w, box_h, surface), px, false));
             }
-
-            // Overflow: wrap within the cap at the same font so neighbours stay one size.
-            let box_w = cap;
-            let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
-            let box_h = (text_h + pad * 2).max(font_px + pad * 2).max(min_h);
-            return Ok((place_label(base, box_w, box_h, surface), font_px, false));
+            px = (px * 9 / 10).min(px - 1).max(8);
         }
-
-        // Multi-line source: keep OCR column width; wrap height only.
-        let pad = label_pad(font_px);
-        let box_w = source_w;
-        let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
-        let box_h = (text_h + pad * 2).max(font_px + pad * 2).max(min_h);
-        Ok((place_label(base, box_w, box_h, surface), font_px, false))
     }
 
     /// Unwrapped single-line extent (width, height) in pixels.
