@@ -29,8 +29,9 @@ const NON_TEXT_LAYOUT: [&str; 6] = ["image", "chart", "table", "seal", "header_i
 /// PP-DocLayoutV3's fixed square input side (no aspect-ratio keep).
 const LAYOUT_SIDE: u32 = 800;
 
-/// One page of OCR lines plus layout boxes (crop coords; empty without layout).
-type Page = (Vec<TextRegion>, Vec<Rect>);
+/// One page of OCR lines plus layout boxes (crop coords; empty without layout),
+/// each flagged `true` for a `vertical_text` box.
+type Page = (Vec<TextRegion>, Vec<(Rect, bool)>);
 
 /// Loaded PP-OCRv6 engine (ONNX Runtime).
 #[derive(Clone)]
@@ -115,7 +116,7 @@ impl OcrEngine {
         let inner = Arc::clone(&self.inner);
         let layout = self.layout.clone();
         tokio::task::spawn_blocking(move || {
-            let boxes: Vec<Vec<Rect>> = match &layout {
+            let boxes: Vec<Vec<(Rect, bool)>> = match &layout {
                 // Pre-shrink with the area filter (~3 ms per 1080p frame vs ~15 ms for
                 // oar-ocr's CatmullRom); a same-size resize inside oar-ocr is a plain copy.
                 Some(layout) => layout
@@ -136,7 +137,8 @@ impl OcrEngine {
                             .filter(|e| !NON_TEXT_LAYOUT.contains(&e.element_type.as_str()))
                             .map(|e| {
                                 let (x0, y0, x1, y1) = e.bbox.aabb();
-                                Rect::new(x0.min(x1) * sx, y0.min(y1) * sy, (x1 - x0).abs() * sx, (y1 - y0).abs() * sy)
+                                let rect = Rect::new(x0.min(x1) * sx, y0.min(y1) * sy, (x1 - x0).abs() * sx, (y1 - y0).abs() * sy);
+                                (rect, e.element_type == "vertical_text")
                             })
                             .collect()
                     })

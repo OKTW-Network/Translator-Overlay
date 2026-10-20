@@ -54,11 +54,12 @@ pub fn label_pad(font_px: i32) -> i32 {
 }
 
 /// Place a label at the OCR origin; shift up only if it would go past the bottom.
+/// Never starts off the left / top edge (column captions grow left).
 pub fn place_label(base: SurfaceRect, box_w: i32, box_h: i32, surface: SurfaceSize) -> SurfaceRect {
     let box_w = box_w.clamp(1, surface.width.max(1));
     let box_h = box_h.min(surface.height.max(1)).max(1);
-    let mut x = base.x;
-    let mut y = base.y;
+    let mut x = base.x.max(0);
+    let mut y = base.y.max(0);
     if x + box_w > surface.width {
         x = (surface.width - box_w).max(0);
     }

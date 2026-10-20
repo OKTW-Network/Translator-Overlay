@@ -613,7 +613,7 @@ mod tests {
 
         let surface = draw::SurfaceSize::new(host.surface_w.max(1), host.surface_h.max(1));
         let long = "I understand completely and will proceed with the request as written";
-        let (rect_h, font_h) = host
+        let (rect_h, font_h, _) = host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -628,7 +628,7 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
-        let (_, font_short) = host
+        let (_, font_short, _) = host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -643,7 +643,7 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
-        let (rect_v, _) = host
+        let (rect_v, _, vertical_en) = host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -658,8 +658,29 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
+        let column = SurfaceRect {
+            x: 200,
+            y: 20,
+            w: 20,
+            h: 120,
+        };
+        let (rect_cjk, _, vertical_cjk) = host
+            .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", 1, 120, 20, surface)
+            .map_err(|e| e.to_string())?;
+        let (_, _, vertical_short) = host.layout_label(column, "嗯？", 1, 120, 20, surface).map_err(|e| e.to_string())?;
         host.teardown();
         let _ = unsafe { DestroyWindow(target) };
+
+        // Column source: Han text stays in columns at the source height, growing left.
+        if !vertical_cjk || !vertical_short || vertical_en {
+            return Err(format!("expected columns only for Han text, got cjk={vertical_cjk} short={vertical_short} en={vertical_en}"));
+        }
+        if rect_cjk.h != 120 || rect_cjk.x + rect_cjk.w != 220 || rect_cjk.w <= 20 {
+            return Err(format!("expected extra columns to the left at 120px tall, got {rect_cjk:?}"));
+        }
+        if rect_v.w <= 20 {
+            return Err(format!("expected English over a column to widen, got {}", rect_v.w));
+        }
 
         // Font depends only on the source box, not on translation length.
         if font_h != font_short {

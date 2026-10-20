@@ -413,6 +413,7 @@ impl HudWindow {
             font_px: layout.font_px,
             color: fg,
             vcenter: true,
+            vertical: false,
         })?;
         self.present()
     }

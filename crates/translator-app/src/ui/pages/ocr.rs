@@ -211,7 +211,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
     ));
 
     let order_idx = match ocr.line_merge.order {
-        LineMergeOrder::TopToBottomLeftToRight => 0,
+        LineMergeOrder::TopToBottomRightToLeft => 0,
         LineMergeOrder::LeftToRightTopToBottom => 1,
     };
     let cx_order = cx.clone();
@@ -221,7 +221,7 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
             cx.with_mut(|ui| {
                 ui.draft.ocr.line_merge.order = match choice {
                     1 => LineMergeOrder::LeftToRightTopToBottom,
-                    _ => LineMergeOrder::TopToBottomLeftToRight,
+                    _ => LineMergeOrder::TopToBottomRightToLeft,
                 };
                 mark_dirty(ui);
             });

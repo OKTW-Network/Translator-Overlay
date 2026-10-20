@@ -279,6 +279,7 @@ impl ReaderWindow {
             font_px: self.font_px,
             color: fg,
             vcenter: false,
+            vertical: false,
         })?;
         self.present()
     }

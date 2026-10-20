@@ -469,8 +469,8 @@ impl Default for OcrConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LineMergeOrder {
-    /// Down each column, then the next column to the right (column-major).
-    TopToBottomLeftToRight,
+    /// Down each column, then the next column to the left (column-major, CJK vertical).
+    TopToBottomRightToLeft,
     /// Across each row left-to-right, then the next row down (row-major).
     #[default]
     LeftToRightTopToBottom,
@@ -976,7 +976,7 @@ mode = "layout"
 gap_slack = 9.9
 list_min_peers = 99
 keep_speaker_separate = true
-order = "top_to_bottom_left_to_right"
+order = "top_to_bottom_right_to_left"
 merge_whole_region = true
 left_align_ratio = 0.05
 max_gap_ratio = 0.02
@@ -986,7 +986,7 @@ align_overlap_ratio = 0.9
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Layout);
-        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomLeftToRight);
+        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomRightToLeft);
         assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
         assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
         assert_eq!(config.ocr.line_merge.join, LineJoin::Newline);

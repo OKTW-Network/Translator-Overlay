@@ -8,6 +8,9 @@
 //!    for [`LineMergeMode::Region`] with drawn regions).
 //! 4. **Reading order** — row-major or column-major join / emit order.
 //!
+//! Vertical text (columns ≥ 1.5× taller than wide) compares column widths, reads
+//! right to left, and anchors the block one column wide.
+//!
 //! [`LineMergeMode::Layout`] skips 1–2 and joins lines that share a layout box.
 
 use translator_core::{LineJoin, LineMergeConfig, LineMergeMode, LineMergeOrder, OcrBlock, Rect};
@@ -28,7 +31,7 @@ pub fn merge_line_blocks_with(
     frame_w: u32,
     frame_h: u32,
     merge_all: bool,
-    layout: &[Rect],
+    layout: &[(Rect, bool)],
 ) -> Vec<OcrBlock> {
     if cfg.mode == LineMergeMode::Off || blocks.len() <= 1 {
         return reindex(blocks);
@@ -41,7 +44,7 @@ pub fn merge_line_blocks_with(
 
     if merge_all {
         let members: Vec<usize> = (0..blocks.len()).collect();
-        return reindex(vec![assemble_group(&blocks, members, cfg, frame, None)]);
+        return reindex(vec![assemble_group(&blocks, members, cfg, frame, None, false)]);
     }
 
     if cfg.mode == LineMergeMode::Layout {
@@ -54,8 +57,9 @@ pub fn merge_line_blocks_with(
 }
 
 /// Join lines whose center falls in the same layout box (the smallest one when nested).
-/// Lines outside every box stay single.
-fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[Rect], cfg: &LineMergeConfig, frame: Frame) -> Vec<OcrBlock> {
+/// Lines outside every box stay single. A `vertical_text` box (`true`) reads as columns
+/// even when its lines are too short to look vertical.
+fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[(Rect, bool)], cfg: &LineMergeConfig, frame: Frame) -> Vec<OcrBlock> {
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); layout.len()];
     let mut singles = Vec::new();
     for (i, b) in blocks.iter().enumerate() {
@@ -63,8 +67,8 @@ fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[Rect], cfg: &LineMergeConfig,
         let owner = layout
             .iter()
             .enumerate()
-            .filter(|(_, r)| cx >= r.x && cx <= r.x + r.width && cy >= r.y && cy <= r.y + r.height)
-            .min_by(|(_, a), (_, b)| (a.width * a.height).total_cmp(&(b.width * b.height)))
+            .filter(|(_, (r, _))| cx >= r.x && cx <= r.x + r.width && cy >= r.y && cy <= r.y + r.height)
+            .min_by(|(_, (a, _)), (_, (b, _))| (a.width * a.height).total_cmp(&(b.width * b.height)))
             .map(|(k, _)| k);
         match owner {
             Some(k) => groups[k].push(i),
@@ -73,9 +77,10 @@ fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[Rect], cfg: &LineMergeConfig,
     }
     groups
         .into_iter()
-        .filter(|g| !g.is_empty())
-        .chain(singles.into_iter().map(|i| vec![i]))
-        .map(|members| assemble_group(&blocks, members, cfg, frame, None))
+        .zip(layout.iter().map(|(_, vertical)| *vertical))
+        .filter(|(g, _)| !g.is_empty())
+        .chain(singles.into_iter().map(|i| (vec![i], false)))
+        .map(|(members, vertical)| assemble_group(&blocks, members, cfg, frame, None, vertical))
         .collect()
 }
 
@@ -173,7 +178,7 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis
     groups
         .into_iter()
         .filter(|g| !g.is_empty())
-        .map(|members| assemble_group(&blocks, members, cfg, frame, Some(axis)))
+        .map(|members| assemble_group(&blocks, members, cfg, frame, Some(axis), false))
         .collect()
 }
 
@@ -203,8 +208,17 @@ fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
     }
 }
 
-fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeConfig, frame: Frame, along: Option<Axis>) -> OcrBlock {
-    sort_indices(blocks, &mut members, cfg, frame);
+/// `force_vertical` reads the group as columns even when its lines are not tall.
+fn assemble_group(
+    blocks: &[OcrBlock],
+    mut members: Vec<usize>,
+    cfg: &LineMergeConfig,
+    frame: Frame,
+    along: Option<Axis>,
+    force_vertical: bool,
+) -> OcrBlock {
+    let vertical = force_vertical || mostly_vertical(blocks, &members);
+    sort_indices(blocks, &mut members, cfg, frame, vertical);
 
     let mut text = String::new();
     let mut conf = 0.0f32;
@@ -214,6 +228,7 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
     let mut y1 = f32::MIN;
     let mut cover_x1 = f32::MIN;
     let mut heights: Vec<f32> = Vec::with_capacity(members.len());
+    let mut widths: Vec<f32> = Vec::with_capacity(members.len());
 
     for (k, &idx) in members.iter().enumerate() {
         let b = &blocks[idx];
@@ -221,11 +236,12 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
             text = b.text.clone();
         } else {
             // X-pass is already same-row (stagger included). Y-pass is stacked.
+            // Columns swap the two: side by side is the next line, stacked is the same one.
             // merge_all mixes both: still going right *and* overlap on Y.
             let prev = &blocks[members[k - 1]];
             let same_row = match along {
-                Some(Axis::X) => true,
-                Some(Axis::Y) => false,
+                Some(Axis::X) => !vertical,
+                Some(Axis::Y) => vertical,
                 None => {
                     b.bbox.x >= prev.bbox.x + prev.bbox.width * 0.25
                         && (prev.bbox.y + prev.bbox.height).min(b.bbox.y + b.bbox.height) > prev.bbox.y.max(b.bbox.y)
@@ -245,15 +261,19 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
         cover_x1 = cover_x1.max(b.bbox.x + b.bbox.width.max(b.source_width));
         y1 = y1.max(b.bbox.y + b.source_height.max(b.bbox.height));
         heights.push(b.bbox.height.max(1.0));
+        widths.push(b.bbox.width.max(1.0));
     }
     conf /= members.len() as f32;
 
-    // One-line-tall anchor so overlay font tracks a single glyph row.
+    // One-line anchor (one row tall, or one column wide) so overlay font tracks a single glyph.
     // `source_height` / `source_width` are the ink union; overlay uses them as min cover.
-    let line_h = median_f32(heights);
-    let bbox = Rect::new(x0, y0, (x1 - x0).max(1.0), line_h);
+    let bbox = if vertical {
+        Rect::new(x0, y0, median_f32(widths), (y1 - y0).max(1.0))
+    } else {
+        Rect::new(x0, y0, (x1 - x0).max(1.0), median_f32(heights))
+    };
     let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
-    let source_height = (y1 - y0).max(line_h);
+    let source_height = (y1 - y0).max(bbox.height);
     let source_width = (cover_x1 - x0).max(bbox.width);
 
     OcrBlock {
@@ -269,25 +289,53 @@ fn assemble_group(blocks: &[OcrBlock], mut members: Vec<usize>, cfg: &LineMergeC
 
 fn sort_blocks(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame) -> Vec<OcrBlock> {
     let mut order: Vec<usize> = (0..blocks.len()).collect();
-    sort_indices(&blocks, &mut order, cfg, frame);
+    let vertical = mostly_vertical(&blocks, &order);
+    sort_indices(&blocks, &mut order, cfg, frame, vertical);
     let mut slots: Vec<Option<OcrBlock>> = blocks.into_iter().map(Some).collect();
     order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
+/// Taller than wide by the same 1.5× oar-ocr uses to rotate a crop for recognition.
+fn is_vertical(b: &OcrBlock) -> bool {
+    b.bbox.height >= b.bbox.width * 1.5
+}
+
+fn is_horizontal(b: &OcrBlock) -> bool {
+    b.bbox.width >= b.bbox.height * 1.5
+}
+
+/// More columns than clearly horizontal lines; near-square short runs count for neither.
+fn mostly_vertical(blocks: &[OcrBlock], members: &[usize]) -> bool {
+    let count = |f: fn(&OcrBlock) -> bool| members.iter().filter(|&&i| f(&blocks[i])).count();
+    count(is_vertical) > count(is_horizontal)
+}
+
 /// Sort into bands along one axis, then by start position along the other axis, then this one.
-fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfig, frame: Frame) {
+///
+/// `vertical` reads columns right to left, top to bottom, whatever `cfg.order` says.
+fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfig, frame: Frame, vertical: bool) {
+    let start = |i: usize, axis: Axis| axis.span(blocks[i].bbox).0 as i32;
+    if vertical {
+        // Band within half a column width: a fixed frame ratio joins neighbour columns of small text.
+        let col_w = median_f32(members.iter().map(|&i| blocks[i].bbox.width).collect());
+        let bands = assign_bands(blocks, members, Axis::X, col_w * 0.5 / frame.w as f32, frame.w as f32);
+        members.sort_by(|&a, &b| bands[b].cmp(&bands[a]).then_with(|| start(a, Axis::Y).cmp(&start(b, Axis::Y))));
+        return;
+    }
     let band_axis = match cfg.order {
         // Across each row, then the next row down (row-major).
         LineMergeOrder::LeftToRightTopToBottom => Axis::Y,
-        // Down each column, then the next column (column-major).
-        LineMergeOrder::TopToBottomLeftToRight => Axis::X,
+        // Down each column, then the next column to the left (column-major).
+        LineMergeOrder::TopToBottomRightToLeft => Axis::X,
     };
     let bands = assign_bands(blocks, members, band_axis, cfg.order_band_ratio, band_axis.extent(frame));
-    let start = |i: usize, axis: Axis| axis.span(blocks[i].bbox).0 as i32;
     let along = band_axis.cross();
+    let band_order = |a: usize, b: usize| match band_axis {
+        Axis::X => bands[b].cmp(&bands[a]),
+        Axis::Y => bands[a].cmp(&bands[b]),
+    };
     members.sort_by(|&a, &b| {
-        bands[a]
-            .cmp(&bands[b])
+        band_order(a, b)
             .then_with(|| start(a, along).cmp(&start(b, along)))
             .then_with(|| start(a, band_axis).cmp(&start(b, band_axis)))
     });
@@ -326,6 +374,10 @@ fn assign_bands(blocks: &[OcrBlock], members: &[usize], axis: Axis, band_ratio: 
 }
 
 fn can_link(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
+    // A column never joins a clearly horizontal line; near-square short runs go either way.
+    if (is_vertical(a) && is_horizontal(b)) || (is_horizontal(a) && is_vertical(b)) {
+        return false;
+    }
     if !height_compatible(a, b, cfg) || !aligned(a, b, axis.cross(), frame, cfg) {
         return false;
     }
@@ -340,9 +392,12 @@ fn can_link(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMerg
     true
 }
 
+/// Same glyph size: line height, or column width when either side is a column
+/// (column length varies with the text, the last one is often short).
 fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool {
-    let ah = a.bbox.height.max(1.0);
-    let bh = b.bbox.height.max(1.0);
+    let side = |r: Rect| if is_vertical(a) || is_vertical(b) { r.width } else { r.height };
+    let ah = side(a.bbox).max(1.0);
+    let bh = side(b.bbox).max(1.0);
     let larger = ah.max(bh);
     approx_le((ah - bh).abs() / larger, cfg.height_delta_ratio)
 }
@@ -872,9 +927,9 @@ mod tests {
     }
 
     #[test]
-    fn whole_region_order_top_to_bottom_left_to_right() {
+    fn whole_region_order_top_to_bottom_right_to_left() {
         let cfg = LineMergeConfig {
-            order: LineMergeOrder::TopToBottomLeftToRight,
+            order: LineMergeOrder::TopToBottomRightToLeft,
             ..Default::default()
         };
         let blocks = vec![
@@ -885,7 +940,7 @@ mod tests {
         ];
         let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].text, "A\nC\nB\nD");
+        assert_eq!(merged[0].text, "B\nD\nA\nC");
     }
 
     #[test]
@@ -932,7 +987,10 @@ mod tests {
             line(3, "A2", 10.0, 200.0, 100.0, 18.0),
             line(4, "B1", 600.0, 300.0, 100.0, 18.0),
         ];
-        let layout = [Rect::new(0.0, 0.0, 300.0, 250.0), Rect::new(590.0, 290.0, 200.0, 150.0)];
+        let layout = [
+            (Rect::new(0.0, 0.0, 300.0, 250.0), false),
+            (Rect::new(590.0, 290.0, 200.0, 150.0), false),
+        ];
         let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, [
@@ -941,5 +999,72 @@ A2", "B1
 B2", "lone"
         ]);
         assert_eq!(merged[0].source_lines, 2);
+    }
+
+    /// Three top-aligned columns, 24px glyphs, 10px column gap; the left one is short.
+    fn columns() -> Vec<OcrBlock> {
+        vec![
+            line(0, "左", 100.0, 100.0, 24.0, 120.0),
+            line(1, "右", 168.0, 100.0, 24.0, 240.0),
+            line(2, "中", 134.0, 100.0, 24.0, 240.0),
+        ]
+    }
+
+    #[test]
+    fn columns_join_right_to_left_with_line_join() {
+        let merged = merge_line_blocks(columns());
+        assert_eq!(merged.len(), 1, "short last column must still join");
+        assert_eq!(merged[0].text, "右\n中\n左");
+        assert_eq!(merged[0].source_lines, 3);
+    }
+
+    #[test]
+    fn merged_columns_anchor_one_column_wide() {
+        let b = &merge_line_blocks(columns())[0];
+        assert!((b.bbox.x - 100.0).abs() < 0.5, "x={}", b.bbox.x);
+        assert!((b.bbox.width - 24.0).abs() < 0.5, "glyph box must be one column wide, got {}", b.bbox.width);
+        assert!((b.bbox.height - 240.0).abs() < 0.5, "h={}", b.bbox.height);
+        assert!((b.source_width - 92.0).abs() < 0.5, "cover must span all columns, got {}", b.source_width);
+        assert!((b.source_height - 240.0).abs() < 0.5, "cover_h={}", b.source_height);
+    }
+
+    #[test]
+    fn one_glyph_last_column_still_reads_as_columns() {
+        let blocks = vec![line(0, "！", 100.0, 100.0, 24.0, 24.0), line(1, "なに", 134.0, 100.0, 24.0, 48.0)];
+        let merged = merge_line_blocks(blocks);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "なに\n！");
+        assert!((merged[0].bbox.width - 24.0).abs() < 0.5, "w={}", merged[0].bbox.width);
+    }
+
+    #[test]
+    fn column_does_not_join_horizontal_line() {
+        let blocks = vec![line(0, "縦", 100.0, 100.0, 24.0, 240.0), line(1, "row", 134.0, 100.0, 200.0, 24.0)];
+        assert_eq!(merge_line_blocks(blocks).len(), 2);
+    }
+
+    #[test]
+    fn whole_region_reads_columns_right_to_left() {
+        let merged = merge_with(columns(), LineMergeConfig::default(), true);
+        assert_eq!(merged[0].text, "右\n中\n左");
+    }
+
+    #[test]
+    fn layout_vertical_text_box_reads_short_runs_as_columns() {
+        let cfg = LineMergeConfig {
+            mode: LineMergeMode::Layout,
+            ..LineMergeConfig::default()
+        };
+        // One- and two-glyph runs are not tall enough to look vertical on their own.
+        let blocks = vec![
+            line(0, "左", 100.0, 100.0, 24.0, 24.0),
+            line(1, "右", 168.0, 100.0, 24.0, 30.0),
+            line(2, "中", 134.0, 100.0, 24.0, 30.0),
+        ];
+        let layout = [(Rect::new(90.0, 90.0, 120.0, 60.0), true)];
+        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "右\n中\n左");
+        assert!((merged[0].bbox.width - 24.0).abs() < 0.5, "w={}", merged[0].bbox.width);
     }
 }

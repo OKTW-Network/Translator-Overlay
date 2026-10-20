@@ -47,10 +47,10 @@ impl OverlayHost {
             })
             .collect();
 
-        let mut labels: Vec<(SurfaceRect, String, i32)> = Vec::with_capacity(pending.len());
+        let mut labels: Vec<(SurfaceRect, String, i32, bool)> = Vec::with_capacity(pending.len());
         for (base, text, source_lines, source_span_h, source_span_w) in pending {
-            let (expanded, font_px) = self.layout_label(base, &text, source_lines, source_span_h, source_span_w, surface)?;
-            labels.push((expanded, text, font_px));
+            let (expanded, font_px, vertical) = self.layout_label(base, &text, source_lines, source_span_h, source_span_w, surface)?;
+            labels.push((expanded, text, font_px, vertical));
         }
 
         self.surface.ensure(w, h)?;
@@ -60,15 +60,16 @@ impl OverlayHost {
                 .pixels()
                 .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
             buf.fill(0);
-            for (rect, _, _) in &labels {
+            for (rect, ..) in &labels {
                 draw::fill_rect_replace(buf, surface, *rect, bg);
             }
         }
-        for (rect, text, font_px) in &labels {
+        for (rect, text, font_px, vertical) in &labels {
             self.paint_label(*rect, text, LabelStyle {
                 font_px: *font_px,
                 color: fg,
                 vcenter: false,
+                vertical: *vertical,
             })?;
         }
         Ok(())
@@ -116,6 +117,9 @@ impl OverlayHost {
     /// - Height is at least `source_span_h` so a short translation still covers
     ///   every original line. Width is at least `source_span_w` so a tilted
     ///   vertical run still covers its AABB.
+    /// - Column source (`h ≥ 2w`): a Han / kana translation is laid out in
+    ///   columns (returned `true`), adding columns to the left; anything else
+    ///   widens until it fits the column height, centered on the source.
     pub(crate) fn layout_label(
         &mut self,
         base: SurfaceRect,
@@ -124,7 +128,7 @@ impl OverlayHost {
         source_span_h: i32,
         source_span_w: i32,
         surface: draw::SurfaceSize,
-    ) -> Result<(SurfaceRect, i32), OverlayError> {
+    ) -> Result<(SurfaceRect, i32, bool), OverlayError> {
         let max_w = (surface.width - base.x).max(1);
         let source_w = source_span_w.max(base.w).clamp(1, max_w);
         let override_px = self.config.font_px_clamped();
@@ -133,6 +137,37 @@ impl OverlayHost {
             None => self.fit_font_to_source_box(base)?,
         };
         let min_h = source_span_h.max(base.h);
+
+        if draw::glyph_box(base).1 >= 1.0 {
+            let pad = label_pad(font_px);
+            // Mostly Han / kana (punctuation not counted): reads naturally in columns.
+            let cjk = |c: &char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}');
+            let letters = text.chars().filter(|c| c.is_alphanumeric());
+            if letters.clone().filter(cjk).count() * 2 > letters.count() {
+                let adv = text::vertical_advance(font_px);
+                let per_col = ((min_h - pad * 2) / adv).max(1) as usize;
+                let cols = text::vertical_columns(text, per_col).len().max(1) as i32;
+                let box_w = (cols * adv + pad * 2).max(source_w);
+                let at = SurfaceRect {
+                    x: base.x + source_w - box_w,
+                    ..base
+                };
+                return Ok((place_label(at, box_w, min_h, surface), font_px, true));
+            }
+            let mut box_w = source_w;
+            let text_h = loop {
+                let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1 + pad * 2;
+                if text_h <= min_h || box_w >= surface.width {
+                    break text_h;
+                }
+                box_w = (box_w + font_px * 2).min(surface.width);
+            };
+            let at = SurfaceRect {
+                x: base.x + (source_w - box_w) / 2,
+                ..base
+            };
+            return Ok((place_label(at, box_w, text_h.max(min_h), surface), font_px, false));
+        }
 
         if source_lines <= 1 {
             let expand_cap = ((source_w as f32) * 1.75).round() as i32;
@@ -149,14 +184,14 @@ impl OverlayHost {
 
                 // Stay one line so the caption cannot cover the OCR line below.
                 let box_h = (natural.1 + pad * 2).max(font_px + pad * 2).max(min_h);
-                return Ok((place_label(base, box_w, box_h, surface), font_px));
+                return Ok((place_label(base, box_w, box_h, surface), font_px, false));
             }
 
             // Overflow: wrap within the cap at the same font so neighbours stay one size.
             let box_w = cap;
             let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
             let box_h = (text_h + pad * 2).max(font_px + pad * 2).max(min_h);
-            return Ok((place_label(base, box_w, box_h, surface), font_px));
+            return Ok((place_label(base, box_w, box_h, surface), font_px, false));
         }
 
         // Multi-line source: keep OCR column width; wrap height only.
@@ -164,7 +199,7 @@ impl OverlayHost {
         let box_w = source_w;
         let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1;
         let box_h = (text_h + pad * 2).max(font_px + pad * 2).max(min_h);
-        Ok((place_label(base, box_w, box_h, surface), font_px))
+        Ok((place_label(base, box_w, box_h, surface), font_px, false))
     }
 
     /// Unwrapped single-line extent (width, height) in pixels.

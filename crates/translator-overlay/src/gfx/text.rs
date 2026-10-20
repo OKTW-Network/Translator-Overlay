@@ -4,9 +4,9 @@ use windows::{
     Win32::{
         Foundation::{COLORREF, RECT},
         Graphics::Gdi::{
-            CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_LEFT,
-            DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_VCENTER, DT_WORDBREAK, DrawTextW, FF_DONTCARE, FW_NORMAL, HDC, HFONT, HGDIOBJ,
-            OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+            CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_EDITCONTROL,
+            DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_VCENTER, DT_WORDBREAK, DrawTextW, FF_DONTCARE, FW_NORMAL, HDC,
+            HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
         },
     },
     core::w,
@@ -23,6 +23,52 @@ pub(crate) struct LabelStyle {
     pub color: Rgba,
     /// Single-line, vertically centered (HUD status). Overlay captions stay top-aligned wrap.
     pub vcenter: bool,
+    /// Upright glyphs in columns, right to left (CJK captions over vertical source text).
+    pub vertical: bool,
+}
+
+/// Cell side for one upright glyph in a vertical column (also the column pitch).
+pub(crate) fn vertical_advance(font_px: i32) -> i32 {
+    font_px + (font_px / 8).max(1)
+}
+
+/// Split `text` into columns of at most `per_col` glyphs; `\n` starts a new column.
+/// Brackets, colons, ellipses and dashes map to their vertical presentation form;
+/// `，、。！？` stay as-is (centered in the cell, as in Taiwan vertical text).
+pub(crate) fn vertical_columns(text: &str, per_col: usize) -> Vec<Vec<char>> {
+    let per_col = per_col.max(1);
+    let mut cols = Vec::new();
+    for line in text.lines() {
+        let glyphs: Vec<char> = line
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| match c {
+                ',' => '，',
+                '!' => '！',
+                '?' => '？',
+                '：' | ':' => '︓',
+                '；' | ';' => '︔',
+                '…' => '︙',
+                '‥' => '︰',
+                '「' => '﹁',
+                '」' => '﹂',
+                '『' => '﹃',
+                '』' => '﹄',
+                '（' | '(' => '︵',
+                '）' | ')' => '︶',
+                '【' => '︻',
+                '】' => '︼',
+                '《' => '︽',
+                '》' => '︾',
+                '〈' => '︿',
+                '〉' => '﹀',
+                'ー' | '—' | '―' | '－' => '︱',
+                c => c,
+            })
+            .collect();
+        cols.extend(glyphs.chunks(per_col).map(<[char]>::to_vec));
+    }
+    cols
 }
 
 pub(crate) fn create_segoe_font(px: i32) -> Result<HFONT, OverlayError> {
@@ -110,14 +156,35 @@ pub(crate) fn draw_text_label(
         }
     }
 
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
     let _ = unsafe { SetTextColor(hdc, COLORREF(0x00FF_FFFF)) };
-    let flags = if style.vcenter {
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX
+    if style.vertical {
+        let adv = vertical_advance(style.font_px);
+        let per_col = (rh as i32 / adv).max(1) as usize;
+        for (k, col) in vertical_columns(text, per_col).iter().enumerate() {
+            let left = text_rect.right - (k as i32 + 1) * adv;
+            for (i, ch) in col.iter().enumerate() {
+                let top = text_rect.top + i as i32 * adv;
+                let mut cell = RECT {
+                    left,
+                    top,
+                    right: left + adv,
+                    bottom: top + adv,
+                };
+                let mut buf16 = [0u16; 2];
+                // Clipped to the cell: ink outside `text_rect` would skip the coverage pass below.
+                let flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+                unsafe { DrawTextW(hdc, ch.encode_utf16(&mut buf16), &mut cell, flags) };
+            }
+        }
     } else {
-        DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX
-    };
-    unsafe { DrawTextW(hdc, &mut wide, &mut text_rect, flags) };
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        let flags = if style.vcenter {
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX
+        } else {
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX
+        };
+        unsafe { DrawTextW(hdc, &mut wide, &mut text_rect, flags) };
+    }
 
     let color = style.color;
     for row in 0..rh {
@@ -141,4 +208,16 @@ pub(crate) fn draw_text_label(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertical_columns_split_lines_and_map_punctuation() {
+        let cols = vertical_columns("「你好」，世界。\n再見——", 4);
+        let as_str: Vec<String> = cols.iter().map(|c| c.iter().collect()).collect();
+        assert_eq!(as_str, ["﹁你好﹂", "，世界。", "再見︱︱"]);
+    }
 }
