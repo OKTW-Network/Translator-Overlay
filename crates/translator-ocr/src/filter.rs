@@ -142,8 +142,9 @@ impl BlockPersistenceFilter {
                     track.thrash_since = None;
                     // Once confirmed, freeze the box. Overlay remap already keeps
                     // the caption box; detector jitter / trailing glyphs must not
-                    // walk it. Unconfirmed tracks still track the latest sample.
-                    if track.confirmed {
+                    // walk it. A whole-box shift (scroll) and unconfirmed tracks
+                    // take the latest sample.
+                    if track.confirmed && !block.bbox.shifted_from(track.bbox) {
                         track.last_block.confidence = block.confidence;
                     } else {
                         track.bbox = block.bbox;
@@ -368,19 +369,18 @@ mod tests {
     }
 
     #[test]
-    fn persistence_freezes_confirmed_bbox_on_real_move() {
+    fn persistence_follows_confirmed_bbox_on_scroll() {
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
         std::thread::sleep(Duration::from_millis(60));
         let confirmed = f.filter(vec![block("Menu", 100.0, 200.0)]);
         assert_eq!(confirmed.len(), 1);
-        let frozen = confirmed[0].bbox;
 
-        // Same text, different row: overlay remap keeps the caption box anyway.
+        // Same text, page scrolled one row (still inside the track match radius).
         let moved = block("Menu", 100.0, 220.0);
-        let out = f.filter(vec![moved]);
+        let out = f.filter(vec![moved.clone()]);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].bbox, frozen);
+        assert_eq!(out[0].bbox, moved.bbox, "whole-box shift should move the track");
     }
 
     #[test]

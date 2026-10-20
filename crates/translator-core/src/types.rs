@@ -47,6 +47,17 @@ impl Rect {
         let union = self.width * self.height + other.width * other.height - inter;
         if union <= 0.0 { 0.0 } else { inter / union }
     }
+
+    /// True when both edges on an axis moved the same way by more than half the line
+    /// thickness — a scroll/pan, not detector jitter or a trailing glyph (one edge only).
+    pub fn shifted_from(self, prev: Self) -> bool {
+        let tol = (prev.width.min(prev.height) * 0.5).max(4.0);
+        let axis = |a0: f32, a1: f32, b0: f32, b1: f32| {
+            let (d0, d1) = (b0 - a0, b1 - a1);
+            d0 * d1 > 0.0 && d0.abs().min(d1.abs()) > tol
+        };
+        axis(prev.x, prev.x + prev.width, self.x, self.x + self.width) || axis(prev.y, prev.y + prev.height, self.y, self.y + self.height)
+    }
 }
 
 /// Axis-aligned region as fractions of the capture client area (`0..=1`).
@@ -231,6 +242,19 @@ pub enum OcrDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifted_from_ignores_jitter_and_detects_scroll() {
+        let line = Rect::new(100.0, 200.0, 160.0, 20.0);
+        // Trailing glyph widens the box: only the right edge moves.
+        assert!(!Rect::new(100.0, 200.0, 180.0, 20.0).shifted_from(line));
+        // Detector jitter.
+        assert!(!Rect::new(102.0, 198.0, 158.0, 21.0).shifted_from(line));
+        // Scrolled up by more than half a line.
+        assert!(Rect::new(100.0, 188.0, 160.0, 20.0).shifted_from(line));
+        // Horizontal pan.
+        assert!(Rect::new(130.0, 200.0, 160.0, 20.0).shifted_from(line));
+    }
 
     #[test]
     fn normalize_folds_whitespace_ellipsis_and_ocr_punct() {

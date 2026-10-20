@@ -791,9 +791,9 @@ async fn sleep_or_pending(wait: Option<Duration>) {
 ///
 /// A caption is valid only while its normalized source string is still in OCR.
 /// Different text is **not** reused — a new box appears only after
-/// `finish_translate`. Same-text remaps keep the previous box (no follow-move)
-/// so persist/detector swings cannot walk or re-fit the caption. Capture-surface
-/// resize takes the latest OCR box so scale stays correct.
+/// `finish_translate`. Same-text remaps keep the previous box so persist/detector
+/// swings cannot walk or re-fit the caption. A whole-box shift (scroll/pan) or a
+/// capture-surface resize takes the latest OCR box.
 pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock], content_resized: bool) -> Vec<TranslatedBlock> {
     let mut used = vec![false; translated.len()];
     let mut out = Vec::new();
@@ -816,9 +816,10 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
         };
         used[ti] = true;
         let tb = &translated[ti];
-        let bbox = if content_resized { ob.bbox } else { tb.bbox };
-        let source_height = if content_resized { ob.source_height } else { tb.source_height };
-        let source_width = if content_resized { ob.source_width } else { tb.source_width };
+        let follow = content_resized || ob.bbox.shifted_from(tb.bbox);
+        let bbox = if follow { ob.bbox } else { tb.bbox };
+        let source_height = if follow { ob.source_height } else { tb.source_height };
+        let source_width = if follow { ob.source_width } else { tb.source_width };
         out.push(TranslatedBlock {
             id: i as u32,
             source: tb.source.clone(),
@@ -966,14 +967,15 @@ mod tests {
     }
 
     #[test]
-    fn remap_freezes_box_until_retranslate() {
+    fn remap_follows_box_on_scroll() {
         let prev_box = Rect::new(100.0, 200.0, 180.0, 28.0);
         let moved = Rect::new(100.0, 320.0, 180.0, 28.0);
         let prior = [remap_translated("menu", "選單", prev_box)];
         let now = [remap_ocr("menu", moved)];
         let out = remap_translations_to_ocr(&prior, &now, false);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].bbox, prev_box, "same source must not walk the caption");
+        assert_eq!(out[0].bbox, moved, "scrolled source must carry the caption along");
+        assert!(translated_geometry_changed(&prior, &out));
     }
 
     #[test]
