@@ -353,7 +353,12 @@ impl Pipeline {
             PipelineCommand::StartCapture { hwnd, title } => self.begin_start_capture(hwnd, title),
             PipelineCommand::ManualCapture => self.manual_capture().await,
             PipelineCommand::ResetConversation => self.reset_conversation(),
-            PipelineCommand::Hotkey(_) if !self.state.read().config.hotkeys.enabled => {}
+            // Picker Esc arrives as SelectRegion and must work with shortcuts off.
+            PipelineCommand::Hotkey(action)
+                if {
+                    let s = self.state.read();
+                    !s.config.hotkeys.enabled && !(action == HotkeyAction::SelectRegion && s.region_select_active)
+                } => {}
             PipelineCommand::Hotkey(HotkeyAction::StartPause) => self.on_hud_primary(),
             PipelineCommand::Hotkey(HotkeyAction::Stop) => {
                 if !self.state.read().capture_busy && self.state.read().auto_running {
