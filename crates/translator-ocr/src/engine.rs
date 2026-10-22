@@ -157,7 +157,7 @@ impl OcrEngine {
     }
 
     /// Threshold / filter / merge one OCR page into blocks.
-    fn blocks_from_page(&self, (regions, layout): Page, frame_w: u32, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
+    fn blocks_from_page(&self, (regions, layout): Page, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
         let mut blocks = Vec::new();
         for (i, region) in regions.into_iter().enumerate() {
             let Some((text, confidence)) = region.text_with_confidence() else {
@@ -187,7 +187,7 @@ impl OcrEngine {
         }
 
         // Reading order + merge lines by geometry rules or layout boxes.
-        let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_w, frame_h, merge_all, &layout);
+        let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_h, merge_all, &layout);
 
         // Re-apply after merge in case a merge edge case left a single token.
         if self.filter_single_char {
@@ -232,7 +232,7 @@ impl OcrEngine {
 
         let mut all = Vec::new();
         for ((ox, oy), page) in origins.into_iter().zip(results) {
-            let mut blocks = self.blocks_from_page(page, width, height, merge_all);
+            let mut blocks = self.blocks_from_page(page, height, merge_all);
             for block in &mut blocks {
                 block.bbox.x += ox as f32;
                 block.bbox.y += oy as f32;

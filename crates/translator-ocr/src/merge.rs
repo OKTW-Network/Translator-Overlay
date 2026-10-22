@@ -1,12 +1,14 @@
 //! Merge OCR line boxes into paragraph blocks.
 //!
 //! Strategy (tunable via [`LineMergeConfig`]):
-//! 1. **Frame-relative `|gap|`** — vertical vs height, horizontal vs width.
+//! 1. **Frame-relative distances** — every gap and tolerance is a fraction of the
+//!    frame height, on both axes.
 //! 2. **Same-row first** — nearest-right fragments, then nearest-below (a split
 //!    long line becomes one box before stacking).
 //! 3. **Whole region** — join every line in the crop (caller sets `merge_all`
 //!    for [`LineMergeMode::Region`] with drawn regions).
-//! 4. **Reading order** — row-major or column-major join / emit order.
+//! 4. **Reading order** — row-major or column-major join / emit order. The row
+//!    and column tolerances that gate merging also band rows and columns here.
 //!
 //! Vertical text (columns ≥ 1.5× taller than wide) compares column widths, reads
 //! right to left, and anchors the block one column wide.
@@ -20,15 +22,18 @@ use crate::reindex;
 /// Scale-free slack for ratio-space compares (`px / frame` or `|d| / larger`).
 const RATIO_EPS: f32 = 1e-5;
 
+/// The next line along an axis must start past the middle of the current one,
+/// with this fraction of its own length as slack.
+const NEXT_SLACK: f32 = 0.25;
+
 /// Merge consecutive line-level OCR boxes that belong to the same paragraph.
 ///
-/// `frame_w` / `frame_h` are the **full capture** size even when `blocks` came
-/// from a crop. `merge_all` joins every remaining line (whole selected region).
+/// `frame_h` is the **full capture** height even when `blocks` came from a crop.
+/// `merge_all` joins every remaining line (whole selected region).
 /// `layout` holds the layout boxes in the same coordinates as `blocks` (Layout mode).
 pub fn merge_line_blocks_with(
     blocks: Vec<OcrBlock>,
     cfg: &LineMergeConfig,
-    frame_w: u32,
     frame_h: u32,
     merge_all: bool,
     layout: &[(Rect, bool)],
@@ -37,10 +42,7 @@ pub fn merge_line_blocks_with(
         return reindex(blocks);
     }
 
-    let frame = Frame {
-        w: frame_w.max(1),
-        h: frame_h.max(1),
-    };
+    let frame = Frame(frame_h.max(1) as f32);
 
     if merge_all {
         let members: Vec<usize> = (0..blocks.len()).collect();
@@ -127,12 +129,9 @@ fn join_by_layout(blocks: Vec<OcrBlock>, layout: &[(Rect, bool)], cfg: &LineMerg
         .collect()
 }
 
-/// Full capture size in pixels, at least 1 on each side.
+/// Full capture height in pixels (at least 1): the base of every distance ratio.
 #[derive(Clone, Copy)]
-struct Frame {
-    w: u32,
-    h: u32,
-}
+struct Frame(f32);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Axis {
@@ -164,11 +163,11 @@ impl Axis {
         }
     }
 
-    /// Frame size along this axis.
-    fn extent(self, frame: Frame) -> f32 {
+    /// Offset across this axis that still counts as the same column (X) or row (Y).
+    fn tolerance(self, cfg: &LineMergeConfig) -> f32 {
         match self {
-            Self::X => frame.w as f32,
-            Self::Y => frame.h as f32,
+            Self::X => cfg.column_tolerance,
+            Self::Y => cfg.row_tolerance,
         }
     }
 }
@@ -180,10 +179,10 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis
         return blocks;
     }
 
-    let span = axis.extent(frame);
+    let span = frame.0;
     let max_gap = match axis {
-        Axis::X => cfg.horizontal_gap_ratio,
-        Axis::Y => cfg.gap_ratio,
+        Axis::X => cfg.word_gap,
+        Axis::Y => cfg.line_gap,
     };
     let mut parent: Vec<usize> = (0..n).collect();
     let mut rank = vec![0u8; n];
@@ -194,9 +193,8 @@ fn join_nearest(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame, axis
             if i == j {
                 continue;
             }
-            // `j` must start past the middle of `i`, with `below_mid_ratio` of its length as slack.
             let (b0, blen) = axis.cover_span(&blocks[j]);
-            if !approx_ge((b0 + blen * cfg.below_mid_ratio - (a0 + alen * 0.5)) / span, 0.0) {
+            if !approx_ge((b0 + blen * NEXT_SLACK - (a0 + alen * 0.5)) / span, 0.0) {
                 continue;
             }
             let gap = b0 - (a0 + alen);
@@ -353,25 +351,24 @@ fn mostly_vertical(blocks: &[OcrBlock], members: &[usize]) -> bool {
     count(is_vertical) > count(is_horizontal)
 }
 
-/// Sort into bands along one axis, then by start position along the other axis, then this one.
+/// Sort into bands along one axis (row / column tolerance), then by start position along
+/// the other axis, then this one.
 ///
 /// `vertical` reads columns right to left, top to bottom, whatever `cfg.order` says.
 fn sort_indices(blocks: &[OcrBlock], members: &mut [usize], cfg: &LineMergeConfig, frame: Frame, vertical: bool) {
     let start = |i: usize, axis: Axis| axis.span(blocks[i].bbox).0 as i32;
-    if vertical {
-        // Band within half a column width: a fixed frame ratio joins neighbour columns of small text.
-        let col_w = median_f32(members.iter().map(|&i| blocks[i].bbox.width).collect());
-        let bands = assign_bands(blocks, members, Axis::X, col_w * 0.5 / frame.w as f32, frame.w as f32);
-        members.sort_by(|&a, &b| bands[b].cmp(&bands[a]).then_with(|| start(a, Axis::Y).cmp(&start(b, Axis::Y))));
-        return;
-    }
     let band_axis = match cfg.order {
+        _ if vertical => Axis::X,
         // Across each row, then the next row down (row-major).
         LineMergeOrder::LeftToRightTopToBottom => Axis::Y,
         // Down each column, then the next column to the left (column-major).
         LineMergeOrder::TopToBottomRightToLeft => Axis::X,
     };
-    let bands = assign_bands(blocks, members, band_axis, cfg.order_band_ratio, band_axis.extent(frame));
+    // At most half the median size along the band axis (line height for rows, column
+    // width for columns): a loose tolerance must not fuse neighbouring rows of small text.
+    let half = median_f32(members.iter().map(|&i| band_axis.span(blocks[i].bbox).1).collect()) * 0.5;
+    let band = band_axis.tolerance(cfg).min(half / frame.0);
+    let bands = assign_bands(blocks, members, band_axis, band, frame.0);
     let along = band_axis.cross();
     let band_order = |a: usize, b: usize| match band_axis {
         Axis::X => bands[b].cmp(&bands[a]),
@@ -425,10 +422,10 @@ fn can_link(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMerg
         return false;
     }
     // Keep a shorter upper line off a much wider line below it.
-    if axis == Axis::Y && cfg.reject_short_long {
+    if axis == Axis::Y && cfg.split_short_above_wide {
         let upper_w = a.bbox.width.max(1.0);
         let lower_w = b.bbox.width.max(1.0);
-        if approx_lt(upper_w, lower_w) && approx_ge((lower_w - upper_w) / lower_w, cfg.width_delta_ratio) {
+        if approx_lt(upper_w, lower_w) && approx_ge((lower_w - upper_w) / lower_w, cfg.width_diff) {
             return false;
         }
     }
@@ -442,17 +439,17 @@ fn height_compatible(a: &OcrBlock, b: &OcrBlock, cfg: &LineMergeConfig) -> bool 
     let ah = side(a.bbox).max(1.0);
     let bh = side(b.bbox).max(1.0);
     let larger = ah.max(bh);
-    approx_le((ah - bh).abs() / larger, cfg.height_delta_ratio)
+    approx_le((ah - bh).abs() / larger, cfg.size_diff)
 }
 
-/// Starts or centers along `axis` lie within `align_ratio` of the frame.
+/// Starts or centers along `axis` lie within that axis' row / column tolerance.
 fn aligned(a: &OcrBlock, b: &OcrBlock, axis: Axis, frame: Frame, cfg: &LineMergeConfig) -> bool {
-    let span = axis.extent(frame);
+    let tol = axis.tolerance(cfg);
     let (a0, alen) = axis.span(a.bbox);
     let (b0, blen) = axis.span(b.bbox);
-    let start_frac = (a0 - b0).abs() / span;
-    let center_frac = ((a0 + alen * 0.5) - (b0 + blen * 0.5)).abs() / span;
-    approx_le(start_frac, cfg.align_ratio) || approx_le(center_frac, cfg.align_ratio)
+    let start_frac = (a0 - b0).abs() / frame.0;
+    let center_frac = ((a0 + alen * 0.5) - (b0 + blen * 0.5)).abs() / frame.0;
+    approx_le(start_frac, tol) || approx_le(center_frac, tol)
 }
 
 /// True when another block sits in the gap between `first` and `second` along `axis`
@@ -462,7 +459,7 @@ fn has_intervening(blocks: &[OcrBlock], first: usize, second: usize, axis: Axis,
     let (a0, alen) = axis.cover_span(a);
     let start = a0 + alen;
     let end = axis.cover_span(b).0;
-    let span = axis.extent(frame);
+    let span = frame.0;
     if approx_le((end - start) / span, 0.0) {
         return false;
     }
@@ -519,12 +516,11 @@ fn join_text(a: &str, b: &str, join: LineJoin) -> String {
 mod tests {
     use super::*;
 
-    /// Default test frame (1080p). Production always passes the capture size.
-    const DEFAULT_FRAME_W: u32 = 1920;
+    /// Default test frame height (1080p). Production always passes the capture size.
     const DEFAULT_FRAME_H: u32 = 1080;
 
     fn merge_line_blocks(blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
-        merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &[])
+        merge_line_blocks_with(blocks, &LineMergeConfig::default(), DEFAULT_FRAME_H, false, &[])
     }
 
     fn line(id: u32, text: &str, x: f32, y: f32, w: f32, h: f32) -> OcrBlock {
@@ -540,7 +536,7 @@ mod tests {
     }
 
     fn merge_with(blocks: Vec<OcrBlock>, cfg: LineMergeConfig, merge_all: bool) -> Vec<OcrBlock> {
-        merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, merge_all, &[])
+        merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_H, merge_all, &[])
     }
 
     #[test]
@@ -569,10 +565,10 @@ mod tests {
     #[test]
     fn stacked_tilted_lines_join_on_aabb_gap_not_glyph_gap() {
         // Glyph 20px, AABB 30px: shear inflates glyph-to-glyph gap by 10px.
-        // AABB gap 8px < 16.2 (0.015×1080); glyph gap 18px would miss.
+        // AABB gap 20px < 27 (0.025×1080); glyph gap 30px would miss.
         let mut a = line(0, "Hello", 10.0, 10.0, 200.0, 20.0);
         a.source_height = 30.0;
-        let mut b = line(1, "world", 10.0, 48.0, 200.0, 20.0);
+        let mut b = line(1, "world", 10.0, 60.0, 200.0, 20.0);
         b.source_height = 30.0;
         let merged = merge_line_blocks(vec![a, b]);
         assert_eq!(merged.len(), 1);
@@ -634,7 +630,7 @@ mod tests {
     #[test]
     fn short_upper_merges_when_guard_off() {
         let cfg = LineMergeConfig {
-            reject_short_long: false,
+            split_short_above_wide: false,
             ..Default::default()
         };
         let blocks = vec![
@@ -675,7 +671,7 @@ mod tests {
     #[test]
     fn split_first_line_all_merge_when_guard_off() {
         let cfg = LineMergeConfig {
-            reject_short_long: false,
+            split_short_above_wide: false,
             ..Default::default()
         };
         let h = 18.0;
@@ -776,7 +772,7 @@ mod tests {
         let cfg = LineMergeConfig::default();
         let w = 40.0;
         let h = 18.0;
-        let gap = cfg.horizontal_gap_ratio * DEFAULT_FRAME_W as f32;
+        let gap = cfg.word_gap * DEFAULT_FRAME_H as f32;
         let at = vec![line(0, "Left", 10.0, 10.0, w, h), line(1, "Right", 10.0 + w + gap, 10.0, w, h)];
         assert_eq!(merge_with(at, cfg.clone(), false).len(), 1);
         let beyond = vec![
@@ -789,7 +785,7 @@ mod tests {
     #[test]
     fn horizontal_gap_disabled_keeps_neighbors_separate() {
         let cfg = LineMergeConfig {
-            horizontal_gap_ratio: 0.0,
+            word_gap: 0.0,
             ..Default::default()
         };
         let blocks = vec![line(0, "Left", 10.0, 10.0, 40.0, 18.0), line(1, "Right", 55.0, 12.0, 40.0, 18.0)];
@@ -820,7 +816,7 @@ mod tests {
     fn vertical_gap_threshold() {
         let cfg = LineMergeConfig::default();
         let h = 18.0;
-        let gap = cfg.gap_ratio * DEFAULT_FRAME_H as f32;
+        let gap = cfg.line_gap * DEFAULT_FRAME_H as f32;
         let at = vec![
             line(0, "Hello", 10.0, 10.0, 120.0, h),
             line(1, "world", 12.0, 10.0 + h + gap, 90.0, h),
@@ -866,8 +862,8 @@ mod tests {
         let blocks = vec![
             line(0, "L1", 10.0, 10.0, 100.0, 16.0),
             line(1, "L2", 10.0, 28.0, 80.0, 16.0),
-            line(2, "P2", 10.0, 70.0, 80.0, 16.0),
-            line(3, "P3", 10.0, 112.0, 80.0, 16.0),
+            line(2, "P2", 10.0, 80.0, 80.0, 16.0),
+            line(3, "P3", 10.0, 132.0, 80.0, 16.0),
         ];
         let merged = merge_line_blocks(blocks);
         assert_eq!(merged.len(), 3);
@@ -890,9 +886,9 @@ mod tests {
 
     #[test]
     fn aligned_short_over_long_merges_when_guard_off() {
-        // Left edges within align_ratio; gap covers stacked proximity (including overlap).
+        // Left edges within column_tolerance; gap covers stacked proximity (including overlap).
         let cfg = LineMergeConfig {
-            reject_short_long: false,
+            split_short_above_wide: false,
             ..Default::default()
         };
         let blocks = vec![line(0, "A", 100.0, 10.0, 15.0, 18.0), line(1, "B", 110.0, 32.0, 200.0, 18.0)];
@@ -905,7 +901,7 @@ mod tests {
     fn large_list_pitch_stays_separate() {
         let h = 42.0;
         let x = 1334.0;
-        let pitch = h + 19.0;
+        let pitch = h + 32.0;
         let blocks = vec![
             line(0, "あ", x, 224.0, 86.0, h),
             line(1, "い", x, 224.0 + pitch, 78.0, h),
@@ -937,14 +933,14 @@ mod tests {
     fn same_pixel_gap_depends_on_frame_height() {
         let blocks = vec![
             line(0, "Hello", 10.0, 10.0, 120.0, 18.0),
-            line(1, "world", 12.0, 10.0 + 18.0 + 20.0, 90.0, 18.0),
+            line(1, "world", 12.0, 10.0 + 18.0 + 30.0, 90.0, 18.0),
         ];
         let cfg = LineMergeConfig::default();
-        // 20px / 1080 ≈ 0.0185 > 0.015 → no merge; 20px / 2000 = 0.01 < 0.015 → merge.
-        let tall = merge_line_blocks_with(blocks.clone(), &cfg, 1920, 2000, false, &[]);
-        let short = merge_line_blocks_with(blocks, &cfg, 1920, 1080, false, &[]);
-        assert_eq!(tall.len(), 1, "larger frame makes 20px a small relative gap");
-        assert_eq!(short.len(), 2, "1080p treats 20px as too far");
+        // 30px / 1080 ≈ 0.028 > 0.025 → no merge; 30px / 2000 = 0.015 < 0.025 → merge.
+        let tall = merge_line_blocks_with(blocks.clone(), &cfg, 2000, false, &[]);
+        let short = merge_line_blocks_with(blocks, &cfg, 1080, false, &[]);
+        assert_eq!(tall.len(), 1, "larger frame makes 30px a small relative gap");
+        assert_eq!(short.len(), 2, "1080p treats 30px as too far");
     }
 
     #[test]
@@ -1000,6 +996,36 @@ mod tests {
     }
 
     #[test]
+    fn column_tolerance_gates_stacked_lines() {
+        // Left edges 10px and centers 5px apart: within the default row tolerance (16px),
+        // so this splits only if stacking checks the column tolerance.
+        let cfg = LineMergeConfig {
+            column_tolerance: 0.0,
+            ..Default::default()
+        };
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 120.0, 18.0), line(1, "world", 20.0, 33.0, 90.0, 18.0)];
+        assert_eq!(merge_with(blocks.clone(), cfg, false).len(), 2);
+        assert_eq!(merge_line_blocks(blocks).len(), 1);
+    }
+
+    #[test]
+    fn loose_row_tolerance_keeps_small_text_rows_apart() {
+        // 54px tolerance covers both rows, but rows band within half a 12px line.
+        let cfg = LineMergeConfig {
+            row_tolerance: 0.05,
+            ..Default::default()
+        };
+        let blocks = vec![
+            line(0, "A", 10.0, 10.0, 20.0, 12.0),
+            line(1, "B", 80.0, 10.0, 20.0, 12.0),
+            line(2, "C", 10.0, 24.0, 20.0, 12.0),
+            line(3, "D", 80.0, 24.0, 20.0, 12.0),
+        ];
+        let merged = merge_with(blocks, cfg, true);
+        assert_eq!(merged[0].text, "A B\nC D");
+    }
+
+    #[test]
     fn whole_region_stacked_12px_lines_join_with_newline() {
         let blocks = vec![line(0, "Hello", 10.0, 10.0, 80.0, 12.0), line(1, "world", 10.0, 22.0, 70.0, 12.0)];
         let merged = merge_with(blocks, LineMergeConfig::default(), true);
@@ -1034,7 +1060,7 @@ mod tests {
             (Rect::new(0.0, 0.0, 300.0, 250.0), false),
             (Rect::new(590.0, 290.0, 200.0, 150.0), false),
         ];
-        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
+        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_H, false, &layout);
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, [
             "A1
@@ -1063,7 +1089,7 @@ B2", "lone"
             (Rect::new(43.6, 76.2, 1143.6, 57.8), false),
             (Rect::new(48.4, 203.2, 841.0, 62.6), false),
         ];
-        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
+        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_H, false, &layout);
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["L1\nL2\nL3", "L4"]);
     }
@@ -1129,7 +1155,7 @@ B2", "lone"
             line(2, "中", 134.0, 100.0, 24.0, 30.0),
         ];
         let layout = [(Rect::new(90.0, 90.0, 120.0, 60.0), true)];
-        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_W, DEFAULT_FRAME_H, false, &layout);
+        let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_H, false, &layout);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "右\n中\n左");
         assert!((merged[0].bbox.width - 24.0).abs() < 0.5, "w={}", merged[0].bbox.width);

@@ -506,9 +506,10 @@ pub enum LineJoin {
 
 /// Tunable multi-line OCR merge (geometry + join style).
 ///
-/// Distance thresholds are fractions of the **full capture frame** (not line
-/// height). Shape comparisons stay box-to-box (`|delta| / larger`). Tune via
-/// `config.toml` `[ocr.line_merge]` or the OCR settings UI.
+/// Every distance is a fraction of the **full capture frame height**, on both
+/// axes, so one number is the same pixels everywhere. Shape comparisons stay
+/// box-to-box (`|delta| / larger`). Tune via `config.toml` `[ocr.line_merge]`
+/// or the OCR settings UI.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LineMergeConfig {
@@ -516,24 +517,21 @@ pub struct LineMergeConfig {
     pub mode: LineMergeMode,
     /// Join order inside a merged group.
     pub order: LineMergeOrder,
-    /// Allowed `|vertical gap|` as a fraction of frame height (paragraph mode).
-    pub gap_ratio: f32,
-    /// Allowed `|horizontal gap|` as a fraction of frame width (paragraph mode).
-    pub horizontal_gap_ratio: f32,
-    /// Left- or center-edge delta ≤ this × frame width counts as column-aligned.
-    /// Top- or center-edge delta ≤ this × frame height counts as row-aligned.
-    pub align_ratio: f32,
-    /// Allowed `|h1 − h2| / larger(h)` to treat lines as the same size.
-    pub height_delta_ratio: f32,
-    /// Row / column banding as a fraction of frame height / width.
-    pub order_band_ratio: f32,
-    /// Lower counts as below if `top + height × this ≥` the upper vertical mid.
-    pub below_mid_ratio: f32,
-    /// When true, do not glue a shorter upper line onto a much wider line below.
-    pub reject_short_long: bool,
-    /// When [`Self::reject_short_long`] is on, a shorter upper line stays separate
-    /// if `(w_lower − w_upper) / w_lower` is at least this.
-    pub width_delta_ratio: f32,
+    /// Max gap between side-by-side pieces of one row.
+    pub word_gap: f32,
+    /// Top or center offset that still counts as the same row (merge and row order).
+    pub row_tolerance: f32,
+    /// Max gap between stacked lines of one paragraph.
+    pub line_gap: f32,
+    /// Left or center offset that still counts as the same column (merge and column order).
+    pub column_tolerance: f32,
+    /// Allowed `|h1 − h2| / larger(h)` to treat lines as the same size (column width for vertical text).
+    pub size_diff: f32,
+    /// Keep a shorter upper line off a much wider line below it.
+    pub split_short_above_wide: bool,
+    /// With [`Self::split_short_above_wide`], the upper line stays separate when
+    /// `(w_lower − w_upper) / w_lower` is at least this.
+    pub width_diff: f32,
     /// Inserted between joined lines.
     pub join: LineJoin,
 }
@@ -543,16 +541,15 @@ impl Default for LineMergeConfig {
         Self {
             mode: LineMergeMode::default(),
             order: LineMergeOrder::default(),
-            // ~16px on 1080p — below typical UI list pitch, above wrap leading.
-            gap_ratio: 0.015,
-            // ~29px on 1080p/1920 — side-by-side neighbors in the same row.
-            horizontal_gap_ratio: 0.015,
-            align_ratio: 0.012,
-            height_delta_ratio: 0.45,
-            order_band_ratio: 0.012,
-            below_mid_ratio: 0.25,
-            reject_short_long: true,
-            width_delta_ratio: 0.25,
+            word_gap: 0.025,
+            row_tolerance: 0.015,
+            // Measured VN wrap leading (line-height 1.65) is 1.4–2.2% with OCR box jitter;
+            // the nameplate above sits 7%+ away.
+            line_gap: 0.025,
+            column_tolerance: 0.02,
+            size_diff: 0.45,
+            split_short_above_wide: true,
+            width_diff: 0.25,
             join: LineJoin::default(),
         }
     }
@@ -983,14 +980,20 @@ max_gap_ratio = 0.02
 overlap_ratio = 0.9
 overlap_ratio_min = 0.9
 align_overlap_ratio = 0.9
+gap_ratio = 0.05
+align_ratio = 0.05
+order_band_ratio = 0.05
+reject_short_long = false
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
         assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Layout);
         assert_eq!(config.ocr.line_merge.order, LineMergeOrder::TopToBottomRightToLeft);
-        assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
-        assert!((config.ocr.line_merge.align_ratio - LineMergeConfig::default().align_ratio).abs() < 1e-6);
+        let defaults = LineMergeConfig::default();
+        assert!((config.ocr.line_merge.line_gap - defaults.line_gap).abs() < 1e-6);
+        assert!((config.ocr.line_merge.row_tolerance - defaults.row_tolerance).abs() < 1e-6);
+        assert!((config.ocr.line_merge.column_tolerance - defaults.column_tolerance).abs() < 1e-6);
         assert_eq!(config.ocr.line_merge.join, LineJoin::Newline);
-        assert!(config.ocr.line_merge.reject_short_long);
+        assert!(config.ocr.line_merge.split_short_above_wide);
     }
 
     #[test]
@@ -1160,13 +1163,13 @@ history_max_items = "nope"
         let text = r#"
 [ocr.line_merge]
 mode = "off"
-gap_ratio = "bad"
+line_gap = "bad"
 join_with_space = false
 "#;
         let config = AppConfig::from_toml_lenient(text).unwrap();
         assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Off);
         assert_eq!(config.ocr.line_merge.join, LineJoin::Newline, "legacy join_with_space is ignored");
-        assert!((config.ocr.line_merge.gap_ratio - LineMergeConfig::default().gap_ratio).abs() < 1e-6);
+        assert!((config.ocr.line_merge.line_gap - LineMergeConfig::default().line_gap).abs() < 1e-6);
     }
 
     #[test]

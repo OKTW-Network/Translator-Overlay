@@ -325,10 +325,6 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                 .width(160.0)
                 .vertical_alignment(VerticalAlignment::Center)
         }),
-    ));
-
-    let merge_order = StackPanel::new().spacing(4.0).children((
-        subsection_header(t!("ocr.reading_order")),
         settings_card(
             "ocr-merge-order",
             t!("ocr.reading_order"),
@@ -341,111 +337,80 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
                     radio("ocr-merge-order", &t!("ocr.order_cols"), None, order_idx == 0, merging, pick_order(0)),
                 )),
         ),
+    ));
+
+    // Row / column tolerances also band the reading order, so every merging mode uses them.
+    let merge_row = StackPanel::new().spacing(4.0).children((
+        subsection_header(t!("ocr.merge_horizontal")),
         card_merge_pct(
             &cx,
             SliderNumberParams {
-                key: "merge-order-band",
-                header: t!("ocr.order_band"),
-                description: Some(t!("ocr.order_band_desc")),
-                value: f64::from(ocr.line_merge.order_band_ratio) * 100.0,
-                min: 0.1,
+                key: "merge-word-gap",
+                header: t!("ocr.word_gap"),
+                description: Some(t!("ocr.word_gap_desc")),
+                value: f64::from(ocr.line_merge.word_gap) * 100.0,
+                min: 0.0,
+                max: 8.0,
+                step: 0.1,
+            },
+            rules_only,
+            |m, x| m.word_gap = x,
+        ),
+        card_merge_pct(
+            &cx,
+            SliderNumberParams {
+                key: "merge-row-tolerance",
+                header: t!("ocr.row_tolerance"),
+                description: Some(t!("ocr.row_tolerance_desc")),
+                value: f64::from(ocr.line_merge.row_tolerance) * 100.0,
+                min: 0.0,
                 max: 5.0,
                 step: 0.1,
             },
             merging,
-            |m, x| m.order_band_ratio = x,
+            |m, x| m.row_tolerance = x,
         ),
     ));
 
-    let merge_stacking = StackPanel::new().spacing(4.0).children((
-        subsection_header(t!("ocr.vertical")),
+    let merge_paragraph = StackPanel::new().spacing(4.0).children((
+        subsection_header(t!("ocr.merge_vertical")),
         card_merge_pct(
             &cx,
             SliderNumberParams {
-                key: "merge-gap",
-                header: t!("ocr.gap_h"),
-                description: Some(t!("ocr.gap_h_desc")),
-                value: f64::from(ocr.line_merge.gap_ratio) * 100.0,
+                key: "merge-line-gap",
+                header: t!("ocr.line_gap"),
+                description: Some(t!("ocr.line_gap_desc")),
+                value: f64::from(ocr.line_merge.line_gap) * 100.0,
                 min: 0.0,
                 max: 8.0,
                 step: 0.1,
             },
             rules_only,
-            |m, x| m.gap_ratio = x,
+            |m, x| m.line_gap = x,
         ),
         card_merge_pct(
             &cx,
             SliderNumberParams {
-                key: "merge-below-mid",
-                header: t!("ocr.mid"),
-                description: Some(t!("ocr.mid_desc")),
-                value: f64::from(ocr.line_merge.below_mid_ratio) * 100.0,
-                min: 0.0,
-                max: 50.0,
-                step: 1.0,
-            },
-            rules_only,
-            |m, x| m.below_mid_ratio = x,
-        ),
-        card_merge_pct(
-            &cx,
-            SliderNumberParams {
-                key: "merge-height-delta",
-                header: t!("ocr.height_delta"),
-                description: Some(t!("ocr.height_delta_desc")),
-                value: f64::from(ocr.line_merge.height_delta_ratio) * 100.0,
-                min: 0.0,
-                max: 90.0,
-                step: 1.0,
-            },
-            rules_only,
-            |m, x| m.height_delta_ratio = x,
-        ),
-    ));
-
-    let merge_column = StackPanel::new().spacing(4.0).children((
-        subsection_header(t!("ocr.horizontal")),
-        card_merge_pct(
-            &cx,
-            SliderNumberParams {
-                key: "merge-horizontal-gap",
-                header: t!("ocr.gap_w"),
-                description: Some(t!("ocr.gap_w_desc")),
-                value: f64::from(ocr.line_merge.horizontal_gap_ratio) * 100.0,
-                min: 0.0,
-                max: 8.0,
-                step: 0.1,
-            },
-            rules_only,
-            |m, x| m.horizontal_gap_ratio = x,
-        ),
-        card_merge_pct(
-            &cx,
-            SliderNumberParams {
-                key: "merge-align",
-                header: t!("ocr.align"),
-                description: Some(t!("ocr.align_desc")),
-                value: f64::from(ocr.line_merge.align_ratio) * 100.0,
+                key: "merge-column-tolerance",
+                header: t!("ocr.column_tolerance"),
+                description: Some(t!("ocr.column_tolerance_desc")),
+                value: f64::from(ocr.line_merge.column_tolerance) * 100.0,
                 min: 0.0,
                 max: 5.0,
                 step: 0.1,
             },
-            rules_only,
-            |m, x| m.align_ratio = x,
+            merging,
+            |m, x| m.column_tolerance = x,
         ),
-    ));
-
-    let merge_short = StackPanel::new().spacing(4.0).children((
-        subsection_header(t!("ocr.short")),
         settings_card(
-            "ocr-merge-reject-short",
-            t!("ocr.reject_short"),
-            Some(&t!("ocr.reject_short_desc")),
-            compact_toggle(ocr.line_merge.reject_short_long, rules_only, {
+            "ocr-merge-split-short",
+            t!("ocr.split_short"),
+            Some(&t!("ocr.split_short_desc")),
+            compact_toggle(ocr.line_merge.split_short_above_wide, rules_only, {
                 let cx = cx.clone();
                 move |v| {
                     cx.with_mut(|ui| {
-                        ui.draft.ocr.line_merge.reject_short_long = v;
+                        ui.draft.ocr.line_merge.split_short_above_wide = v;
                         mark_dirty(ui);
                     });
                 }
@@ -454,22 +419,40 @@ pub fn ocr_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         card_merge_pct(
             &cx,
             SliderNumberParams {
-                key: "merge-width-delta",
-                header: t!("ocr.width_delta"),
-                description: Some(t!("ocr.width_delta_desc")),
-                value: f64::from(ocr.line_merge.width_delta_ratio) * 100.0,
+                key: "merge-width-diff",
+                header: t!("ocr.width_diff"),
+                description: Some(t!("ocr.width_diff_desc")),
+                value: f64::from(ocr.line_merge.width_diff) * 100.0,
+                min: 0.0,
+                max: 90.0,
+                step: 1.0,
+            },
+            rules_only && ocr.line_merge.split_short_above_wide,
+            |m, x| m.width_diff = x,
+        ),
+    ));
+
+    let merge_shared = StackPanel::new().spacing(4.0).children((
+        subsection_header(t!("ocr.merge_general")),
+        card_merge_pct(
+            &cx,
+            SliderNumberParams {
+                key: "merge-size-diff",
+                header: t!("ocr.size_diff"),
+                description: Some(t!("ocr.size_diff_desc")),
+                value: f64::from(ocr.line_merge.size_diff) * 100.0,
                 min: 0.0,
                 max: 90.0,
                 step: 1.0,
             },
             rules_only,
-            |m, x| m.width_delta_ratio = x,
+            |m, x| m.size_diff = x,
         ),
     ));
 
     let line_merge = StackPanel::new()
         .spacing(4.0)
-        .children((merge_join, merge_order, merge_stacking, merge_column, merge_short));
+        .children((merge_join, merge_row, merge_paragraph, merge_shared));
 
     settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((model, timing, detection, line_merge)))
 }
