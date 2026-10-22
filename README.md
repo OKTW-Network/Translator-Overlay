@@ -1,17 +1,23 @@
 <img width="960" height="200" alt="AI Slop" src="https://github.com/user-attachments/assets/9d681a9b-7548-43e6-9cff-8d01d9f00f54" />
 
 # <img width="32" height="32" src="crates/translator-app/assets/icon.png"> Translator Overlay [![CI](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml) [![GitHub Release](https://img.shields.io/github/v/release/OKTW-Network/Translator-Overlay)](https://github.com/OKTW-Network/Translator-Overlay/releases) [![GitHub Downloads](https://img.shields.io/github/downloads/OKTW-Network/Translator-Overlay/latest/total?label=downloads&color=67ac09)](https://github.com/OKTW-Network/Translator-Overlay/releases/latest)
+繁體中文 | [English](README.en.md)
+
 Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 經 OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以點擊可穿透的 Overlay 顯示譯文。
 
 ## 功能
 
 - **視窗擷取**：Windows Graphics Capture。可在目標視窗上框選多個 OCR 區域，或辨識整窗；區域可存成具名設定集
-- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU 或 DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯；可過濾單字元雜訊、動畫誤辨識，並合併多行
-- **LLM 翻譯**：OpenAI 相容 API，或本機 Grok / OpenCode / Codex / Claude Code。串流時 Overlay 與翻譯視窗會隨譯文即時更新
+- **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU 或 DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯（文字一直變動時可設定強制翻譯時間）；可過濾單字元雜訊、動畫誤辨識
+- **多行合併**：關閉 / 位置規則 / 智慧偵測（PP-DocLayoutV3 版面分析）/ 整區合併；分隔可選無、空白或換行；閱讀順序可選橫排或直排，直排文字一律由右至左讀
+- **LLM 翻譯**：OpenAI 相容 API（Chat Completions 或 Responses），或本機 Grok / OpenCode / Codex / Claude Code。串流時 Overlay 與翻譯視窗會隨譯文即時更新；可自訂 System prompt（只取代風格，輸出格式與語言不變）
+- **API 選項**：Structured outputs、串流、回送 reasoning、Temperature / Top P / Max tokens / Reasoning effort、Priority 模式；逾時、重試次數與退避；Model 欄位可從 Provider 清單自動完成。翻譯失敗時控制視窗的工作列按鈕會閃爍
 - **翻譯對照**：可把原文→譯文詞條存成具名設定檔並送給模型；詞條愈多 Token 消耗愈多
-- **翻譯記憶與上下文**：同一句原文本會話只翻一次（關閉程式後清空）；多輪歷史維持用語一致
-- **顯示**：點擊可穿透的 Overlay（跟隨目標視窗，目標最小化時隱藏）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）
-- **設定 UI**：Dashboard + API / Translation / OCR / Overlay。API 可存成具名設定檔（Save / Load，與區域設定集相同）
+- **翻譯記憶與上下文**：同一句原文本會話只翻一次（LFU 快取，可調大小、手動清空，關閉程式後清空）；多輪歷史維持用語一致，可 **Clear history** 重新開始
+- **顯示**：點擊可穿透的 Overlay（跟隨目標視窗與捲動的文字，目標最小化時隱藏；譯文不重疊，必要時加寬、縮小或換行）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）。文字與背景色可含透明度；Overlay 字級可自動貼合原文或固定大小
+- **控制列**：置頂的 Start / Pause / Stop 與狀態列，可拖曳。Pause 會暫停並隱藏譯文，Stop 會停止並清除
+- **快捷鍵**：Start / Pause、Stop、框選區域、Retry、Clear history，可限定只在目標視窗有焦點時生效。預設關閉、未綁定
+- **設定 UI**：Dashboard + API / Translation / OCR / Overlay / Hotkeys；介面語言 English / 繁體中文 / 简体中文（首次啟動依系統語系）。API 可存成具名設定檔（Save / Load，與區域設定集相同）
 
 ## 截圖
 <img width="100%" alt="TranslatorOverlay Screenshot UI" src="https://github.com/user-attachments/assets/4a03a129-3a99-4ab2-8b64-89591473f5ce" />
@@ -37,9 +43,21 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 ## 使用
 
-**Dashboard** 選目標視窗。可選 **Select regions** 在該視窗上框選辨識範圍（開啟時會把目標視窗帶到前景）；空區域 = 整窗。框選結果可存成設定集再 **Load**。開始翻譯後可 **Retry** 立刻再翻譯一次（略過穩定等待），或 **Cancel** 取消進行中的翻譯。
+**Dashboard** 選目標視窗。可選 **Select regions** 在該視窗上框選辨識範圍（開啟時會把目標視窗帶到前景；拖曳移動或縮放、右鍵刪除、Esc 完成）；空區域 = 整窗。框選結果可存成設定集再 **Load**。開始翻譯後可 **Retry** 立刻再翻譯一次（略過穩定等待），或 **Cancel** 取消進行中的翻譯。
 
-**Overlay** 頁開關 Overlay 與獨立翻譯視窗（即時生效）。其餘選項改完需 **Save**。
+**Overlay** 頁開關 Overlay、獨立翻譯視窗與控制列（即時生效）。其餘選項改完需 **Save**；**Reload** 從磁碟重新讀取 `config.toml`，**Discard** 放棄未儲存的修改。
+
+**Hotkeys** 頁先打開總開關，再逐項按下要綁定的按鍵（Ctrl / Alt / Shift + 一個鍵，不能用 Win 鍵）。框選區域的快捷鍵再按一次即套用。
+
+所有設定與資料都放在 exe 同目錄（可攜式）：
+
+| 檔案 | 內容 |
+| --- | --- |
+| `config.toml` | 主要設定；格式錯誤的欄位會改用預設值，語法錯誤的檔案會被移到旁邊 |
+| `region-presets.toml` | 區域設定集 |
+| `api-profiles.toml` | API 設定檔 |
+| `dictionaries/*.toml` | 翻譯對照設定檔 |
+| `translator-app.log` / `translator-app.prev.log` | 本次 / 上次執行的 log |
 
 **OBS：** Window Capture 選 `Translator Overlay Captions`（Overlay）或 `Translator Overlay Translation`（翻譯視窗），不要選控制視窗 `Translator Overlay`。擷取方式要設成 **Windows 10**，不能用 BitBlt。Game Capture 只抓得到遊戲本身，需再加一層 Window Capture 疊譯文。
 
@@ -49,7 +67,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 目標視窗
   → Windows Graphics Capture
   → PP-OCRv6（oar-ocr / ONNX + WebGPU 或 DirectML，失敗回退 CPU）
-  → 信心過濾 / 單字元過濾 / 多行合併 / block 持續追蹤
+  → 信心過濾 / 單字元過濾 / 多行合併（規則或 PP-DocLayoutV3）/ block 持續追蹤
   → 穩定閘門
   → LLM 翻譯（session cache + 多輪上下文；HTTP 可串流）
   → 點擊可穿透的 Overlay（跟隨目標視窗）+ 獨立翻譯視窗
@@ -67,7 +85,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 較小較快，較大較準。換尺寸或裝置後 **Save** 會重新載入。
 
-多行合併選版面分析時另需 `pp-doclayoutv3_fp16.onnx`（本 repo [models-v1](https://github.com/OKTW-Network/Translator-Overlay/releases/tag/models-v1)）：官方 [PaddlePaddle/PP-DocLayoutV3_onnx](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx) 經 `uv run scripts/optimize-doclayout.py inference.onnx pp-doclayoutv3_fp16.onnx` 轉成 FP16 並移除未使用的 mask 輸出。
+多行合併選 **智慧偵測** 時另需 `pp-doclayoutv3_fp16.onnx`（約 65 MB，同樣自動下載，來自本 repo [models-v1](https://github.com/OKTW-Network/Translator-Overlay/releases/tag/models-v1)）：官方 [PaddlePaddle/PP-DocLayoutV3_onnx](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx) 經 `uv run scripts/optimize-doclayout.py inference.onnx pp-doclayoutv3_fp16.onnx` 轉成 FP16 並移除未使用的 mask 輸出。
 
 ## 從原始碼建置
 
