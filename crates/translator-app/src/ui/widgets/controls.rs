@@ -26,14 +26,8 @@ use crate::{
 /// Radio button in a group; `width` pins it, otherwise it hugs the left.
 pub fn radio(group: &str, label: &str, width: Option<f64>, on: impl Fn() + Send + 'static) -> Result<Radio> {
     let r = Radio::new(group, label, on)?;
-    r.rb.valign(VerticalAlignment::Center)?;
-    match width {
-        Some(w) => {
-            r.rb.min_width(w)?.width(w)?;
-        }
-        None => {
-            r.rb.halign(HorizontalAlignment::Left)?;
-        }
+    if let Some(w) = width {
+        r.rb.min_width(w)?.width(w)?;
     }
     Ok(r)
 }
@@ -51,8 +45,7 @@ pub fn compact_toggle(on_toggled: impl Fn(bool) + Send + 'static) -> Result<Togg
     t.ts.width(40.0)?
         .min_width(40.0)?
         .max_width(44.0)?
-        .halign(HorizontalAlignment::Right)?
-        .valign(VerticalAlignment::Center)?;
+        .halign(HorizontalAlignment::Right)?;
     Ok(t)
 }
 
@@ -331,7 +324,7 @@ pub fn card_color_popup(
     chip.SetBorderThickness(uniform(1.0))?;
     let swatch = Button::new()?;
     button_style(&swatch, ButtonKind::Subtle)?;
-    swatch.min_width(0.0)?.min_height(0.0)?.valign(VerticalAlignment::Center)?;
+    swatch.min_width(0.0)?.min_height(0.0)?;
     swatch.SetContent(&chip)?;
     click(&swatch, on_toggle_open)?;
 

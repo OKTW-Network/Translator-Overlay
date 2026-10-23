@@ -58,7 +58,7 @@ pub fn app_status_strip(b: &mut Binds<UiShared>) -> Result<TextBlock> {
     tb.SetTextWrapping(TextWrapping::NoWrap)?;
     tb.SetTextTrimming(TextTrimming::CharacterEllipsis)?;
     tb.SetMaxLines(1)?;
-    tb.halign(HorizontalAlignment::Stretch)?.valign(VerticalAlignment::Center)?;
+    tb.valign(VerticalAlignment::Center)?;
     let el = tb.clone();
     let mut shown = Prop::default();
     b.add(move |_, snap| {
@@ -113,7 +113,7 @@ pub struct Footer {
 impl Footer {
     pub fn new() -> Result<Self> {
         let root = grid(&[auto(), auto()], &[])?;
-        root.halign(HorizontalAlignment::Stretch)?.valign(VerticalAlignment::Bottom)?;
+        root.valign(VerticalAlignment::Bottom)?;
         Ok(Self {
             root,
             key: None,
@@ -202,7 +202,6 @@ impl Footer {
             .height(NAV_ITEM_HEIGHT)?
             .automation_name(&stop_label)?
             .automation_id("btn-stop")?;
-        stop.SetVerticalContentAlignment(VerticalAlignment::Center)?;
         click(&stop, {
             let cx = cx.clone();
             move || {
@@ -228,7 +227,6 @@ impl Footer {
             .height(NAV_ITEM_HEIGHT)?
             .automation_name(&primary_label)?
             .automation_id("btn-start-pause")?;
-        primary.SetVerticalContentAlignment(VerticalAlignment::Center)?;
         click(&primary, {
             let cx = cx.clone();
             move || {
@@ -268,11 +266,9 @@ impl Footer {
             self.root.halign(HorizontalAlignment::Stretch)?;
             self.root.SetWidth(f64::NAN)?;
         } else {
-            stop.SetHorizontalContentAlignment(HorizontalAlignment::Center)?;
             stop.width(NAV_ICON_BOX)?
                 .halign(HorizontalAlignment::Center)?
                 .margin(0.0, 4.0, 0.0, 0.0)?;
-            primary.SetHorizontalContentAlignment(HorizontalAlignment::Center)?;
             primary
                 .width(NAV_ICON_BOX)?
                 .halign(HorizontalAlignment::Center)?
@@ -365,12 +361,10 @@ pub fn settings_sticky_chrome(b: &mut Binds<UiShared>, cx: &UiCx, title: &str) -
     children!(actions; status_hint, save, reload, discard);
 
     let bar = grid(&[auto()], &[star(1.0), auto()])?;
-    bar.halign(HorizontalAlignment::Stretch)?;
     let title_cell = Border::new()?;
     title_cell
         .row(0)?
         .column(0)?
-        .halign(HorizontalAlignment::Stretch)?
         .valign(VerticalAlignment::Center)?
         .margin(0.0, 0.0, 16.0, 0.0)?;
     title_cell.SetChild(&title_el)?;
@@ -383,7 +377,6 @@ pub fn settings_sticky_chrome(b: &mut Binds<UiShared>, cx: &UiCx, title: &str) -
     actions_cell.SetChild(&actions)?;
     children!(bar; title_cell, actions_cell);
     let root = Border::new()?;
-    root.halign(HorizontalAlignment::Stretch)?;
     root.SetPadding(thickness(24.0, 16.0, 24.0, 12.0))?;
     root.SetChild(&bar)?;
 

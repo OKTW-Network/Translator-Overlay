@@ -81,32 +81,18 @@ fn take_dash(ui: &UiShared) -> DashSnap {
 /// Source | divider | translation, then a rule under the row.
 fn results_pair(left: &TextBlock, right: &TextBlock) -> Result<StackPanel> {
     let cells = grid(&[], &[star(1.0), auto(), star(1.0)])?;
-    cells.halign(HorizontalAlignment::Stretch)?;
     let left_cell = Border::new()?;
-    left_cell
-        .column(0)?
-        .halign(HorizontalAlignment::Stretch)?
-        .valign(VerticalAlignment::Top)?
-        .margin(0.0, 0.0, 8.0, 0.0)?;
+    left_cell.column(0)?.valign(VerticalAlignment::Top)?.margin(0.0, 0.0, 8.0, 0.0)?;
     left_cell.SetChild(left)?;
     let divider = rule()?;
-    divider
-        .width(1.0)?
-        .halign(HorizontalAlignment::Center)?
-        .valign(VerticalAlignment::Stretch)?
-        .column(1)?;
+    divider.width(1.0)?.halign(HorizontalAlignment::Center)?.column(1)?;
     let right_cell = Border::new()?;
-    right_cell
-        .column(2)?
-        .halign(HorizontalAlignment::Stretch)?
-        .valign(VerticalAlignment::Top)?
-        .margin(8.0, 0.0, 0.0, 0.0)?;
+    right_cell.column(2)?.valign(VerticalAlignment::Top)?.margin(8.0, 0.0, 0.0, 0.0)?;
     right_cell.SetChild(right)?;
     children!(cells; left_cell, divider, right_cell);
     let line = rule()?;
-    line.height(1.0)?.halign(HorizontalAlignment::Stretch)?;
+    line.height(1.0)?;
     let pair = column(8.0)?;
-    pair.halign(HorizontalAlignment::Stretch)?;
     children!(pair; cells, line);
     Ok(pair)
 }
@@ -207,11 +193,7 @@ pub fn dashboard_page(cx: &UiCx) -> Result<Dashboard> {
     title.SetFontSize(28.0)?;
     title.SetFontWeight(BOLD)?;
     let settings = column(12.0)?;
-    settings
-        .halign(HorizontalAlignment::Stretch)?
-        .row(0)?
-        .column(0)?
-        .valign(VerticalAlignment::Top)?;
+    settings.row(0)?.column(0)?.valign(VerticalAlignment::Top)?;
     children!(settings;
         title,
         status_infobar(&mut d)?,
@@ -221,12 +203,7 @@ pub fn dashboard_page(cx: &UiCx) -> Result<Dashboard> {
     named_confirm_dialog(&mut ui_binds, cx, &REGION_PRESETS)?;
 
     let divider = rule()?;
-    divider
-        .height(1.0)?
-        .halign(HorizontalAlignment::Stretch)?
-        .row(1)?
-        .column(0)?
-        .margin(0.0, 12.0, 0.0, 16.0)?;
+    divider.height(1.0)?.row(1)?.column(0)?.margin(0.0, 12.0, 0.0, 16.0)?;
 
     let cancel = button(&t!("action.cancel"), {
         let cx = cx.clone();
@@ -276,7 +253,7 @@ pub fn dashboard_page(cx: &UiCx) -> Result<Dashboard> {
 
     let mut preview = Preview::new()?;
     let preview_pane = column(8.0)?;
-    preview_pane.fill()?.row(0)?.column(0)?.margin(0.0, 0.0, 16.0, 0.0)?;
+    preview_pane.row(0)?.column(0)?.margin(0.0, 0.0, 16.0, 0.0)?;
     children!(preview_pane; actions, preview.none, preview.image, preview.unavailable);
     d.add(move |snap, _| {
         preview.sync(
@@ -298,7 +275,6 @@ pub fn dashboard_page(cx: &UiCx) -> Result<Dashboard> {
     let ocr_desc = muted("")?;
     ocr_desc.valign(VerticalAlignment::Center)?.column(1)?;
     let ocr_line = grid(&[], &[star(1.0), auto()])?;
-    ocr_line.halign(HorizontalAlignment::Stretch)?;
     children!(ocr_line; ocr_label, ocr_desc);
     let header_label = |key: &str| -> Result<TextBlock> {
         let tb = muted(&t!(key))?;
@@ -307,18 +283,17 @@ pub fn dashboard_page(cx: &UiCx) -> Result<Dashboard> {
     };
     let results_header = results_pair(&header_label("dash.source")?, &header_label("dash.translation")?)?;
     let head = column(8.0)?;
-    head.halign(HorizontalAlignment::Stretch)?.row(0)?.column(0)?;
+    head.row(0)?.column(0)?;
     children!(head; ocr_line, results_header);
 
     let no_history = text(&t!("dash.no_history"))?;
     foreground(&no_history, Theme::PrimaryText)?;
     no_history.opacity(0.72)?;
     let list = column(8.0)?;
-    list.halign(HorizontalAlignment::Stretch)?;
     let rows_host = column(0.0)?;
     children!(rows_host; no_history, list);
     let scroll = ScrollViewer::new()?;
-    scroll.fill()?.margin(0.0, 8.0, 0.0, 0.0)?.row(1)?.column(0)?;
+    scroll.margin(0.0, 8.0, 0.0, 0.0)?.row(1)?.column(0)?;
     scroll.SetContent(&rows_host)?;
     let mut results = Results {
         list,
@@ -357,15 +332,14 @@ pub fn dashboard_page(cx: &UiCx) -> Result<Dashboard> {
     });
 
     let output = grid(&[auto(), star(1.0)], &[star(1.0)])?;
-    output.fill()?.row(0)?.column(1)?;
+    output.row(0)?.column(1)?;
     children!(output; head, scroll);
 
     let workspace = grid(&[star(1.0)], &[star(1.0), star(1.0)])?;
-    workspace.fill()?.row(2)?.column(0)?;
+    workspace.row(2)?.column(0)?;
     children!(workspace; preview_pane, output);
 
     let root = grid(&[auto(), auto(), star(1.0)], &[star(1.0)])?;
-    root.fill()?;
     children!(root; settings, divider, workspace);
     Ok(Dashboard {
         root,
@@ -578,7 +552,6 @@ fn build_regions_pane(b: &mut Binds<UiShared>, d: &mut Binds<DashSnap>, cx: &UiC
     let help = muted(&t!("dash.regions_help"))?;
     help.SetTextWrapping(TextWrapping::WrapWholeWords)?;
     let pane = column(8.0)?;
-    pane.halign(HorizontalAlignment::Stretch)?;
     let name_row = name_entry_row(b, cx, &REGION_PRESETS)?;
     children!(pane; heading, toolbar, name_row, help);
     Ok(pane)

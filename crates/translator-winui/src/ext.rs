@@ -59,10 +59,6 @@ pub trait Layout: Interface + CanInto<FrameworkElement> + CanInto<UIElement> {
         self.fe()?.SetVerticalAlignment(v)?;
         Ok(self)
     }
-    /// Stretch on both axes.
-    fn fill(&self) -> Result<&Self> {
-        self.halign(HorizontalAlignment::Stretch)?.valign(VerticalAlignment::Stretch)
-    }
     fn opacity(&self, v: f64) -> Result<&Self> {
         self.fe()?.SetOpacity(v)?;
         Ok(self)

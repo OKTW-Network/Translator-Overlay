@@ -174,13 +174,11 @@ pub fn font_icon(glyph: &str) -> Result<FontIcon> {
     Ok(icon)
 }
 
-/// Subtle 36px button showing one glyph, vertically centred in its row.
+/// Subtle 36px button showing one glyph (button styles centre it in its row).
 pub fn icon_button(glyph: &str, on_click: impl Fn() + Send + 'static) -> Result<Button> {
     let b = Button::new()?;
     button_style(&b, ButtonKind::Subtle)?;
-    b.min_width(36.0)?.min_height(36.0)?.valign(VerticalAlignment::Center)?;
-    b.SetHorizontalContentAlignment(HorizontalAlignment::Center)?;
-    b.SetVerticalContentAlignment(VerticalAlignment::Center)?;
+    b.min_width(36.0)?.min_height(36.0)?;
     b.SetContent(&font_icon(glyph)?)?;
     click(&b, on_click)?;
     Ok(b)

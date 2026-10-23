@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use rust_i18n::t;
 use translator_core::NormRect;
-use translator_winui::{HorizontalAlignment, Image, Layout, Result, Stretch, TextBlock, bitmap};
+use translator_winui::{Image, Layout, Result, Stretch, TextBlock, bitmap};
 
 use crate::ui::widgets::{Prop, text};
 
@@ -108,7 +108,6 @@ pub struct Preview {
 fn placeholder(s: &str) -> Result<TextBlock> {
     let tb = text(s)?;
     tb.SetFontSize(12.0)?;
-    tb.halign(HorizontalAlignment::Stretch)?;
     Ok(tb)
 }
 
@@ -116,7 +115,6 @@ impl Preview {
     pub fn new() -> Result<Self> {
         let image = Image::new()?;
         image.SetStretch(Stretch::Uniform)?;
-        image.halign(HorizontalAlignment::Stretch)?;
         Ok(Self {
             image,
             none: placeholder(&t!("preview.none"))?,

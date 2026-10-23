@@ -18,11 +18,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use translator_translate::list_models;
 use translator_winui::{
-    AppWindowTitleBar, Application, Border, Color, ElementTheme, Grid, HSTRING, HorizontalAlignment, IInspectable, ImageIconSource,
-    Interface, Layout, MicaBackdrop, MicaKind, NavigationView, NavigationViewBackButtonVisible, NavigationViewItem,
-    NavigationViewItemHeader, NavigationViewPaneDisplayMode, Ref, Result, ScrollViewer, SizeInt32, Symbol, SymbolIcon, TitleBar,
-    TitleBarHeightOption, TitleBarTheme, UIElement, Window, XamlRoot, auto, bitmap, boxed, boxed_f64, grid, keep, post, set_ui_thread,
-    solid_brush, star, thickness, unboxed, window_hwnd,
+    AppWindowTitleBar, Application, Border, Color, Grid, HSTRING, IInspectable, ImageIconSource, Interface, Layout, MicaBackdrop, MicaKind,
+    NavigationView, NavigationViewBackButtonVisible, NavigationViewItem, NavigationViewItemHeader, NavigationViewPaneDisplayMode, Ref,
+    Result, ScrollViewer, SizeInt32, Symbol, SymbolIcon, TitleBar, TitleBarHeightOption, TitleBarTheme, UIElement, Window, XamlRoot, auto,
+    bitmap, boxed, boxed_f64, grid, keep, post, set_ui_thread, solid_brush, star, thickness, unboxed, window_hwnd,
 };
 use windows::{
     Win32::{
@@ -230,7 +229,6 @@ impl Root {
         let app_window = window.AppWindow()?;
         let title_bar_native: AppWindowTitleBar = app_window.TitleBar()?;
         title_bar_native.SetPreferredTheme(TitleBarTheme::UseDefaultAppMode)?;
-        host.SetRequestedTheme(ElementTheme::Default)?;
         // SAFETY: `hwnd` is the live control window.
         let dpi = unsafe { GetDpiForWindow(HWND(hwnd as *mut _)) }.max(96);
         for (kind, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
@@ -253,7 +251,7 @@ impl Root {
         title_bar.SetTitle(&HSTRING::from(TITLE))?;
         title_bar.SetIsPaneToggleButtonVisible(true)?;
         title_bar.SetIsBackButtonVisible(false)?;
-        title_bar.halign(HorizontalAlignment::Stretch)?.row(0)?.column(0)?;
+        title_bar.row(0)?.column(0)?;
         title_bar.SetContent(&app_status_strip(&mut binds)?)?;
         title_bar.SetRightHeader(&ui_language_combo(&mut binds, &cx)?)?;
         keep(title_bar.PaneToggleRequested({
@@ -271,7 +269,7 @@ impl Root {
         nav.SetIsSettingsVisible(false)?;
         nav.SetIsBackButtonVisible(NavigationViewBackButtonVisible::Collapsed)?;
         nav.SetIsPaneToggleButtonVisible(false)?;
-        nav.fill()?.row(1)?.column(0)?;
+        nav.row(1)?.column(0)?;
         let header = NavigationViewItemHeader::new()?;
         let menu = nav.MenuItems()?;
         let mut items = Vec::new();
@@ -324,7 +322,6 @@ impl Root {
         nav.SetPaneFooter(&footer.root)?;
 
         let root = grid(&[auto(), star(1.0)], &[star(1.0)])?;
-        root.fill()?;
         root.SetBackground(&solid_brush(Color::default())?)?;
         children!(root; title_bar, nav);
         children!(host; root);
@@ -474,7 +471,6 @@ fn build_page(cx: &UiCx, page: Page) -> Result<(UIElement, PageView)> {
         let dashboard = dashboard_page(cx)?;
         let frame = Border::new()?;
         frame.SetPadding(thickness(24.0, 16.0, 24.0, 24.0))?;
-        frame.fill()?;
         frame.SetChild(&dashboard.root)?;
         return Ok((frame.cast()?, PageView::Dashboard(Box::new(dashboard))));
     }
@@ -488,17 +484,15 @@ fn build_page(cx: &UiCx, page: Page) -> Result<(UIElement, PageView)> {
     };
     confirm_dialog(&mut binds, cx)?;
     let sticky = Border::new()?;
-    sticky.row(0)?.column(0)?.halign(HorizontalAlignment::Stretch)?;
+    sticky.row(0)?.column(0)?;
     sticky.SetChild(&settings_sticky_chrome(&mut binds, cx, &title)?)?;
     let padded = Border::new()?;
     padded.SetPadding(thickness(24.0, 8.0, 24.0, 24.0))?;
-    padded.halign(HorizontalAlignment::Stretch)?;
     padded.SetChild(&body)?;
     let scroll = ScrollViewer::new()?;
-    scroll.fill()?.row(1)?.column(0)?;
+    scroll.row(1)?.column(0)?;
     scroll.SetContent(&padded)?;
     let frame = grid(&[auto(), star(1.0)], &[star(1.0)])?;
-    frame.fill()?;
     children!(frame; sticky, scroll);
     Ok((frame.cast()?, PageView::Settings(binds)))
 }

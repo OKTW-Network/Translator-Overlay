@@ -76,7 +76,7 @@ impl PairRow {
             })?;
             f.tb.automation_id(&id)?.halign(HorizontalAlignment::Stretch)?;
             let cell = Border::new()?;
-            cell.halign(HorizontalAlignment::Stretch)?.margin(0.0, 0.0, 8.0, 0.0)?;
+            cell.margin(0.0, 0.0, 8.0, 0.0)?;
             cell.SetChild(&f.tb)?;
             Ok((cell, f))
         };
@@ -143,7 +143,6 @@ impl PairList {
         let add_row = pair_grid()?;
         children!(add_row; spacer(0)?, spacer(1)?, add_cell);
         let list = column(PAIR_GAP)?;
-        list.halign(HorizontalAlignment::Stretch)?;
         children!(list; add_row);
         let scroll = ScrollViewer::new()?;
         scroll.width(ROW)?;

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use rust_i18n::t;
 use translator_core::HotkeyAction;
-use translator_winui::{Border, Button, HorizontalAlignment, Layout, Result, StackPanel, TextWrapping, VerticalAlignment};
+use translator_winui::{Border, Button, Layout, Result, StackPanel, TextWrapping};
 
 use crate::{
     children, hotkey,
@@ -73,8 +73,7 @@ pub fn hotkeys_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
 fn bind_row(b: &mut Binds<UiShared>, cx: &UiCx, action: HotkeyAction) -> Result<Border> {
     let label = text("")?;
     let bind = Button::new()?;
-    bind.min_width(180.0)?.width(180.0)?.valign(VerticalAlignment::Center)?;
-    bind.SetHorizontalContentAlignment(HorizontalAlignment::Center)?;
+    bind.min_width(180.0)?.width(180.0)?;
     bind.SetContent(&label)?;
     click(&bind, {
         let cx = cx.clone();

@@ -244,7 +244,6 @@ pub fn named_confirm_inline(b: &mut Binds<UiShared>, cx: &UiCx, store: &'static 
 /// Stretched card with a 1px stroke and small corners, for rows inside a card list or dialog.
 fn outlined(padding: Thickness) -> Result<Border> {
     let root = themed_border(Some(Theme::CardBackground), Some(Theme::CardStroke))?;
-    root.halign(HorizontalAlignment::Stretch)?;
     root.SetBorderThickness(uniform(1.0))?;
     root.SetCornerRadius(corners(4.0))?;
     root.SetPadding(padding)?;

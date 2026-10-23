@@ -28,7 +28,7 @@ fn header_text(s: &str) -> Result<TextBlock> {
 
 fn labeled_stack(header: &TextBlock, description: Option<&str>) -> Result<(StackPanel, Option<TextBlock>)> {
     let panel = column(0.0)?;
-    panel.halign(HorizontalAlignment::Stretch)?.valign(VerticalAlignment::Center)?;
+    panel.valign(VerticalAlignment::Center)?;
     let desc = match description {
         Some(d) if !d.is_empty() => {
             panel.SetSpacing(2.0)?;
@@ -64,7 +64,7 @@ pub fn subsection_header(title: &str) -> Result<TextBlock> {
 
 fn card_border(key: &str) -> Result<Border> {
     let border = themed_border(Some(Theme::CardBackground), None)?;
-    border.automation_id(key)?.halign(HorizontalAlignment::Stretch)?;
+    border.automation_id(key)?;
     border.SetCornerRadius(corners(8.0))?;
     border.SetPadding(uniform(16.0))?;
     Ok(border)
@@ -80,12 +80,10 @@ pub fn settings_card_with_below(
 ) -> Result<Card> {
     let (left, desc) = labeled_stack(&header_text(header)?, description)?;
     let body = grid(&[auto()], &[star(1.0), auto()])?;
-    body.halign(HorizontalAlignment::Stretch)?;
     let left_cell = Border::new()?;
     left_cell
         .row(0)?
         .column(0)?
-        .halign(HorizontalAlignment::Stretch)?
         .valign(VerticalAlignment::Center)?
         .margin(0.0, 0.0, 16.0, 0.0)?;
     left_cell.SetChild(&left)?;
@@ -101,7 +99,6 @@ pub fn settings_card_with_below(
     match below {
         Some(below) => {
             let stack = column(10.0)?;
-            stack.halign(HorizontalAlignment::Stretch)?;
             children!(stack; body, *below);
             root.SetChild(&stack)?;
         }
@@ -119,7 +116,6 @@ pub fn settings_card(key: &str, header: &str, description: Option<&str>, control
 pub fn settings_card_stack(key: &str, header: &str, description: Option<&str>, content: &impl Interface) -> Result<Card> {
     let (head, desc) = labeled_stack(&header_text(header)?, description)?;
     let stack = column(12.0)?;
-    stack.halign(HorizontalAlignment::Stretch)?;
     children!(stack; head, content.cast::<UIElement>()?);
     let root = card_border(key)?;
     root.SetChild(&stack)?;
