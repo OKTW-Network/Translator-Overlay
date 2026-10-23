@@ -2,22 +2,6 @@
 
 use translator_core::{NormRect, OverlayConfig, TranslatedBlock};
 
-/// Icon on the HUD primary button (start / resume vs pause).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HudPrimary {
-    Play,
-    Pause,
-}
-
-/// Localized snapshot pushed to the always-on-top control bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HudSnapshot {
-    pub label: String,
-    pub primary: HudPrimary,
-    pub primary_enabled: bool,
-    pub stop_enabled: bool,
-}
-
 pub enum OverlayCommand {
     Attach {
         target_hwnd: isize,
@@ -35,7 +19,8 @@ pub enum OverlayCommand {
     UpdateConfig(OverlayConfig),
     /// Hide or restore in-place captions without dropping stored blocks.
     SetCaptionsVisible(bool),
-    SetHud(HudSnapshot),
+    /// Pipeline heartbeat: re-assert the reader's always-on-top.
+    RestoreTopmost,
     /// Localized text the translation window shows while it has nothing to show.
     SetReaderPlaceholder(String),
     BeginRegionSelect {
@@ -53,6 +38,4 @@ pub enum OverlayEvent {
     RegionsCommitted(Vec<NormRect>),
     RegionSelectCancelled,
     RegionSelectUpdated(Vec<NormRect>),
-    HudPrimary,
-    HudStop,
 }

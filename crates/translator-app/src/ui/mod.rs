@@ -1,11 +1,13 @@
 //! WinUI 3 control window — dashboard + settings (card layout).
 //!
 //! - `app`: window, navigation, and the sync loop; `chrome`: title-bar status, Start/Stop, Save bar.
+//! - `hud`: the always-on-top control bar window.
 //! - `state`: UI state shared by every handler, and the actions that change it.
 //! - `widgets`: reusable controls; `pages`: one module per navigation page.
 
 mod app;
 mod chrome;
+mod hud;
 #[cfg(test)]
 mod live_tests;
 mod locale;
@@ -13,7 +15,6 @@ mod pages;
 mod state;
 mod widgets;
 
-pub(crate) use crate::ui::chrome::status_text;
 pub use crate::ui::{
     app::{control_hwnd, run},
     locale::{apply_ui_locale, system_locale_name},

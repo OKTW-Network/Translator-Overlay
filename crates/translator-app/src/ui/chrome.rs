@@ -204,18 +204,7 @@ impl Footer {
             .automation_id("btn-stop")?;
         click(&stop, {
             let cx = cx.clone();
-            move || {
-                {
-                    let ui = cx.shared.lock();
-                    let mut s = ui.state.write();
-                    if !s.capture_busy && s.auto_running {
-                        s.capture_busy = true;
-                        drop(s);
-                        let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
-                    }
-                }
-                cx.refresh();
-            }
+            move || stop_capture(&cx)
         })?;
         if !pane_open {
             button_style(&stop, ButtonKind::Subtle)?;
@@ -229,30 +218,7 @@ impl Footer {
             .automation_id("btn-start-pause")?;
         click(&primary, {
             let cx = cx.clone();
-            move || {
-                {
-                    let ui = cx.shared.lock();
-                    let s = ui.state.write();
-                    if !s.capture_busy {
-                        if s.auto_running && !s.capture_paused {
-                            drop(s);
-                            let _ = ui.cmd_tx.send(PipelineCommand::PauseCapture);
-                        } else if s.capture_paused {
-                            drop(s);
-                            let _ = ui.cmd_tx.send(PipelineCommand::ResumeCapture);
-                        } else {
-                            drop(s);
-                            if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
-                                let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
-                                    hwnd: w.hwnd,
-                                    title: w.title,
-                                });
-                            }
-                        }
-                    }
-                }
-                cx.refresh();
-            }
+            move || start_pause(&cx)
         })?;
         if running || paused {
             button_style(&primary, ButtonKind::Accent)?;
@@ -292,6 +258,46 @@ impl Footer {
         self.primary = Some(primary);
         Ok(())
     }
+}
+
+/// Stop button action (nav footer and control bar).
+pub fn stop_capture(cx: &UiCx) {
+    {
+        let ui = cx.shared.lock();
+        let mut s = ui.state.write();
+        if !s.capture_busy && s.auto_running {
+            s.capture_busy = true;
+            drop(s);
+            let _ = ui.cmd_tx.send(PipelineCommand::StopCapture);
+        }
+    }
+    cx.refresh();
+}
+
+/// Start / Pause / Resume button action (nav footer and control bar).
+pub fn start_pause(cx: &UiCx) {
+    {
+        let ui = cx.shared.lock();
+        let s = ui.state.write();
+        if !s.capture_busy {
+            if s.auto_running && !s.capture_paused {
+                drop(s);
+                let _ = ui.cmd_tx.send(PipelineCommand::PauseCapture);
+            } else if s.capture_paused {
+                drop(s);
+                let _ = ui.cmd_tx.send(PipelineCommand::ResumeCapture);
+            } else {
+                drop(s);
+                if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)).cloned() {
+                    let _ = ui.cmd_tx.send(PipelineCommand::StartCapture {
+                        hwnd: w.hwnd,
+                        title: w.title,
+                    });
+                }
+            }
+        }
+    }
+    cx.refresh();
 }
 
 /// Sticky top bar for settings pages: page title + Save / Reload / Discard (outside scroll).

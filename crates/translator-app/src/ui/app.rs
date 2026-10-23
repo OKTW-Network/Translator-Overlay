@@ -45,6 +45,7 @@ use crate::{
     taskbar_guard::restore_taskbar_zorder,
     ui::{
         chrome::{Footer, app_status_strip, confirm_dialog, settings_sticky_chrome, ui_language_combo},
+        hud::hud_window,
         pages::{Dashboard, api_page, dashboard_page, hotkeys_page, ocr_page, overlay_page, translation_page},
         state::{Page, UiCx, UiShared, apply_hotkey_capture, make_shared, schedule_model_list_if_needed, stop_hotkey_edit, take_chrome},
         widgets::{Binds, Prop, text},
@@ -254,6 +255,7 @@ impl Root {
         title_bar.row(0)?.column(0)?;
         title_bar.SetContent(&app_status_strip(&mut binds)?)?;
         title_bar.SetRightHeader(&ui_language_combo(&mut binds, &cx)?)?;
+        hud_window(&mut binds, &cx)?;
         keep(title_bar.PaneToggleRequested({
             let cx = cx.clone();
             move |_, _| {
@@ -331,6 +333,13 @@ impl Root {
         title_bar_native.SetPreferredHeightOption(TitleBarHeightOption::Tall)?;
         window.SetTitle(&HSTRING::from(TITLE))?;
         keep(window.Closed(|_, _| {
+            // Release every other window (control bar, glossary editor) while XAML is still running;
+            // thread-local teardown after the app exits would close them on freed objects.
+            ROOT.with(|root| {
+                if let Ok(mut root) = root.try_borrow_mut() {
+                    root.take();
+                }
+            });
             if let Ok(app) = Application::Current() {
                 let _ = app.Exit();
             }

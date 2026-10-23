@@ -36,7 +36,7 @@ pub enum PipelineCommand {
     PauseCapture,
     ResumeCapture,
     StopCapture,
-    /// Dashboard window combo; wakes the worker so the HUD Start button can enable.
+    /// Dashboard window combo; wakes the worker so the Start hotkey can enable.
     SetSelectedWindow,
     /// Grab one frame and OCR + translate immediately (bypass stability wait).
     ManualCapture,

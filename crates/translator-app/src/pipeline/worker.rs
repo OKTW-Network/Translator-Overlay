@@ -14,13 +14,12 @@ use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, HotkeyAction, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrFingerprint, StabilityGate};
-use translator_overlay::{HudPrimary, HudSnapshot, OverlayCommand, OverlayController, OverlayEvent};
+use translator_overlay::{OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
 
 use crate::{
     hotkey,
     pipeline::{PipelineCommand, config_apply::apply_dictionary_profile, ping_ui},
-    ui::status_text,
 };
 
 pub type SharedState = Arc<RwLock<AppState>>;
@@ -274,7 +273,9 @@ impl Pipeline {
     fn beat_ui(&mut self) {
         hotkey::sync_state(&self.state.read());
         ping_ui();
-        self.push_hud();
+        if let Some(o) = self.overlay.as_ref() {
+            let _ = o.send(OverlayCommand::RestoreTopmost);
+        }
     }
 
     fn next_wait(&self) -> Option<Duration> {
@@ -329,7 +330,7 @@ impl Pipeline {
             PipelineCommand::PauseCapture => self.pause_capture(),
             PipelineCommand::ResumeCapture => self.resume_capture(),
             PipelineCommand::StopCapture => self.stop_capture().await,
-            // Combo already wrote AppState; this only wakes push_hud.
+            // Combo already wrote AppState; this only wakes beat_ui (hotkey enable state).
             PipelineCommand::SetSelectedWindow => {}
             PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
             PipelineCommand::ConfirmRegionSelect => {
@@ -359,7 +360,7 @@ impl Pipeline {
                     let s = self.state.read();
                     !s.config.hotkeys.enabled && !(action == HotkeyAction::SelectRegion && s.region_select_active)
                 } => {}
-            PipelineCommand::Hotkey(HotkeyAction::StartPause) => self.on_hud_primary(),
+            PipelineCommand::Hotkey(HotkeyAction::StartPause) => self.start_pause(),
             PipelineCommand::Hotkey(HotkeyAction::Stop) => {
                 if !self.state.read().capture_busy && self.state.read().auto_running {
                     self.stop_capture().await;
@@ -471,12 +472,6 @@ impl Pipeline {
                 let mut s = self.state.write();
                 s.region_select_draft = regions;
             }
-            OverlayEvent::HudPrimary => self.on_hud_primary(),
-            OverlayEvent::HudStop => {
-                if !self.state.read().capture_busy && self.state.read().auto_running {
-                    self.stop_capture().await;
-                }
-            }
         }
     }
 
@@ -492,7 +487,7 @@ impl Pipeline {
         }
     }
 
-    fn on_hud_primary(&mut self) {
+    fn start_pause(&mut self) {
         let (busy, paused, running, hwnd, title) = {
             let s = self.state.read();
             (s.capture_busy, s.capture_paused, s.auto_running && !s.capture_paused, s.selected_hwnd, s.selected_title.clone())
@@ -558,28 +553,10 @@ impl Pipeline {
         info!("capture resumed");
     }
 
-    fn push_hud(&mut self) {
-        let Some(overlay) = self.overlay.as_ref() else {
-            return;
-        };
-        let snap = {
-            let s = self.state.read();
-            let running = s.auto_running && !s.capture_paused;
-            HudSnapshot {
-                label: status_text(&s.status).into_owned(),
-                primary: if running { HudPrimary::Pause } else { HudPrimary::Play },
-                primary_enabled: !s.capture_busy && (s.auto_running || s.selected_hwnd.is_some()),
-                stop_enabled: !s.capture_busy && s.auto_running,
-            }
-        };
-        let _ = overlay.send(OverlayCommand::SetHud(snap));
-    }
-
     async fn stop_capture(&mut self) {
         self.state.write().capture_busy = true;
         hotkey::sync_state(&self.state.read());
         ping_ui();
-        self.push_hud();
         if let Some(o) = self.overlay.as_ref() {
             let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
             let _ = o.send(OverlayCommand::CancelRegionSelect);

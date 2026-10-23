@@ -186,13 +186,18 @@ pub fn icon_button(glyph: &str, on_click: impl Fn() + Send + 'static) -> Result<
 
 /// 16px glyph boxed in a uniform `Viewbox`, centred.
 pub fn glyph_box(glyph: &str) -> Result<Viewbox> {
+    icon_box(&font_icon(glyph)?)
+}
+
+/// [`glyph_box`] around an icon the caller already styled.
+pub fn icon_box(icon: &FontIcon) -> Result<Viewbox> {
     let vb = Viewbox::new()?;
     vb.width(16.0)?
         .height(16.0)?
         .halign(HorizontalAlignment::Center)?
         .valign(VerticalAlignment::Center)?;
     vb.SetStretch(Stretch::Uniform)?;
-    vb.SetChild(&font_icon(glyph)?)?;
+    vb.SetChild(icon)?;
     Ok(vb)
 }
 

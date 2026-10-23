@@ -36,7 +36,6 @@ use crate::{
         win32::{ClientRect, set_overlay_owner},
         wnd::{CLASS_NAME, HOST_TEARING_DOWN, WINDOW_TITLE, overlay_wnd_proc},
     },
-    hud::HudWindow,
     picker::{PickerEnd, RegionPicker},
     reader::{ReaderWindow, format_reader_text},
 };
@@ -60,7 +59,6 @@ pub(crate) struct OverlayHost {
     pub(crate) hfont: HFONT,
     pub(crate) font_px: i32,
     pub(crate) reader: Option<Box<ReaderWindow>>,
-    pub(crate) hud: Option<Box<HudWindow>>,
     pub(crate) picker: Option<RegionPicker>,
     /// Pause hides captions without dropping `blocks`.
     pub(crate) captions_hidden: bool,
@@ -119,7 +117,6 @@ impl OverlayHost {
             hfont,
             font_px,
             reader: None,
-            hud: None,
             picker: None,
             captions_hidden: false,
             presented_rect: None,
@@ -137,13 +134,6 @@ impl OverlayHost {
         host.warmup_overlay_layer();
         match ReaderWindow::create(&host.config) {
             Ok(reader) => host.reader = Some(reader),
-            Err(e) => {
-                host.teardown();
-                return Err(e);
-            }
-        }
-        match HudWindow::create(&host.config, host.event_tx.clone()) {
-            Ok(hud) => host.hud = Some(hud),
             Err(e) => {
                 host.teardown();
                 return Err(e);
@@ -218,11 +208,8 @@ impl OverlayHost {
                 self.dirty = true;
                 self.sync_caption_windows();
             }
-            OverlayCommand::SetHud(snapshot) => {
-                if let Some(hud) = self.hud.as_mut() {
-                    hud.apply_snapshot(snapshot);
-                }
-                // Reader has no idle heartbeat; HUD snapshots recover it after WinUI
+            OverlayCommand::RestoreTopmost => {
+                // Reader has no idle heartbeat of its own; this recovers it after WinUI
                 // drops independent topmost windows at launch.
                 if let Some(reader) = self.reader.as_mut() {
                     reader.restore_topmost_if_needed();
@@ -233,9 +220,6 @@ impl OverlayHost {
                 self.dirty = true;
                 if let Some(reader) = self.reader.as_mut() {
                     reader.apply_config(&self.config);
-                }
-                if let Some(hud) = self.hud.as_mut() {
-                    hud.apply_config(&self.config);
                 }
                 if !self.config.enabled && self.picker.is_none() {
                     self.hide();
@@ -374,9 +358,6 @@ impl OverlayHost {
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {
             reader.teardown();
-        }
-        if let Some(mut hud) = self.hud.take() {
-            hud.teardown();
         }
         if !self.hwnd.is_invalid() {
             if unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
