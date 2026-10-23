@@ -7,9 +7,9 @@ use rust_i18n::t;
 use translator_capture::{WindowInfo, list_windows};
 use translator_core::{
     ApiConfig, ApiProfile, ApiProfileFile, AppConfig, DictionaryPair, HotkeyAction, NormRect, OVERLAY_FONT_PX_DEFAULT, OVERLAY_FONT_PX_MAX,
-    OVERLAY_FONT_PX_MIN, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage, api_profiles_path, config_path, delete_profile,
-    dictionaries_dir, format_argb_hex, is_valid_profile_name, list_dictionary_names_default, load_profile_pairs, parse_argb_hex,
-    region_presets_path, sanitize_pairs, save_profile_pairs,
+    OVERLAY_FONT_PX_MIN, OverlayConfig, PipelineStatus, RegionPreset, RegionPresetFile, UiLanguage, api_profiles_path, config_path,
+    delete_profile, dictionaries_dir, format_argb_hex, is_valid_profile_name, list_dictionary_names_default, load_profile_pairs,
+    parse_argb_hex, region_presets_path, sanitize_pairs, save_profile_pairs,
 };
 
 use crate::{
@@ -31,6 +31,55 @@ pub fn send_overlay_display(ui: &UiShared) {
         hud_enabled: o.hud_enabled,
     });
 }
+
+/// A colour card on the Overlay page.
+pub struct ColorSlot {
+    pub key: &'static str,
+    /// Locale key of the window, for the validation message.
+    pub window: &'static str,
+    pub background: bool,
+    pub field: fn(&mut OverlayConfig) -> &mut u32,
+}
+
+/// Colour cards in page order. [`UiShared::color_hex`] follows the same order.
+pub const COLOR_SLOTS: [ColorSlot; 6] = [
+    ColorSlot {
+        key: "ov-text-color",
+        window: "overlay.inplace",
+        background: false,
+        field: |o| &mut o.colors.text,
+    },
+    ColorSlot {
+        key: "ov-bg-color",
+        window: "overlay.inplace",
+        background: true,
+        field: |o| &mut o.colors.background,
+    },
+    ColorSlot {
+        key: "ov-reader-text-color",
+        window: "overlay.reader",
+        background: false,
+        field: |o| &mut o.reader_colors.text,
+    },
+    ColorSlot {
+        key: "ov-reader-bg-color",
+        window: "overlay.reader",
+        background: true,
+        field: |o| &mut o.reader_colors.background,
+    },
+    ColorSlot {
+        key: "ov-hud-text-color",
+        window: "overlay.hud",
+        background: false,
+        field: |o| &mut o.hud_colors.text,
+    },
+    ColorSlot {
+        key: "ov-hud-bg-color",
+        window: "overlay.hud",
+        background: true,
+        field: |o| &mut o.hud_colors.background,
+    },
+];
 
 /// Apply the control-window language immediately and persist it on the live config.
 pub fn send_ui_language(ui: &mut UiShared, language: UiLanguage) {
@@ -313,14 +362,13 @@ pub struct UiShared {
     pub draft: Box<AppConfig>,
     /// Optional API numbers (kept while toggle is off so re-enable restores).
     pub optional: Box<OptionalApiState>,
-    pub text_argb_str: String,
-    pub bg_argb_str: String,
+    /// Hex text of each [`COLOR_SLOTS`] card, kept as typed until it parses.
+    pub color_hex: [String; COLOR_SLOTS.len()],
     /// Overlay caption size slider (kept while the override toggle is off).
     pub overlay_font_val: f64,
     pub overlay_font_enabled: bool,
-    /// ColorPicker panel open (text / background). Only one should be true.
-    pub text_color_picker_open: bool,
-    pub bg_color_picker_open: bool,
+    /// Key of the colour card whose ColorPicker is open.
+    pub open_color_picker: Option<&'static str>,
     /// Show API key as plain text (PasswordRevealMode::Visible).
     pub api_key_revealed: bool,
     /// Pending Reload / Discard confirmation dialog.
@@ -373,12 +421,10 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         selected_idx: None,
         draft: Box::default(),
         optional: Box::new(optional_api_state(&draft)),
-        text_argb_str: String::new(),
-        bg_argb_str: String::new(),
+        color_hex: Default::default(),
         overlay_font_val: 0.0,
         overlay_font_enabled: false,
-        text_color_picker_open: false,
-        bg_color_picker_open: false,
+        open_color_picker: None,
         api_key_revealed: false,
         confirm: ConfirmAction::None,
         form_error: None,
@@ -599,10 +645,11 @@ fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
 }
 
 /// Point the form at `cfg`: the draft plus the free-form fields kept beside it.
-fn load_form(ui: &mut UiShared, cfg: AppConfig) {
+fn load_form(ui: &mut UiShared, mut cfg: AppConfig) {
     *ui.optional = optional_api_state(&cfg);
-    ui.text_argb_str = format_argb_hex(cfg.overlay.text_color_argb);
-    ui.bg_argb_str = format_argb_hex(cfg.overlay.background_color_argb);
+    for (hex, slot) in ui.color_hex.iter_mut().zip(&COLOR_SLOTS) {
+        *hex = format_argb_hex(*(slot.field)(&mut cfg.overlay));
+    }
     ui.overlay_font_enabled = cfg.overlay.font_px.is_some();
     ui.overlay_font_val = f64::from(cfg.overlay.font_px.unwrap_or(OVERLAY_FONT_PX_DEFAULT));
     *ui.draft = cfg;
@@ -634,11 +681,10 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
     } else {
         None
     };
-    if let Some(v) = parse_argb_hex(&ui.text_argb_str) {
-        cfg.overlay.text_color_argb = v;
-    }
-    if let Some(v) = parse_argb_hex(&ui.bg_argb_str) {
-        cfg.overlay.background_color_argb = v;
+    for (hex, slot) in ui.color_hex.iter().zip(&COLOR_SLOTS) {
+        if let Some(v) = parse_argb_hex(hex) {
+            *(slot.field)(&mut cfg.overlay) = v;
+        }
     }
     cfg.overlay.font_px = if ui.overlay_font_enabled {
         Some(
@@ -733,15 +779,17 @@ pub fn form_validation_error(ui: &UiShared) -> Option<Cow<'static, str>> {
     if ui.optional.reasoning_enabled && ui.optional.reasoning_str.trim().is_empty() {
         return Some(t!("err.reasoning_empty"));
     }
-    let text = ui.text_argb_str.trim();
-    if !text.is_empty() && parse_argb_hex(text).is_none() {
-        return Some(t!("err.text_color"));
-    }
-    let bg = ui.bg_argb_str.trim();
-    if !bg.is_empty() && parse_argb_hex(bg).is_none() {
-        return Some(t!("err.bg_color"));
-    }
-    None
+    let (_, slot) = ui
+        .color_hex
+        .iter()
+        .zip(&COLOR_SLOTS)
+        .find(|(hex, _)| !hex.trim().is_empty() && parse_argb_hex(hex).is_none())?;
+    let window = t!(slot.window);
+    Some(if slot.background {
+        t!("err.bg_color", window = window)
+    } else {
+        t!("err.text_color", window = window)
+    })
 }
 
 pub fn do_reload_from_disk(ui: &mut UiShared) {

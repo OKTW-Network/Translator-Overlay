@@ -1,13 +1,13 @@
-//! Overlay appearance: display toggles, colours, caption size, translation-window font.
+//! Overlay, translation window, and control bar: one section each with its switch, colours, and text size.
 
 use rust_i18n::t;
-use translator_core::{OVERLAY_FONT_PX_MAX, OVERLAY_FONT_PX_MIN, OverlayConfig, READER_FONT_PX_MAX, READER_FONT_PX_MIN};
+use translator_core::{OVERLAY_FONT_PX_MAX, OVERLAY_FONT_PX_MIN, OverlayConfig, READER_FONT_PX_MAX, READER_FONT_PX_MIN, format_argb_hex};
 use translator_winui::{Border, Result, StackPanel};
 
 use crate::{
     children,
     ui::{
-        state::{UiCx, UiShared, mark_dirty, send_overlay_display},
+        state::{COLOR_SLOTS, UiCx, UiShared, mark_dirty, send_overlay_display},
         widgets::{
             Binds,
             cards::section_header,
@@ -20,14 +20,14 @@ use crate::{
 pub fn overlay_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     // Display switches apply at once, without Save.
     let display_toggle = |b: &mut Binds<UiShared>,
-                          (key, header, desc): (&str, &str, &str),
+                          (key, desc): (&str, &str),
                           get: fn(&OverlayConfig) -> bool,
                           set: fn(&mut OverlayConfig, bool)|
      -> Result<Border> {
         let cx = cx.clone();
         card_toggle(
             b,
-            (key, header, Some(desc)),
+            (key, &t!("overlay.display"), Some(desc)),
             move |ui| get(&ui.draft.overlay),
             move |on| {
                 cx.with_mut(|ui| {
@@ -39,94 +39,51 @@ pub fn overlay_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
             },
         )
     };
-    let display = column(4.0)?;
-    children!(display;
-        section_header(&t!("overlay.display"))?,
-        display_toggle(
+    // `i` indexes `COLOR_SLOTS`.
+    let color_card = |b: &mut Binds<UiShared>, i: usize| -> Result<Border> {
+        let slot = &COLOR_SLOTS[i];
+        let key = slot.key;
+        card_color_popup(
             b,
-            ("ov-enabled", &t!("overlay.inplace"), &t!("overlay.inplace_desc")),
-            |o| o.enabled,
-            |o, on| o.enabled = on,
-        )?,
-        display_toggle(
-            b,
-            ("ov-reader", &t!("overlay.reader"), &t!("overlay.reader_desc")),
-            |o| o.reader_enabled,
-            |o, on| o.reader_enabled = on,
-        )?,
-        display_toggle(b, ("ov-hud", &t!("overlay.hud"), &t!("overlay.hud_desc")), |o| o.hud_enabled, |o, on| o.hud_enabled = on)?,
-    );
+            ColorPopupParams {
+                key,
+                header: if slot.background {
+                    t!("overlay.bg_color")
+                } else {
+                    t!("overlay.text_color")
+                },
+                placeholder: format_argb_hex(*(slot.field)(&mut OverlayConfig::default())).into(),
+            },
+            move |ui| (ui.color_hex[i].clone(), ui.open_color_picker == Some(key)),
+            {
+                let cx = cx.clone();
+                move |v| {
+                    cx.with_mut(|ui| {
+                        if ui.color_hex[i] != v {
+                            ui.color_hex[i] = v;
+                            mark_dirty(ui);
+                        }
+                    });
+                }
+            },
+            {
+                let cx = cx.clone();
+                move || cx.with_mut(|ui| ui.open_color_picker = if ui.open_color_picker == Some(key) { None } else { Some(key) })
+            },
+        )
+    };
 
-    let colors = column(4.0)?;
-    children!(colors;
-        section_header(&t!("overlay.appearance"))?,
-        card_color_popup(
-            b,
-            ColorPopupParams {
-                key: "ov-text-color",
-                header: t!("overlay.text_color"),
-                placeholder: "#FFFFFFFF".into(),
-            },
-            |ui| (ui.text_argb_str.clone(), ui.text_color_picker_open),
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        if ui.text_argb_str != v {
-                            ui.text_argb_str = v;
-                            mark_dirty(ui);
-                        }
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        ui.text_color_picker_open = !ui.text_color_picker_open;
-                        if ui.text_color_picker_open {
-                            ui.bg_color_picker_open = false;
-                        }
-                    });
-                }
-            },
-        )?,
-        card_color_popup(
-            b,
-            ColorPopupParams {
-                key: "ov-bg-color",
-                header: t!("overlay.bg_color"),
-                placeholder: "#C8000000".into(),
-            },
-            |ui| (ui.bg_argb_str.clone(), ui.bg_color_picker_open),
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        if ui.bg_argb_str != v {
-                            ui.bg_argb_str = v;
-                            mark_dirty(ui);
-                        }
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move || {
-                    cx.with_mut(|ui| {
-                        ui.bg_color_picker_open = !ui.bg_color_picker_open;
-                        if ui.bg_color_picker_open {
-                            ui.text_color_picker_open = false;
-                        }
-                    });
-                }
-            },
-        )?,
+    let overlay = column(4.0)?;
+    children!(overlay;
+        section_header(&t!("overlay.inplace"))?,
+        display_toggle(b, ("ov-enabled", &t!("overlay.inplace_desc")), |o| o.enabled, |o, on| o.enabled = on)?,
+        color_card(b, 0)?,
+        color_card(b, 1)?,
         optional_slider_row(
             b,
             SliderNumberParams {
                 key: "ov-caption-font",
-                header: t!("overlay.caption_font"),
+                header: t!("overlay.font"),
                 description: Some(t!("overlay.caption_font_desc")),
                 min: f64::from(OVERLAY_FONT_PX_MIN),
                 max: f64::from(OVERLAY_FONT_PX_MAX),
@@ -157,6 +114,14 @@ pub fn overlay_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 }
             },
         )?,
+    );
+
+    let reader = column(4.0)?;
+    children!(reader;
+        section_header(&t!("overlay.reader"))?,
+        display_toggle(b, ("ov-reader", &t!("overlay.reader_desc")), |o| o.reader_enabled, |o, on| o.reader_enabled = on)?,
+        color_card(b, 2)?,
+        color_card(b, 3)?,
         card_slider_number(
             b,
             SliderNumberParams {
@@ -184,7 +149,15 @@ pub fn overlay_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         .root,
     );
 
+    let hud = column(4.0)?;
+    children!(hud;
+        section_header(&t!("overlay.hud"))?,
+        display_toggle(b, ("ov-hud", &t!("overlay.hud_desc")), |o| o.hud_enabled, |o, on| o.hud_enabled = on)?,
+        color_card(b, 4)?,
+        color_card(b, 5)?,
+    );
+
     let body = column(8.0)?;
-    children!(body; display, colors);
+    children!(body; overlay, reader, hud);
     Ok(body)
 }

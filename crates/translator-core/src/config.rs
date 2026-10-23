@@ -599,12 +599,12 @@ pub struct OverlayConfig {
     /// Overlay caption size in pixels. `None` = fit to the source OCR box.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_px: Option<u32>,
-    /// Text colour including alpha (`#AARRGGBB` in config.toml).
-    #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
-    pub text_color_argb: u32,
-    /// Box fill colour including alpha (`#AARRGGBB` in config.toml).
-    #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
-    pub background_color_argb: u32,
+    /// In-place overlay caption colours.
+    pub colors: WindowColors,
+    /// Translation-window colours.
+    pub reader_colors: WindowColors,
+    /// Control-bar colours.
+    pub hud_colors: WindowColors,
 }
 
 impl Default for OverlayConfig {
@@ -615,8 +615,28 @@ impl Default for OverlayConfig {
             hud_enabled: false,
             reader_font_px: READER_FONT_PX_DEFAULT,
             font_px: None,
-            text_color_argb: 0xFFFF_FFFF,
-            background_color_argb: 0xC800_0000,
+            colors: WindowColors::default(),
+            reader_colors: WindowColors::default(),
+            hud_colors: WindowColors::default(),
+        }
+    }
+}
+
+/// Text and background colour of one window, including alpha (`#AARRGGBB` in config.toml).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowColors {
+    #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
+    pub text: u32,
+    #[serde(serialize_with = "serialize_argb_hex", deserialize_with = "deserialize_argb_hex")]
+    pub background: u32,
+}
+
+impl Default for WindowColors {
+    fn default() -> Self {
+        Self {
+            text: 0xFFFF_FFFF,
+            background: 0xC800_0000,
         }
     }
 }
@@ -785,8 +805,8 @@ start_pause = "f8"
         assert!(config.api.api_key.is_empty());
         assert!(config.api.model.is_empty());
         let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("text_color_argb = \"#FFFFFFFF\""), "expected hex string in TOML, got:\n{text}");
-        assert!(text.contains("background_color_argb = \"#C8000000\""), "expected hex string in TOML, got:\n{text}");
+        assert!(text.contains("[overlay.reader_colors]\ntext = \"#FFFFFFFF\""), "expected hex string in TOML, got:\n{text}");
+        assert!(text.contains("background = \"#C8000000\""), "expected hex string in TOML, got:\n{text}");
         let parsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(config, parsed);
     }
@@ -806,19 +826,21 @@ start_pause = "f8"
     #[test]
     fn overlay_colors_accept_hash_argb_and_reject_legacy_forms() {
         let hashed = r##"
-[overlay]
-text_color_argb = "#AABBCCDD"
-background_color_argb = "#c8000000"
+[overlay.hud_colors]
+text = "#AABBCCDD"
+background = "#c8000011"
 "##;
         let config: AppConfig = toml::from_str(hashed).unwrap();
-        assert_eq!(config.overlay.text_color_argb, 0xAABB_CCDD);
-        assert_eq!(config.overlay.background_color_argb, 0xC800_0000);
+        assert_eq!(config.overlay.hud_colors.text, 0xAABB_CCDD);
+        assert_eq!(config.overlay.hud_colors.background, 0xC800_0011);
+        assert_eq!(config.overlay.colors, WindowColors::default());
+        assert_eq!(config.overlay.reader_colors, WindowColors::default());
 
         for bad in [
-            "[overlay]\ntext_color_argb = \"C8000000\"\n",
-            "[overlay]\ntext_color_argb = 4294967295\n",
-            "[overlay]\ntext_color_argb = \"0xC8000000\"\n",
-            "[overlay]\ntext_color_argb = \"#AABBCC\"\n",
+            "[overlay.colors]\ntext = \"C8000000\"\n",
+            "[overlay.colors]\ntext = 4294967295\n",
+            "[overlay.colors]\ntext = \"0xC8000000\"\n",
+            "[overlay.colors]\ntext = \"#AABBCC\"\n",
         ] {
             assert!(toml::from_str::<AppConfig>(bad).is_err(), "{bad}");
         }
@@ -1089,8 +1111,8 @@ reader_enabled = false
         assert!(!config.overlay.reader_enabled);
 
         let partial = r##"
-[overlay]
-text_color_argb = "#FFFFFFFF"
+[overlay.colors]
+text = "#FFFFFFFF"
 "##;
         let config: AppConfig = toml::from_str(partial).unwrap();
         assert!(config.overlay.enabled);
@@ -1141,8 +1163,10 @@ provider = "not_a_real_provider"
 
 [overlay]
 enabled = false
-text_color_argb = "FFFFFFFF"
-background_color_argb = "#C8000000"
+
+[overlay.colors]
+text = "FFFFFFFF"
+background = "#C8000011"
 
 [translation]
 target_lang = "ja"
@@ -1152,8 +1176,8 @@ history_max_items = "nope"
         assert_eq!(config.api.model, "keep-me");
         assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
         assert!(!config.overlay.enabled);
-        assert_eq!(config.overlay.text_color_argb, OverlayConfig::default().text_color_argb);
-        assert_eq!(config.overlay.background_color_argb, 0xC800_0000);
+        assert_eq!(config.overlay.colors.text, WindowColors::default().text);
+        assert_eq!(config.overlay.colors.background, 0xC800_0011);
         assert_eq!(config.translation.target_lang, "ja");
         assert_eq!(config.translation.history_max_items, TranslationConfig::default().history_max_items);
     }

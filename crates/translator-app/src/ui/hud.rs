@@ -50,7 +50,7 @@ pub fn hud_window(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<()> {
         let (enabled, text_argb, bg_argb) = {
             let s = ui.state.read();
             let o = &s.config.overlay;
-            (o.hud_enabled, o.text_color_argb, o.background_color_argb)
+            (o.hud_enabled, o.hud_colors.text, o.hud_colors.background)
         };
         if !enabled {
             hud = None;
@@ -173,7 +173,7 @@ struct Hud {
     drag: InputNonClientPointerSource,
     /// DPI that [`fit`] last sized the bar for.
     dpi: Prop<u32>,
-    /// Overlay text and background ARGB.
+    /// Control-bar text and background ARGB.
     colors: Prop<(u32, u32)>,
     shown: Prop<(String, bool, bool, bool, String, String, u32)>,
 }

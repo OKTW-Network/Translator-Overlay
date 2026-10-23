@@ -22,8 +22,8 @@ impl OverlayHost {
         let w = self.surface_w.max(1);
         let h = self.surface_h.max(1);
         let surface = draw::SurfaceSize::new(w, h);
-        let bg = draw::Rgba::from_argb(self.config.background_color_argb);
-        let fg = draw::Rgba::from_argb(self.config.text_color_argb);
+        let bg = draw::Rgba::from_argb(self.config.colors.background);
+        let fg = draw::Rgba::from_argb(self.config.colors.text);
 
         // Layout first (needs GDI measure / font) before borrowing DIB pixels.
         let content_w = self.content_w;
