@@ -3,7 +3,7 @@ Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread
 Microsoft::UI::Dispatching::DispatcherQueueHandler
 Microsoft::UI::Dispatching::DispatcherQueuePriority
 Microsoft::UI::Dispatching::IDispatcherQueue::TryEnqueueWithPriority
-Microsoft::UI::Windowing::IAppWindow::{get_TitleBar, SetIcon}
+Microsoft::UI::Windowing::IAppWindow::get_TitleBar
 Microsoft::UI::Windowing::IAppWindowTitleBar2::put_PreferredHeightOption
 Microsoft::UI::Windowing::IAppWindowTitleBar3::put_PreferredTheme
 Microsoft::UI::Windowing::TitleBarHeightOption
@@ -76,7 +76,7 @@ Microsoft::UI::Xaml::Controls::IStackPanel::{put_Orientation, put_Spacing}
 Microsoft::UI::Xaml::Controls::ISymbolIcon::put_Symbol
 Microsoft::UI::Xaml::Controls::ITextBlock::{put_FontSize, put_FontWeight, put_IsTextSelectionEnabled, put_MaxLines, put_Text, put_TextTrimming, put_TextWrapping}
 Microsoft::UI::Xaml::Controls::ITextBox::{add_TextChanged, get_Text, put_AcceptsReturn, put_PlaceholderText, put_Text, put_TextWrapping}
-Microsoft::UI::Xaml::Controls::ITitleBar::{add_PaneToggleRequested, put_Content, put_IsBackButtonVisible, put_IsPaneToggleButtonVisible, put_RightHeader, put_Title}
+Microsoft::UI::Xaml::Controls::ITitleBar::{add_PaneToggleRequested, put_Content, put_IconSource, put_IsBackButtonVisible, put_IsPaneToggleButtonVisible, put_RightHeader, put_Title}
 Microsoft::UI::Xaml::Controls::IToggleSwitch::{add_Toggled, get_IsOn, put_IsOn}
 Microsoft::UI::Xaml::Controls::IViewbox::{put_Child, put_Stretch}
 Microsoft::UI::Xaml::Controls::NavigationView::CreateInstance
@@ -256,3 +256,8 @@ Microsoft::UI::Xaml::IUIElement::{put_XamlRoot, UpdateLayout}
 Microsoft::UI::Xaml::IDependencyObject::ClearValue
 Microsoft::UI::Xaml::FrameworkElement::StyleProperty
 Microsoft::UI::Xaml::IDependencyPropertyStatics::{}
+Microsoft::UI::Xaml::Controls::ImageIconSource::CreateInstance
+Microsoft::UI::Xaml::Controls::IImageIconSource::put_ImageSource
+Microsoft::UI::Xaml::Controls::ImageIconSource
+Microsoft::UI::Xaml::Controls::IIconSourceStatics::{}
+Microsoft::UI::Xaml::Controls::IImageIconSourceStatics::{}

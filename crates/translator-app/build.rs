@@ -1,7 +1,4 @@
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-};
+use std::env;
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/icon.ico");
@@ -16,13 +13,5 @@ fn main() {
         res.set("ProductName", "Translator Overlay");
         res.set("LegalCopyright", "Unlicense");
         res.compile().expect("embed Windows resources");
-    }
-
-    let src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/icon.ico");
-    if let Ok(out) = env::var("OUT_DIR")
-        && let Some(profile_dir) = Path::new(&out).ancestors().nth(3)
-        && let Err(e) = fs::copy(&src, profile_dir.join("icon.ico"))
-    {
-        println!("cargo:warning=copy icon.ico: {e}");
     }
 }

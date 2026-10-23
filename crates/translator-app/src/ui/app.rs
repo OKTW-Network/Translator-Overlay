@@ -5,7 +5,6 @@
 
 use std::{
     cell::{Cell, RefCell},
-    env,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicIsize, Ordering},
@@ -19,13 +18,27 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use translator_translate::list_models;
 use translator_winui::{
-    AppWindowTitleBar, Application, Border, Color, ElementTheme, Grid, HSTRING, HorizontalAlignment, IInspectable, Interface, Layout,
-    MicaBackdrop, MicaKind, NavigationView, NavigationViewBackButtonVisible, NavigationViewItem, NavigationViewItemHeader,
-    NavigationViewPaneDisplayMode, Ref, Result, ScrollViewer, SizeInt32, Symbol, SymbolIcon, TitleBar, TitleBarHeightOption, TitleBarTheme,
-    UIElement, Window, XamlRoot, auto, boxed, boxed_f64, grid, keep, post, set_ui_thread, solid_brush, star, thickness, unboxed,
-    window_hwnd,
+    AppWindowTitleBar, Application, Border, Color, ElementTheme, Grid, HSTRING, HorizontalAlignment, IInspectable, ImageIconSource,
+    Interface, Layout, MicaBackdrop, MicaKind, NavigationView, NavigationViewBackButtonVisible, NavigationViewItem,
+    NavigationViewItemHeader, NavigationViewPaneDisplayMode, Ref, Result, ScrollViewer, SizeInt32, Symbol, SymbolIcon, TitleBar,
+    TitleBarHeightOption, TitleBarTheme, UIElement, Window, XamlRoot, auto, bitmap, boxed, boxed_f64, grid, keep, post, set_ui_thread,
+    solid_brush, star, thickness, unboxed, window_hwnd,
 };
-use windows::Win32::{Foundation::HWND, UI::HiDpi::GetDpiForWindow};
+use windows::{
+    Win32::{
+        Foundation::{HWND, LPARAM, WPARAM},
+        Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, ReleaseDC},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::{
+            HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
+            WindowsAndMessaging::{
+                DestroyIcon, GetIconInfo, HICON, ICON_BIG, ICON_SMALL, ICONINFO, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON,
+                SM_CXSMICON, SendMessageW, WM_SETICON,
+            },
+        },
+    },
+    core::PCWSTR,
+};
 
 use crate::{
     children,
@@ -193,6 +206,9 @@ struct Root {
     locale: String,
     selected: Prop<Page>,
     pane: Prop<bool>,
+    title_bar: TitleBar,
+    /// Pixel size of the title bar icon, which follows the raster scale.
+    icon_px: Prop<i32>,
 }
 
 impl Root {
@@ -215,11 +231,16 @@ impl Root {
         let title_bar_native: AppWindowTitleBar = app_window.TitleBar()?;
         title_bar_native.SetPreferredTheme(TitleBarTheme::UseDefaultAppMode)?;
         host.SetRequestedTheme(ElementTheme::Default)?;
-        if let Some(icon) = window_icon_path() {
-            app_window.SetIcon(&HSTRING::from(icon.as_str()))?;
-        }
         // SAFETY: `hwnd` is the live control window.
         let dpi = unsafe { GetDpiForWindow(HWND(hwnd as *mut _)) }.max(96);
+        for (kind, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+            // SAFETY: as above; the window keeps the icon for the life of the process.
+            unsafe {
+                if let Some(icon) = app_icon(GetSystemMetricsForDpi(metric, dpi)) {
+                    SendMessageW(HWND(hwnd as *mut _), WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0 as isize)));
+                }
+            }
+        }
         let px = |dips: f64| (dips * f64::from(dpi) / 96.0).round() as i32;
         app_window.ResizeClient(SizeInt32 {
             Width: px(1280.0),
@@ -350,6 +371,8 @@ impl Root {
             locale: String::new(),
             selected: Prop::default(),
             pane: Prop::default(),
+            title_bar,
+            icon_px: Prop::default(),
         };
         root.relabel()?;
         Ok(root)
@@ -380,6 +403,49 @@ impl Root {
         let nav = &self.nav;
         self.pane.set(ui.pane_open, |&open| nav.SetIsPaneOpen(open))?;
         self.footer.sync(&self.cx, &chrome, ui.pane_open)?;
+        let title_bar = &self.title_bar;
+        self.icon_px.set((16.0 * SCALE.get()).round() as i32, |&px| {
+            let Some(icon) = app_icon(px) else {
+                return Ok(());
+            };
+            let mut bgra = vec![0u8; px as usize * px as usize * 4];
+            // SAFETY: `bgra` fits the px×px 32-bit top-down DIB requested; every handle is released here.
+            let read = unsafe {
+                let mut info = ICONINFO::default();
+                let _ = GetIconInfo(icon, &mut info);
+                let mut header = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: px,
+                        biHeight: -px,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let dc = GetDC(None);
+                let lines = GetDIBits(dc, info.hbmColor, 0, px as u32, Some(bgra.as_mut_ptr().cast()), &mut header, DIB_RGB_COLORS);
+                ReleaseDC(None, dc);
+                let _ = DeleteObject(info.hbmColor.into());
+                let _ = DeleteObject(info.hbmMask.into());
+                let _ = DestroyIcon(icon);
+                lines == px
+            };
+            if !read {
+                return Ok(());
+            }
+            // Icon pixels carry straight alpha; XAML bitmaps are premultiplied.
+            for p in bgra.as_chunks_mut::<4>().0 {
+                let a = u16::from(p[3]);
+                for c in &mut p[..3] {
+                    *c = (u16::from(*c) * a / 255) as u8;
+                }
+            }
+            let source = ImageIconSource::new()?;
+            source.SetImageSource(&bitmap(px as u32, px as u32, &bgra)?)?;
+            title_bar.SetIconSource(&source)
+        })?;
 
         let page = ui.page;
         if self.page.as_ref().map(|(p, _)| *p) != Some(page) {
@@ -447,14 +513,12 @@ fn apply_resource_overrides() -> Result<()> {
     Ok(())
 }
 
-fn window_icon_path() -> Option<String> {
-    const BYTES: &[u8] = include_bytes!("../../assets/icon.ico");
-    if let Some(path) = env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("icon.ico")))
-        && path.is_file()
-    {
-        return Some(path.to_string_lossy().into_owned());
+/// The exe's icon resource (id 1, `build.rs`) at `px`×`px`; Windows picks the closest frame.
+fn app_icon(px: i32) -> Option<HICON> {
+    // SAFETY: loads a resource of this module; integer resource ids are passed as the name pointer.
+    unsafe {
+        let module = GetModuleHandleW(None).ok()?;
+        let icon = LoadImageW(Some(module.into()), PCWSTR(1 as _), IMAGE_ICON, px, px, LR_DEFAULTCOLOR).ok()?;
+        Some(HICON(icon.0))
     }
-    let dest = env::temp_dir().join("translator-overlay-icon.ico");
-    std::fs::write(&dest, BYTES).ok()?;
-    Some(dest.to_string_lossy().into_owned())
 }
