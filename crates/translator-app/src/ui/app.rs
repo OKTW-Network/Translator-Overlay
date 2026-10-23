@@ -234,11 +234,11 @@ impl Root {
         // SAFETY: `hwnd` is the live control window.
         let dpi = unsafe { GetDpiForWindow(HWND(hwnd as *mut _)) }.max(96);
         for (kind, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
-            // SAFETY: as above; the window keeps the icon for the life of the process.
-            unsafe {
-                if let Some(icon) = app_icon(GetSystemMetricsForDpi(metric, dpi)) {
-                    SendMessageW(HWND(hwnd as *mut _), WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0 as isize)));
-                }
+            // SAFETY: reads a system metric; no pointers involved.
+            let size = unsafe { GetSystemMetricsForDpi(metric, dpi) };
+            if let Some(icon) = app_icon(size) {
+                // SAFETY: `hwnd` is the live control window; it keeps the icon for the life of the process.
+                unsafe { SendMessageW(HWND(hwnd as *mut _), WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0 as isize))) };
             }
         }
         let px = |dips: f64| (dips * f64::from(dpi) / 96.0).round() as i32;
@@ -408,31 +408,36 @@ impl Root {
             let Some(icon) = app_icon(px) else {
                 return Ok(());
             };
-            let mut bgra = vec![0u8; px as usize * px as usize * 4];
-            // SAFETY: `bgra` fits the px×px 32-bit top-down DIB requested; every handle is released here.
-            let read = unsafe {
-                let mut info = ICONINFO::default();
-                let _ = GetIconInfo(icon, &mut info);
-                let mut header = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: px,
-                        biHeight: -px,
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        ..Default::default()
-                    },
+            let mut info = ICONINFO::default();
+            // SAFETY: `icon` is a live icon owned here; the bitmaps it copies into `info` are freed below.
+            let _ = unsafe { GetIconInfo(icon, &mut info) };
+            // SAFETY: `icon` came from `LoadImageW` without `LR_SHARED`, so it is ours to destroy.
+            let _ = unsafe { DestroyIcon(icon) };
+            let mut header = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: px,
+                    biHeight: -px,
+                    biPlanes: 1,
+                    biBitCount: 32,
                     ..Default::default()
-                };
+                },
+                ..Default::default()
+            };
+            let mut bgra = vec![0u8; px as usize * px as usize * 4];
+            // SAFETY: `bgra` fits the px×px 32-bit top-down DIB `header` asks for; the screen DC is released right after.
+            let lines = unsafe {
                 let dc = GetDC(None);
                 let lines = GetDIBits(dc, info.hbmColor, 0, px as u32, Some(bgra.as_mut_ptr().cast()), &mut header, DIB_RGB_COLORS);
                 ReleaseDC(None, dc);
+                lines
+            };
+            // SAFETY: `GetIconInfo` created these bitmaps for the caller to free.
+            unsafe {
                 let _ = DeleteObject(info.hbmColor.into());
                 let _ = DeleteObject(info.hbmMask.into());
-                let _ = DestroyIcon(icon);
-                lines == px
-            };
-            if !read {
+            }
+            if lines != px {
                 return Ok(());
             }
             // Icon pixels carry straight alpha; XAML bitmaps are premultiplied.
@@ -515,10 +520,9 @@ fn apply_resource_overrides() -> Result<()> {
 
 /// The exe's icon resource (id 1, `build.rs`) at `px`×`px`; Windows picks the closest frame.
 fn app_icon(px: i32) -> Option<HICON> {
-    // SAFETY: loads a resource of this module; integer resource ids are passed as the name pointer.
-    unsafe {
-        let module = GetModuleHandleW(None).ok()?;
-        let icon = LoadImageW(Some(module.into()), PCWSTR(1 as _), IMAGE_ICON, px, px, LR_DEFAULTCOLOR).ok()?;
-        Some(HICON(icon.0))
-    }
+    // SAFETY: `None` returns this exe's module handle, which needs no cleanup.
+    let module = unsafe { GetModuleHandleW(None) }.ok()?;
+    // SAFETY: integer resource ids are passed as the name pointer (`MAKEINTRESOURCE`).
+    let icon = unsafe { LoadImageW(Some(module.into()), PCWSTR(1 as _), IMAGE_ICON, px, px, LR_DEFAULTCOLOR) }.ok()?;
+    Some(HICON(icon.0))
 }
