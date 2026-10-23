@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use rust_i18n::t;
+use translator_overlay::ensure_topmost;
 use translator_winui::{
     Button, Color, DesktopAcrylicController, DesktopAcrylicKind, ElementTheme, Grid, ICompositionSupportsSystemBackdrop,
     InputNonClientPointerSource, Interface, Layout, NonClientRegionKind, OverlappedPresenter, RectInt32, Result,
@@ -18,7 +19,7 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, GWL_EXSTYLE, GWL_STYLE, GetSystemMetrics, GetWindowLongPtrW, HCBT_ACTIVATE, HHOOK, HWND_TOPMOST, SM_CXSCREEN,
             SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-            SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WH_CBT, WS_DLGFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WH_CBT, WS_DLGFRAME, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
         },
     },
 };
@@ -66,11 +67,7 @@ pub fn hud_window(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<()> {
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
         hud.dpi.set(dpi, |&dpi| fit(hwnd, drag, dpi))?;
         // WinUI can bury other topmost windows when the control window launches.
-        // SAFETY: `hwnd` is the live control bar.
-        if unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } & WS_EX_TOPMOST.0 as isize == 0 {
-            // SAFETY: `hwnd` is the live control bar.
-            let _ = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
-        }
+        ensure_topmost(hwnd);
         hud.colors.set((text_argb, bg_argb), |&(text, bg)| {
             let [a, r, g, b] = text.to_be_bytes();
             status.SetForeground(&solid_brush(Color { A: a, R: r, G: g, B: b })?)?;

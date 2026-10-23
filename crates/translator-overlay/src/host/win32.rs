@@ -55,7 +55,7 @@ pub(crate) fn window_is_topmost(hwnd: HWND) -> bool {
 /// WASDK / WinUI 3 can bury other topmost windows under normal ones on launch
 /// while leaving `WS_EX_TOPMOST` set
 /// ([microsoft-ui-xaml#9990](https://github.com/microsoft/microsoft-ui-xaml/issues/9990)).
-pub(crate) fn ensure_topmost(hwnd: HWND) {
+pub fn ensure_topmost(hwnd: HWND) {
     if hwnd.is_invalid() || (window_is_topmost(hwnd) && !normal_window_is_above(hwnd)) {
         return;
     }

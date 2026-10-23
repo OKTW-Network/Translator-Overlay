@@ -17,4 +17,5 @@ pub use crate::{
     command::{OverlayCommand, OverlayEvent},
     controller::OverlayController,
     error::OverlayError,
+    host::win32::ensure_topmost,
 };
