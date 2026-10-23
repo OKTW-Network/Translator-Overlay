@@ -2400,6 +2400,16 @@ impl ContentDialog {
         }
     }
 
+    pub fn SetSecondaryButtonText(&self, value: &windows_core::HSTRING) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetSecondaryButtonText)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(value),
+            )
+            .ok()
+        }
+    }
+
     pub fn SetCloseButtonText(&self, value: &windows_core::HSTRING) -> windows_core::Result<()> {
         unsafe {
             (windows_core::Interface::vtable(self).SetCloseButtonText)(
@@ -2408,10 +2418,6 @@ impl ContentDialog {
             )
             .ok()
         }
-    }
-
-    pub fn SetIsPrimaryButtonEnabled(&self, value: bool) -> windows_core::Result<()> {
-        unsafe { (windows_core::Interface::vtable(self).SetIsPrimaryButtonEnabled)(windows_core::Interface::as_raw(self), value).ok() }
     }
 
     pub fn Closed<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
@@ -4543,7 +4549,7 @@ pub struct IContentDialog_Vtbl {
     PrimaryButtonText: usize,
     pub SetPrimaryButtonText: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
     SecondaryButtonText: usize,
-    SetSecondaryButtonText: usize,
+    pub SetSecondaryButtonText: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
     CloseButtonText: usize,
     pub SetCloseButtonText: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
     PrimaryButtonCommand: usize,
@@ -4559,7 +4565,7 @@ pub struct IContentDialog_Vtbl {
     CloseButtonCommandParameter: usize,
     SetCloseButtonCommandParameter: usize,
     IsPrimaryButtonEnabled: usize,
-    pub SetIsPrimaryButtonEnabled: unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    SetIsPrimaryButtonEnabled: usize,
     IsSecondaryButtonEnabled: usize,
     SetIsSecondaryButtonEnabled: usize,
     PrimaryButtonStyle: usize,
@@ -7032,6 +7038,8 @@ impl windows_core::RuntimeType for IWindowEventArgs {
 #[repr(C)]
 pub struct IWindowEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
+    Handled: usize,
+    pub SetHandled: unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(IWindowFactory, IWindowFactory_Vtbl, 0xf0441536_afef_5222_918f_324a9b2dec75);
 impl windows_core::RuntimeType for IWindowFactory {
@@ -15378,6 +15386,11 @@ unsafe impl Sync for Window {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowEventArgs(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(WindowEventArgs, windows_core::IUnknown, windows_core::IInspectable);
+impl WindowEventArgs {
+    pub fn SetHandled(&self, value: bool) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetHandled)(windows_core::Interface::as_raw(self), value).ok() }
+    }
+}
 impl windows_core::RuntimeType for WindowEventArgs {
     const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IWindowEventArgs>();
 }

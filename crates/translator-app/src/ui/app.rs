@@ -498,7 +498,7 @@ fn build_page(cx: &UiCx, page: Page) -> Result<(UIElement, PageView)> {
 }
 
 /// Application-wide resource overrides: transparent NavigationView content (Mica shows between
-/// cards), a narrow title-bar drag strip, and a wider ContentDialog for the glossary editor.
+/// cards) and a narrow title-bar drag strip.
 fn apply_resource_overrides() -> Result<()> {
     let resources = Application::Current()?.Resources()?;
     let clear = solid_brush(Color::default())?;
@@ -507,8 +507,6 @@ fn apply_resource_overrides() -> Result<()> {
     }
     // WinUI default is 48; keep a sliver so the caption buttons are not flush against the combo.
     resources.Insert(&boxed("TitleBarMinDragRegionWidth"), &boxed_f64(8.0))?;
-    // Default 548 is too narrow for the two-column glossary editor.
-    resources.Insert(&boxed("ContentDialogMaxWidth"), &boxed_f64(720.0))?;
     Ok(())
 }
 

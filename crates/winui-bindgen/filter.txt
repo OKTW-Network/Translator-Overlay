@@ -14,6 +14,7 @@ Microsoft::UI::Xaml::IResourceDictionary::get_MergedDictionaries
 Microsoft::UI::Xaml::Window::CreateInstance
 Microsoft::UI::Xaml::IWindow::{Activate, add_Closed, Close, get_Content, put_Content, put_ExtendsContentIntoTitleBar, put_Title, remove_Closed, SetTitleBar}
 Microsoft::UI::Xaml::IWindow2::{get_AppWindow, put_SystemBackdrop}
+Microsoft::UI::Xaml::IWindowEventArgs::put_Handled
 Microsoft::UI::Xaml::IUIElement::{get_Visibility, get_XamlRoot, put_Opacity, put_Visibility}
 Microsoft::UI::Xaml::IFrameworkElement::{get_Tag, put_Height, put_HorizontalAlignment, put_Margin, put_MaxHeight, put_MaxWidth, put_MinHeight, put_MinWidth, put_RequestedTheme, put_Style, put_Tag, put_VerticalAlignment, put_Width}
 Microsoft::UI::Xaml::IXamlRoot::{add_Changed, get_RasterizationScale, remove_Changed}
@@ -49,7 +50,7 @@ Microsoft::UI::Xaml::Controls::IColorPicker::{add_ColorChanged, get_Color, put_C
 Microsoft::UI::Xaml::Controls::IColumnDefinition::put_Width
 Microsoft::UI::Xaml::Controls::IComboBox::put_PlaceholderText
 Microsoft::UI::Xaml::Controls::IContentControl::put_Content
-Microsoft::UI::Xaml::Controls::IContentDialog::{add_Closed, Hide, put_CloseButtonText, put_IsPrimaryButtonEnabled, put_PrimaryButtonText, put_Title, ShowAsync}
+Microsoft::UI::Xaml::Controls::IContentDialog::{add_Closed, Hide, put_CloseButtonText, put_PrimaryButtonText, put_SecondaryButtonText, put_Title, ShowAsync}
 Microsoft::UI::Xaml::Controls::IContentDialogClosedEventArgs::get_Result
 Microsoft::UI::Xaml::Controls::IControl::{put_HorizontalContentAlignment, put_IsEnabled, put_VerticalContentAlignment}
 Microsoft::UI::Xaml::Controls::IFontIcon::put_Glyph

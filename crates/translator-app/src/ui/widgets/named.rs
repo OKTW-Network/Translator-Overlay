@@ -197,7 +197,7 @@ pub fn named_confirm_dialog(b: &mut Binds<UiShared>, cx: &UiCx, store: &'static 
     Ok(())
 }
 
-/// Same overwrite/delete confirm as [`named_confirm_dialog`], as a card. Use this inside another ContentDialog.
+/// Same overwrite/delete confirm as [`named_confirm_dialog`], as a card. Use this where a ContentDialog cannot open, such as the glossary editor window.
 pub fn named_confirm_inline(b: &mut Binds<UiShared>, cx: &UiCx, store: &'static NamedStore) -> Result<Border> {
     let resolve = |primary: bool| {
         let cx = cx.clone();

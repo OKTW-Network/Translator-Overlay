@@ -1,24 +1,41 @@
-//! Glossary editor as a ContentDialog on the control window.
+//! Glossary editor as a child window, modal over the control window.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use rust_i18n::t;
 use translator_core::DictionaryPair;
 use translator_winui::{
-    Border, Button, Grid, HorizontalAlignment, InfoBar, InfoBarSeverity, Layout, Result, ScrollBarVisibility, ScrollViewer, StackPanel,
-    TextBlock, VerticalAlignment, grid, pixels,
+    Border, Button, ContentDialog, ContentDialogResult, Grid, HorizontalAlignment, InfoBar, InfoBarSeverity, Layout, MicaBackdrop,
+    MicaKind, Result, ScrollBarVisibility, ScrollViewer, SizeInt32, StackPanel, TextBlock, TitleBarTheme, VerticalAlignment, Window, auto,
+    boxed, grid, keep, pixels, star, window_hwnd,
+};
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow},
+    UI::{
+        HiDpi::GetDpiForWindow,
+        Input::KeyboardAndMouse::EnableWindow,
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        WindowsAndMessaging::{
+            GWL_STYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, GetWindowRect, ICON_BIG, ICON_SMALL, SC_MINIMIZE, SW_MINIMIZE, SW_PARENTOPENING,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+            WM_GETICON, WM_NCDESTROY, WM_SETICON, WM_SHOWWINDOW, WM_SYSCOMMAND, WS_MAXIMIZEBOX, WS_THICKFRAME,
+        },
+    },
 };
 
 use crate::{
     children,
     ui::{
-        state::{
-            DICTIONARIES, NamedDialog, UiCx, UiShared, commit_named, open_dictionary_editor, select_dictionary_profile,
-            start_new_dictionary,
-        },
+        app::{control_hwnd, quiet},
+        state::{DICTIONARIES, NamedDialog, UiCx, UiShared, commit_named, select_dictionary_profile, start_new_dictionary},
         widgets::{
-            Binds, Prop, button,
+            Binds, ButtonKind, Prop, button, button_style,
             cards::SEMI_BOLD,
             column,
-            dialog::Dialog,
             fields::{Combo, TextField},
             glyph_box, hs, icon_button,
             named::{NamedSnap, name_entry_row, named_confirm_inline},
@@ -27,16 +44,13 @@ use crate::{
     },
 };
 
-// Pixel columns so ContentScrollViewer's infinite measure cannot stretch
-// the row past the ContentDialog. Subtle + FontIcon clips if the cell is locked to 36×36; min 36 + Viewbox 16.
+// Fixed pixel columns keep the source/target fields aligned with their headers.
+// Subtle + FontIcon clips if the cell is locked to 36×36; min 36 + Viewbox 16.
 const FIELD: f64 = 220.0;
 const BTN: f64 = 40.0;
 const ROW: f64 = FIELD * 2.0 + BTN;
-// Default VerticalScrollBarVisibility is Visible. Pin the list height to the rows so
-// Auto does not paint a bar when ContentDialog measures it with infinite height.
-const PAIR_ROW: f64 = 40.0;
+const PAD: f64 = 24.0;
 const PAIR_GAP: f64 = 8.0;
-const PAIR_MAX: f64 = 320.0;
 
 fn pair_grid() -> Result<Grid> {
     let g = grid(&[], &[pixels(FIELD), pixels(FIELD), pixels(BTN)])?;
@@ -125,7 +139,6 @@ struct PairList {
     rows: Vec<PairRow>,
     add: Button,
     add_enabled: Prop<bool>,
-    height: Prop<u64>,
 }
 
 impl PairList {
@@ -156,7 +169,6 @@ impl PairList {
             rows: Vec::new(),
             add,
             add_enabled: Prop::default(),
-            height: Prop::default(),
         })
     }
 
@@ -175,99 +187,300 @@ impl PairList {
             row.set(pair, can_edit)?;
         }
         let add = &self.add;
-        self.add_enabled.set(can_edit, |&e| add.SetIsEnabled(e))?;
-        let n = (pairs.len() + 1) as f64;
-        let content_h = n * PAIR_ROW + (n - 1.0).max(0.0) * PAIR_GAP;
-        let scroll = &self.scroll;
-        self.height
-            .set(content_h.min(PAIR_MAX).to_bits(), |&h| scroll.height(f64::from_bits(h)).map(drop))
+        self.add_enabled.set(can_edit, |&e| add.SetIsEnabled(e))
     }
 }
 
-pub fn dictionary_editor_dialog(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<()> {
-    let mut dialog = Dialog::new({
-        let cx = cx.clone();
-        move |primary| {
-            cx.with_mut(|ui| {
-                if !ui.dictionary.editor_open {
-                    return;
-                }
-                if primary {
-                    if let Some(name) = ui.dictionary.loaded.clone() {
-                        commit_named(ui, &DICTIONARIES, name);
+/// Shows the glossary editor window while `editor_open` is set.
+pub fn dictionary_editor_window(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<()> {
+    let cx = cx.clone();
+    let mut editor: Option<Editor> = None;
+    b.add(move |ui, chrome| {
+        if !ui.dictionary.editor_open {
+            editor = None;
+            return Ok(());
+        }
+        let editor = match &mut editor {
+            Some(editor) => editor,
+            None => editor.insert(Editor::new(&cx)?),
+        };
+        editor.binds.run(ui, chrome)
+    });
+    Ok(())
+}
+
+/// Editor window procedure: minimizing the editor minimizes the control window (`owner`) instead.
+/// A minimized owned window has no taskbar button, so it could not be brought back; Windows hides
+/// owned windows with their owner and shows them again when the owner is restored.
+unsafe extern "system" fn minimize_owner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, id: usize, owner: usize) -> LRESULT {
+    let owner = HWND(owner as *mut _);
+    match msg {
+        WM_SYSCOMMAND if (wparam.0 & 0xFFF0) as u32 == SC_MINIMIZE => {
+            // Alt+Tab leaves a disabled minimized window minimized, so keep it enabled until it is restored.
+            // SAFETY: `owner` is the live control window, which outlives the editor.
+            let _ = unsafe { EnableWindow(owner, true) };
+            // SAFETY: `owner` is the live control window, which outlives the editor.
+            let _ = unsafe { ShowWindow(owner, SW_MINIMIZE) };
+            return LRESULT(0);
+        }
+        WM_SHOWWINDOW if wparam.0 != 0 && lparam.0 as u32 == SW_PARENTOPENING.0 => {
+            // SAFETY: `owner` is the live control window, which outlives the editor.
+            let _ = unsafe { EnableWindow(owner, false) };
+            // SAFETY: `hwnd` is the live editor window this procedure was called for.
+            let _ = unsafe { SetForegroundWindow(hwnd) };
+        }
+        WM_NCDESTROY => {
+            // SAFETY: removes the subclass installed on `hwnd` with this procedure and `id`.
+            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(minimize_owner), id) };
+        }
+        _ => {}
+    }
+    // SAFETY: passes comctl32's own arguments for the live editor window to the next procedure.
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// A closed WinUI window cannot be shown again, so each open builds a new one.
+/// It disables the control window while it lives, like a modal dialog.
+struct Editor {
+    window: Window,
+    owner: HWND,
+    binds: Binds<UiShared>,
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        // Re-enable the owner while this window still exists, or Windows activates another app.
+        // SAFETY: `owner` is the control window, which outlives this editor.
+        let _ = unsafe { EnableWindow(self.owner, true) };
+        let _ = self.window.Close();
+    }
+}
+
+impl Editor {
+    fn new(cx: &UiCx) -> Result<Self> {
+        let mut binds = Binds::default();
+        let b = &mut binds;
+        let save = |ui: &mut UiShared| {
+            if let Some(name) = ui.dictionary.loaded.clone() {
+                commit_named(ui, &DICTIONARIES, name);
+            }
+            // A failed save keeps the window open with the edits still in the buffer.
+            if !ui.dictionary.dirty() {
+                ui.dictionary.close_editor();
+            }
+        };
+        let cancel = |ui: &mut UiShared| {
+            ui.dictionary.revert();
+            ui.dictionary.close_editor();
+        };
+
+        let mut combo = Combo::new(&t!("tr.select_dictionary"), {
+            let cx = cx.clone();
+            move |idx| cx.with_mut(|ui| select_dictionary_profile(ui, idx))
+        })?;
+        combo
+            .cb
+            .automation_id("cmb-dictionary-editor")?
+            .width(180.0)?
+            .min_width(140.0)?
+            .valign(VerticalAlignment::Center)?;
+        let new_btn = button(&t!("action.new"), {
+            let cx = cx.clone();
+            move || cx.with_mut(start_new_dictionary)
+        })?;
+        new_btn.automation_id("btn-dictionary-new")?;
+        let delete_btn = button(&t!("action.delete"), {
+            let cx = cx.clone();
+            move || {
+                cx.with_mut(|ui| {
+                    if let Some(name) = ui.dictionary.selected_name() {
+                        ui.dictionary.pick.dialog = NamedDialog::Delete { name };
                     }
-                    if ui.dictionary.dirty() {
-                        // The save failed; reopen with the edits still in the buffer.
-                        ui.dictionary.close_editor();
-                        open_dictionary_editor(ui);
+                });
+            }
+        })?;
+        let toolbar = row(8.0)?;
+        toolbar.valign(VerticalAlignment::Center)?.halign(HorizontalAlignment::Left)?;
+        children!(toolbar; combo.cb, new_btn, delete_btn);
+
+        let error_bar = InfoBar::new()?;
+        error_bar.SetSeverity(InfoBarSeverity::Error)?;
+        error_bar.SetIsClosable(false)?;
+
+        let header = |key: &str, col: i32| -> Result<TextBlock> {
+            let tb = text(&t!(key))?;
+            tb.SetFontWeight(SEMI_BOLD)?;
+            tb.column(col)?.margin(0.0, 0.0, 8.0, 0.0)?;
+            Ok(tb)
+        };
+        let headers = pair_grid()?;
+        let header_gap = Border::new()?;
+        header_gap.width(BTN)?.column(2)?;
+        children!(headers; header("tr.term_source", 0)?, header("tr.term_target", 1)?, header_gap);
+
+        let mut pairs = PairList::new(cx)?;
+        let name_row = name_entry_row(b, cx, &DICTIONARIES)?;
+        let confirm = named_confirm_inline(b, cx, &DICTIONARIES)?;
+        let top = column(8.0)?;
+        children!(top; toolbar, name_row, confirm, error_bar, headers);
+        pairs.scroll.row(1)?.margin(0.0, PAIR_GAP, 0.0, 0.0)?;
+
+        let body = grid(&[auto(), star(1.0), auto()], &[star(1.0)])?;
+        body.width(ROW)?.halign(HorizontalAlignment::Left)?.margin(PAD, PAD, PAD, PAD)?;
+
+        let ask = ContentDialog::new()?;
+        ask.SetTitle(&boxed(&t!("tr.unsaved_dictionary_title")))?;
+        ask.SetPrimaryButtonText(&hs(&t!("action.save")))?;
+        ask.SetSecondaryButtonText(&hs(&t!("action.dont_save")))?;
+        ask.SetCloseButtonText(&hs(&t!("action.cancel")))?;
+        let asking = Arc::new(AtomicBool::new(false));
+        keep(ask.Closed({
+            let (cx, asking) = (cx.clone(), asking.clone());
+            move |_, args| {
+                asking.store(false, Ordering::Relaxed);
+                match args.as_ref().and_then(|a| a.Result().ok()) {
+                    Some(ContentDialogResult::Primary) => cx.with_mut(save),
+                    Some(ContentDialogResult::Secondary) => cx.with_mut(cancel),
+                    _ => {}
+                }
+            }
+        }))?;
+        // Shows `ask` when closing would drop unsaved edits; `Ok(false)` means close now.
+        let ask_unsaved = {
+            let (cx, ask, body) = (cx.clone(), ask.clone(), body.clone());
+            move || -> Result<bool> {
+                let name = {
+                    let ui = cx.shared.lock();
+                    ui.dictionary.loaded.clone().filter(|_| ui.dictionary.dirty())
+                };
+                let Some(name) = name else {
+                    return Ok(false);
+                };
+                // Leave an open question alone: a second ShowAsync fails and the dialog then never closes.
+                if asking.swap(true, Ordering::Relaxed) {
+                    return Ok(true);
+                }
+                let shown = (|| -> Result<()> {
+                    ask.SetContent(&text(&t!("tr.unsaved_dictionary_body", name = name))?)?;
+                    ask.SetXamlRoot(&body.XamlRoot()?)?;
+                    // WinUI may return S_OK without an async handle, which still means shown.
+                    ask.ShowAsync()
+                        .map(drop)
+                        .or_else(|e| if e.code().is_ok() { Ok(()) } else { Err(e) })
+                })();
+                if shown.is_err() {
+                    asking.store(false, Ordering::Relaxed);
+                }
+                shown.map(|()| true)
+            }
+        };
+
+        let save_btn = button(&t!("action.save"), {
+            let cx = cx.clone();
+            move || cx.with_mut(save)
+        })?;
+        button_style(&save_btn, ButtonKind::Accent)?;
+        let cancel_btn = button(&t!("action.cancel"), {
+            let (cx, ask_unsaved) = (cx.clone(), ask_unsaved.clone());
+            move || {
+                if matches!(ask_unsaved(), Ok(false)) {
+                    cx.with_mut(cancel);
+                }
+            }
+        })?;
+        let footer = row(8.0)?;
+        footer.row(2)?.halign(HorizontalAlignment::Right)?.margin(0.0, 16.0, 0.0, 0.0)?;
+        children!(footer; save_btn, cancel_btn);
+        children!(body; top, pairs.scroll, footer);
+
+        let window = Window::new()?;
+        window.SetContent(&body)?;
+        window.SetTitle(&hs(&t!("tr.editor_title")))?;
+        let mica = MicaBackdrop::new()?;
+        mica.SetKind(MicaKind::Base)?;
+        window.SetSystemBackdrop(&mica)?;
+        let owner = control_hwnd().unwrap_or_default();
+        keep(window.Closed({
+            let cx = cx.clone();
+            move |_, args| {
+                // A sync dropping the editor closes it with the state lock held, and the state already says closed.
+                if !quiet() {
+                    if !matches!(ask_unsaved(), Ok(false)) {
+                        // Stay open until the user answers.
+                        if let Some(args) = args.as_ref() {
+                            let _ = args.SetHandled(true);
+                        }
                         return;
                     }
-                } else {
-                    ui.dictionary.revert();
+                    cx.with_mut(|ui| {
+                        if ui.dictionary.editor_open {
+                            cancel(ui);
+                        }
+                    });
                 }
-                ui.dictionary.close_editor();
-            });
+                // Re-enable the owner before this window goes away, or Windows activates another app.
+                // SAFETY: `owner` is the control window, which outlives this editor.
+                let _ = unsafe { EnableWindow(HWND(owner as *mut _), true) };
+            }
+        }))?;
+
+        let hwnd = HWND(window_hwnd(&window)? as *mut _);
+        let owner_hwnd = HWND(owner as *mut _);
+        // SAFETY: `owner_hwnd` is the live control window.
+        let dpi = unsafe { GetDpiForWindow(owner_hwnd) }.max(96);
+        let px = |dips: f64| (dips * f64::from(dpi) / 96.0).round() as i32;
+        let app_window = window.AppWindow()?;
+        app_window.TitleBar()?.SetPreferredTheme(TitleBarTheme::UseDefaultAppMode)?;
+        // Fixed size and no maximize. Before `ResizeClient`, which sizes for the frame.
+        // SAFETY: `hwnd` is the live editor window.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } & !((WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0) as isize);
+        // SAFETY: `hwnd` is the live editor window.
+        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, style) };
+        // SAFETY: `hwnd` is the live editor window; `owner` is the live control window on the same thread.
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner) };
+        // SAFETY: `hwnd` is the live editor window; `minimize_owner` removes itself on `WM_NCDESTROY`.
+        let _ = unsafe { SetWindowSubclass(hwnd, Some(minimize_owner), 0, owner as usize) };
+        // Borrow the control window's icons; it keeps them for the life of the process.
+        for kind in [ICON_SMALL, ICON_BIG] {
+            // SAFETY: `owner_hwnd` is the live control window.
+            let icon = unsafe { SendMessageW(owner_hwnd, WM_GETICON, Some(WPARAM(kind as usize)), None) };
+            // SAFETY: `hwnd` is the live editor window; the icon outlives it.
+            unsafe { SendMessageW(hwnd, WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0))) };
         }
-    })?;
-
-    let mut combo = Combo::new(&t!("tr.select_dictionary"), {
-        let cx = cx.clone();
-        move |idx| cx.with_mut(|ui| select_dictionary_profile(ui, idx))
-    })?;
-    combo
-        .cb
-        .automation_id("cmb-dictionary-editor")?
-        .width(180.0)?
-        .min_width(140.0)?
-        .valign(VerticalAlignment::Center)?;
-    let new_btn = button(&t!("action.new"), {
-        let cx = cx.clone();
-        move || cx.with_mut(start_new_dictionary)
-    })?;
-    new_btn.automation_id("btn-dictionary-new")?;
-    let delete_btn = button(&t!("action.delete"), {
-        let cx = cx.clone();
-        move || {
-            cx.with_mut(|ui| {
-                if let Some(name) = ui.dictionary.selected_name() {
-                    ui.dictionary.pick.dialog = NamedDialog::Delete { name };
-                }
-            });
+        app_window.ResizeClient(SizeInt32 {
+            Width: px(ROW + PAD * 2.0),
+            Height: px(600.0),
+        })?;
+        let (mut outer, mut own) = (RECT::default(), RECT::default());
+        let mut monitor = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `owner_hwnd` is the live control window.
+        let screen = unsafe { MonitorFromWindow(owner_hwnd, MONITOR_DEFAULTTONEAREST) };
+        // SAFETY: `owner_hwnd` is the live control window; `outer` outlives the call.
+        let outer_ok = unsafe { GetWindowRect(owner_hwnd, &mut outer) }.is_ok();
+        // SAFETY: `hwnd` is the live editor window; `own` outlives the call.
+        let own_ok = unsafe { GetWindowRect(hwnd, &mut own) }.is_ok();
+        // SAFETY: `screen` came from `MonitorFromWindow`; `monitor` has `cbSize` set and outlives the call.
+        let monitor_ok = unsafe { GetMonitorInfoW(screen, &mut monitor) }.as_bool();
+        if outer_ok && own_ok && monitor_ok {
+            // The window cannot be resized, so keep all of it, title bar and footer, inside the work area.
+            let work = monitor.rcWork;
+            let w = (own.right - own.left).min(work.right - work.left);
+            let h = (own.bottom - own.top).min(work.bottom - work.top);
+            let x = ((outer.left + outer.right - w) / 2).clamp(work.left, work.right - w);
+            let y = ((outer.top + outer.bottom - h) / 2).clamp(work.top, work.bottom - h);
+            // SAFETY: `hwnd` is the live editor window.
+            let _ = unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
         }
-    })?;
-    let toolbar = row(8.0)?;
-    toolbar.valign(VerticalAlignment::Center)?.halign(HorizontalAlignment::Left)?;
-    children!(toolbar; combo.cb, new_btn, delete_btn);
+        // SAFETY: `owner_hwnd` is the live control window.
+        let _ = unsafe { EnableWindow(owner_hwnd, false) };
+        window.Activate()?;
 
-    let error_bar = InfoBar::new()?;
-    error_bar.SetSeverity(InfoBarSeverity::Error)?;
-    error_bar.SetIsClosable(false)?;
-
-    let header = |key: &str, col: i32| -> Result<TextBlock> {
-        let tb = text(&t!(key))?;
-        tb.SetFontWeight(SEMI_BOLD)?;
-        tb.column(col)?.margin(0.0, 0.0, 8.0, 0.0)?;
-        Ok(tb)
-    };
-    let headers = pair_grid()?;
-    let header_gap = Border::new()?;
-    header_gap.width(BTN)?.column(2)?;
-    children!(headers; header("tr.term_source", 0)?, header("tr.term_target", 1)?, header_gap);
-
-    let mut pairs = PairList::new(cx)?;
-    let name_row = name_entry_row(b, cx, &DICTIONARIES)?;
-    let confirm = named_confirm_inline(b, cx, &DICTIONARIES)?;
-    let body = column(8.0)?;
-    body.width(ROW)?.halign(HorizontalAlignment::Left)?;
-    children!(body; toolbar, name_row, confirm, error_bar, headers, pairs.scroll);
-    dialog.cd.SetContent(&body)?;
-    dialog.labels(&t!("tr.editor_title"), &t!("action.save"), &t!("action.cancel"))?;
-
-    let mut error = Prop::default();
-    let mut can_edit_prop = Prop::default();
-    b.add(move |ui, _| {
-        let open = ui.dictionary.editor_open;
-        if open {
+        let mut error = Prop::default();
+        let mut can_edit_prop = Prop::default();
+        b.add(move |ui, _| {
             let snap = NamedSnap::take(ui, &DICTIONARIES);
             let can_edit = ui.dictionary.loaded.is_some();
             let enabled = !snap.names.is_empty();
@@ -279,11 +492,13 @@ pub fn dictionary_editor_dialog(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<()
                 error_bar.SetTitle(&hs(e))?;
                 error_bar.SetIsOpen(!e.is_empty())
             })?;
-            let cd = &dialog.cd;
-            can_edit_prop.set(can_edit, |&e| cd.SetIsPrimaryButtonEnabled(e))?;
-            pairs.set(&ui.dictionary.pairs, can_edit)?;
-        }
-        dialog.show(open)
-    });
-    Ok(())
+            can_edit_prop.set(can_edit, |&e| save_btn.SetIsEnabled(e))?;
+            pairs.set(&ui.dictionary.pairs, can_edit)
+        });
+        Ok(Self {
+            window,
+            owner: owner_hwnd,
+            binds,
+        })
+    }
 }

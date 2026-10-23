@@ -10,7 +10,7 @@ use crate::{
     children,
     pipeline::PipelineCommand,
     ui::{
-        pages::translation::dictionary::dictionary_editor_dialog,
+        pages::translation::dictionary::dictionary_editor_window,
         state::{UiCx, UiShared, mark_dirty, open_dictionary_editor},
         widgets::{
             Binds, Prop, button,
@@ -185,7 +185,7 @@ pub fn translation_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel
     let prompt = column(4.0)?;
     children!(prompt; section_header(&t!("tr.prompt"))?, dictionary_card.root, prompt_card.root);
 
-    dictionary_editor_dialog(b, cx)?;
+    dictionary_editor_window(b, cx)?;
     let body = column(8.0)?;
     children!(body; languages, context, cache, prompt);
     Ok(body)
