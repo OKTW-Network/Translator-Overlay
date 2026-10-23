@@ -11,18 +11,18 @@ use translator_core::{AppConfig, HotkeyAction, NormRect, UiLanguage};
 
 pub use crate::pipeline::worker::{CmdTx, SharedState, spawn_pipeline};
 
-static UI_PING: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
+static UI_PING: OnceLock<fn()> = OnceLock::new();
 
-/// Capture a Send ping so the pipeline can wake the UI component.
+/// Install the thread-safe callback that asks the control window to re-sync.
 /// First call wins; later calls are ignored.
-pub fn install_ui_ping(tx: std::sync::mpsc::Sender<()>) {
-    let _ = UI_PING.set(tx);
+pub fn install_ui_ping(ping: fn()) {
+    let _ = UI_PING.set(ping);
 }
 
-/// Request a control-window rerender. No-op until [`install_ui_ping`].
+/// Request a control-window re-sync. No-op until [`install_ui_ping`].
 pub fn ping_ui() {
-    if let Some(tx) = UI_PING.get() {
-        let _ = tx.send(());
+    if let Some(ping) = UI_PING.get() {
+        ping();
     }
 }
 

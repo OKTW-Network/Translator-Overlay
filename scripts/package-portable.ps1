@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Produces dist/TranslatorOverlay-<version>-win-x64.zip containing the files
-  required to run a framework-dependent windows-reactor 0.100 app:
+  required to run the framework-dependent WinUI 3 app:
 
     - translator-app.exe
     - lib/onnxruntime.dll       (custom ORT with DirectML + WebGPU)
@@ -12,7 +12,7 @@
     - lib/webgpu_dawn.dll       (WebGPU EP / Dawn)
     - lib/dxcompiler.dll        (Dawn D3D12 shader compiler)
 
-  windows-reactor 0.100 inlines WASDK bootstrap (no Bootstrap.dll).
+  translator-winui adds the Windows App Runtime package dependency itself (no Bootstrap.dll).
   Target machines need Windows 11 21H2 (build 22000+) and Windows App Runtime 2.4.
   See: https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
   Visual C++ Redistributable may also be needed for MSVC CRT DLLs.

@@ -1,26 +1,28 @@
 //! API settings: provider, connection, sampling, and named profiles.
 
-use std::{borrow::Cow, sync::Arc};
+use std::borrow::Cow;
 
-use parking_lot::Mutex;
 use rust_i18n::t;
-use translator_core::{HttpApi, ModelProvider, ServiceTier};
-use windows_reactor::{
-    Button, ChildrenControl, ComboBox, ContentControl, HorizontalAlignment, LayoutControl, LocalSender, Orientation, StackPanel,
-    TooltipExt, VerticalAlignment, View,
-};
+use translator_core::{ApiConfig, HttpApi, ModelProvider, ServiceTier};
+use translator_winui::{HorizontalAlignment, Interface, Layout, Result, StackPanel, UIElement, VerticalAlignment};
 
-use crate::ui::{
-    cards::{section_header, settings_card},
-    chrome::settings_page_shell,
-    controls::{
-        ModelSuggestParams, OptionalNumberParams, OptionalSliderParams, OptionalTextParams, SliderNumberParams, card_model_suggest,
-        card_password, card_slider_number, card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row, radio,
-    },
-    named::{NamedSnap, name_entry_row, named_combo, named_confirm_dialog, named_delete_button},
-    shared::{
-        API_PROFILES, AppMsg, ChromeSnap, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list,
-        schedule_model_list_if_needed, selected_api_profile,
+use crate::{
+    children,
+    ui::{
+        state::{API_PROFILES, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list, selected_api_profile},
+        widgets::{
+            Binds, Prop, button,
+            cards::{section_header, settings_card},
+            column,
+            controls::{
+                ModelSuggestParams, OptionalTextParams, SliderNumberParams, card_model_suggest, card_password, card_slider_number,
+                card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row, radio,
+            },
+            fields::Combo,
+            hs,
+            named::{name_entry_row, named_combo, named_confirm_dialog, named_delete_button},
+            row,
+        },
     },
 };
 
@@ -34,153 +36,123 @@ fn provider_label(provider: ModelProvider) -> &'static str {
     }
 }
 
-fn api_profile_section(cx: &UiCx, snap: &NamedSnap) -> View {
-    let combo = named_combo(cx, &API_PROFILES, snap, t!("api.select_profile"));
-    let toolbar = StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(8.0)
-        .vertical_alignment(VerticalAlignment::Center)
-        .horizontal_alignment(HorizontalAlignment::Left)
-        .children((
-            combo,
-            Button::new()
-                .on_click({
-                    let cx = cx.clone();
-                    move || {
-                        cx.with_mut(|ui| {
-                            ui.profiles.name_draft = selected_api_profile(ui)
-                                .map(|p| p.name.clone())
-                                .unwrap_or_else(|| provider_label(ui.draft.api.provider).into());
-                            ui.profiles.dialog = NamedDialog::SaveName;
-                        });
-                    }
-                })
-                .content(t!("action.save").as_ref())
-                .tooltip(t!("api.save_profile_tip")),
-            Button::new()
-                .is_enabled(snap.selected().is_some())
-                .on_click({
-                    let cx = cx.clone();
-                    move || {
-                        cx.with_mut(|ui| {
-                            if let Err(e) = load_api_profile(ui) {
-                                ui.state.write().set_error(e);
-                            }
-                        });
-                    }
-                })
-                .content(t!("action.load").as_ref())
-                .tooltip(t!("api.load_profile_tip")),
-            named_delete_button(cx, &API_PROFILES, snap, t!("api.delete_profile_tip")),
-        ));
+const PROVIDERS: [ModelProvider; 5] = [
+    ModelProvider::OpenaiCompatible,
+    ModelProvider::GrokCli,
+    ModelProvider::OpenCodeCli,
+    ModelProvider::CodexCli,
+    ModelProvider::ClaudeCli,
+];
 
-    StackPanel::new().spacing(4.0).children((
-        section_header(t!("api.profiles")),
-        toolbar,
-        name_entry_row(cx, &API_PROFILES, snap),
-        named_confirm_dialog(cx, &API_PROFILES, snap),
-    ))
+fn api_profile_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
+    let combo = named_combo(b, cx, &API_PROFILES, &t!("api.select_profile"))?;
+    let save = button(&t!("action.save"), {
+        let cx = cx.clone();
+        move || {
+            cx.with_mut(|ui| {
+                ui.profiles.name_draft = selected_api_profile(ui)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| provider_label(ui.draft.api.provider).into());
+                ui.profiles.dialog = NamedDialog::SaveName;
+            });
+        }
+    })?;
+    save.tooltip(&t!("api.save_profile_tip"))?;
+    let load = button(&t!("action.load"), {
+        let cx = cx.clone();
+        move || {
+            cx.with_mut(|ui| {
+                if let Err(e) = load_api_profile(ui) {
+                    ui.state.write().set_error(e);
+                }
+            });
+        }
+    })?;
+    load.tooltip(&t!("api.load_profile_tip"))?;
+    let load_el = load.clone();
+    let mut load_enabled = Prop::default();
+    b.add(move |ui, _| load_enabled.set(selected_api_profile(ui).is_some(), |&e| load_el.SetIsEnabled(e)));
+    let delete = named_delete_button(b, cx, &API_PROFILES, &t!("api.delete_profile_tip"))?;
+    let toolbar = row(8.0)?;
+    toolbar.valign(VerticalAlignment::Center)?.halign(HorizontalAlignment::Left)?;
+    children!(toolbar; combo, save, load, delete);
+
+    let section = column(4.0)?;
+    children!(section; section_header(&t!("api.profiles"))?, toolbar, name_entry_row(b, cx, &API_PROFILES)?);
+    named_confirm_dialog(b, cx, &API_PROFILES)?;
+    Ok(section)
 }
 
-pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
-    let cx = UiCx::new(shared, bump);
-    let (api, optional, api_key_revealed, profile_snap, model_catalog, model_list_loading) = {
-        let mut ui = shared.lock();
-        schedule_model_list_if_needed(&mut ui, bump);
-        (
-            ui.draft.api.clone(),
-            ui.optional.clone(),
-            ui.api_key_revealed,
-            NamedSnap::take(&mut ui, &API_PROFILES),
-            ui.model_catalog.clone(),
-            ui.model_list_loading,
-        )
-    };
+/// Shows `el` only for the providers `pred` accepts.
+fn shown_for(b: &mut Binds<UiShared>, el: &impl Layout, pred: fn(ModelProvider) -> bool) -> Result<UIElement> {
+    let el = el.fe()?;
+    let ui_el: UIElement = el.cast()?;
+    let mut shown = Prop::default();
+    b.add(move |ui, _| shown.set(pred(ui.draft.api.provider), |&v| el.visible(v).map(drop)));
+    Ok(ui_el)
+}
 
-    let provider_desc = t!("api.provider_desc");
-    let provider_card = settings_card("api-provider", t!("api.provider"), Some(&provider_desc), {
-        const PROVIDERS: [ModelProvider; 5] = [
-            ModelProvider::OpenaiCompatible,
-            ModelProvider::GrokCli,
-            ModelProvider::OpenCodeCli,
-            ModelProvider::CodexCli,
-            ModelProvider::ClaudeCli,
-        ];
-        ComboBox::new()
-            .items_source(PROVIDERS.iter().map(|&p| provider_label(p).to_string()).collect::<Vec<_>>())
-            .selected_index(PROVIDERS.iter().position(|&p| p == api.provider))
-            .on_selection_changed({
-                let cx = cx.clone();
-                move |idx: Option<usize>| {
-                    let Some(&provider) = idx.and_then(|i| PROVIDERS.get(i)) else {
-                        return;
-                    };
-                    cx.with_mut(|ui| {
-                        if ui.draft.api.provider != provider {
-                            ui.draft.api.provider = provider;
-                            mark_dirty(ui);
-                        }
-                    });
-                }
-            })
-            .width(200.0)
-            .vertical_alignment(VerticalAlignment::Center)
-    });
-
-    let http_api_desc = t!("api.http_api_desc");
-    let http_api_card = settings_card("api-http-api", t!("api.http_api"), Some(&http_api_desc), {
-        let idx = match api.http_api {
-            HttpApi::ChatCompletions => 0,
-            HttpApi::Responses => 1,
-        };
-        let cx_h = cx.clone();
-        let pick = move |choice: i32| {
-            let cx = cx_h.clone();
-            move || {
-                cx.with_mut(|ui| {
-                    ui.draft.api.http_api = if choice == 1 {
-                        HttpApi::Responses
-                    } else {
-                        HttpApi::ChatCompletions
-                    };
+pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
+    let mut provider = Combo::new("", {
+        let cx = cx.clone();
+        move |idx| {
+            let Some(&provider) = idx.and_then(|i| PROVIDERS.get(i)) else {
+                return;
+            };
+            cx.with_mut(|ui| {
+                if ui.draft.api.provider != provider {
+                    ui.draft.api.provider = provider;
                     mark_dirty(ui);
-                });
-            }
-        };
-        StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(12.0)
-            .vertical_alignment(VerticalAlignment::Center)
-            .children((
-                radio("api-http-api", &t!("api.chat_completions"), Some(168.0), idx == 0, true, pick(0)),
-                radio("api-http-api", &t!("api.responses"), Some(120.0), idx == 1, true, pick(1)),
-            ))
+                }
+            });
+        }
+    })?;
+    provider.cb.width(200.0)?.valign(VerticalAlignment::Center)?;
+    let provider_card = settings_card("api-provider", &t!("api.provider"), Some(&t!("api.provider_desc")), &provider.cb)?;
+    b.add(move |ui, _| {
+        let items = PROVIDERS.iter().map(|&p| provider_label(p).to_string()).collect();
+        provider.set(items, PROVIDERS.iter().position(|&p| p == ui.draft.api.provider), true)
     });
 
-    let model_hint = match api.provider {
-        ModelProvider::OpenCodeCli => t!("api.model_opencode"),
-        ModelProvider::ClaudeCli => t!("api.model_claude"),
-        ModelProvider::GrokCli | ModelProvider::CodexCli => t!("api.model_cli"),
-        ModelProvider::OpenaiCompatible => t!("api.model_http"),
+    let pick = |choice: HttpApi| {
+        let set = cx.edit(move |ui, ()| ui.draft.api.http_api = choice);
+        move || set(())
     };
+    let mut chat = radio("api-http-api", &t!("api.chat_completions"), Some(168.0), pick(HttpApi::ChatCompletions))?;
+    let mut responses = radio("api-http-api", &t!("api.responses"), Some(120.0), pick(HttpApi::Responses))?;
+    let radios = row(12.0)?;
+    radios.valign(VerticalAlignment::Center)?;
+    children!(radios; chat.rb, responses.rb);
+    let http_api_card = settings_card("api-http-api", &t!("api.http_api"), Some(&t!("api.http_api_desc")), &radios)?;
+    b.add(move |ui, _| {
+        chat.set(ui.draft.api.http_api == HttpApi::ChatCompletions, true)?;
+        responses.set(ui.draft.api.http_api == HttpApi::Responses, true)
+    });
 
     let model_card = card_model_suggest(
+        b,
         ModelSuggestParams {
             key: "api-model",
             header: t!("api.model"),
-            description: model_hint,
-            value: api.model.clone(),
             placeholder: Cow::Borrowed(""),
-            suggestions: {
-                let q = api.model.trim().to_ascii_lowercase();
-                model_catalog
-                    .iter()
-                    .filter(|id| q.is_empty() || id.to_ascii_lowercase().contains(&q))
-                    .take(40)
-                    .cloned()
-                    .collect()
-            },
-            loading: model_list_loading,
+        },
+        |ui| {
+            let api = &ui.draft.api;
+            let hint = match api.provider {
+                ModelProvider::OpenCodeCli => t!("api.model_opencode"),
+                ModelProvider::ClaudeCli => t!("api.model_claude"),
+                ModelProvider::GrokCli | ModelProvider::CodexCli => t!("api.model_cli"),
+                ModelProvider::OpenaiCompatible => t!("api.model_http"),
+            };
+            let q = api.model.trim().to_ascii_lowercase();
+            let suggestions = ui
+                .model_catalog
+                .iter()
+                .filter(|id| q.is_empty() || id.to_ascii_lowercase().contains(&q))
+                .take(40)
+                .cloned()
+                .collect();
+            (hint, api.model.clone(), suggestions, ui.model_list_loading)
         },
         {
             let cx = cx.clone();
@@ -196,321 +168,201 @@ pub fn api_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &Local
         },
         {
             let cx = cx.clone();
-            move || {
-                let bump = cx.bump.clone();
-                cx.with_mut(|ui| request_model_list(ui, &bump));
-            }
+            move || cx.with_mut(request_model_list)
         },
+    )?;
+
+    let priority_card = card_toggle(
+        b,
+        ("api-priority-mode", &t!("api.priority"), Some(&t!("api.priority_desc"))),
+        |ui| ui.draft.api.service_tier == ServiceTier::Priority,
+        cx.edit(|ui, on| ui.draft.api.service_tier = if on { ServiceTier::Priority } else { ServiceTier::Standard }),
+    )?;
+
+    let cli_path = card_text(
+        b,
+        ("api-cli-path", &t!("api.cli_path"), Some(&t!("api.cli_path_desc"))),
+        "",
+        |ui| ui.draft.api.cli_path.clone(),
+        cx.edit(|ui, v| ui.draft.api.cli_path = v),
+    )?;
+    let base_url = card_text(
+        b,
+        ("api-base-url", &t!("api.base_url"), Some(&t!("api.base_url_desc"))),
+        "",
+        |ui| ui.draft.api.base_url.clone(),
+        cx.edit(|ui, v| ui.draft.api.base_url = v),
+    )?;
+    let key = card_password(
+        b,
+        ("api-key", &t!("api.key"), Some(&t!("api.key_desc"))),
+        |ui| (ui.draft.api.api_key.clone(), ui.api_key_revealed),
+        cx.edit(|ui, v| ui.draft.api.api_key = v),
+        {
+            let cx = cx.clone();
+            move || cx.with_mut(|ui| ui.api_key_revealed = !ui.api_key_revealed)
+        },
+    )?;
+    let toggle =
+        |b: &mut Binds<UiShared>, key: &str, header: &str, desc: &str, get: fn(&ApiConfig) -> bool, set: fn(&mut ApiConfig, bool)| {
+            card_toggle(b, (key, header, Some(desc)), move |ui| get(&ui.draft.api), cx.edit(move |ui, on| set(&mut ui.draft.api, on)))
+        };
+    let structured = toggle(
+        b,
+        "api-structured-outputs",
+        &t!("api.structured"),
+        &t!("api.structured_desc"),
+        |api| api.structured_outputs,
+        |api, on| api.structured_outputs = on,
+    )?;
+    let stream = toggle(b, "api-stream", &t!("api.stream"), &t!("api.stream_desc"), |api| api.stream, |api, on| api.stream = on)?;
+    let send_reasoning = toggle(
+        b,
+        "api-send-reasoning-content",
+        &t!("api.send_reasoning"),
+        &t!("api.send_reasoning_desc"),
+        |api| api.send_reasoning_content,
+        |api, on| api.send_reasoning_content = on,
+    )?;
+
+    let http: fn(ModelProvider) -> bool = |p| !p.is_cli();
+    let connection = column(4.0)?;
+    children!(connection;
+        section_header(&t!("api.connection"))?,
+        provider_card.root,
+        shown_for(b, &http_api_card.root, http)?,
+        shown_for(b, &cli_path, ModelProvider::is_cli)?,
+        shown_for(b, &base_url, http)?,
+        shown_for(b, &key, http)?,
+        shown_for(b, &priority_card, |p| p == ModelProvider::CodexCli)?,
+        model_card,
+        shown_for(b, &structured, http)?,
+        shown_for(b, &stream, http)?,
+        shown_for(b, &send_reasoning, http)?,
     );
 
-    let priority_tier_card: View = if api.provider == ModelProvider::CodexCli {
-        card_toggle("api-priority-mode", t!("api.priority"), Some(&t!("api.priority_desc")), api.service_tier == ServiceTier::Priority, {
-            let cx = cx.clone();
-            move |on| {
-                cx.with_mut(|ui| {
-                    ui.draft.api.service_tier = if on { ServiceTier::Priority } else { ServiceTier::Standard };
-                    mark_dirty(ui);
-                });
-            }
-        })
-    } else {
-        View::empty()
-    };
-
-    let connection = if api.provider.is_cli() {
-        StackPanel::new().spacing(4.0).children((
-            section_header(t!("api.connection")),
-            provider_card,
-            card_text("api-cli-path", t!("api.cli_path"), Some(&t!("api.cli_path_desc")), api.cli_path.clone(), "", {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.cli_path = v;
-                        mark_dirty(ui);
-                    });
-                }
-            }),
-            priority_tier_card,
-            model_card,
-        ))
-    } else {
-        StackPanel::new().spacing(4.0).children((
-            section_header(t!("api.connection")),
-            provider_card,
-            http_api_card,
-            card_text("api-base-url", t!("api.base_url"), Some(&t!("api.base_url_desc")), api.base_url.clone(), "", {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.base_url = v;
-                        mark_dirty(ui);
-                    });
-                }
-            }),
-            card_password(
-                "api-key",
-                t!("api.key"),
-                Some(&t!("api.key_desc")),
-                api.api_key.clone(),
-                api_key_revealed,
-                {
-                    let cx = cx.clone();
-                    move |v| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.api_key = v;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-                {
-                    let cx = cx.clone();
-                    move || {
-                        cx.with_mut(|ui| {
-                            ui.api_key_revealed = !ui.api_key_revealed;
-                        });
-                    }
-                },
-            ),
-            priority_tier_card,
-            model_card,
-            card_toggle("api-structured-outputs", t!("api.structured"), Some(&t!("api.structured_desc")), api.structured_outputs, {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.structured_outputs = on;
-                        mark_dirty(ui);
-                    });
-                }
-            }),
-            card_toggle("api-stream", t!("api.stream"), Some(&t!("api.stream_desc")), api.stream, {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.stream = on;
-                        mark_dirty(ui);
-                    });
-                }
-            }),
-            card_toggle(
-                "api-send-reasoning-content",
-                t!("api.send_reasoning"),
-                Some(&t!("api.send_reasoning_desc")),
-                api.send_reasoning_content,
-                {
-                    let cx = cx.clone();
-                    move |on| {
-                        cx.with_mut(|ui| {
-                            ui.draft.api.send_reasoning_content = on;
-                            mark_dirty(ui);
-                        });
-                    }
-                },
-            ),
-        ))
-    };
-
-    let http_sampling = !api.provider.is_cli();
-    let sampling = StackPanel::new().spacing(4.0).children((
-        section_header(t!("api.optional")),
+    let http_sampling = |ui: &UiShared| !ui.draft.api.provider.is_cli();
+    let sampling = column(4.0)?;
+    children!(sampling;
+        section_header(&t!("api.optional"))?,
         optional_slider_row(
-            OptionalSliderParams {
+            b,
+            SliderNumberParams {
                 key: "api-temperature",
                 header: t!("api.temperature"),
-                description: t!("api.temperature_desc"),
-                value: optional.temp_val,
-                enabled: optional.temp_enabled,
-                applicable: http_sampling,
+                description: Some(t!("api.temperature_desc")),
                 min: 0.0,
                 max: 2.0,
                 step: 0.05,
             },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.optional.temp_val = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.optional.temp_enabled = on;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+            move |ui| (ui.optional.temp_val, ui.optional.temp_enabled, http_sampling(ui)),
+            cx.edit(|ui, v| ui.optional.temp_val = v),
+            cx.edit(|ui, on| ui.optional.temp_enabled = on),
+        )?,
         optional_slider_row(
-            OptionalSliderParams {
+            b,
+            SliderNumberParams {
                 key: "api-top-p",
                 header: t!("api.top_p"),
-                description: t!("api.top_p_desc"),
-                value: optional.top_p_val,
-                enabled: optional.top_p_enabled,
-                applicable: http_sampling,
+                description: Some(t!("api.top_p_desc")),
                 min: 0.0,
                 max: 1.0,
                 step: 0.01,
             },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.optional.top_p_val = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.optional.top_p_enabled = on;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+            move |ui| (ui.optional.top_p_val, ui.optional.top_p_enabled, http_sampling(ui)),
+            cx.edit(|ui, v| ui.optional.top_p_val = v),
+            cx.edit(|ui, on| ui.optional.top_p_enabled = on),
+        )?,
         optional_number_row(
-            OptionalNumberParams {
+            b,
+            SliderNumberParams {
                 key: "api-max-tokens",
                 header: t!("api.max_tokens"),
                 description: Some(t!("api.max_tokens_desc")),
-                value: optional.max_tokens_val,
-                enabled: optional.max_tokens_enabled,
-                applicable: http_sampling,
                 min: 1.0,
                 max: 1_000_000.0,
                 step: 1.0,
             },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.optional.max_tokens_val = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.optional.max_tokens_enabled = on;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+            move |ui| (ui.optional.max_tokens_val, ui.optional.max_tokens_enabled, http_sampling(ui)),
+            cx.edit(|ui, v| ui.optional.max_tokens_val = v),
+            cx.edit(|ui, on| ui.optional.max_tokens_enabled = on),
+        )?,
         optional_text_row(
+            b,
             OptionalTextParams {
                 key: "api-reasoning",
                 header: t!("api.reasoning"),
                 description: Some(t!("api.reasoning_desc")),
-                text: optional.reasoning_str.clone(),
-                enabled: optional.reasoning_enabled,
                 placeholder: t!("api.reasoning_placeholder"),
             },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.optional.reasoning_str = v;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-            {
-                let cx = cx.clone();
-                move |on| {
-                    cx.with_mut(|ui| {
-                        ui.optional.reasoning_enabled = on;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
-    ));
+            |ui| (ui.optional.reasoning_str.clone(), ui.optional.reasoning_enabled),
+            cx.edit(|ui, v| ui.optional.reasoning_str = v),
+            cx.edit(|ui, on| ui.optional.reasoning_enabled = on),
+        )?,
+    );
 
-    let reliability = StackPanel::new().spacing(4.0).children((
-        section_header(t!("api.reliability")),
+    let timeout = card_slider_number(
+        b,
+        SliderNumberParams {
+            key: "api-timeout",
+            header: t!("api.timeout"),
+            description: Some(t!("api.timeout_http")),
+            min: 0.0,
+            max: 600.0,
+            step: 1.0,
+        },
+        |ui| (ui.draft.api.request_timeout_secs as f64, true),
+        cx.edit(|ui, v: f64| ui.draft.api.request_timeout_secs = v.max(0.0) as u64),
+    )?;
+    if let Some(desc) = timeout.desc.clone() {
+        let mut shown = Prop::default();
+        b.add(move |ui, _| {
+            let api = &ui.draft.api;
+            let text = if api.provider.is_cli() {
+                t!("api.timeout_cli")
+            } else if api.stream {
+                t!("api.timeout_stream")
+            } else {
+                t!("api.timeout_http")
+            };
+            shown.set(text.into_owned(), |t| desc.SetText(&hs(t)))
+        });
+    }
+    let reliability = column(4.0)?;
+    children!(reliability;
+        section_header(&t!("api.reliability"))?,
+        timeout.root,
         card_slider_number(
-            SliderNumberParams {
-                key: "api-timeout",
-                header: t!("api.timeout"),
-                description: Some(if api.provider.is_cli() {
-                    t!("api.timeout_cli")
-                } else if api.stream {
-                    t!("api.timeout_stream")
-                } else {
-                    t!("api.timeout_http")
-                }),
-                value: api.request_timeout_secs as f64,
-                min: 0.0,
-                max: 600.0,
-                step: 1.0,
-            },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.request_timeout_secs = v.max(0.0) as u64;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
-        card_slider_number(
+            b,
             SliderNumberParams {
                 key: "api-retries",
                 header: t!("api.retries"),
                 description: Some(t!("api.retries_desc")),
-                value: f64::from(api.max_retries),
                 min: 0.0,
                 max: 10.0,
                 step: 1.0,
             },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.max_retries = v.max(0.0) as u32;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
+            |ui| (f64::from(ui.draft.api.max_retries), true),
+            cx.edit(|ui, v: f64| ui.draft.api.max_retries = v.max(0.0) as u32),
+        )?
+        .root,
         card_slider_number(
+            b,
             SliderNumberParams {
                 key: "api-backoff",
                 header: t!("api.backoff"),
                 description: Some(t!("api.backoff_desc")),
-                value: api.retry_backoff_ms as f64,
                 min: 50.0,
                 max: 30_000.0,
                 step: 50.0,
             },
-            {
-                let cx = cx.clone();
-                move |v| {
-                    cx.with_mut(|ui| {
-                        ui.draft.api.retry_backoff_ms = v.max(50.0) as u64;
-                        mark_dirty(ui);
-                    });
-                }
-            },
-        ),
-    ));
+            |ui| (ui.draft.api.retry_backoff_ms as f64, true),
+            cx.edit(|ui, v: f64| ui.draft.api.retry_backoff_ms = v.max(50.0) as u64),
+        )?
+        .root,
+    );
 
-    settings_page_shell(
-        shared,
-        chrome,
-        bump,
-        StackPanel::new()
-            .spacing(8.0)
-            .children((api_profile_section(&cx, &profile_snap), connection, sampling, reliability)),
-    )
+    let body = column(8.0)?;
+    children!(body; api_profile_section(b, cx)?, connection, sampling, reliability);
+    Ok(body)
 }

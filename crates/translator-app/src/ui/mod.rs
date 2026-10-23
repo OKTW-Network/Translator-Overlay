@@ -1,20 +1,21 @@
-//! windows-reactor control UI — dashboard + settings (card layout).
+//! WinUI 3 control window — dashboard + settings (card layout).
+//!
+//! - `app`: window, navigation, and the sync loop; `chrome`: title-bar status, Start/Stop, Save bar.
+//! - `state`: UI state shared by every handler, and the actions that change it.
+//! - `widgets`: reusable controls; `pages`: one module per navigation page.
 
 mod app;
-mod cards;
 mod chrome;
-mod controls;
-mod dictionary;
+#[cfg(test)]
+mod live_tests;
 mod locale;
-mod named;
 mod pages;
-mod preview;
-mod shared;
-mod xaml;
+mod state;
+mod widgets;
 
 pub(crate) use crate::ui::chrome::status_text;
 pub use crate::ui::{
-    app::AppRoot,
+    app::{control_hwnd, run},
     locale::{apply_ui_locale, system_locale_name},
 };
 

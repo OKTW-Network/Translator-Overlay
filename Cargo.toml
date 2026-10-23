@@ -7,6 +7,8 @@ members = [
     "crates/translator-ocr",
     "crates/translator-overlay",
     "crates/translator-translate",
+    "crates/translator-winui",
+    "crates/winui-bindgen",
 ]
 
 [workspace.package]

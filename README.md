@@ -110,10 +110,12 @@ cargo clippy --all-targets -- -D warnings
 
 ```
 crates/
-  translator-app         # WinUI 3 控制視窗（windows-reactor）與管線
+  translator-app         # WinUI 3 控制視窗與管線
   translator-capture     # Windows Graphics Capture
   translator-core        # 設定、路徑、區域設定集、共用型別
   translator-ocr         # PP-OCRv6、下載、穩定閘門、過濾、合併
   translator-overlay     # 點擊可穿透的 Overlay、區域選取、翻譯視窗
   translator-translate   # HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code、session cache
+  translator-winui       # WinUI 3 bindings（winui-bindgen 產生）與啟動
+  winui-bindgen          # 重新產生 translator-winui bindings 的工具
 ```

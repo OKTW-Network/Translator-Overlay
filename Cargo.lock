@@ -2408,12 +2408,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustc-hash"
-version = "2.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
-
-[[package]]
 name = "rustdct"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3145,12 +3139,8 @@ dependencies = [
  "translator-ocr",
  "translator-overlay",
  "translator-translate",
+ "translator-winui",
  "windows",
- "windows-canvas",
- "windows-collections 0.100.0",
- "windows-core 0.100.0",
- "windows-reactor",
- "windows-reference",
  "winresource",
 ]
 
@@ -3214,6 +3204,18 @@ dependencies = [
  "tokio-util",
  "tracing",
  "translator-core",
+]
+
+[[package]]
+name = "translator-winui"
+version = "0.6.0"
+dependencies = [
+ "windows",
+ "windows-collections 0.100.0",
+ "windows-core 0.100.0",
+ "windows-future 0.100.0",
+ "windows-numerics 0.100.0",
+ "windows-reference",
 ]
 
 [[package]]
@@ -3569,15 +3571,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-canvas"
+name = "windows-bindgen"
 version = "0.100.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6bc3a83c76a8113ab82864086778b6a705b4b54700ed84d642a1b1125987bef"
+checksum = "c6bb7c22ca81c6dc1554fd328c12697b4b0ad5c45081df2c3c9a3f89cc467da2"
 dependencies = [
- "windows-core 0.100.0",
- "windows-numerics 0.100.0",
- "windows-reactor",
- "windows-window",
+ "proc-macro2",
+ "quote",
+ "windows-default",
+ "windows-metadata",
 ]
 
 [[package]]
@@ -3636,6 +3638,12 @@ dependencies = [
  "windows-result 0.100.0",
  "windows-strings 0.100.0",
 ]
+
+[[package]]
+name = "windows-default"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4882bb065b03115aa8891d44d076bbe843d286d8bfd0b55caaa4b049141a712"
 
 [[package]]
 name = "windows-future"
@@ -3716,6 +3724,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415"
 
 [[package]]
+name = "windows-metadata"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d3a758dc1da4ae61aa7f93afbb505d564c72dd6431e513ed581377857896a72"
+
+[[package]]
 name = "windows-numerics"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3732,22 +3746,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c5500bf6a9098f27922953422ae7324cdd330c868e945801593455a6832701"
 dependencies = [
  "windows-core 0.100.0",
-]
-
-[[package]]
-name = "windows-reactor"
-version = "0.100.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e3f0c06995fb2b791584562e32c76d4fed2241d0460a82c3fcdf30a32beadc3"
-dependencies = [
- "rustc-hash",
- "windows-collections 0.100.0",
- "windows-core 0.100.0",
- "windows-future 0.100.0",
- "windows-numerics 0.100.0",
- "windows-reference",
- "windows-threading 0.100.0",
- "windows-time",
 ]
 
 [[package]]
@@ -3833,15 +3831,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-window"
-version = "0.100.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1d48f56961ae40c65db3a0ea0076a0b100f4c46ba21d78af97bd8b77e924a82"
-dependencies = [
- "windows-core 0.100.0",
-]
-
-[[package]]
 name = "winnow"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3864,6 +3853,14 @@ checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
 dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "version_check",
+]
+
+[[package]]
+name = "winui-bindgen"
+version = "0.6.0"
+dependencies = [
+ "windows",
+ "windows-bindgen",
 ]
 
 [[package]]

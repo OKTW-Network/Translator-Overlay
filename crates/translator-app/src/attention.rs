@@ -3,29 +3,18 @@
 use std::mem::size_of;
 
 use tracing::debug;
-use windows::{
-    Win32::{
-        Foundation::{HWND, LPARAM},
-        UI::WindowsAndMessaging::{
-            EnumWindows, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOTOWNER, GetAncestor, GetClassNameW,
-            GetForegroundWindow, GetWindowThreadProcessId,
-        },
-    },
-    core::{BOOL, w},
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GA_ROOTOWNER, GetAncestor, GetForegroundWindow},
 };
 
 /// Flash the control-window taskbar until it is focused. No-op if already focused.
 pub fn flash_control_window_taskbar() {
-    // TODO: windows-reactor 0.100 `WindowRef` has no HWND (`request_close` only). GitHub master
-    // exposes `context.run_window(|w| w.as_raw())` via `IWindowNative::WindowHandle` — switch
-    // when that ships on crates.io instead of pid + `WinUIDesktopWin32WindowClass`.
-    let mut hwnd = HWND::default();
-    // Callback returns FALSE to stop the walk; windows-rs maps that to Err even when we found a window.
-    let _ = unsafe { EnumWindows(Some(enum_control), LPARAM(std::ptr::from_mut(&mut hwnd) as isize)) };
-    if hwnd.is_invalid() {
-        debug!("control window HWND not found — skip taskbar flash");
+    let Some(hwnd) = crate::ui::control_hwnd() else {
+        debug!("control window HWND not known yet — skip taskbar flash");
         return;
-    }
+    };
+    let hwnd = HWND(hwnd as *mut _);
     if unsafe { GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) == hwnd } {
         return;
     }
@@ -37,22 +26,4 @@ pub fn flash_control_window_taskbar() {
         dwTimeout: 0,
     };
     let _ = unsafe { FlashWindowEx(&info) };
-}
-
-unsafe extern "system" fn enum_control(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    // SAFETY: `lparam` is `&mut HWND` for the duration of `EnumWindows`.
-    let found = unsafe { &mut *(lparam.0 as *mut HWND) };
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(std::ptr::from_mut(&mut pid))) };
-    if pid != std::process::id() {
-        return true.into();
-    }
-    let mut buf = [0u16; 64];
-    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
-    let class = w!("WinUIDesktopWin32WindowClass");
-    if n > 0 && buf.get(..n as usize) == Some(unsafe { class.as_wide() }) {
-        *found = hwnd;
-        return false.into();
-    }
-    true.into()
 }

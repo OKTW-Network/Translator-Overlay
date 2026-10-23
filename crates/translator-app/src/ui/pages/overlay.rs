@@ -1,86 +1,73 @@
 //! Overlay appearance: display toggles, colours, caption size, translation-window font.
 
-use std::sync::Arc;
-
-use parking_lot::Mutex;
 use rust_i18n::t;
-use translator_core::{OVERLAY_FONT_PX_MAX, OVERLAY_FONT_PX_MIN, READER_FONT_PX_MAX, READER_FONT_PX_MIN};
-use windows_reactor::{ChildrenControl, LocalSender, StackPanel, View};
+use translator_core::{OVERLAY_FONT_PX_MAX, OVERLAY_FONT_PX_MIN, OverlayConfig, READER_FONT_PX_MAX, READER_FONT_PX_MIN};
+use translator_winui::{Border, Result, StackPanel};
 
-use crate::ui::{
-    cards::section_header,
-    chrome::settings_page_shell,
-    controls::{
-        ColorPopupParams, OptionalSliderParams, SliderNumberParams, card_color_popup, card_slider_number, card_toggle, optional_slider_row,
+use crate::{
+    children,
+    ui::{
+        state::{UiCx, UiShared, mark_dirty, send_overlay_display},
+        widgets::{
+            Binds,
+            cards::section_header,
+            column,
+            controls::{ColorPopupParams, SliderNumberParams, card_color_popup, card_slider_number, card_toggle, optional_slider_row},
+        },
     },
-    shared::{AppMsg, ChromeSnap, UiCx, UiShared, mark_dirty, send_overlay_display},
 };
 
-pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &LocalSender<AppMsg>) -> View {
-    let cx = UiCx::new(shared, bump);
-    let (overlay, text_argb_str, bg_argb_str, text_color_picker_open, bg_color_picker_open, overlay_font_val, overlay_font_enabled) = {
-        let ui = shared.lock();
-        (
-            ui.draft.overlay.clone(),
-            ui.text_argb_str.clone(),
-            ui.bg_argb_str.clone(),
-            ui.text_color_picker_open,
-            ui.bg_color_picker_open,
-            ui.overlay_font_val,
-            ui.overlay_font_enabled,
+pub fn overlay_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
+    // Display switches apply at once, without Save.
+    let display_toggle = |b: &mut Binds<UiShared>,
+                          (key, header, desc): (&str, &str, &str),
+                          get: fn(&OverlayConfig) -> bool,
+                          set: fn(&mut OverlayConfig, bool)|
+     -> Result<Border> {
+        let cx = cx.clone();
+        card_toggle(
+            b,
+            (key, header, Some(desc)),
+            move |ui| get(&ui.draft.overlay),
+            move |on| {
+                cx.with_mut(|ui| {
+                    if get(&ui.draft.overlay) != on {
+                        set(&mut ui.draft.overlay, on);
+                        send_overlay_display(ui);
+                    }
+                });
+            },
         )
     };
+    let display = column(4.0)?;
+    children!(display;
+        section_header(&t!("overlay.display"))?,
+        display_toggle(
+            b,
+            ("ov-enabled", &t!("overlay.inplace"), &t!("overlay.inplace_desc")),
+            |o| o.enabled,
+            |o, on| o.enabled = on,
+        )?,
+        display_toggle(
+            b,
+            ("ov-reader", &t!("overlay.reader"), &t!("overlay.reader_desc")),
+            |o| o.reader_enabled,
+            |o, on| o.reader_enabled = on,
+        )?,
+        display_toggle(b, ("ov-hud", &t!("overlay.hud"), &t!("overlay.hud_desc")), |o| o.hud_enabled, |o, on| o.hud_enabled = on)?,
+    );
 
-    let display = StackPanel::new().spacing(4.0).children((
-        section_header(t!("overlay.display")),
-        card_toggle("ov-enabled", t!("overlay.inplace"), Some(&t!("overlay.inplace_desc")), overlay.enabled, {
-            let cx = cx.clone();
-            move |on| {
-                cx.with_mut(|ui| {
-                    if ui.draft.overlay.enabled != on {
-                        let reader = ui.draft.overlay.reader_enabled;
-                        let hud = ui.draft.overlay.hud_enabled;
-                        send_overlay_display(ui, on, reader, hud);
-                    }
-                });
-            }
-        }),
-        card_toggle("ov-reader", t!("overlay.reader"), Some(&t!("overlay.reader_desc")), overlay.reader_enabled, {
-            let cx = cx.clone();
-            move |on| {
-                cx.with_mut(|ui| {
-                    if ui.draft.overlay.reader_enabled != on {
-                        let enabled = ui.draft.overlay.enabled;
-                        let hud = ui.draft.overlay.hud_enabled;
-                        send_overlay_display(ui, enabled, on, hud);
-                    }
-                });
-            }
-        }),
-        card_toggle("ov-hud", t!("overlay.hud"), Some(&t!("overlay.hud_desc")), overlay.hud_enabled, {
-            let cx = cx.clone();
-            move |on| {
-                cx.with_mut(|ui| {
-                    if ui.draft.overlay.hud_enabled != on {
-                        let enabled = ui.draft.overlay.enabled;
-                        let reader = ui.draft.overlay.reader_enabled;
-                        send_overlay_display(ui, enabled, reader, on);
-                    }
-                });
-            }
-        }),
-    ));
-
-    let colors = StackPanel::new().spacing(4.0).children((
-        section_header(t!("overlay.appearance")),
+    let colors = column(4.0)?;
+    children!(colors;
+        section_header(&t!("overlay.appearance"))?,
         card_color_popup(
+            b,
             ColorPopupParams {
                 key: "ov-text-color",
                 header: t!("overlay.text_color"),
-                hex: text_argb_str.clone(),
-                open: text_color_picker_open,
                 placeholder: "#FFFFFFFF".into(),
             },
+            |ui| (ui.text_argb_str.clone(), ui.text_color_picker_open),
             {
                 let cx = cx.clone();
                 move |v| {
@@ -103,15 +90,15 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                     });
                 }
             },
-        ),
+        )?,
         card_color_popup(
+            b,
             ColorPopupParams {
                 key: "ov-bg-color",
                 header: t!("overlay.bg_color"),
-                hex: bg_argb_str.clone(),
-                open: bg_color_picker_open,
                 placeholder: "#C8000000".into(),
             },
+            |ui| (ui.bg_argb_str.clone(), ui.bg_color_picker_open),
             {
                 let cx = cx.clone();
                 move |v| {
@@ -134,19 +121,18 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                     });
                 }
             },
-        ),
+        )?,
         optional_slider_row(
-            OptionalSliderParams {
+            b,
+            SliderNumberParams {
                 key: "ov-caption-font",
                 header: t!("overlay.caption_font"),
-                description: t!("overlay.caption_font_desc"),
-                value: overlay_font_val,
-                enabled: overlay_font_enabled,
-                applicable: true,
+                description: Some(t!("overlay.caption_font_desc")),
                 min: f64::from(OVERLAY_FONT_PX_MIN),
                 max: f64::from(OVERLAY_FONT_PX_MAX),
                 step: 1.0,
             },
+            |ui| (ui.overlay_font_val, ui.overlay_font_enabled, true),
             {
                 let cx = cx.clone();
                 move |v| {
@@ -170,17 +156,18 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                     });
                 }
             },
-        ),
+        )?,
         card_slider_number(
+            b,
             SliderNumberParams {
                 key: "ov-reader-font",
                 header: t!("overlay.font"),
                 description: Some(t!("overlay.font_desc")),
-                value: f64::from(overlay.reader_font_px),
                 min: f64::from(READER_FONT_PX_MIN),
                 max: f64::from(READER_FONT_PX_MAX),
                 step: 1.0,
             },
+            |ui| (f64::from(ui.draft.overlay.reader_font_px), true),
             {
                 let cx = cx.clone();
                 move |v| {
@@ -193,8 +180,11 @@ pub fn overlay_page(shared: &Arc<Mutex<UiShared>>, chrome: &ChromeSnap, bump: &L
                     });
                 }
             },
-        ),
-    ));
+        )?
+        .root,
+    );
 
-    settings_page_shell(shared, chrome, bump, StackPanel::new().spacing(8.0).children((display, colors)))
+    let body = column(8.0)?;
+    children!(body; display, colors);
+    Ok(body)
 }

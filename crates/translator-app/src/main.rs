@@ -1,4 +1,4 @@
-//! Translator Overlay — WinUI 3 control app (windows-reactor).
+//! Translator Overlay — WinUI 3 control app.
 
 #![windows_subsystem = "windows"]
 
@@ -28,14 +28,10 @@ use windows::{
     },
     core::PCWSTR,
 };
-use windows_reactor::App;
 
-use crate::{
-    pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline},
-    ui::AppRoot,
-};
+use crate::pipeline::{CmdTx, PipelineCommand, SharedState, spawn_pipeline};
 
-/// Process-wide handles for the UI (set before `App::run_component`).
+/// Process-wide handles for the UI (set before [`ui::run`]).
 pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 
 #[tokio::main]
@@ -89,17 +85,16 @@ async fn main() {
     APP_HANDLES.set((state.clone(), cmd_tx.clone())).expect("APP_HANDLES set once");
     hotkey::install(&state.read(), cmd_tx.clone());
 
-    // WinUI / windows-reactor must pump on the OS main thread. `#[tokio::main]`
-    // `block_on`s this future on that thread — do not move render off-thread.
-    // 0.100 inlines WASDK framework bootstrap (no Bootstrap.dll / setup crate).
-    let result = App::run_component::<AppRoot>(());
+    // WinUI must pump on the OS main thread. `#[tokio::main]` `block_on`s this future on
+    // that thread — do not move the UI off-thread.
+    let result = ui::run();
 
     hotkey::shutdown();
     let _ = cmd_tx.send(PipelineCommand::Shutdown);
     let _ = pipeline.await;
 
     if let Err(e) = result {
-        error!(error = %e, "App::run_component failed");
+        error!(error = %e, "control window failed");
         process::exit(1);
     }
 }
