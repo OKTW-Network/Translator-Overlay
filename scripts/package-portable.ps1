@@ -12,8 +12,9 @@
     - lib/webgpu_dawn.dll       (WebGPU EP / Dawn)
     - lib/dxcompiler.dll        (Dawn D3D12 shader compiler)
 
-  translator-winui adds the Windows App Runtime package dependency itself (no Bootstrap.dll).
-  Target machines need Windows 11 21H2 (build 22000+) and Windows App Runtime 2.4.
+  translator-winui adds the Windows App Runtime package dependency itself (no Bootstrap.dll):
+  the OS API on Windows 11, the framework's Microsoft.WindowsAppRuntime.dll on Windows 10.
+  Target machines need Windows 10 1903 (build 18362+) and Windows App Runtime 2.4.
   See: https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
   Visual C++ Redistributable may also be needed for MSVC CRT DLLs.
 
@@ -121,7 +122,7 @@ $packReadme = @"
 # Translator Overlay $Version (portable)
 
 ## Requirements
-- Windows 11 x64 (21H2 / build 22000 or later)
+- Windows 10 / 11 x64 (1903 / build 18362 or later)
 - Windows App Runtime 2.4 (framework-dependent)
   https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
 - Microsoft Visual C++ Redistributable
@@ -158,4 +159,4 @@ Write-Host "Done."
 Write-Host "  Stage: $StageDir"
 Write-Host "  Zip:   $ZipPath  ($zipMb MB)"
 Write-Host ""
-Write-Host "Note: Users need Windows 11 and Windows App Runtime 2.4 before launching."
+Write-Host "Note: Users need Windows 10 1903+ and Windows App Runtime 2.4 before launching."

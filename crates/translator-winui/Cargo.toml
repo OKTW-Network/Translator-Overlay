@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_Packaging_Appx", "Win32_System_Com", "Win32_System_Memory", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_Packaging_Appx", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-collections = "0.100"
 windows-core = "0.100"
 windows-future = "0.100"

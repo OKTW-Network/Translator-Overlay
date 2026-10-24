@@ -25,7 +25,9 @@ Real-time translation overlay for the Windows desktop: pick a target window → 
 
 ## Requirements
 
-- Windows 11 **x64** (21H2 / build 22000 or later)
+- Operating system (**x64**)
+  - Minimum: Windows 10 1903 (build 18362)
+  - Recommended: Windows 11 24H2 (build 26100) or later: no yellow capture border and throttled capture updates
 - [Windows App Runtime 2.4](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
 - Microsoft Visual C++ Redistributable (x64), if the CRT is missing
 

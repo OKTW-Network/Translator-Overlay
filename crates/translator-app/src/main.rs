@@ -22,10 +22,7 @@ use parking_lot::RwLock;
 use tracing::{error, info};
 use translator_core::{AppConfig, AppState, UiLanguage, config_path, log_path, prev_log_path};
 use windows::{
-    Win32::{
-        System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW},
-        UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
-    },
+    Win32::System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW},
     core::PCWSTR,
 };
 
@@ -37,14 +34,6 @@ pub static APP_HANDLES: OnceLock<(SharedState, CmdTx)> = OnceLock::new();
 #[tokio::main]
 async fn main() {
     load_onnxruntime();
-
-    // Must run before any HWND is created (pipeline spawns the overlay window).
-    // Otherwise GetClientRect / ClientToScreen stay in a mismatched DPI space
-    // vs Graphics Capture physical pixels → overlay position/size drift.
-    // SAFETY: process-wide setting with no windows yet. It fails only when the host already
-    // set an awareness, which is fine.
-    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-
     init_tracing();
 
     info!("Translator Overlay starting");
