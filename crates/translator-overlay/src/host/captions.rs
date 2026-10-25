@@ -190,12 +190,14 @@ impl OverlayHost {
         let room_h = (bottom - base.y).max(min_h);
         let cap = (((source_w as f32) * 1.75).round() as i32).min(right - base.x).max(source_w);
         let floor = (font_px * 7 / 10).max(8);
+        // `base.h` is one source line; tight line spacing leaves `min_h` a few px short of N GDI lines.
+        let source_lines = ((min_h as f32) / (base.h.max(1) as f32)).round().max(1.0) as i32;
 
         let mut px = font_px;
         loop {
             let pad = label_pad(px);
             let line_h = self.measure_single_line(text, px)?.1;
-            let source_text_h = (min_h - pad * 2).max(line_h);
+            let source_text_h = (min_h - pad * 2).max(line_h * source_lines);
             let mut box_w = source_w;
             let (text_w, text_h) = loop {
                 let (text_w, text_h) = self.measure_wrapped(text, px, (box_w - pad * 2).max(8))?;
@@ -208,7 +210,7 @@ impl OverlayHost {
             let limit = if px > floor {
                 source_text_h
             } else {
-                (room_h - pad * 2).max(line_h)
+                (room_h - pad * 2).max(source_text_h)
             };
             if text_h <= limit || px <= 8 {
                 let box_w = (text_w + pad * 2).max(source_w).min(cap);

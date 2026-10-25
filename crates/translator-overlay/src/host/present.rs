@@ -670,6 +670,16 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
+        // Two tightly spaced source lines: 52px of ink is less than two GDI lines plus padding.
+        let two_line_base = SurfaceRect {
+            x: 20,
+            y: 150,
+            w: 120,
+            h: 28,
+        };
+        let (rect_two, ..) = host
+            .layout_label(two_line_base, "Please wait right here", 52, 120, &[], surface)
+            .map_err(|e| e.to_string())?;
         let (_, font_short, _) = host
             .layout_label(
                 SurfaceRect {
@@ -751,6 +761,10 @@ mod tests {
         }
         if rect_v.w <= 20 {
             return Err(format!("expected English over a column to widen, got {}", rect_v.w));
+        }
+
+        if rect_two.w != 120 || rect_two.h < 52 {
+            return Err(format!("two-line source must wrap onto its second line before widening, got {rect_two:?}"));
         }
 
         // Too long for the 1.75× width cap: the font shrinks before wrapping.
