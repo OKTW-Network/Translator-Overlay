@@ -241,7 +241,8 @@ impl Footer {
                 .margin(0.0, 4.0, 0.0, 8.0)?;
             self.root.width(48.0)?.halign(HorizontalAlignment::Center)?;
         }
-        stop.SetContent(&content("\u{EE95}", &stop_label)?)?;
+        // E73B CheckboxFill stands in for its look-alike EE95 StopSolid, which Windows 10's Segoe MDL2 Assets lacks.
+        stop.SetContent(&content("\u{E73B}", &stop_label)?)?;
         primary.SetContent(&content(primary_glyph, &primary_label)?)?;
 
         let stop_cell = Border::new()?;

@@ -115,7 +115,7 @@ pub fn hud_window(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<()> {
                 primary.SetContent(&icon(if *running { "\u{E769}" } else { "\u{F5B0}" }, *primary_enabled)?)?;
                 primary.SetIsEnabled(*primary_enabled)?;
                 primary.automation_name(primary_name)?.tooltip(primary_name)?;
-                stop.SetContent(&icon("\u{EE95}", *stop_enabled)?)?;
+                stop.SetContent(&icon("\u{E73B}", *stop_enabled)?)?;
                 stop.SetIsEnabled(*stop_enabled)?;
                 stop.automation_name(stop_name)?.tooltip(stop_name)?;
                 Ok(())
@@ -194,7 +194,8 @@ impl Hud {
             move || start_pause(&cx)
         })?;
         primary.width(BTN)?.height(BTN)?.column(0)?.automation_id("hud-start-pause")?;
-        let stop = icon_button("\u{EE95}", {
+        // E73B CheckboxFill stands in for its look-alike EE95 StopSolid, which Windows 10's Segoe MDL2 Assets lacks.
+        let stop = icon_button("\u{E73B}", {
             let cx = cx.clone();
             move || stop_capture(&cx)
         })?;
