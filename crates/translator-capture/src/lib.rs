@@ -4,9 +4,11 @@ mod client_area;
 mod resize_watch;
 mod session;
 
+use std::sync::OnceLock;
+
 use bytes::Bytes;
 use thiserror::Error;
-use windows_capture::window::Window;
+use windows_capture::{graphics_capture_api::GraphicsCaptureApi, window::Window};
 
 pub use crate::{client_area::client_screen_rect, session::CaptureSession};
 
@@ -47,6 +49,14 @@ impl CapturedFrame {
 pub struct WindowInfo {
     pub title: String,
     pub hwnd: isize,
+}
+
+/// Whether window capture can leave out windows owned by the target.
+///
+/// Without `IncludeSecondaryWindows` (Windows 10), WGC composites owned windows into the frame.
+pub fn excludes_owned_windows() -> bool {
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| GraphicsCaptureApi::is_secondary_windows_supported().unwrap_or(false))
 }
 
 /// Enumerate capturable top-level windows with a non-empty title.

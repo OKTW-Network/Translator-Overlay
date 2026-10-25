@@ -155,7 +155,7 @@ impl OverlayHost {
                 if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                     self.target = Some(hwnd);
                     FOLLOW_TARGET.store(target_hwnd, Ordering::Release);
-                    if !self.hwnd.is_invalid() {
+                    if !self.hwnd.is_invalid() && translator_capture::excludes_owned_windows() {
                         set_overlay_owner(self.hwnd, Some(hwnd));
                     }
                     self.dirty = true;

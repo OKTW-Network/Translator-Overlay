@@ -1,13 +1,14 @@
 //! Overlay visibility and presentation.
 //!
-//! Captions: owned overlay + capture/DWM client rect.
+//! Captions: owned overlay (unowned where capture cannot exclude owned
+//! windows) + capture/DWM client rect.
 //! Picker: unowned insert-above + live client rect; pure target drags use
 //! `SetWindowPos` only (no per-drag `UpdateLayeredWindow`).
 
 use std::sync::atomic::Ordering;
 
 use tracing::{debug, warn};
-use translator_capture::client_screen_rect;
+use translator_capture::{client_screen_rect, excludes_owned_windows};
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -161,6 +162,12 @@ impl OverlayHost {
         let Some(rect) = client_screen_rect(target.0 as isize) else {
             return;
         };
+        // An owned overlay would land in the target's own capture and feed OCR its captions.
+        let ownership = if excludes_owned_windows() {
+            OverlayOwnership::OwnedByTarget
+        } else {
+            OverlayOwnership::Unowned
+        };
 
         if self.captions_hidden || self.blocks.is_empty() || self.content_w == 0 || self.content_h == 0 {
             let (_, _, client_w, client_h) = rect;
@@ -185,7 +192,7 @@ impl OverlayHost {
             } else {
                 false
             };
-            self.update_overlay_window(target, rect, content_changed, OverlayOwnership::OwnedByTarget, allow_restack);
+            self.update_overlay_window(target, rect, content_changed, ownership, allow_restack);
             return;
         }
 
@@ -209,7 +216,7 @@ impl OverlayHost {
             false
         };
 
-        self.update_overlay_window(target, rect, content_changed, OverlayOwnership::OwnedByTarget, allow_restack);
+        self.update_overlay_window(target, rect, content_changed, ownership, allow_restack);
     }
 
     fn apply_picker(&mut self, allow_restack: bool) {

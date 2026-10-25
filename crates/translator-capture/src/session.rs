@@ -28,6 +28,7 @@ use windows_capture::{
 use crate::{
     CaptureError, CapturedFrame,
     client_area::crop_frame_to_client,
+    excludes_owned_windows,
     resize_watch::{IN_MOVESIZE, ResizeWatch},
 };
 
@@ -256,11 +257,17 @@ impl CaptureSession {
         } else {
             MinimumUpdateIntervalSettings::Default
         };
+        // The caption overlay is owned by the target; keep it out of OCR frames.
+        let secondary = if excludes_owned_windows() {
+            SecondaryWindowSettings::Exclude
+        } else {
+            SecondaryWindowSettings::Default
+        };
         let settings = Settings::new(
             window,
             cursor,
             border,
-            SecondaryWindowSettings::Default,
+            secondary,
             interval,
             DirtyRegionSettings::Default,
             ColorFormat::Rgba8,
@@ -269,7 +276,7 @@ impl CaptureSession {
 
         let control = FrameHandler::start_free_threaded(settings).map_err(|e| CaptureError::Capture(e.to_string()))?;
         let title = title.into();
-        info!(%title, hwnd, ?cursor, ?border, ?interval, "capture started");
+        info!(%title, hwnd, ?cursor, ?border, ?secondary, ?interval, "capture started");
         self.stream = Some(ActiveStream { control, latest });
         self.target = Some(CaptureTarget { hwnd, title, min_interval });
         self.resize.set_target(hwnd);
