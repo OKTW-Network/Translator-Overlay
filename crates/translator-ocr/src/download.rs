@@ -1,10 +1,10 @@
 //! PP-OCRv6 / PP-DocLayoutV3 model download (GitHub Releases → `models_dir`) and load orchestration.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::{fs, io::AsyncWriteExt, sync::watch};
 use tracing::info;
-use translator_core::{ModelTier, OcrConfig, OcrDevice, PipelineStatus};
+use translator_core::{ModelKind, ModelTier, OcrConfig, OcrDevice, PipelineStatus};
 
 use crate::{
     OcrEngine, OcrError,
@@ -43,7 +43,7 @@ impl OcrEngine {
                 let missing = missing_artifacts(&dir, &config);
                 ModelLoadUpdate::Progress(match missing.first() {
                     Some(first) => downloading(first.file_name, 0, missing.len(), 0),
-                    None => PipelineStatus::LoadingModels,
+                    None => PipelineStatus::LoadingModels { kind: ModelKind::Ocr },
                 })
             }
             Err(e) => ModelLoadUpdate::Failed(e.to_string()),
@@ -65,6 +65,7 @@ impl OcrEngine {
 /// `DownloadingModels` for file `index` (0-based) of `count`.
 fn downloading(file: &str, index: usize, count: usize, percent: u8) -> PipelineStatus {
     PipelineStatus::DownloadingModels {
+        kind: ModelKind::Ocr,
         file: file.to_string(),
         file_index: index as u32 + 1,
         file_count: count as u32,
@@ -84,18 +85,13 @@ async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdat
             .build()
             .map_err(|e| OcrError::Download(format!("http client: {e}")))?;
         for (index, art) in missing.iter().enumerate() {
-            // Publish only when the integer percent changes, not per chunk.
-            let mut last_percent = None;
-            download_one(&client, art, &models_dir, |percent| {
-                if last_percent != Some(percent) {
-                    last_percent = Some(percent);
-                    let _ = tx.send(ModelLoadUpdate::Progress(downloading(art.file_name, index, missing.len(), percent)));
-                }
+            download_artifact(&client, art, &models_dir, |percent| {
+                let _ = tx.send(ModelLoadUpdate::Progress(downloading(art.file_name, index, missing.len(), percent)));
             })
             .await?;
         }
     }
-    let _ = tx.send(ModelLoadUpdate::Progress(PipelineStatus::LoadingModels));
+    let _ = tx.send(ModelLoadUpdate::Progress(PipelineStatus::LoadingModels { kind: ModelKind::Ocr }));
     OcrEngine::load(config).await
 }
 
@@ -108,17 +104,24 @@ fn missing_artifacts(models_dir: &Path, config: &OcrConfig) -> Vec<&'static Mode
         .collect()
 }
 
+/// Temporary file [`download_artifact`] writes before the rename. A caller that drops the future early deletes it.
+pub fn part_path(models_dir: &Path, art: &ModelArtifact) -> PathBuf {
+    // The process id keeps a crashed run's leftover from clashing with this one.
+    models_dir.join(format!(".{}.{}.part", art.file_name, std::process::id()))
+}
+
 /// Download one artifact into `models_dir` through a `.part` file.
 ///
-/// HTTPS plus the exact byte length is the integrity check (no hash).
-async fn download_one(
+/// HTTPS plus the exact byte length is the integrity check (no hash). `on_percent` fires once
+/// per integer percent.
+pub async fn download_artifact(
     client: &reqwest::Client,
     art: &ModelArtifact,
     models_dir: &Path,
     mut on_percent: impl FnMut(u8),
 ) -> Result<(), OcrError> {
     let url = art.download_url();
-    info!(file = art.file_name, %url, expected = art.expected_bytes, "downloading OCR model");
+    info!(file = art.file_name, %url, expected = art.expected_bytes, "downloading model");
 
     let mut response = client
         .get(&url)
@@ -134,14 +137,14 @@ async fn download_one(
         return Err(OcrError::Download(format!("{}: Content-Length {len} != expected {}", art.file_name, art.expected_bytes)));
     }
 
-    // The process id keeps a crashed run's leftover from clashing with this one.
-    let part = models_dir.join(format!(".{}.{}.part", art.file_name, std::process::id()));
+    let part = part_path(models_dir, art);
     let mut file = fs::File::create(&part)
         .await
         .map_err(|e| OcrError::Download(format!("create {}: {e}", part.display())))?;
     let written = async {
         let mut downloaded = 0_u64;
-        on_percent(0);
+        let mut percent = 0;
+        on_percent(percent);
         while let Some(chunk) = response
             .chunk()
             .await
@@ -157,7 +160,12 @@ async fn download_one(
                     art.file_name, art.expected_bytes
                 )));
             }
-            on_percent((downloaded * 100 / art.expected_bytes) as u8);
+            // Report only when the integer percent changes, not per chunk.
+            let now = (downloaded * 100 / art.expected_bytes) as u8;
+            if now != percent {
+                percent = now;
+                on_percent(percent);
+            }
         }
         file.flush()
             .await
@@ -188,6 +196,6 @@ async fn download_one(
         return Err(OcrError::Download(format!("{}: size check failed after rename", art.file_name)));
     }
 
-    info!(file = art.file_name, bytes = art.expected_bytes, "OCR model download complete");
+    info!(file = art.file_name, bytes = art.expected_bytes, "model download complete");
     Ok(())
 }

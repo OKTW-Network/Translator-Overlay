@@ -23,7 +23,7 @@ use crate::{
 type RadioSpec = (&'static str, Option<f64>, Option<&'static str>);
 
 /// One radio group card; `get` returns the checked index and whether the group is enabled.
-fn radio_card<T: Copy + Send + 'static>(
+pub(crate) fn radio_card<T: Copy + Send + 'static>(
     b: &mut Binds<UiShared>,
     cx: &UiCx,
     (key, header, desc): (&str, &str, &str),

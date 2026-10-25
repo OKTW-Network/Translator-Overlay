@@ -93,13 +93,26 @@ impl Pipeline {
         }
         let identity_changed = {
             let prev = self.client.config();
-            prev.model != cfg.api.model || prev.http_api != cfg.api.http_api || prev.provider != cfg.api.provider
+            prev.model != cfg.api.model
+                || prev.http_api != cfg.api.http_api
+                || prev.provider != cfg.api.provider
+                || prev.builtin_model != cfg.api.builtin_model
+                || prev.builtin_device != cfg.api.builtin_device
         };
         if identity_changed {
             self.cancel_inflight();
             self.conversation.clear();
         }
         self.client.update_config(cfg.api.clone());
+        if let Ok(dir) = cfg.ocr.models_dir_path() {
+            self.client.set_models_dir(dir);
+        }
+        if identity_changed {
+            self.cancel_preload();
+            if self.state.read().auto_running {
+                self.start_preload();
+            }
+        }
         self.translation_cache.set_max(cfg.translation.cache_max_entries_clamped());
 
         if let Some(o) = self.overlay.as_ref() {

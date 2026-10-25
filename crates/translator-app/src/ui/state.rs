@@ -847,7 +847,10 @@ pub struct ChromeSnap {
 pub fn take_chrome(ui: &UiShared) -> ChromeSnap {
     let s = ui.state.read();
     ChromeSnap {
-        status: s.status.clone(),
+        status: match (&s.status, &s.translation_model_load) {
+            (PipelineStatus::Error { .. }, _) | (_, None) => s.status.clone(),
+            (_, Some(load)) => load.clone(),
+        },
         target: s.target_window_title.clone(),
         last_error: s.last_error.clone(),
         auto_running: s.auto_running,

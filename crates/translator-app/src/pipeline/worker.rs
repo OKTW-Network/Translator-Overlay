@@ -146,6 +146,8 @@ pub(crate) struct Pipeline {
     pub last_translated_fp: Option<OcrFingerprint>,
     pub last_page: Option<PendingPage>,
     pub inflight: Option<InflightTranslate>,
+    /// Cancels the background built-in model load started with the capture.
+    pub preload: Option<CancellationToken>,
     pub model_load: Option<ModelLoadTask>,
     pub ocr_tier: ModelTier,
     pub ocr_device: OcrDevice,
@@ -178,7 +180,10 @@ impl Pipeline {
         let ocr_tier = ocr_cfg.model_tier;
         let ocr_device = ocr_cfg.device;
         let ocr_layout = ocr_cfg.uses_layout();
-        let client = TranslateClient::new(state.read().config.api.clone());
+        let mut client = TranslateClient::new(state.read().config.api.clone());
+        if let Ok(dir) = ocr_cfg.models_dir_path() {
+            client.set_models_dir(dir);
+        }
         let cache_max = state.read().config.translation.cache_max_entries_clamped();
         let overlay_cfg = state.read().config.overlay.clone();
         let overlay = match OverlayController::spawn(overlay_cfg).await {
@@ -201,6 +206,7 @@ impl Pipeline {
             last_translated_fp: None,
             last_page: None,
             inflight: None,
+            preload: None,
             model_load: None,
             ocr_tier,
             ocr_device,
@@ -292,6 +298,7 @@ impl Pipeline {
         match cmd {
             PipelineCommand::Shutdown => {
                 self.cancel_inflight();
+                self.cancel_preload();
                 self.model_load = None;
                 self.session.stop();
                 self.conversation.clear();
@@ -431,6 +438,8 @@ impl Pipeline {
         s.translate_in_flight = false;
         s.last_error = None;
         s.status = PipelineStatus::Capturing;
+        drop(s);
+        self.start_preload();
     }
 
     fn begin_region_select(&mut self, hwnd: isize) {
@@ -564,6 +573,7 @@ impl Pipeline {
             let _ = o.send(OverlayCommand::Clear);
         }
         self.cancel_inflight();
+        self.cancel_preload();
         self.state.write().translate_in_flight = false;
         self.session.stop();
         self.reset_ocr_session(false);
@@ -693,7 +703,7 @@ impl Pipeline {
                     s.status,
                     PipelineStatus::Error { .. }
                         | PipelineStatus::DownloadingModels { .. }
-                        | PipelineStatus::LoadingModels
+                        | PipelineStatus::LoadingModels { .. }
                         | PipelineStatus::Translating
                         | PipelineStatus::RetryingTranslate { .. }
                         | PipelineStatus::OverlayActive

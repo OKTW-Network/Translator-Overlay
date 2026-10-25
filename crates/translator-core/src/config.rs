@@ -169,8 +169,10 @@ fn remove_by_path(root: &mut toml::Table, path: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvider {
-    /// OpenAI-compatible HTTP chat completions or Responses API.
+    /// Built-in ONNX model run in-process ([`ApiConfig::builtin_model`]).
     #[default]
+    Builtin,
+    /// OpenAI-compatible HTTP chat completions or Responses API.
     OpenaiCompatible,
     /// Local Grok Build CLI over ACP stdio (`grok agent stdio`).
     GrokCli,
@@ -206,10 +208,14 @@ impl ModelProvider {
         matches!(self, Self::GrokCli | Self::OpenCodeCli | Self::CodexCli | Self::ClaudeCli)
     }
 
+    pub fn is_http(self) -> bool {
+        self == Self::OpenaiCompatible
+    }
+
     /// Default executable name when `cli_path` is empty.
     pub fn default_bin(self) -> &'static str {
         match self {
-            Self::OpenaiCompatible => "",
+            Self::OpenaiCompatible | Self::Builtin => "",
             Self::GrokCli => "grok",
             Self::OpenCodeCli => "opencode",
             Self::CodexCli => "codex",
@@ -295,6 +301,12 @@ pub struct ApiConfig {
     /// Preferred processing tier. Ignored by providers that do not support it.
     #[serde(skip_serializing_if = "is_default")]
     pub service_tier: ServiceTier,
+    /// Built-in model catalog id. Empty = the first catalog entry. Only for [`ModelProvider::Builtin`].
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub builtin_model: String,
+    /// ONNX Runtime device for the built-in model. Only for [`ModelProvider::Builtin`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub builtin_device: OcrDevice,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -332,10 +344,12 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            provider: ModelProvider::OpenaiCompatible,
+            provider: ModelProvider::Builtin,
             http_api: HttpApi::ChatCompletions,
             cli_path: String::new(),
             service_tier: ServiceTier::Standard,
+            builtin_model: String::new(),
+            builtin_device: OcrDevice::default(),
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -359,18 +373,25 @@ impl ApiConfig {
     /// HTTP-only strings are emptied so serialization omits them.
     pub(crate) fn blank_inapplicable(&mut self) {
         let defaults = Self::default();
-        if self.provider.is_cli() {
+        if !self.provider.is_http() {
             self.http_api = defaults.http_api;
             self.base_url.clear();
             self.api_key.clear();
             self.structured_outputs = defaults.structured_outputs;
             self.stream = defaults.stream;
             self.send_reasoning_content = defaults.send_reasoning_content;
-        } else {
+        }
+        if !self.provider.is_cli() {
             self.cli_path.clear();
         }
         if self.provider != ModelProvider::CodexCli {
             self.service_tier = defaults.service_tier;
+        }
+        if self.provider == ModelProvider::Builtin {
+            self.model.clear();
+        } else {
+            self.builtin_model.clear();
+            self.builtin_device = defaults.builtin_device;
         }
     }
 }
@@ -879,13 +900,13 @@ background = "#c8000011"
     }
 
     #[test]
-    fn provider_defaults_to_openai_compatible() {
+    fn provider_defaults_to_builtin() {
         let text = r#"
 [api]
 model = "my-model"
 "#;
         let config: AppConfig = toml::from_str(text).unwrap();
-        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert_eq!(config.api.provider, ModelProvider::Builtin);
         assert_eq!(config.api.http_api, HttpApi::ChatCompletions);
         assert!(config.api.cli_path.is_empty());
         assert!(!config.api.provider.is_cli());
@@ -921,6 +942,33 @@ model = "my-model"
             assert!(parsed.api.provider.is_cli());
         }
         assert_eq!(ModelProvider::ClaudeCli.default_bin(), "claude");
+    }
+
+    #[test]
+    fn builtin_roundtrip_and_blanking() {
+        let mut config = AppConfig::default();
+        config.api.provider = ModelProvider::Builtin;
+        config.api.builtin_model = "gemma-4-e4b-it-q4f16".into();
+        config.api.builtin_device = OcrDevice::Directml;
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("provider = \"builtin\""), "got:\n{text}");
+        assert!(text.contains("builtin_device = \"directml\""), "got:\n{text}");
+        let parsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.api, config.api);
+        assert!(!parsed.api.provider.is_cli() && !parsed.api.provider.is_http());
+
+        let mut api = config.api.clone();
+        api.base_url = "https://example/v1".into();
+        api.cli_path = "grok".into();
+        api.model = "leftover".into();
+        api.blank_inapplicable();
+        assert!(api.base_url.is_empty() && api.cli_path.is_empty() && api.model.is_empty());
+        assert_eq!(api.builtin_device, OcrDevice::Directml);
+
+        api.provider = ModelProvider::OpenaiCompatible;
+        api.blank_inapplicable();
+        assert!(api.builtin_model.is_empty());
+        assert_eq!(api.builtin_device, OcrDevice::default());
     }
 
     #[test]
@@ -1174,7 +1222,7 @@ history_max_items = "nope"
 "##;
         let config = AppConfig::from_toml_lenient(text).unwrap();
         assert_eq!(config.api.model, "keep-me");
-        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert_eq!(config.api.provider, ModelProvider::Builtin);
         assert!(!config.overlay.enabled);
         assert_eq!(config.overlay.colors.text, WindowColors::default().text);
         assert_eq!(config.overlay.colors.background, 0xC800_0011);
@@ -1208,7 +1256,7 @@ join_with_space = false
         fs::write(&path, "[api]\nmodel = \"keep-me\"\nprovider = \"nope\"\n").unwrap();
         let config = AppConfig::load(&path).unwrap();
         assert_eq!(config.api.model, "keep-me");
-        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert_eq!(config.api.provider, ModelProvider::Builtin);
         let _ = fs::remove_file(&path);
     }
 }

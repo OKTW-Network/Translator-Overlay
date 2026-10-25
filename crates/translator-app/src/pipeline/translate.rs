@@ -15,7 +15,10 @@ use translator_translate::{
 
 use crate::{
     attention::flash_control_window_taskbar,
-    pipeline::worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobMsg},
+    pipeline::{
+        ping_ui,
+        worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobMsg},
+    },
 };
 
 impl Pipeline {
@@ -72,6 +75,36 @@ impl Pipeline {
         self.launch_translate_job(page, resolved.hits, resolved.misses, 0);
     }
 
+    /// Load the built-in translation model in the background so the first page does not wait
+    /// for it. A translation started meanwhile queues behind the load.
+    pub(crate) fn start_preload(&mut self) {
+        self.cancel_preload();
+        let cancel = CancellationToken::new();
+        self.preload = Some(cancel.clone());
+        let client = self.client.clone();
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let on_status = &mut |load| {
+                state.write().translation_model_load = load;
+                ping_ui();
+            };
+            match client.preload(&cancel, on_status).await {
+                Err(e) if !e.is_cancelled() => {
+                    error!(error = %e, "translation model preload failed");
+                    state.write().set_error(t!("err.translate", error = e.to_string()));
+                    ping_ui();
+                }
+                _ => {}
+            }
+        });
+    }
+
+    pub(crate) fn cancel_preload(&mut self) {
+        if let Some(cancel) = self.preload.take() {
+            cancel.cancel();
+        }
+    }
+
     fn launch_translate_job(
         &mut self,
         page: PendingPage,
@@ -99,6 +132,7 @@ impl Pipeline {
         let cancel_job = cancel.clone();
         let client_clone = self.client.clone();
         let state_cb = Arc::clone(&self.state);
+        let state_status = Arc::clone(&self.state);
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_done = tx.clone();
         let tx_retry = tx.clone();
@@ -134,6 +168,10 @@ impl Pipeline {
                             max_retries,
                             message,
                         };
+                    },
+                    &mut move |load| {
+                        state_status.write().translation_model_load = load;
+                        ping_ui();
                     },
                     &mut move |text| {
                         let pairs = peek_translation_pairs(text);
@@ -339,7 +377,7 @@ fn apply_translated(
 mod tests {
     use parking_lot::RwLock;
     use translator_capture::CaptureSession;
-    use translator_core::{AppConfig, AppState, Rect};
+    use translator_core::{AppConfig, AppState, ModelProvider, Rect};
     use translator_ocr::{BlockPersistenceFilter, OcrFingerprint, StabilityGate};
     use translator_translate::{Conversation, TranslateClient};
 
@@ -360,6 +398,8 @@ mod tests {
     fn pipeline(max_retries: u32) -> Pipeline {
         let mut config = AppConfig::default();
         config.api.max_retries = max_retries;
+        // Not the built-in default: a spawned job must never download or run a model.
+        config.api.provider = ModelProvider::OpenaiCompatible;
         Pipeline {
             session: CaptureSession::new(),
             gate: StabilityGate::from_config(&config.ocr),
@@ -371,6 +411,7 @@ mod tests {
             last_translated_fp: None,
             last_page: None,
             inflight: None,
+            preload: None,
             model_load: None,
             ocr_tier: config.ocr.model_tier,
             ocr_device: config.ocr.device,

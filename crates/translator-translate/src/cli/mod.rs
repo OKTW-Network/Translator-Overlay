@@ -57,7 +57,9 @@ pub(crate) async fn list_models(api: &ApiConfig, cancel: &CancellationToken, tim
         ModelProvider::OpenCodeCli => opencode::list_models(&program, cancel, timeout).await,
         ModelProvider::CodexCli => codex::list_models(&program, cancel, timeout).await,
         ModelProvider::ClaudeCli => claude::list_models(&program, cancel, timeout).await,
-        ModelProvider::OpenaiCompatible => Err(TranslateError::CliProtocol("CLI model list used with HTTP provider".into())),
+        ModelProvider::OpenaiCompatible | ModelProvider::Builtin => {
+            Err(TranslateError::CliProtocol("CLI model list used with a non-CLI provider".into()))
+        }
     }
 }
 
@@ -312,8 +314,8 @@ impl CliBackend {
             ModelProvider::ClaudeCli => {
                 LiveSession::Claude(ClaudeSession::connect(&program, &api.model, api.reasoning_effort.as_deref(), &cwd, &system)?)
             }
-            ModelProvider::OpenaiCompatible => {
-                return Err(TranslateError::CliProtocol("CLI session used with HTTP provider".into()));
+            ModelProvider::OpenaiCompatible | ModelProvider::Builtin => {
+                return Err(TranslateError::CliProtocol("CLI session used with a non-CLI provider".into()));
             }
         };
         self.live = Some(live);

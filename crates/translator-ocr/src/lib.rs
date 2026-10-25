@@ -8,6 +8,7 @@ mod merge;
 mod models;
 mod stability;
 
+pub use oar_ocr::core::inference::initialize_ort_environment;
 use thiserror::Error;
 use translator_core::{OcrBlock, PathError};
 

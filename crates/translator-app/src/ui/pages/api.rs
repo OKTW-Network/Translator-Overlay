@@ -3,16 +3,18 @@
 use std::borrow::Cow;
 
 use rust_i18n::t;
-use translator_core::{ApiConfig, HttpApi, ModelProvider, ServiceTier};
-use translator_winui::{HorizontalAlignment, Interface, Layout, Result, StackPanel, UIElement, VerticalAlignment};
+use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ServiceTier};
+use translator_translate::{BUILTIN_MODELS, find_builtin_model};
+use translator_winui::{Border, HorizontalAlignment, Interface, Layout, Result, StackPanel, UIElement, VerticalAlignment};
 
 use crate::{
     children,
     ui::{
+        pages::ocr::radio_card,
         state::{API_PROFILES, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list, selected_api_profile},
         widgets::{
             Binds, Prop, button,
-            cards::{section_header, settings_card},
+            cards::{Card, section_header, settings_card},
             column,
             controls::{
                 ModelSuggestParams, OptionalTextParams, SliderNumberParams, card_model_suggest, card_password, card_slider_number,
@@ -26,23 +28,62 @@ use crate::{
     },
 };
 
-fn provider_label(provider: ModelProvider) -> &'static str {
-    match provider {
+fn provider_label(provider: ModelProvider) -> Cow<'static, str> {
+    Cow::Borrowed(match provider {
         ModelProvider::OpenaiCompatible => "OpenAI-compatible",
         ModelProvider::GrokCli => "Grok CLI",
         ModelProvider::OpenCodeCli => "OpenCode CLI",
         ModelProvider::CodexCli => "Codex CLI",
         ModelProvider::ClaudeCli => "Claude Code",
-    }
+        ModelProvider::Builtin => return t!("api.provider_builtin"),
+    })
 }
 
-const PROVIDERS: [ModelProvider; 5] = [
+const PROVIDERS: [ModelProvider; 6] = [
+    ModelProvider::Builtin,
     ModelProvider::OpenaiCompatible,
     ModelProvider::GrokCli,
     ModelProvider::OpenCodeCli,
     ModelProvider::CodexCli,
     ModelProvider::ClaudeCli,
 ];
+
+fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border)> {
+    let mut model = Combo::new("", {
+        let cx = cx.clone();
+        move |idx| {
+            let Some(spec) = idx.and_then(|i| BUILTIN_MODELS.get(i)) else {
+                return;
+            };
+            cx.with_mut(|ui| {
+                if ui.draft.api.builtin_model != spec.id {
+                    ui.draft.api.builtin_model = spec.id.to_string();
+                    mark_dirty(ui);
+                }
+            });
+        }
+    })?;
+    model.cb.width(280.0)?.valign(VerticalAlignment::Center)?;
+    let model_card = settings_card("api-builtin-model", &t!("api.builtin_model"), Some(&t!("api.builtin_model_desc")), &model.cb)?;
+    b.add(move |ui, _| {
+        let items = BUILTIN_MODELS.iter().map(|m| m.label.to_string()).collect();
+        let selected = find_builtin_model(&ui.draft.api.builtin_model).and_then(|s| BUILTIN_MODELS.iter().position(|m| m.id == s.id));
+        model.set(items, selected, true)
+    });
+    // No DirectML: its attention kernel breaks Gemma 4 (see translator-translate's builtin module).
+    const DEVICES: [OcrDevice; 2] = [OcrDevice::Webgpu, OcrDevice::Cpu];
+    let device_card = radio_card(
+        b,
+        cx,
+        ("api-builtin-device", &t!("api.builtin_device"), &t!("api.builtin_device_desc")),
+        // The OCR tooltips talk about OCR, so these radios go without.
+        ("api-builtin-device", &[("ocr.webgpu", Some(84.0), None), ("ocr.cpu", Some(64.0), None)], &DEVICES),
+        false,
+        |ui| (DEVICES.iter().position(|&d| d == ui.draft.api.builtin_device).unwrap_or(0), true),
+        |ui, v| ui.draft.api.builtin_device = v,
+    )?;
+    Ok((model_card, device_card))
+}
 
 fn api_profile_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     let combo = named_combo(b, cx, &API_PROFILES, &t!("api.select_profile"))?;
@@ -142,7 +183,8 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 ModelProvider::OpenCodeCli => t!("api.model_opencode"),
                 ModelProvider::ClaudeCli => t!("api.model_claude"),
                 ModelProvider::GrokCli | ModelProvider::CodexCli => t!("api.model_cli"),
-                ModelProvider::OpenaiCompatible => t!("api.model_http"),
+                // Built-in hides this card (it has its own model list).
+                ModelProvider::OpenaiCompatible | ModelProvider::Builtin => t!("api.model_http"),
             };
             let q = api.model.trim().to_ascii_lowercase();
             let suggestions = ui
@@ -225,7 +267,11 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         |api, on| api.send_reasoning_content = on,
     )?;
 
-    let http: fn(ModelProvider) -> bool = |p| !p.is_cli();
+    let (builtin_model, builtin_device) = builtin_section(b, cx)?;
+
+    let http: fn(ModelProvider) -> bool = ModelProvider::is_http;
+    let builtin: fn(ModelProvider) -> bool = |p| p == ModelProvider::Builtin;
+    let not_builtin: fn(ModelProvider) -> bool = |p| p != ModelProvider::Builtin;
     let connection = column(4.0)?;
     children!(connection;
         section_header(&t!("api.connection"))?,
@@ -235,13 +281,27 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         shown_for(b, &base_url, http)?,
         shown_for(b, &key, http)?,
         shown_for(b, &priority_card, |p| p == ModelProvider::CodexCli)?,
-        model_card,
+        shown_for(b, &model_card, not_builtin)?,
+        shown_for(b, &builtin_model.root, builtin)?,
+        shown_for(b, &builtin_device, builtin)?,
         shown_for(b, &structured, http)?,
         shown_for(b, &stream, http)?,
         shown_for(b, &send_reasoning, http)?,
     );
 
-    let http_sampling = |ui: &UiShared| !ui.draft.api.provider.is_cli();
+    let reasoning = optional_text_row(
+        b,
+        OptionalTextParams {
+            key: "api-reasoning",
+            header: t!("api.reasoning"),
+            description: Some(t!("api.reasoning_desc")),
+            placeholder: t!("api.reasoning_placeholder"),
+        },
+        |ui| (ui.optional.reasoning_str.clone(), ui.optional.reasoning_enabled),
+        cx.edit(|ui, v| ui.optional.reasoning_str = v),
+        cx.edit(|ui, on| ui.optional.reasoning_enabled = on),
+    )?;
+    let http_sampling = |ui: &UiShared| ui.draft.api.provider.is_http();
     let sampling = column(4.0)?;
     children!(sampling;
         section_header(&t!("api.optional"))?,
@@ -283,22 +343,14 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 max: 1_000_000.0,
                 step: 1.0,
             },
-            move |ui| (ui.optional.max_tokens_val, ui.optional.max_tokens_enabled, http_sampling(ui)),
+            move |ui| {
+                let applicable = http_sampling(ui) || ui.draft.api.provider == ModelProvider::Builtin;
+                (ui.optional.max_tokens_val, ui.optional.max_tokens_enabled, applicable)
+            },
             cx.edit(|ui, v| ui.optional.max_tokens_val = v),
             cx.edit(|ui, on| ui.optional.max_tokens_enabled = on),
         )?,
-        optional_text_row(
-            b,
-            OptionalTextParams {
-                key: "api-reasoning",
-                header: t!("api.reasoning"),
-                description: Some(t!("api.reasoning_desc")),
-                placeholder: t!("api.reasoning_placeholder"),
-            },
-            |ui| (ui.optional.reasoning_str.clone(), ui.optional.reasoning_enabled),
-            cx.edit(|ui, v| ui.optional.reasoning_str = v),
-            cx.edit(|ui, on| ui.optional.reasoning_enabled = on),
-        )?,
+        shown_for(b, &reasoning, not_builtin)?,
     );
 
     let timeout = card_slider_number(
@@ -331,7 +383,8 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     let reliability = column(4.0)?;
     children!(reliability;
         section_header(&t!("api.reliability"))?,
-        timeout.root,
+        // The built-in model has no network idle to time out.
+        shown_for(b, &timeout.root, not_builtin)?,
         card_slider_number(
             b,
             SliderNumberParams {

@@ -3,14 +3,14 @@
 # <img width="32" height="32" src="crates/translator-app/assets/icon.png"> Translator Overlay [![CI](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml) [![GitHub Release](https://img.shields.io/github/v/release/OKTW-Network/Translator-Overlay)](https://github.com/OKTW-Network/Translator-Overlay/releases) [![GitHub Downloads](https://img.shields.io/github/downloads/OKTW-Network/Translator-Overlay/latest/total?label=downloads&color=67ac09)](https://github.com/OKTW-Network/Translator-Overlay/releases/latest)
 [繁體中文](README.md) | English
 
-Real-time translation overlay for the Windows desktop: pick a target window → capture it → recognize text with PP-OCRv6 → translate through an OpenAI-compatible API or a local CLI → draw the translation in place on a click-through overlay.
+Real-time translation overlay for the Windows desktop: pick a target window → capture it → recognize text with PP-OCRv6 → translate with the built-in model, an OpenAI-compatible API, or a local CLI → draw the translation in place on a click-through overlay.
 
 ## Features
 
 - **Window capture**: Windows Graphics Capture. Draw several OCR regions on the target window, or recognize the whole window. Regions can be saved as named presets
 - **Local OCR**: PP-OCRv6 (tiny / small / medium) on ONNX Runtime with WebGPU or DirectML (falls back to CPU). Text is sent for translation only after the screen settles (with an optional force-translate time for text that never settles). Filters single-character noise and animations that OCR misreads
 - **Line merge**: Off / Position rules / Smart detection (PP-DocLayoutV3 layout analysis) / Merge all. Lines are joined with nothing, a space, or a line break. Reading order is rows or columns; vertical text columns always read right to left
-- **LLM translation**: OpenAI-compatible API (Chat Completions or Responses), or local Grok / OpenCode / Codex / Claude Code. When streaming, the overlay and translation window update as the translation arrives. The system prompt can be customized (it replaces the style only; output format and languages stay)
+- **LLM translation**: built-in model (runs locally), OpenAI-compatible API (Chat Completions or Responses), or local Grok / OpenCode / Codex / Claude Code. When streaming, the overlay and translation window update as the translation arrives. The system prompt can be customized (it replaces the style only; output format and languages stay)
 - **API options**: Structured outputs, streaming, reasoning replay, Temperature / Top P / Max tokens / Reasoning effort, Priority mode; timeout, retries, and backoff. The Model field autocompletes from the provider's model list. The control window's taskbar button flashes when translation fails
 - **Glossary**: save source → translation term pairs as named profiles and send them to the model. More terms use more tokens
 - **Translation memory and context**: each source line is translated once per session (LFU cache with adjustable size, manual clear, emptied when the app closes). Multi-turn history keeps wording consistent; **Clear history** starts fresh
@@ -36,12 +36,13 @@ Real-time translation overlay for the Windows desktop: pick a target window → 
 1. Extract `TranslatorOverlay-*-win-x64.zip` (OCR DLLs are in `lib/`)
 2. Double-click `translator-app.exe`
 3. On the **API** page, pick a Provider:
+   - **Built-in model** (default): pick a model and device; see [Built-in translation model](#built-in-translation-model)
    - **OpenAI-compatible**: fill in `base_url` / `api_key` / `model`
    - **Grok CLI** / **OpenCode CLI** / **Codex CLI** / **Claude Code**: uses the local `grok` / `opencode` / `codex` / `claude` and its existing login (Codex needs 0.154.0 or later)
 4. **Save**
 5. Pick a window on the **Dashboard** → **Start** at the bottom of the left navigation
 
-If OCR models are missing on first run, they are downloaded from [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0) into `models/` next to the exe. **Start** is unavailable until that finishes.
+If OCR models are missing on first run, they are downloaded from [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0) into `models/` next to the exe. **Start** is unavailable until that finishes. With the built-in model, the first **Start** downloads the translation model in the background, with progress in the status bar.
 
 ## Usage
 
@@ -71,7 +72,7 @@ Target window
   → PP-OCRv6 (oar-ocr / ONNX + WebGPU or DirectML, falls back to CPU)
   → confidence filter / single-char filter / line merge (rules or PP-DocLayoutV3) / block persistence
   → stability gate
-  → LLM translation (session cache + multi-turn context; HTTP can stream)
+  → LLM translation (session cache + multi-turn context; the built-in model and HTTP can stream)
   → click-through overlay (follows the target window) + separate translation window
 ```
 
@@ -88,6 +89,18 @@ Source: [GreatV/oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v
 Smaller is faster, larger is more accurate. Changing the size or device reloads on **Save**.
 
 The **Smart detection** line merge also needs `pp-doclayoutv3_fp16.onnx` (about 65 MB, also downloaded automatically, from this repo's [models-v1](https://github.com/OKTW-Network/Translator-Overlay/releases/tag/models-v1)): the official [PaddlePaddle/PP-DocLayoutV3_onnx](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx) converted to FP16 with the unused mask output removed via `uv run scripts/optimize-doclayout.py inference.onnx pp-doclayoutv3_fp16.onnx`.
+
+## Built-in translation model
+
+Source: [onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-community/gemma-4-E4B-it-ONNX), downloaded to `models/gemma-4-e4b-it/`.
+
+| Quantization | Download size |
+| --- | --- |
+| q4 (default) | 5.6 GB |
+| q4f16 | 4.9 GB |
+| int8 | 9.8 GB |
+
+The device is WebGPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
 
 ## Building from source
 
@@ -117,7 +130,7 @@ crates/
   translator-core        # config, paths, region presets, shared types
   translator-ocr         # PP-OCRv6, downloads, stability gate, filters, merge
   translator-overlay     # click-through overlay, region picker, translation window
-  translator-translate   # HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code, session cache
+  translator-translate   # built-in ONNX model / HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code, session cache
   translator-winui       # WinUI 3 bindings (generated by winui-bindgen) and startup
   winui-bindgen          # regenerates the translator-winui bindings
 ```

@@ -1,10 +1,13 @@
-//! Translation client: OpenAI-compatible HTTP or long-lived Grok/OpenCode/Codex/Claude Code CLI sessions.
+//! Translation client: OpenAI-compatible HTTP, long-lived Grok/OpenCode/Codex/Claude Code CLI sessions,
+//! or a built-in ONNX model.
 
+mod builtin;
 mod cache;
 mod cli;
 mod http;
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -15,15 +18,17 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, DictionaryPair, HttpApi, OcrBlock, TranslatedBlock, TranslationConfig};
+use translator_core::{ApiConfig, DictionaryPair, HttpApi, ModelProvider, OcrBlock, PipelineStatus, TranslatedBlock, TranslationConfig};
 
-pub use crate::{
-    cache::{CacheResolve, TranslationCache},
-    http::{ChatMessage, ResponseItem},
-};
 use crate::{
+    builtin::BuiltinBackend,
     cli::{CliBackend, list_models as list_cli_models},
     http::{chat_completion_body, list_http_models, responses_request_body},
+};
+pub use crate::{
+    builtin::{BUILTIN_MODELS, BuiltinModelSpec, find_builtin_model},
+    cache::{CacheResolve, TranslationCache},
+    http::{ChatMessage, ResponseItem},
 };
 
 #[derive(Debug, Error)]
@@ -620,12 +625,15 @@ struct CliHandle {
     epoch: AtomicU64,
 }
 
-/// HTTP or long-lived CLI translation backend.
+/// HTTP, long-lived CLI, or built-in model translation backend.
 #[derive(Clone)]
 pub struct TranslateClient {
     http: reqwest::Client,
     config: ApiConfig,
     cli: Arc<CliHandle>,
+    builtin: Arc<tokio::sync::Mutex<BuiltinBackend>>,
+    /// Where built-in model files are downloaded (shared with OCR models).
+    models_dir: PathBuf,
 }
 
 impl TranslateClient {
@@ -637,7 +645,13 @@ impl TranslateClient {
                 backend: tokio::sync::Mutex::new(CliBackend::new()),
                 epoch: AtomicU64::new(0),
             }),
+            builtin: Arc::default(),
+            models_dir: PathBuf::from("models"),
         }
+    }
+
+    pub fn set_models_dir(&mut self, models_dir: PathBuf) {
+        self.models_dir = models_dir;
     }
 
     pub fn update_config(&mut self, config: ApiConfig) {
@@ -652,9 +666,16 @@ impl TranslateClient {
             || self.config.reasoning_effort != config.reasoning_effort
             || self.config.service_tier != config.service_tier
             || self.config.http_api != config.http_api;
+        let builtin_changed = self.config.provider != config.provider
+            || self.config.builtin_model != config.builtin_model
+            || self.config.builtin_device != config.builtin_device;
         self.config = config;
         if session_changed {
             self.reset_session();
+        }
+        // Free VRAM now; if a turn holds the lock, the next request reloads on its own.
+        if builtin_changed && let Ok(mut backend) = self.builtin.try_lock() {
+            backend.unload();
         }
     }
 
@@ -674,19 +695,50 @@ impl TranslateClient {
         backend.close().await;
         let teardowns = std::mem::take(&mut backend.teardowns);
         let _ = tokio::task::spawn_blocking(move || teardowns.into_iter().for_each(|t| drop(t.join()))).await;
+        // A model load cannot be interrupted; unload once it ends instead of stalling Stop.
+        let builtin = Arc::clone(&self.builtin);
+        tokio::spawn(async move { builtin.lock().await.unload() });
     }
 
     pub fn config(&self) -> &ApiConfig {
         &self.config
     }
 
+    /// Load the built-in model before the first translation needs it. Other providers unload
+    /// it instead. `on_status` as in [`Self::complete_cancellable`].
+    pub async fn preload(
+        &self,
+        cancel: &CancellationToken,
+        on_status: &mut impl FnMut(Option<PipelineStatus>),
+    ) -> Result<(), TranslateError> {
+        let mut backend = self.builtin.lock().await;
+        if self.config.provider != ModelProvider::Builtin {
+            // `update_config` skips the unload while a turn holds the lock.
+            backend.unload();
+            return Ok(());
+        }
+        builtin::ensure_loaded(&mut backend, &self.config, &self.models_dir, cancel, on_status).await?;
+        Ok(())
+    }
+
+    /// `on_status` reports built-in model download / load phases, then `None` when loading
+    /// ends; other providers never call it.
     pub async fn complete_cancellable(
         &self,
         conv: &Conversation,
         cancel: &CancellationToken,
+        on_status: &mut impl FnMut(Option<PipelineStatus>),
         on_text: &mut impl FnMut(&str),
     ) -> Result<Completion, TranslateError> {
-        if !self.config.provider.is_cli() && self.config.http_api == HttpApi::Responses {
+        if self.config.provider == ModelProvider::Builtin {
+            let backend = Arc::clone(&self.builtin).lock_owned().await;
+            let text = builtin::complete(backend, &self.config, &self.models_dir, &conv.messages(), cancel, on_status, on_text).await?;
+            return Ok(Completion {
+                text,
+                replay_items: Vec::new(),
+            });
+        }
+        if self.config.provider.is_http() && self.config.http_api == HttpApi::Responses {
             let body = responses_request_body(&self.config, &conv.items, &conv.session_id);
             return self
                 .http_complete(
@@ -781,6 +833,7 @@ impl TranslateClient {
         cancel: &CancellationToken,
         start_attempt: u32,
         mut on_retry: impl FnMut(u32, u32, &TranslateError, u64),
+        on_status: &mut impl FnMut(Option<PipelineStatus>),
         on_text: &mut impl FnMut(&str),
     ) -> Result<(Completion, u32), TranslateError> {
         let max_retries = self.config.max_retries;
@@ -788,7 +841,7 @@ impl TranslateClient {
         let mut attempt = start_attempt;
 
         loop {
-            match self.complete_cancellable(conv, cancel, on_text).await {
+            match self.complete_cancellable(conv, cancel, on_status, on_text).await {
                 Ok(content) => return Ok((content, attempt)),
                 Err(e) if should_retry(&e, attempt, max_retries) => {
                     attempt += 1;
@@ -820,10 +873,11 @@ pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<
     if cancel.is_cancelled() {
         return Err(TranslateError::Cancelled);
     }
-    if api.provider.is_cli() {
-        list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await
-    } else {
-        list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await
+    match api.provider {
+        // The UI lists [`BUILTIN_MODELS`] directly.
+        ModelProvider::Builtin => Ok(Vec::new()),
+        p if p.is_cli() => list_cli_models(api, cancel, LIST_MODELS_TIMEOUT).await,
+        _ => list_http_models(api, cancel, LIST_MODELS_TIMEOUT).await,
     }
 }
 
@@ -1458,6 +1512,7 @@ mod tests {
     async fn unchanged_config_keeps_the_http_connection_pool() {
         let (base_url, accepted) = keep_alive_server();
         let api = ApiConfig {
+            provider: ModelProvider::OpenaiCompatible,
             base_url,
             model: "m".into(),
             stream: false,
@@ -1467,28 +1522,56 @@ mod tests {
         let conv = Conversation::empty();
         let cancel = CancellationToken::new();
 
-        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}, &mut |_| {}).await.unwrap();
         client.update_config(api.clone());
-        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}, &mut |_| {}).await.unwrap();
         assert_eq!(accepted.load(Ordering::SeqCst), 1, "the same config must reuse the pooled connection");
 
         client.update_config(ApiConfig {
             request_timeout_secs: api.request_timeout_secs + 1,
             ..api
         });
-        client.complete_cancellable(&conv, &cancel, &mut |_| {}).await.unwrap();
+        client.complete_cancellable(&conv, &cancel, &mut |_| {}, &mut |_| {}).await.unwrap();
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "a new idle timeout needs a new client");
     }
 
     #[tokio::test]
     async fn empty_base_url_fails_before_http() {
-        let client = TranslateClient::new(ApiConfig::default());
+        let client = TranslateClient::new(ApiConfig {
+            provider: ModelProvider::OpenaiCompatible,
+            ..ApiConfig::default()
+        });
         let conv = Conversation::empty();
         let err = client
-            .complete_cancellable(&conv, &CancellationToken::new(), &mut |_| {})
+            .complete_cancellable(&conv, &CancellationToken::new(), &mut |_| {}, &mut |_| {})
             .await
             .unwrap_err();
         assert!(matches!(err, TranslateError::MissingBaseUrl));
         assert_eq!(err.to_string(), "Base URL is empty");
+    }
+
+    #[tokio::test]
+    #[ignore = "runs the built-in model; downloads it into TRANSLATOR_MODELS_DIR (default target/release/models) if missing"]
+    async fn builtin_model_translates() {
+        let mut client = TranslateClient::new(ApiConfig::default());
+        let models_dir = std::env::var_os("TRANSLATOR_MODELS_DIR")
+            .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/models"), PathBuf::from);
+        client.set_models_dir(models_dir);
+        let source = vec![OcrBlock {
+            id: 1,
+            text: "おはようございます".into(),
+            confidence: 0.9,
+            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+            source_lines: 1,
+            source_height: 1.0,
+            source_width: 1.0,
+        }];
+        let conv = Conversation::empty().begin_translate_request(&TranslationConfig::default(), &source, &[]);
+        let completion = client
+            .complete_cancellable(&conv, &CancellationToken::new(), &mut |_| {}, &mut |_| {})
+            .await
+            .unwrap();
+        let out = merge_translations(&source, &completion.text).unwrap();
+        assert!(!out[0].translation.trim().is_empty(), "{}", completion.text);
     }
 }

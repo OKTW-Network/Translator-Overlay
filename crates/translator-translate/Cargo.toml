@@ -4,11 +4,16 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
+half = "2.7.1"
+# Same pin as oar-ocr, so both share one ONNX Runtime.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "half", "webgpu"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 translator-core = { path = "../translator-core" }
+translator-ocr = { path = "../translator-ocr" }

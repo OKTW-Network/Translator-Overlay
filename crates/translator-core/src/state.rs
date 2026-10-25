@@ -20,8 +20,9 @@ pub enum PipelineStatus {
     WaitingForStable {
         elapsed_ms: u64,
     },
-    /// App-owned model download (GitHub → `models_dir`); UI stays operable.
+    /// App-owned model download (→ `models_dir`); UI stays operable.
     DownloadingModels {
+        kind: ModelKind,
         file: String,
         /// 1-based index among files being fetched this run.
         file_index: u32,
@@ -29,7 +30,9 @@ pub enum PipelineStatus {
         percent: u8,
     },
     /// Building the ONNX Runtime session after files are on disk.
-    LoadingModels,
+    LoadingModels {
+        kind: ModelKind,
+    },
     Translating,
     /// Auto-retry after a transient translate API / network / CLI error, or omitted blocks.
     RetryingTranslate {
@@ -47,6 +50,14 @@ pub enum PipelineStatus {
     Error {
         message: String,
     },
+}
+
+/// Which models a download / load status is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelKind {
+    Ocr,
+    /// The built-in translation model.
+    Translation,
 }
 
 /// Token stored in [`AppState::settings_message`] after a successful save.
@@ -94,6 +105,9 @@ pub struct PreviewInfo {
 #[derive(Debug, Default)]
 pub struct AppState {
     pub status: PipelineStatus,
+    /// Built-in translation model download / load phase. Kept apart from `status` so OCR
+    /// progress does not overwrite it; the UI shows it over any non-error status.
+    pub translation_model_load: Option<PipelineStatus>,
     pub config: AppConfig,
     pub latest_ocr_blocks: Vec<OcrBlock>,
     pub latest_translated_blocks: Vec<TranslatedBlock>,

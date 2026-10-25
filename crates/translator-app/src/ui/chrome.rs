@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use rust_i18n::t;
-use translator_core::{PipelineStatus, SETTINGS_SAVED, UiLanguage};
+use translator_core::{ModelKind, PipelineStatus, SETTINGS_SAVED, UiLanguage};
 use translator_winui::{
     Border, Button, ComboBox, Grid, HorizontalAlignment, InfoBar, InfoBarSeverity, Interface, Layout, Result, TextBlock, TextTrimming,
     TextWrapping, UIElement, VerticalAlignment, auto, grid, star, thickness,
@@ -464,14 +464,22 @@ pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
         PipelineStatus::RunningOcr => t!("status.running_ocr"),
         PipelineStatus::WaitingForStable { elapsed_ms } => t!("status.waiting_stable", elapsed_ms = elapsed_ms),
         PipelineStatus::DownloadingModels {
+            kind,
             file,
             file_index,
             file_count,
             percent,
         } => {
-            t!("status.downloading", file = file, file_index = file_index, file_count = file_count, percent = percent)
+            let key = match kind {
+                ModelKind::Ocr => "status.downloading",
+                ModelKind::Translation => "status.downloading_translation",
+            };
+            t!(key, file = file, file_index = file_index, file_count = file_count, percent = percent)
         }
-        PipelineStatus::LoadingModels => t!("status.loading_models"),
+        PipelineStatus::LoadingModels { kind: ModelKind::Ocr } => t!("status.loading_models"),
+        PipelineStatus::LoadingModels {
+            kind: ModelKind::Translation,
+        } => t!("status.loading_translation_model"),
         PipelineStatus::Translating => t!("status.translating"),
         PipelineStatus::RetryingTranslate { attempt, max_retries, .. } => {
             t!("status.retrying", attempt = attempt, max_retries = max_retries)
