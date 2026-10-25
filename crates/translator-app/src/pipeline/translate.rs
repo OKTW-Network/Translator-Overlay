@@ -275,6 +275,26 @@ impl Pipeline {
                     self.fail_translate(t!("err.translate_parse", error = e.to_string()).into_owned());
                 }
             },
+            // Turn-based compression never fires while every request fails, so trim on overflow.
+            // Once trimmed, another overflow falls through to the plain error.
+            Err(TranslateError::ContextFull(context))
+                if self.conversation.turn_count() > self.state.read().config.translation.history_max_items =>
+            {
+                self.conversation.rollback_user_turn();
+                let turns = self.conversation.turn_count();
+                let keep = self.state.read().config.translation.history_max_items;
+                self.conversation.compress_if_needed(0, keep);
+                info!(context, turns, keep, "context full; trimmed history and resending");
+                // Restore the captions first: the resent job keeps them as its revert point.
+                self.apply_stream_preview(&job, &[]);
+                let page = PendingPage {
+                    blocks: job.blocks,
+                    fingerprint: job.fingerprint,
+                    content_width: job.content_width,
+                    content_height: job.content_height,
+                };
+                self.launch_translate_job(page, job.cached_hits, job.miss_blocks, 0);
+            }
             Err(e) if e.is_cancelled() => {
                 info!("translation cancelled");
                 self.conversation.rollback_user_turn();
@@ -467,5 +487,37 @@ mod tests {
         assert!(matches!(s.status, PipelineStatus::Error { .. }), "{:?}", s.status);
         assert!(!s.translate_in_flight);
         assert_eq!(p.translation_cache.len(), 1, "the translated block stays cached");
+    }
+
+    #[tokio::test]
+    async fn context_full_trims_history_once_then_fails() {
+        let mut p = pipeline(0);
+        p.state.write().config.translation.history_max_items = 1;
+        let page = |text: &str| {
+            let blocks = vec![block(1, text)];
+            PendingPage {
+                fingerprint: OcrFingerprint::from_blocks(&blocks),
+                blocks,
+                content_width: 100,
+                content_height: 100,
+            }
+        };
+        for text in ["A", "B", "C"] {
+            p.start_translate(page(text), false);
+            let job = p.inflight.take().expect("job");
+            p.finish_translate(job, reply(r#"{"b":[[1,"T"]]}"#, 0));
+        }
+        assert_eq!(p.conversation.turn_count(), 3);
+
+        p.start_translate(page("D"), false);
+        let job = p.inflight.take().expect("job");
+        p.finish_translate(job, Err(TranslateError::ContextFull(4096)));
+        assert!(p.inflight.is_some(), "resent with a trimmed history");
+        assert_eq!(p.conversation.turn_count(), 1);
+
+        let job = p.inflight.take().expect("job");
+        p.finish_translate(job, Err(TranslateError::ContextFull(4096)));
+        assert!(p.inflight.is_none(), "a trimmed history that still overflows must fail");
+        assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
     }
 }

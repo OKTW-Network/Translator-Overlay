@@ -10,9 +10,9 @@ use std::path::Path;
 use half::f16;
 use ort::{
     ep,
-    memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
+    memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
-    value::{DynValue, Tensor, TensorElementType},
+    value::{DynTensor, DynValue, Tensor, TensorElementType},
 };
 use tokenizers::Tokenizer;
 use tokio::sync::{OwnedMutexGuard, mpsc};
@@ -99,21 +99,21 @@ pub(crate) async fn complete(
 
     let prompt = spec.arch.render_prompt(messages);
     let max_tokens = api.max_tokens.map_or(DEFAULT_MAX_TOKENS, |n| n as usize);
+    let context = api.builtin_context_tokens as usize;
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let cancel_job = cancel.clone();
     let job = tokio::task::spawn_blocking(move || {
         let Some(loaded) = backend.loaded.as_mut() else {
-            return Ok(None);
+            return Ok(Err(TranslateError::Cancelled));
         };
-        loaded.generate(&prompt, max_tokens, &cancel_job, |text| drop(tx.send(text.to_owned())))
+        loaded.generate(&prompt, max_tokens, context, &cancel_job, |text| drop(tx.send(text.to_owned())))
     });
     // Ends when the job drops its sender.
     while let Some(text) = rx.recv().await {
         on_text(&text);
     }
     match job.await {
-        Ok(Ok(Some(text))) => Ok(text),
-        Ok(Ok(None)) => Err(TranslateError::Cancelled),
+        Ok(Ok(result)) => result,
         Ok(Err(e)) => Err(TranslateError::Other(format!("{}: {e}", spec.id))),
         Err(e) => Err(TranslateError::Other(format!("built-in model task: {e}"))),
     }
@@ -163,19 +163,33 @@ struct Loaded {
     tokenizer: Tokenizer,
     embed: Session,
     decoder: Session,
-    /// `(past input, present output)` names, in decoder input order.
-    kv: Vec<(String, String)>,
+    /// In decoder input order.
+    kv: Vec<KvSlot>,
     kv_type: TensorElementType,
-    /// `[1, heads, 0, head_dim]` per KV input: the empty cache for a fresh prefill.
-    kv_empty: Vec<[i64; 4]>,
     per_layer_inputs: bool,
     cache: Option<KvCache>,
+    /// Allocates the in-place KV buffers. Declared after `cache` so it outlives them.
+    kv_alloc: Allocator,
+}
+
+struct KvSlot {
+    past: String,
+    present: String,
+    heads: i64,
+    head_dim: i64,
+    /// See [`crate::builtin::catalog::BuiltinArch::kv_in_place`].
+    in_place: bool,
 }
 
 /// Device KV for `ids` (every token fed so far), reused when the next prompt extends it.
 struct KvCache {
+    /// `ids` as text. Matched as text because re-encoding a reply can split it differently
+    /// from the tokens the model generated (`算了`+`吧` vs `算`+`了吧`).
+    text: String,
     ids: Vec<u32>,
     past: Vec<DynValue>,
+    /// Sequence capacity of the in-place buffers.
+    context: usize,
 }
 
 fn session(device: OcrDevice, path: &Path) -> ort::Result<Session> {
@@ -185,6 +199,16 @@ fn session(device: OcrDevice, path: &Path) -> ort::Result<Session> {
         OcrDevice::Cpu | OcrDevice::Directml => vec![ep::CPU::default().build()],
     };
     Session::builder()?.with_execution_providers(eps)?.commit_from_file(path)
+}
+
+/// Where the KV cache lives. Build this rather than reading [`Allocator::memory_info`]: ort's
+/// `MemoryInfo::to_owned` (used by [`Allocator::new`]) always returns CPU memory info.
+fn kv_memory(device: OcrDevice) -> ort::Result<MemoryInfo<'static>> {
+    let kv_device = match device {
+        OcrDevice::Webgpu => AllocationDevice::WEBGPU_BUFFER,
+        OcrDevice::Cpu | OcrDevice::Directml => AllocationDevice::CPU,
+    };
+    MemoryInfo::new(kv_device, 0, AllocatorType::Device, MemoryType::Default)
 }
 
 fn missing(what: &str) -> ort::Error {
@@ -210,7 +234,6 @@ impl Loaded {
         let decoder = session(device, &dir.join(spec.decoder[0].file_name))?;
 
         let mut kv = Vec::new();
-        let mut kv_empty = Vec::new();
         let mut kv_type = TensorElementType::Float32;
         for input in decoder.inputs() {
             let Some(layer) = input.name().strip_prefix("past_key_values.") else {
@@ -220,12 +243,28 @@ impl Loaded {
             let &[_, heads, _, head_dim] = &dims[..] else {
                 return Err(ort::Error::new(format!("{}: expected a 4-D KV input", input.name())));
             };
-            kv.push((input.name().to_string(), format!("present.{layer}")));
-            kv_empty.push([1, heads, 0, head_dim]);
+            kv.push(KvSlot {
+                past: input.name().to_string(),
+                present: format!("present.{layer}"),
+                heads,
+                head_dim,
+                in_place: false,
+            });
             kv_type = input.dtype().tensor_type().unwrap_or(kv_type);
         }
+        // `present.22.key` -> layer `22`.
+        let layers: Vec<_> = kv
+            .iter()
+            .map(|s| (s.present["present.".len()..].rsplit_once('.').map_or("", |(layer, _)| layer), s.head_dim))
+            .collect();
+        let in_place = spec.arch.kv_in_place(&layers);
+        for (slot, in_place) in kv.iter_mut().zip(in_place) {
+            slot.in_place = in_place;
+        }
         let per_layer_inputs = decoder.inputs().iter().any(|i| i.name() == "per_layer_inputs");
-        info!(model = spec.id, kv_inputs = kv.len(), ?kv_type, per_layer_inputs, "built-in model sessions ready");
+        let kv_alloc = Allocator::new(&decoder, kv_memory(device)?)?;
+        let in_place = kv.iter().filter(|s| s.in_place).count();
+        info!(model = spec.id, kv_inputs = kv.len(), in_place, ?kv_type, per_layer_inputs, "built-in model sessions ready");
         Ok(Self {
             spec,
             device,
@@ -234,16 +273,21 @@ impl Loaded {
             decoder,
             kv,
             kv_type,
-            kv_empty,
             per_layer_inputs,
             cache: None,
+            kv_alloc,
         })
     }
 
-    fn empty_past(&self) -> ort::Result<Vec<DynValue>> {
-        self.kv_empty
+    /// The cache for a fresh prefill: in-place slots get a `context`-long buffer, the rest are empty.
+    fn empty_past(&self, context: usize) -> ort::Result<Vec<DynValue>> {
+        self.kv
             .iter()
-            .map(|&shape| {
+            .map(|s| {
+                if s.in_place {
+                    return Ok(DynTensor::new(&self.kv_alloc, self.kv_type, [1, s.heads, context as i64, s.head_dim])?.into_dyn());
+                }
+                let shape = [1, s.heads, 0, s.head_dim];
                 Ok(match self.kv_type {
                     TensorElementType::Float16 => Tensor::<f16>::from_array((shape, Vec::new()))?.into_dyn(),
                     _ => Tensor::<f32>::from_array((shape, Vec::new()))?.into_dyn(),
@@ -253,36 +297,44 @@ impl Loaded {
     }
 
     /// Greedy decode. `on_text` gets the whole reply so far after each token.
-    /// `Ok(None)` = cancelled.
+    /// The inner error is [`TranslateError::Cancelled`] or [`TranslateError::ContextFull`].
     fn generate(
         &mut self,
         prompt: &str,
         max_tokens: usize,
+        context: usize,
         cancel: &CancellationToken,
         mut on_text: impl FnMut(&str),
-    ) -> ort::Result<Option<String>> {
+    ) -> ort::Result<Result<String, TranslateError>> {
         // shortcut: greedy only; add temperature/top_p sampling if replies need variety.
-        let mut ids = self.tokenizer.encode(prompt, false)?.get_ids().to_vec();
+        // shortcut: only a whole cached prefix is reused (the Concat layers' KV cannot be cut);
+        // trimmed history or a new system prompt re-prefills everything.
+        // `filter` drops a stale cache before `empty_past` allocates the next one.
+        let cache = self
+            .cache
+            .take()
+            .filter(|c| c.context == context && prompt.len() > c.text.len() && prompt.starts_with(&c.text));
+        let mut ids = match &cache {
+            Some(c) => [c.ids.as_slice(), self.tokenizer.encode(&prompt[c.text.len()..], false)?.get_ids()].concat(),
+            None => self.tokenizer.encode(prompt, false)?.get_ids().to_vec(),
+        };
         let prompt_len = ids.len();
-        // shortcut: only a whole cached prefix is reused (no KV slicing); trimmed history or a new
-        // system prompt re-prefills everything. Slice the KV if long prompts get slow.
-        let (mut past, mut fed) = match self.cache.take() {
-            Some(c) if ids.len() > c.ids.len() && ids.starts_with(&c.ids) => (c.past, c.ids.len()),
-            _ => (self.empty_past()?, 0),
+        if prompt_len > context {
+            return Ok(Err(TranslateError::ContextFull(context)));
+        }
+        let (mut past, mut fed) = match cache {
+            Some(c) => (c.past, c.ids.len()),
+            None => (self.empty_past(context)?, 0),
         };
         info!(model = self.spec.id, prompt_tokens = prompt_len, reused = fed, "built-in model prefill");
-        let kv_device = match self.device {
-            OcrDevice::Webgpu => AllocationDevice::WEBGPU_BUFFER,
-            OcrDevice::Cpu | OcrDevice::Directml => AllocationDevice::CPU,
-        };
-        let kv_mem = MemoryInfo::new(kv_device, 0, AllocatorType::Device, MemoryType::Default)?;
+        let kv_mem = kv_memory(self.device)?;
         let cpu_mem = MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default)?;
         let eos = self.spec.arch.eos_ids();
         let mut binding = self.decoder.create_binding()?;
         let mut text = String::new();
         loop {
             if cancel.is_cancelled() {
-                return Ok(None);
+                return Ok(Err(TranslateError::Cancelled));
             }
             let step: Vec<i64> = ids[fed..].iter().map(|&t| i64::from(t)).collect();
             let (n, total) = (step.len(), ids.len());
@@ -295,14 +347,17 @@ impl Loaded {
             binding.bind_input("attention_mask", &Tensor::from_array(([1, total], vec![1_i64; total]))?)?;
             binding.bind_input("position_ids", &Tensor::from_array(([1, n], (fed as i64..total as i64).collect::<Vec<_>>()))?)?;
             binding.bind_input("num_logits_to_keep", &Tensor::from_array(((), vec![1_i64]))?)?;
-            for ((name, _), value) in self.kv.iter().zip(&past) {
-                binding.bind_input(name, value)?;
-            }
             // Rebind every step: a device-bound output keeps the last run's buffer, and the KV grows.
             binding.clear_outputs();
             binding.bind_output_to_device("logits", &cpu_mem)?;
-            for (_, present) in &self.kv {
-                binding.bind_output_to_device(present, &kv_mem)?;
+            for (slot, value) in self.kv.iter().zip(std::mem::take(&mut past)) {
+                binding.bind_input(&slot.past, &value)?;
+                if slot.in_place {
+                    // Same buffer as the input: GQA writes the new tokens at their positions.
+                    binding.bind_output(&slot.present, value)?;
+                } else {
+                    binding.bind_output_to_device(&slot.present, &kv_mem)?;
+                }
             }
 
             let mut outputs = self.decoder.run_binding(&binding)?;
@@ -310,7 +365,7 @@ impl Loaded {
             past = self
                 .kv
                 .iter()
-                .map(|(_, present)| outputs.remove(present).ok_or_else(|| missing(present)))
+                .map(|s| outputs.remove(&s.present).ok_or_else(|| missing(&s.present)))
                 .collect::<ort::Result<_>>()?;
             drop(outputs);
             fed = total;
@@ -328,12 +383,18 @@ impl Loaded {
             if ids.len() - prompt_len >= max_tokens {
                 break;
             }
+            // The next step would feed all of `ids`; a cut-off reply would not parse anyway.
+            if ids.len() > context {
+                return Ok(Err(TranslateError::ContextFull(context)));
+            }
         }
         self.cache = Some(KvCache {
+            text: format!("{prompt}{}", self.tokenizer.decode(&ids[prompt_len..fed], true)?),
             ids: ids[..fed].to_vec(),
             past,
+            context,
         });
-        Ok(Some(text))
+        Ok(Ok(text))
     }
 }
 

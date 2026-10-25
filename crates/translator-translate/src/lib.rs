@@ -51,6 +51,9 @@ pub enum TranslateError {
     Cancelled,
     #[error("response missing block ids {0:?}")]
     MissingBlocks(Vec<u32>),
+    /// The built-in model ran out of context; trimming history and resending can fix it.
+    #[error("conversation exceeds the {0}-token context length")]
+    ContextFull(usize),
     #[error("{0}")]
     Other(String),
 }
@@ -67,7 +70,7 @@ impl TranslateError {
             Self::ApiStatus { status, .. } => *status >= 500 || *status == 429,
             Self::CliExit(_) | Self::MissingBlocks(_) => true,
             Self::CliProtocol(msg) => msg.contains("timed out") || msg.contains("closed stdout"),
-            Self::Cancelled | Self::MissingBaseUrl | Self::CliNotFound(_) | Self::Parse(_) | Self::Other(_) => false,
+            Self::Cancelled | Self::MissingBaseUrl | Self::CliNotFound(_) | Self::Parse(_) | Self::ContextFull(_) | Self::Other(_) => false,
         }
     }
 }

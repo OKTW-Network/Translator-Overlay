@@ -34,6 +34,20 @@ impl BuiltinArch {
             Self::Gemma4 => &[1, 106, 50],
         }
     }
+
+    /// For KV inputs given as `(layer, head_dim)` in decoder input order: whether only
+    /// `GroupQueryAttention` reads it, which appends into a preallocated
+    /// `[1, heads, context, head_dim]` buffer bound as both past and present.
+    pub fn kv_in_place(self, inputs: &[(&str, i64)]) -> Vec<bool> {
+        match self {
+            Self::Gemma4 => {
+                // Global layers (head_dim 512) use a Concat attention. The last sliding layer lends its
+                // present (and a mask sized from it) to the KV-shared layers, which span all of it.
+                let donor = inputs.iter().rev().find(|&&(_, d)| d == 256).map(|&(layer, _)| layer);
+                inputs.iter().map(|&(layer, d)| d == 256 && Some(layer) != donor).collect()
+            }
+        }
+    }
 }
 
 /// One selectable model (family + quantization).
@@ -155,6 +169,21 @@ mod tests {
         assert_eq!(find("").map(|m| m.id), BUILTIN_MODELS.first().map(|m| m.id));
         assert_eq!(find(" gemma-4-e4b-it-q4 ").map(|m| m.id), Some("gemma-4-e4b-it-q4"));
         assert!(find("nope").is_none());
+    }
+
+    #[test]
+    fn gemma4_in_place_kv_skips_global_and_donor_layers() {
+        let inputs = [
+            ("0", 256),
+            ("0", 256),
+            ("1", 512),
+            ("1", 512),
+            ("2", 256),
+            ("2", 256),
+            ("3", 512),
+            ("3", 512),
+        ];
+        assert_eq!(BuiltinArch::Gemma4.kv_in_place(&inputs), [true, true, false, false, false, false, false, false]);
     }
 
     #[test]

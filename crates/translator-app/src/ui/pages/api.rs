@@ -48,7 +48,7 @@ const PROVIDERS: [ModelProvider; 6] = [
     ModelProvider::ClaudeCli,
 ];
 
-fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border)> {
+fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, Border)> {
     let mut model = Combo::new("", {
         let cx = cx.clone();
         move |idx| {
@@ -82,7 +82,20 @@ fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border)>
         |ui| (DEVICES.iter().position(|&d| d == ui.draft.api.builtin_device).unwrap_or(0), true),
         |ui, v| ui.draft.api.builtin_device = v,
     )?;
-    Ok((model_card, device_card))
+    let context_card = card_slider_number(
+        b,
+        SliderNumberParams {
+            key: "api-builtin-context",
+            header: t!("api.builtin_context"),
+            description: Some(t!("api.builtin_context_desc")),
+            min: 1024.0,
+            max: 32768.0,
+            step: 1024.0,
+        },
+        |ui| (f64::from(ui.draft.api.builtin_context_tokens), true),
+        cx.edit(|ui, v: f64| ui.draft.api.builtin_context_tokens = v.max(1024.0) as u32),
+    )?;
+    Ok((model_card, device_card, context_card.root))
 }
 
 fn api_profile_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
@@ -267,7 +280,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         |api, on| api.send_reasoning_content = on,
     )?;
 
-    let (builtin_model, builtin_device) = builtin_section(b, cx)?;
+    let (builtin_model, builtin_device, builtin_context) = builtin_section(b, cx)?;
 
     let http: fn(ModelProvider) -> bool = ModelProvider::is_http;
     let builtin: fn(ModelProvider) -> bool = |p| p == ModelProvider::Builtin;
@@ -284,6 +297,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         shown_for(b, &model_card, not_builtin)?,
         shown_for(b, &builtin_model.root, builtin)?,
         shown_for(b, &builtin_device, builtin)?,
+        shown_for(b, &builtin_context, builtin)?,
         shown_for(b, &structured, http)?,
         shown_for(b, &stream, http)?,
         shown_for(b, &send_reasoning, http)?,

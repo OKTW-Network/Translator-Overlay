@@ -307,6 +307,9 @@ pub struct ApiConfig {
     /// ONNX Runtime device for the built-in model. Only for [`ModelProvider::Builtin`].
     #[serde(skip_serializing_if = "is_default")]
     pub builtin_device: OcrDevice,
+    /// Prompt + reply token limit of the built-in model; sizes its preallocated KV cache.
+    /// Only for [`ModelProvider::Builtin`].
+    pub builtin_context_tokens: u32,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -350,6 +353,7 @@ impl Default for ApiConfig {
             service_tier: ServiceTier::Standard,
             builtin_model: String::new(),
             builtin_device: OcrDevice::default(),
+            builtin_context_tokens: 4096,
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -392,6 +396,7 @@ impl ApiConfig {
         } else {
             self.builtin_model.clear();
             self.builtin_device = defaults.builtin_device;
+            self.builtin_context_tokens = defaults.builtin_context_tokens;
         }
     }
 }
