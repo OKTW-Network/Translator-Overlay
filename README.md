@@ -30,6 +30,9 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
   - 建議：Windows 11 24H2（build 26100）以上：擷取時不顯示黃框、可限制擷取更新頻率
 - [Windows App Runtime 2.4](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
 - Microsoft Visual C++ Redistributable（x64），若系統缺少 CRT
+- 記憶體（預估，設定頁會依目前設定顯示）
+  - OCR（GPU）：small 約 350 MB VRAM、medium 約 1.5 GB；**智慧偵測**另加約 500 MB
+  - 內建翻譯模型（僅選用時；q4、上下文 4096）：約 6 GB VRAM + 1.6 GB RAM
 
 ## 快速開始
 

@@ -5,12 +5,12 @@ use std::borrow::Cow;
 use rust_i18n::t;
 use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ServiceTier};
 use translator_translate::{BUILTIN_MODELS, find_builtin_model};
-use translator_winui::{Border, HorizontalAlignment, Interface, Layout, Result, StackPanel, UIElement, VerticalAlignment};
+use translator_winui::{Border, HorizontalAlignment, InfoBar, Interface, Layout, Result, StackPanel, UIElement, VerticalAlignment};
 
 use crate::{
     children,
     ui::{
-        pages::ocr::radio_card,
+        pages::ocr::{memory_infobar, radio_card},
         state::{API_PROFILES, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list, selected_api_profile},
         widgets::{
             Binds, Prop, button,
@@ -48,7 +48,7 @@ const PROVIDERS: [ModelProvider; 6] = [
     ModelProvider::ClaudeCli,
 ];
 
-fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, Border)> {
+fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, Border, InfoBar)> {
     let mut model = Combo::new("", {
         let cx = cx.clone();
         move |idx| {
@@ -95,7 +95,11 @@ fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, 
         |ui| (f64::from(ui.draft.api.builtin_context_tokens), true),
         cx.edit(|ui, v: f64| ui.draft.api.builtin_context_tokens = v.max(1024.0) as u32),
     )?;
-    Ok((model_card, device_card, context_card.root))
+    let memory = memory_infobar(b, |ui| {
+        let api = &ui.draft.api;
+        find_builtin_model(&api.builtin_model).map_or((0, 0), |s| s.memory_estimate(api.builtin_device, api.builtin_context_tokens))
+    })?;
+    Ok((model_card, device_card, context_card.root, memory))
 }
 
 fn api_profile_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
@@ -280,7 +284,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         |api, on| api.send_reasoning_content = on,
     )?;
 
-    let (builtin_model, builtin_device, builtin_context) = builtin_section(b, cx)?;
+    let (builtin_model, builtin_device, builtin_context, builtin_memory) = builtin_section(b, cx)?;
 
     let http: fn(ModelProvider) -> bool = ModelProvider::is_http;
     let builtin: fn(ModelProvider) -> bool = |p| p == ModelProvider::Builtin;
@@ -289,6 +293,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     children!(connection;
         section_header(&t!("api.connection"))?,
         provider_card.root,
+        shown_for(b, &builtin_memory, builtin)?,
         shown_for(b, &http_api_card.root, http)?,
         shown_for(b, &cli_path, ModelProvider::is_cli)?,
         shown_for(b, &base_url, http)?,

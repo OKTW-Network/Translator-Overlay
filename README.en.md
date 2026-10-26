@@ -30,6 +30,9 @@ Real-time translation overlay for the Windows desktop: pick a target window → 
   - Recommended: Windows 11 24H2 (build 26100) or later: no yellow capture border and throttled capture updates
 - [Windows App Runtime 2.4](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
 - Microsoft Visual C++ Redistributable (x64), if the CRT is missing
+- Memory (estimates; the settings pages show them for the current settings)
+  - OCR (GPU): small about 350 MB VRAM, medium about 1.5 GB; **Smart detection** adds about 500 MB
+  - Built-in translation model (only when selected; q4, context 4096): about 6 GB VRAM + 1.6 GB RAM
 
 ## Quick start
 

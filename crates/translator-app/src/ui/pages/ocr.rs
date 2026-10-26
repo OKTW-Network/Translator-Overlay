@@ -2,19 +2,20 @@
 
 use rust_i18n::t;
 use translator_core::{LineJoin, LineMergeConfig, LineMergeMode, LineMergeOrder, ModelTier, OcrDevice};
-use translator_winui::{Border, HorizontalAlignment, Layout, Result, StackPanel, VerticalAlignment};
+use translator_ocr::memory_estimate;
+use translator_winui::{Border, HorizontalAlignment, InfoBar, Layout, Result, StackPanel, VerticalAlignment};
 
 use crate::{
     children,
     ui::{
         state::{UiCx, UiShared, mark_dirty},
         widgets::{
-            Binds,
+            Binds, Prop,
             cards::{section_header, settings_card, subsection_header},
             column,
             controls::{SliderNumberParams, card_slider_number, card_toggle, compact_toggle, radio, wrap_tooltip},
             fields::{Combo, Radio},
-            row,
+            hs, row,
         },
     },
 };
@@ -61,6 +62,31 @@ pub(crate) fn radio_card<T: Copy + Send + 'static>(
         Ok(())
     });
     Ok(card.root)
+}
+
+/// Informational bar showing `estimate`'s `(VRAM, RAM)` bytes for the draft settings.
+pub(crate) fn memory_infobar(b: &mut Binds<UiShared>, estimate: impl Fn(&UiShared) -> (u64, u64) + 'static) -> Result<InfoBar> {
+    let bar = InfoBar::new()?;
+    bar.SetIsOpen(true)?;
+    bar.SetIsClosable(false)?;
+    bar.SetTitle(&hs(&t!("ocr.memory")))?;
+    let el = bar.clone();
+    let mut shown = Prop::default();
+    b.add(move |ui, _| {
+        let gb = |bytes: u64| match bytes >> 20 {
+            mb @ ..1024 => format!("{mb} MB"),
+            mb => format!("{:.1} GB", mb as f64 / 1024.0),
+        };
+        let (vram, ram) = estimate(ui);
+        let ram = format!("RAM ≈ {}", gb(ram));
+        let line = if vram == 0 {
+            ram
+        } else {
+            format!("VRAM ≈ {} · {ram}", gb(vram))
+        };
+        shown.set(line, |s| el.SetMessage(&hs(s)))
+    });
+    Ok(bar)
 }
 
 fn merge_pct(
@@ -110,6 +136,10 @@ pub fn ocr_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     let model = column(4.0)?;
     children!(model;
         section_header(&t!("ocr.model"))?,
+        memory_infobar(b, |ui| {
+            let ocr = &ui.draft.ocr;
+            memory_estimate(ocr.model_tier, ocr.device, ocr.uses_layout())
+        })?,
         radio_card(
             b,
             cx,

@@ -2,6 +2,7 @@
 //!
 //! Each repo's files are pinned to a commit and checked by exact byte length on download.
 
+use translator_core::OcrDevice;
 use translator_ocr::ModelArtifact;
 
 use crate::http::ChatMessage;
@@ -65,11 +66,28 @@ pub struct BuiltinModelSpec {
     pub embed: &'static [ModelArtifact],
     /// `.onnx` first, then its `.onnx_data*` files.
     pub decoder: &'static [ModelArtifact],
+    /// KV bytes per context token: Σ heads × head_dim over every `past_key_values.*` input × element size.
+    pub kv_bytes_per_token: u64,
 }
 
 impl BuiltinModelSpec {
     pub fn artifacts(&self) -> impl Iterator<Item = &ModelArtifact> {
         std::iter::once(&self.tokenizer).chain(self.embed).chain(self.decoder)
+    }
+
+    /// Rough `(VRAM, RAM)` bytes with a full `context`. Calibrated on q4 with a Radeon RX 9070 XT.
+    pub fn memory_estimate(&self, device: OcrDevice, context: u32) -> (u64, u64) {
+        let bytes = |arts: &[ModelArtifact]| arts.iter().map(|a| a.expected_bytes).sum::<u64>();
+        let kv = self.kv_bytes_per_token * u64::from(context);
+        match device {
+            // Both sessions sit on the GPU, plus ~6% runtime buffers; ~30% of the weights stays resident in RAM.
+            OcrDevice::Webgpu | OcrDevice::Directml => {
+                let weights = bytes(self.embed) + bytes(self.decoder);
+                (weights * 106 / 100 + kv, weights * 3 / 10)
+            }
+            // The embedding tables are memory-mapped and only the rows for seen tokens get paged in.
+            OcrDevice::Cpu => (0, bytes(self.decoder) + kv),
+        }
     }
 }
 
@@ -95,6 +113,8 @@ const fn art(release: &'static str, file_name: &'static str, expected_bytes: u64
 }
 
 const GEMMA4_E4B_TOKENIZER: ModelArtifact = art(GEMMA4_E4B, "tokenizer.json", 19_439_251);
+/// 24 layers × K/V × 2 heads: 20 with head_dim 256, 4 with 512.
+const GEMMA4_E4B_KV_ELEMS: u64 = 2 * 2 * (20 * 256 + 4 * 512);
 
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     BuiltinModelSpec {
@@ -113,6 +133,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data", 2_093_703_168),
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_286_205_440),
         ],
+        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
     },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-q4f16",
@@ -129,6 +150,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 2_074_847_232),
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 812_318_720),
         ],
+        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
     },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-int8",
@@ -148,6 +170,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_quantized.onnx_data_1", 2_053_529_600),
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_quantized.onnx_data_2", 1_624_637_440),
         ],
+        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
     },
 ];
 
@@ -161,6 +184,7 @@ mod tests {
             assert!(BUILTIN_MODELS[..i].iter().all(|o| o.id != m.id), "duplicate id {}", m.id);
             assert_eq!(m.tokenizer.file_name, "tokenizer.json", "{}", m.id);
             assert!(m.embed[0].file_name.ends_with(".onnx") && m.decoder[0].file_name.ends_with(".onnx"), "{}", m.id);
+            assert!(m.kv_bytes_per_token > 0, "{}", m.id);
             for a in m.artifacts() {
                 assert!(a.expected_bytes > 0, "{} {}", m.id, a.file_name);
                 assert!(a.download_url().contains("/resolve/") && !a.download_url().contains("/resolve/main/"), "{}", a.download_url());

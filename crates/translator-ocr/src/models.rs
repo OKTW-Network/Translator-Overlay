@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use translator_core::ModelTier;
+use translator_core::{ModelTier, OcrDevice};
 
 const OAR_V070: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0";
 
@@ -32,6 +32,26 @@ pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {
         ModelTier::Small => &SMALL,
         ModelTier::Medium => &MEDIUM,
     }
+}
+
+/// Rough peak `(VRAM, RAM)` bytes on a 1080p frame, with the layout model if `layout`.
+/// Measured on a Radeon RX 9070 XT; ONNX Runtime arenas, not file size, dominate.
+pub fn memory_estimate(tier: ModelTier, device: OcrDevice, layout: bool) -> (u64, u64) {
+    const MB: u64 = 1 << 20;
+    let (vram, ram) = match (tier, device) {
+        (ModelTier::Tiny | ModelTier::Small, OcrDevice::Webgpu) => (350, 150),
+        (ModelTier::Tiny | ModelTier::Small, OcrDevice::Directml) => (410, 150),
+        (ModelTier::Tiny | ModelTier::Small, OcrDevice::Cpu) => (0, 100),
+        (ModelTier::Medium, OcrDevice::Webgpu) => (1550, 430),
+        (ModelTier::Medium, OcrDevice::Directml) => (1100, 420),
+        (ModelTier::Medium, OcrDevice::Cpu) => (0, 390),
+    };
+    let (layout_vram, layout_ram) = match (layout, device) {
+        (false, _) => (0, 0),
+        (true, OcrDevice::Cpu) => (0, 300),
+        (true, OcrDevice::Webgpu | OcrDevice::Directml) => (500, 50),
+    };
+    ((vram + layout_vram) * MB, (ram + layout_ram) * MB)
 }
 
 const TINY: [ModelArtifact; 3] = [
