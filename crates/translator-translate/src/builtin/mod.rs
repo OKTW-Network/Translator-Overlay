@@ -5,7 +5,7 @@
 
 mod catalog;
 
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use half::f16;
 use ort::{
@@ -400,7 +400,9 @@ impl Loaded {
             Some(c) => (c.past, c.ids.len()),
             None => (self.empty_past(context)?, 0),
         };
-        info!(model = self.spec.id, prompt_tokens = prompt_len, reused = fed, "built-in model prefill");
+        let reused = fed;
+        let start = Instant::now();
+        let mut prefill = None;
         let kv_mem = kv_memory(self.device)?;
         let cpu_mem = MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::Default)?;
         let eos = self.spec.arch.eos_ids();
@@ -443,6 +445,7 @@ impl Loaded {
                 .collect::<ort::Result<_>>()?;
             drop(outputs);
             fed = total;
+            prefill.get_or_insert_with(|| start.elapsed());
 
             let next = match logits.dtype().tensor_type() {
                 Some(TensorElementType::Float16) => {
@@ -474,6 +477,20 @@ impl Loaded {
                 return Ok(Err(TranslateError::ContextFull(context)));
             }
         }
+        // The first step feeds every uncached prompt token; each later step feeds one.
+        let prefill = prefill.unwrap_or_default();
+        let decode = start.elapsed() - prefill;
+        info!(
+            model = self.spec.id,
+            prompt_tokens = prompt_len,
+            reused,
+            output_tokens = ids.len() - prompt_len,
+            prefill_ms = prefill.as_millis() as u64,
+            prefill_tps = format_args!("{:.1}", (prompt_len - reused) as f64 / prefill.as_secs_f64()),
+            decode_ms = decode.as_millis() as u64,
+            decode_tps = format_args!("{:.1}", (fed - prompt_len) as f64 / decode.as_secs_f64()),
+            "built-in model generated"
+        );
         self.cache = Some(KvCache {
             text: format!("{prompt}{}", self.tokenizer.decode(&ids[prompt_len..fed], true)?),
             ids: ids[..fed].to_vec(),
