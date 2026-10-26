@@ -99,8 +99,8 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 | 量化 | 下載大小 |
 | --- | --- |
-| q4（預設） | 5.6 GB |
 | q4f16 | 4.9 GB |
+| q4（預設） | 5.6 GB |
 | int8 | 9.8 GB |
 
 裝置可選 WebGPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。

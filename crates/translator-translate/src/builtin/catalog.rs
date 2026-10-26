@@ -91,12 +91,15 @@ impl BuiltinModelSpec {
     }
 }
 
-/// Empty `id` selects the first entry.
+/// Model used when the config leaves `builtin_model` empty.
+const DEFAULT_ID: &str = "gemma-4-e4b-it-q4";
+
+/// Empty `id` selects `DEFAULT_ID`.
 pub fn find(id: &str) -> Option<&'static BuiltinModelSpec> {
-    let id = id.trim();
-    if id.is_empty() {
-        return BUILTIN_MODELS.first();
-    }
+    let id = match id.trim() {
+        "" => DEFAULT_ID,
+        id => id,
+    };
     BUILTIN_MODELS.iter().find(|m| m.id == id)
 }
 
@@ -116,7 +119,25 @@ const GEMMA4_E4B_TOKENIZER: ModelArtifact = art(GEMMA4_E4B, "tokenizer.json", 19
 /// 24 layers × K/V × 2 heads: 20 with head_dim 256, 4 with 512.
 const GEMMA4_E4B_KV_ELEMS: u64 = 2 * 2 * (20 * 256 + 4 * 512);
 
+/// Sorted by download size.
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
+    BuiltinModelSpec {
+        id: "gemma-4-e4b-it-q4f16",
+        label: "Gemma 4 E4B · q4f16 (4.9 GB)",
+        arch: BuiltinArch::Gemma4,
+        dir: "gemma-4-e4b-it",
+        tokenizer: GEMMA4_E4B_TOKENIZER,
+        embed: &[
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx", 5_619),
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx_data", 2_017_460_224),
+        ],
+        decoder: &[
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx", 850_610),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 2_074_847_232),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 812_318_720),
+        ],
+        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
+    },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-q4",
         label: "Gemma 4 E4B · q4 (5.6 GB)",
@@ -134,23 +155,6 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_286_205_440),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
-    },
-    BuiltinModelSpec {
-        id: "gemma-4-e4b-it-q4f16",
-        label: "Gemma 4 E4B · q4f16 (4.9 GB)",
-        arch: BuiltinArch::Gemma4,
-        dir: "gemma-4-e4b-it",
-        tokenizer: GEMMA4_E4B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx", 5_619),
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx_data", 2_017_460_224),
-        ],
-        decoder: &[
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx", 850_610),
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 2_074_847_232),
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 812_318_720),
-        ],
-        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
     },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-int8",
@@ -190,7 +194,7 @@ mod tests {
                 assert!(a.download_url().contains("/resolve/") && !a.download_url().contains("/resolve/main/"), "{}", a.download_url());
             }
         }
-        assert_eq!(find("").map(|m| m.id), BUILTIN_MODELS.first().map(|m| m.id));
+        assert_eq!(find("").map(|m| m.id), Some(DEFAULT_ID));
         assert_eq!(find(" gemma-4-e4b-it-q4 ").map(|m| m.id), Some("gemma-4-e4b-it-q4"));
         assert!(find("nope").is_none());
     }

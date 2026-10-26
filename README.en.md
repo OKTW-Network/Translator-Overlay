@@ -99,8 +99,8 @@ Source: [onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-communi
 
 | Quantization | Download size |
 | --- | --- |
-| q4 (default) | 5.6 GB |
 | q4f16 | 4.9 GB |
+| q4 (default) | 5.6 GB |
 | int8 | 9.8 GB |
 
 The device is WebGPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
