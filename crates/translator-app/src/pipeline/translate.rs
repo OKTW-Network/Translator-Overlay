@@ -267,11 +267,25 @@ impl Pipeline {
                     apply_translated(&self.state, self.overlay.as_ref(), translated, job.content_width, job.content_height);
                 }
                 Err(e) => {
-                    error!(error = %e, "failed to merge translation");
                     // Drop the pending user turn so the next translate does not
                     // store invalid model JSON as assistant context.
                     self.conversation.rollback_user_turn();
                     self.apply_stream_preview(&job, &[]);
+                    let max_retries = self.state.read().config.api.max_retries;
+                    // A cut-off or malformed reply (e.g. a dropped closing quote) often parses on the next try.
+                    if retry_attempt < max_retries {
+                        warn!(attempt = retry_attempt + 1, max_retries, error = %e, "unparsable translation; resending");
+                        self.state.write().last_error = Some(e.to_string());
+                        let page = PendingPage {
+                            blocks: job.blocks,
+                            fingerprint: job.fingerprint,
+                            content_width: job.content_width,
+                            content_height: job.content_height,
+                        };
+                        self.launch_translate_job(page, job.cached_hits, job.miss_blocks, retry_attempt + 1);
+                        return;
+                    }
+                    error!(error = %e, "failed to merge translation");
                     self.fail_translate(t!("err.translate_parse", error = e.to_string()).into_owned());
                 }
             },
@@ -487,6 +501,34 @@ mod tests {
         assert!(matches!(s.status, PipelineStatus::Error { .. }), "{:?}", s.status);
         assert!(!s.translate_in_flight);
         assert_eq!(p.translation_cache.len(), 1, "the translated block stays cached");
+    }
+
+    #[tokio::test]
+    async fn unparsable_reply_is_resent_then_fails_when_retries_run_out() {
+        let mut p = pipeline(1);
+        let blocks = vec![block(1, "A")];
+        p.start_translate(
+            PendingPage {
+                fingerprint: OcrFingerprint::from_blocks(&blocks),
+                blocks,
+                content_width: 100,
+                content_height: 100,
+            },
+            false,
+        );
+
+        // Dropped closing quote: resend the same block as attempt 1 without keeping the bad turn.
+        let job = p.inflight.take().expect("first job");
+        p.finish_translate(job, reply(r#"{"b":[[1,"T]}"#, 0));
+        let retry = p.inflight.as_ref().expect("retry job for the unparsable reply");
+        assert_eq!(retry.miss_blocks.iter().map(|b| b.id).collect::<Vec<_>>(), [1]);
+        assert!(matches!(p.state.read().status, PipelineStatus::RetryingTranslate { attempt: 1, .. }));
+
+        let job = p.inflight.take().expect("retry job");
+        p.finish_translate(job, reply(r#"{"b":[[1,"T]}"#, 1));
+        assert!(p.inflight.is_none(), "exhausted retries must not launch another job");
+        assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
+        assert_eq!(p.conversation.turn_count(), 0, "no unparsable turn is kept");
     }
 
     #[tokio::test]
