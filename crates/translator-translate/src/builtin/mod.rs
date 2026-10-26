@@ -105,7 +105,11 @@ pub(crate) async fn complete(
     let sampling = Some(Sampling {
         temperature: api.temperature.unwrap_or(temperature),
         top_p: api.top_p.unwrap_or(top_p),
-        top_k: api.top_k.unwrap_or(top_k).max(1) as usize,
+        // 0 turns top-k off.
+        top_k: match api.top_k.unwrap_or(top_k) {
+            0 => usize::MAX,
+            k => k as usize,
+        },
     })
     .filter(|s| s.temperature > 0.0);
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();

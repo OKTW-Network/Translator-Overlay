@@ -640,9 +640,9 @@ fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
         max_tokens_enabled: cfg.api.max_tokens.is_some(),
         reasoning_enabled: cfg.api.reasoning_effort.as_ref().is_some_and(|s| !s.trim().is_empty()),
         // Always keep a valid number (toggle off = omit on save, not empty field).
-        temp_val: f64::from(cfg.api.temperature.unwrap_or(0.7)),
-        top_p_val: f64::from(cfg.api.top_p.unwrap_or(0.9)),
-        top_k_val: f64::from(cfg.api.top_k.unwrap_or(64)),
+        temp_val: f64::from(cfg.api.temperature.unwrap_or(1.0)),
+        top_p_val: f64::from(cfg.api.top_p.unwrap_or(0.95)),
+        top_k_val: f64::from(cfg.api.top_k.unwrap_or(40)),
         max_tokens_val: f64::from(cfg.api.max_tokens.unwrap_or(2048)),
         reasoning_str: cfg.api.reasoning_effort.clone().unwrap_or_else(|| "medium".into()),
     }
@@ -675,7 +675,7 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
         None
     };
     cfg.api.top_k = if o.top_k_enabled {
-        Some(o.top_k_val.round().clamp(1.0, 1000.0) as u32)
+        Some(o.top_k_val.round().clamp(0.0, 1000.0) as u32)
     } else {
         None
     };

@@ -358,7 +358,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 key: "api-top-k",
                 header: t!("api.top_k"),
                 description: Some(t!("api.top_k_desc")),
-                min: 1.0,
+                min: 0.0,
                 max: 1000.0,
                 step: 1.0,
             },
