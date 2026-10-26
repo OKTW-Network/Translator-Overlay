@@ -1,4 +1,4 @@
-//! Built-in ONNX LLM: download, load, and greedy generation with an on-device KV cache.
+//! Built-in ONNX LLM: download, load, and generation with an on-device KV cache.
 //!
 //! Models follow the onnx-community layout: `embed_tokens` (ids → embeddings) feeding a merged
 //! decoder with `past_key_values.*` inputs and `present.*` outputs.
@@ -100,13 +100,21 @@ pub(crate) async fn complete(
     let prompt = spec.arch.render_prompt(messages);
     let max_tokens = api.max_tokens.map_or(DEFAULT_MAX_TOKENS, |n| n as usize);
     let context = api.builtin_context_tokens as usize;
+    // Unset knobs take the model's recommended values; temperature 0 is greedy.
+    let (temperature, top_p, top_k) = spec.arch.sampling_defaults();
+    let sampling = Some(Sampling {
+        temperature: api.temperature.unwrap_or(temperature),
+        top_p: api.top_p.unwrap_or(top_p),
+        top_k: api.top_k.unwrap_or(top_k).max(1) as usize,
+    })
+    .filter(|s| s.temperature > 0.0);
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let cancel_job = cancel.clone();
     let job = tokio::task::spawn_blocking(move || {
         let Some(loaded) = backend.loaded.as_mut() else {
             return Ok(Err(TranslateError::Cancelled));
         };
-        loaded.generate(&prompt, max_tokens, context, &cancel_job, |text| drop(tx.send(text.to_owned())))
+        loaded.generate(&prompt, max_tokens, context, sampling, &cancel_job, |text| drop(tx.send(text.to_owned())))
     });
     // Ends when the job drops its sender.
     while let Some(text) = rx.recv().await {
@@ -168,6 +176,7 @@ struct Loaded {
     kv_type: TensorElementType,
     per_layer_inputs: bool,
     cache: Option<KvCache>,
+    rng: fastrand::Rng,
     /// Allocates the in-place KV buffers. Declared after `cache` so it outlives them.
     kv_alloc: Allocator,
 }
@@ -226,6 +235,66 @@ fn argmax<T: Copy>(values: &[T], to_f32: impl Fn(T) -> f32) -> u32 {
     best.0 as u32
 }
 
+/// Random token choice. Without it a retry after an unparsable reply repeats the same reply.
+#[derive(Clone, Copy)]
+struct Sampling {
+    /// Above 0.
+    temperature: f32,
+    /// 1 keeps every token.
+    top_p: f32,
+    /// At least 1; `usize::MAX` keeps every token.
+    top_k: usize,
+}
+
+impl Sampling {
+    fn pick<T: Copy>(&self, logits: &[T], to_f32: impl Fn(T) -> f32, rng: &mut fastrand::Rng) -> u32 {
+        // One pass keeping the best `top_k`; most tokens lose to the weakest kept one and are skipped.
+        let mut cand: Vec<(u32, f32)> = Vec::with_capacity(self.top_k.min(logits.len()));
+        let mut weakest = 0;
+        for (i, &l) in logits.iter().enumerate() {
+            let c = (i as u32, to_f32(l));
+            if cand.len() < self.top_k {
+                cand.push(c);
+            } else if c.1 > cand[weakest].1 {
+                cand[weakest] = c;
+            } else {
+                continue;
+            }
+            if cand.len() == self.top_k {
+                weakest = (0..cand.len()).min_by(|&a, &b| cand[a].1.total_cmp(&cand[b].1)).unwrap_or(0);
+            }
+        }
+        let by_logit = |a: &(u32, f32), b: &(u32, f32)| b.1.total_cmp(&a.1);
+        // Only top-p needs the order; a full-vocab sort per token is the slow part.
+        if self.top_p < 1.0 {
+            cand.sort_unstable_by(by_logit);
+        }
+        let max = cand.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+        let weights: Vec<f32> = cand.iter().map(|c| ((c.1 - max) / self.temperature).exp()).collect();
+        let mut kept = weights.len();
+        if self.top_p < 1.0 {
+            let target = self.top_p * weights.iter().sum::<f32>();
+            let mut sum = 0.0;
+            kept = weights
+                .iter()
+                .position(|w| {
+                    sum += w;
+                    sum >= target
+                })
+                .map_or(kept, |i| i + 1);
+        }
+        let mut r = rng.f32() * weights[..kept].iter().sum::<f32>();
+        for (c, w) in cand.iter().zip(&weights[..kept]) {
+            if r < *w {
+                return c.0;
+            }
+            r -= w;
+        }
+        // Float rounding left `r` past the last weight.
+        cand[kept - 1].0
+    }
+}
+
 impl Loaded {
     fn load(spec: &'static BuiltinModelSpec, device: OcrDevice, dir: &Path) -> ort::Result<Self> {
         initialize_ort_environment()?;
@@ -275,6 +344,7 @@ impl Loaded {
             kv_type,
             per_layer_inputs,
             cache: None,
+            rng: fastrand::Rng::new(),
             kv_alloc,
         })
     }
@@ -296,17 +366,17 @@ impl Loaded {
             .collect()
     }
 
-    /// Greedy decode. `on_text` gets the whole reply so far after each token.
+    /// Decode greedily when `sampling` is `None`. `on_text` gets the whole reply so far after each token.
     /// The inner error is [`TranslateError::Cancelled`] or [`TranslateError::ContextFull`].
     fn generate(
         &mut self,
         prompt: &str,
         max_tokens: usize,
         context: usize,
+        sampling: Option<Sampling>,
         cancel: &CancellationToken,
         mut on_text: impl FnMut(&str),
     ) -> ort::Result<Result<String, TranslateError>> {
-        // shortcut: greedy only; add temperature/top_p sampling if replies need variety.
         // shortcut: only a whole cached prefix is reused (the Concat layers' KV cannot be cut);
         // trimmed history or a new system prompt re-prefills everything.
         // `filter` drops a stale cache before `empty_past` allocates the next one.
@@ -371,8 +441,20 @@ impl Loaded {
             fed = total;
 
             let next = match logits.dtype().tensor_type() {
-                Some(TensorElementType::Float16) => argmax(logits.try_extract_tensor::<f16>()?.1, f16::to_f32),
-                _ => argmax(logits.try_extract_tensor::<f32>()?.1, |v| v),
+                Some(TensorElementType::Float16) => {
+                    let values = logits.try_extract_tensor::<f16>()?.1;
+                    match &sampling {
+                        Some(s) => s.pick(values, f16::to_f32, &mut self.rng),
+                        None => argmax(values, f16::to_f32),
+                    }
+                }
+                _ => {
+                    let values = logits.try_extract_tensor::<f32>()?.1;
+                    match &sampling {
+                        Some(s) => s.pick(values, |v| v, &mut self.rng),
+                        None => argmax(values, |v| v),
+                    }
+                }
             };
             if eos.contains(&next) {
                 break;
@@ -406,5 +488,41 @@ mod tests {
     fn argmax_picks_first_max() {
         assert_eq!(argmax(&[1.0_f32, 3.0, 3.0, -1.0], |v| v), 1);
         assert_eq!(argmax(&[f16::from_f32(-2.0), f16::from_f32(0.5)], f16::to_f32), 1);
+    }
+
+    #[test]
+    fn sampling_respects_top_k_and_top_p() {
+        let logits = [0.0, 2.0, 1.9, -1.0, 1.8];
+        let mut rng = fastrand::Rng::with_seed(7);
+        let pick = |s: Sampling, rng: &mut fastrand::Rng| (0..200).map(|_| s.pick(&logits, |v| v, rng)).collect::<Vec<_>>();
+        let s = Sampling {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 2,
+        };
+        let picks = pick(s, &mut rng);
+        assert!(picks.iter().all(|&t| t == 1 || t == 2) && picks.contains(&1) && picks.contains(&2));
+        // Tokens 1 and 2 hold ~0.34 and ~0.31 of the mass, so 0.5 keeps exactly those two.
+        let picks = pick(
+            Sampling {
+                top_p: 0.5,
+                top_k: usize::MAX,
+                ..s
+            },
+            &mut rng,
+        );
+        assert!(picks.iter().all(|&t| t == 1 || t == 2) && picks.contains(&2));
+        assert!(
+            pick(
+                Sampling {
+                    top_p: 0.0,
+                    top_k: usize::MAX,
+                    ..s
+                },
+                &mut rng
+            )
+            .iter()
+            .all(|&t| t == 1)
+        );
     }
 }

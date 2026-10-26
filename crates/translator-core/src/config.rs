@@ -321,6 +321,8 @@ pub struct ApiConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -359,6 +361,7 @@ impl Default for ApiConfig {
             model: String::new(),
             temperature: None,
             top_p: None,
+            top_k: None,
             max_tokens: None,
             reasoning_effort: None,
             structured_outputs: true,

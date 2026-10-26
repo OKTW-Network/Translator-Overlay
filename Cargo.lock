@@ -3232,6 +3232,7 @@ dependencies = [
 name = "translator-translate"
 version = "0.6.0"
 dependencies = [
+ "fastrand",
  "half",
  "ort",
  "reqwest",

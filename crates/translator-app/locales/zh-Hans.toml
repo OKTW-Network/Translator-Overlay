@@ -183,6 +183,7 @@ send_reasoning_desc = "后续回合把模型的推理内容一起发回。若端
 optional = "可选参数"
 temperature_desc = "越高越随机（0–2）。"
 top_p_desc = "Nucleus sampling 上限（0–1）。"
+top_k_desc = "只从概率最高的 K 个 token 中采样。"
 max_tokens = "最大 token 数"
 max_tokens_desc = "回复长度上限。实际限制视模型而定。"
 reasoning = "推理强度"

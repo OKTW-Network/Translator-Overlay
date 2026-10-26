@@ -36,6 +36,13 @@ impl BuiltinArch {
         }
     }
 
+    /// `(temperature, top_p, top_k)` from the model's `generation_config.json`.
+    pub fn sampling_defaults(self) -> (f32, f32, u32) {
+        match self {
+            Self::Gemma4 => (1.0, 0.95, 64),
+        }
+    }
+
     /// For KV inputs given as `(layer, head_dim)` in decoder input order: whether only
     /// `GroupQueryAttention` reads it, which appends into a preallocated
     /// `[1, heads, context, head_dim]` buffer bound as both past and present.

@@ -11,7 +11,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 - **本機 OCR**：PP-OCRv6（tiny / small / medium），ONNX Runtime + WebGPU 或 DirectML（失敗時回退 CPU）。畫面穩定後才送翻譯（文字一直變動時可設定強制翻譯時間）；可過濾單字元雜訊、動畫誤辨識
 - **多行合併**：關閉 / 位置規則 / 智慧偵測（PP-DocLayoutV3 版面分析）/ 整區合併；分隔可選無、空白或換行；閱讀順序可選橫排或直排，直排文字一律由右至左讀
 - **LLM 翻譯**：內建模型（本機執行）、OpenAI 相容 API（Chat Completions 或 Responses），或本機 Grok / OpenCode / Codex / Claude Code。串流時 Overlay 與翻譯視窗會隨譯文即時更新；可自訂 System prompt（只取代風格，輸出格式與語言不變）
-- **API 選項**：Structured outputs、串流、回送 reasoning、Temperature / Top P / Max tokens / Reasoning effort、Priority 模式；逾時、重試次數與退避；Model 欄位可從 Provider 清單自動完成。翻譯失敗時控制視窗的工作列按鈕會閃爍
+- **API 選項**：Structured outputs、串流、回送 reasoning、Temperature / Top P / Top K / Max tokens / Reasoning effort、Priority 模式；逾時、重試次數與退避；Model 欄位可從 Provider 清單自動完成。翻譯失敗時控制視窗的工作列按鈕會閃爍
 - **翻譯對照**：可把原文→譯文詞條存成具名設定檔並送給模型；詞條愈多 Token 消耗愈多
 - **翻譯記憶與上下文**：同一句原文本會話只翻一次（LFU 快取，可調大小、手動清空，關閉程式後清空）；多輪歷史維持用語一致，可 **Clear history** 重新開始
 - **顯示**：點擊可穿透的 Overlay（跟隨目標視窗與捲動的文字，目標最小化時隱藏；譯文不重疊，必要時加寬、縮小或換行）+ 獨立置頂翻譯視窗（拖曳移動、邊緣縮放）。文字與背景色可含透明度；Overlay 字級可自動貼合原文或固定大小

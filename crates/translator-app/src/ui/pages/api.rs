@@ -320,7 +320,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         cx.edit(|ui, v| ui.optional.reasoning_str = v),
         cx.edit(|ui, on| ui.optional.reasoning_enabled = on),
     )?;
-    let http_sampling = |ui: &UiShared| ui.draft.api.provider.is_http();
+    let sampling_applies = |ui: &UiShared| ui.draft.api.provider.is_http() || ui.draft.api.provider == ModelProvider::Builtin;
     let sampling = column(4.0)?;
     children!(sampling;
         section_header(&t!("api.optional"))?,
@@ -334,7 +334,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 max: 2.0,
                 step: 0.05,
             },
-            move |ui| (ui.optional.temp_val, ui.optional.temp_enabled, http_sampling(ui)),
+            move |ui| (ui.optional.temp_val, ui.optional.temp_enabled, sampling_applies(ui)),
             cx.edit(|ui, v| ui.optional.temp_val = v),
             cx.edit(|ui, on| ui.optional.temp_enabled = on),
         )?,
@@ -348,9 +348,23 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 max: 1.0,
                 step: 0.01,
             },
-            move |ui| (ui.optional.top_p_val, ui.optional.top_p_enabled, http_sampling(ui)),
+            move |ui| (ui.optional.top_p_val, ui.optional.top_p_enabled, sampling_applies(ui)),
             cx.edit(|ui, v| ui.optional.top_p_val = v),
             cx.edit(|ui, on| ui.optional.top_p_enabled = on),
+        )?,
+        optional_number_row(
+            b,
+            SliderNumberParams {
+                key: "api-top-k",
+                header: t!("api.top_k"),
+                description: Some(t!("api.top_k_desc")),
+                min: 1.0,
+                max: 1000.0,
+                step: 1.0,
+            },
+            move |ui| (ui.optional.top_k_val, ui.optional.top_k_enabled, sampling_applies(ui)),
+            cx.edit(|ui, v| ui.optional.top_k_val = v),
+            cx.edit(|ui, on| ui.optional.top_k_enabled = on),
         )?,
         optional_number_row(
             b,
@@ -362,10 +376,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
                 max: 1_000_000.0,
                 step: 1.0,
             },
-            move |ui| {
-                let applicable = http_sampling(ui) || ui.draft.api.provider == ModelProvider::Builtin;
-                (ui.optional.max_tokens_val, ui.optional.max_tokens_enabled, applicable)
-            },
+            move |ui| (ui.optional.max_tokens_val, ui.optional.max_tokens_enabled, sampling_applies(ui)),
             cx.edit(|ui, v| ui.optional.max_tokens_val = v),
             cx.edit(|ui, on| ui.optional.max_tokens_enabled = on),
         )?,

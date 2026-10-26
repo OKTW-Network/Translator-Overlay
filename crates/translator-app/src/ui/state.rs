@@ -622,10 +622,12 @@ pub fn load_api_profile(ui: &mut UiShared) -> Result<(), String> {
 pub struct OptionalApiState {
     pub temp_val: f64,
     pub top_p_val: f64,
+    pub top_k_val: f64,
     pub max_tokens_val: f64,
     pub reasoning_str: String,
     pub temp_enabled: bool,
     pub top_p_enabled: bool,
+    pub top_k_enabled: bool,
     pub max_tokens_enabled: bool,
     pub reasoning_enabled: bool,
 }
@@ -634,11 +636,13 @@ fn optional_api_state(cfg: &AppConfig) -> OptionalApiState {
     OptionalApiState {
         temp_enabled: cfg.api.temperature.is_some(),
         top_p_enabled: cfg.api.top_p.is_some(),
+        top_k_enabled: cfg.api.top_k.is_some(),
         max_tokens_enabled: cfg.api.max_tokens.is_some(),
         reasoning_enabled: cfg.api.reasoning_effort.as_ref().is_some_and(|s| !s.trim().is_empty()),
         // Always keep a valid number (toggle off = omit on save, not empty field).
         temp_val: f64::from(cfg.api.temperature.unwrap_or(0.7)),
         top_p_val: f64::from(cfg.api.top_p.unwrap_or(0.9)),
+        top_k_val: f64::from(cfg.api.top_k.unwrap_or(64)),
         max_tokens_val: f64::from(cfg.api.max_tokens.unwrap_or(2048)),
         reasoning_str: cfg.api.reasoning_effort.clone().unwrap_or_else(|| "medium".into()),
     }
@@ -667,6 +671,11 @@ pub fn effective_draft(ui: &UiShared) -> AppConfig {
     };
     cfg.api.top_p = if o.top_p_enabled {
         Some(o.top_p_val.clamp(0.0, 1.0) as f32)
+    } else {
+        None
+    };
+    cfg.api.top_k = if o.top_k_enabled {
+        Some(o.top_k_val.round().clamp(1.0, 1000.0) as u32)
     } else {
         None
     };

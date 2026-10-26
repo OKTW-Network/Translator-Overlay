@@ -58,6 +58,8 @@ pub struct ChatCompletionRequestBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<&'a str>,
@@ -81,6 +83,8 @@ pub struct ResponsesRequestBody<'a> {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +113,7 @@ pub fn chat_completion_body<'a>(api: &'a ApiConfig, messages: &'a [ChatMessage],
         prompt_cache_retention: "24h",
         temperature: api.temperature,
         top_p: api.top_p,
+        top_k: api.top_k,
         max_tokens: api.max_tokens,
         reasoning_effort: api.reasoning_effort.as_deref(),
         response_format: api.structured_outputs.then(|| {
@@ -135,6 +140,7 @@ pub fn responses_request_body<'a>(api: &'a ApiConfig, items: &[ResponseItem], se
         prompt_cache_retention: "24h",
         temperature: api.temperature,
         top_p: api.top_p,
+        top_k: api.top_k,
         max_output_tokens: api.max_tokens,
         reasoning: api
             .reasoning_effort
@@ -843,6 +849,7 @@ mod tests {
     fn optional_api_params_included_when_set() {
         let api = ApiConfig {
             temperature: Some(0.2),
+            top_k: Some(40),
             reasoning_effort: Some("medium".to_string()),
             ..ApiConfig::default()
         };
@@ -850,6 +857,7 @@ mod tests {
         let json = serde_json::to_value(chat_completion_body(&api, &messages, "s")).unwrap();
         let temp = json["temperature"].as_f64().unwrap();
         assert!((temp - 0.2).abs() < 1e-5);
+        assert_eq!(json["top_k"], 40);
         assert_eq!(json["reasoning_effort"], "medium");
         assert!(json.get("top_p").is_none());
     }
@@ -872,6 +880,7 @@ mod tests {
         assert_eq!(json["input"][0]["content"], "hi");
         assert!(json.get("temperature").is_none());
         assert!(json.get("top_p").is_none());
+        assert!(json.get("top_k").is_none());
         assert!(json.get("max_output_tokens").is_none());
         assert!(json.get("reasoning").is_none());
         assert!(json.get("previous_response_id").is_none());
@@ -884,6 +893,7 @@ mod tests {
             max_tokens: Some(256),
             reasoning_effort: Some("high".into()),
             temperature: Some(0.2),
+            top_k: Some(40),
             ..ApiConfig::default()
         };
         let items = [
@@ -906,6 +916,7 @@ mod tests {
         assert_eq!(json["max_output_tokens"], 256);
         assert_eq!(json["reasoning"]["effort"], "high");
         assert!((json["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-5);
+        assert_eq!(json["top_k"], 40);
         assert!(json.get("reasoning_effort").is_none());
         assert_eq!(json["input"][2]["type"], "reasoning");
         assert_eq!(json["input"][2]["encrypted_content"], "enc");
