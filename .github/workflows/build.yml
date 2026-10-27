@@ -25,7 +25,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: third_party/onnxruntime-win-x64
-          key: ort-${{ hashFiles('scripts/build-onnxruntime.ps1') }}
+          key: ort-${{ hashFiles('scripts/build-onnxruntime.ps1', 'scripts/onnxruntime-patches/*.patch') }}
       - name: Build ONNX Runtime
         shell: pwsh
         run: .\scripts\build-onnxruntime.ps1

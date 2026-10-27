@@ -1,0 +1,14 @@
+diff --git a/onnxruntime/core/providers/webgpu/webgpu_context.cc b/onnxruntime/core/providers/webgpu/webgpu_context.cc
+index cc5567b..b7e5d89 100644
+--- a/onnxruntime/core/providers/webgpu/webgpu_context.cc
++++ b/onnxruntime/core/providers/webgpu/webgpu_context.cc
+@@ -859,6 +859,9 @@ std::vector<const char*> WebGpuContext::GetEnabledDeviceToggles() const {
+ std::vector<const char*> WebGpuContext::GetDisabledDeviceToggles() const {
+   constexpr const char* toggles[] = {
+       "timestamp_quantization",
++      // Over budget, Dawn's residency manager evicts and re-uploads heaps every submit (~2 s/token for a
++      // 14 GB model on a 16 GB GPU); without it the driver lets the GPU read spilled memory in place.
++      "use_d3d12_residency_management",
+   };
+   return std::vector<const char*>(std::begin(toggles), std::end(toggles));
+ }

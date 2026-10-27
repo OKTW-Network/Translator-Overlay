@@ -3,6 +3,12 @@ param([switch]$Force)
 $ErrorActionPreference = "Stop"
 
 $OrtTag = "v1.31.0"
+# Local fixes applied on top of $OrtTag, in name order.
+$Patches = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "onnxruntime-patches") -Filter *.patch | Sort-Object Name)
+# The staged VERSION names the patch set too, so editing a patch triggers a rebuild.
+$patchHashes = ($Patches | Get-FileHash -Algorithm SHA256).Hash -join ","
+$Stamp = "$OrtTag+" + [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($patchHashes))).Substring(0, 12)
 $RequiredNames = @(
     "onnxruntime.dll",
     "onnxruntime.lib",
@@ -22,7 +28,7 @@ function Test-Staged {
         }
     }
     $got = Get-Content -LiteralPath (Join-Path $Dir "VERSION") -ErrorAction SilentlyContinue
-    return ($got -eq $OrtTag)
+    return ($got -eq $Stamp)
 }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -49,6 +55,7 @@ Write-Host "==> Source: $SourceDir"
 Write-Host "==> Build:  $BuildDir"
 Write-Host "==> Out:    $OutDir"
 Write-Host "==> Tag:    $OrtTag"
+Write-Host "==> Stamp:  $Stamp"
 
 if (-not (Test-Path -LiteralPath $SourceDir)) {
     New-Item -ItemType Directory -Force -Path (Split-Path $SourceDir) | Out-Null
@@ -66,6 +73,15 @@ try {
     $env:GIT_CONFIG_COUNT = "1"
     $env:GIT_CONFIG_KEY_0 = "core.longpaths"
     $env:GIT_CONFIG_VALUE_0 = "true"
+    # Undo earlier patch runs (and any other edits to the patched files) so the tag switch and the
+    # patches below start from clean files.
+    foreach ($patch in $Patches) {
+        $files = @(git apply --numstat $patch.FullName | ForEach-Object { ($_ -split "`t")[2] })
+        git checkout -- @files
+        if ($LASTEXITCODE -ne 0) {
+            throw "restoring files of $($patch.Name) failed with exit code $LASTEXITCODE"
+        }
+    }
     $head = (git describe --tags --exact-match HEAD 2>$null)
     $switchTag = $head -ne $OrtTag
     if ($switchTag) {
@@ -83,6 +99,13 @@ try {
     git submodule update --init --recursive
     if ($LASTEXITCODE -ne 0) {
         throw "git submodule update failed with exit code $LASTEXITCODE"
+    }
+    foreach ($patch in $Patches) {
+        Write-Host "==> Applying $($patch.Name)"
+        git apply $patch.FullName
+        if ($LASTEXITCODE -ne 0) {
+            throw "git apply $($patch.Name) failed with exit code $LASTEXITCODE"
+        }
     }
 
     # Dawn's DXC FindD3D12 reads WIN10_SDK_PATH from the registry; the 64-bit
@@ -104,7 +127,8 @@ try {
     }
 
     $stagedVersion = Get-Content -LiteralPath (Join-Path $OutDir "VERSION") -ErrorAction SilentlyContinue
-    $versionChanged = $switchTag -or (($null -ne $stagedVersion) -and ($stagedVersion -ne $OrtTag))
+    # Only a tag change needs a clean build; a patch change rebuilds the touched files incrementally.
+    $versionChanged = $switchTag -or (($null -ne $stagedVersion) -and (($stagedVersion -split '\+')[0] -ne $OrtTag))
     if ($Force -or $versionChanged) {
         # Leftover CMake/Dawn files from another ORT tag (or generator) misconfigure the next build.
         foreach ($buildRoot in @($BuildDir, (Join-Path $SourceDir "build"))) {
@@ -166,7 +190,7 @@ foreach ($name in $RequiredNames) {
     Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir $name) -Force
     Write-Host "  $name  <-  $src"
 }
-Set-Content -LiteralPath (Join-Path $OutDir "VERSION") -Value $OrtTag -NoNewline
+Set-Content -LiteralPath (Join-Path $OutDir "VERSION") -Value $Stamp -NoNewline
 
 if (-not (Test-Staged $OutDir)) {
     throw "Staging incomplete at $OutDir"
