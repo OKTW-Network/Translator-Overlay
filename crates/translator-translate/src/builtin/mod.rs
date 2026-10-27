@@ -355,11 +355,19 @@ impl Loaded {
     }
 
     /// The cache for a fresh prefill: in-place slots get a `context`-long buffer, the rest are empty.
-    fn empty_past(&self, context: usize) -> ort::Result<Vec<DynValue>> {
+    /// In-place buffers of `stale` (a dropped cache with the same `context`, or empty) are kept: the
+    /// prefill overwrites them from position 0, and ORT frees a dropped buffer only after the next
+    /// run, so new ones would briefly hold a second copy of the KV.
+    fn empty_past(&self, context: usize, stale: Vec<DynValue>) -> ort::Result<Vec<DynValue>> {
+        let mut stale = stale.into_iter();
         self.kv
             .iter()
             .map(|s| {
+                let old = stale.next();
                 if s.in_place {
+                    if let Some(old) = old {
+                        return Ok(old);
+                    }
                     return Ok(DynTensor::new(&self.kv_alloc, self.kv_type, [1, s.heads, context as i64, s.head_dim])?.into_dyn());
                 }
                 let shape = [1, s.heads, 0, s.head_dim];
@@ -384,11 +392,11 @@ impl Loaded {
     ) -> ort::Result<Result<String, TranslateError>> {
         // shortcut: only a whole cached prefix is reused (the out-of-place layers' KV cannot be cut);
         // trimmed history or a new system prompt re-prefills everything.
-        // `filter` drops a stale cache before `empty_past` allocates the next one.
-        let cache = self
-            .cache
-            .take()
-            .filter(|c| c.context == context && prompt.len() > c.text.len() && prompt.starts_with(&c.text));
+        let (cache, stale) = match self.cache.take() {
+            Some(c) if c.context == context && prompt.len() > c.text.len() && prompt.starts_with(&c.text) => (Some(c), Vec::new()),
+            Some(c) if c.context == context => (None, c.past),
+            _ => (None, Vec::new()),
+        };
         let mut ids = match &cache {
             Some(c) => [c.ids.as_slice(), self.tokenizer.encode(&prompt[c.text.len()..], false)?.get_ids()].concat(),
             None => self.tokenizer.encode(prompt, false)?.get_ids().to_vec(),
@@ -399,7 +407,7 @@ impl Loaded {
         }
         let (mut past, mut fed) = match cache {
             Some(c) => (c.past, c.ids.len()),
-            None => (self.empty_past(context)?, 0),
+            None => (self.empty_past(context, stale)?, 0),
         };
         let reused = fed;
         let start = Instant::now();
@@ -409,12 +417,18 @@ impl Loaded {
         let eos = self.spec.arch.eos_ids();
         let mut binding = self.decoder.create_binding()?;
         let mut text = String::new();
+        // A prefill run holds VRAM per fed token until it ends: buffers the WebGPU cache drops are
+        // reclaimed only once the GPU finishes. fp32 (q4) holds several MB per token (12B: +13 GB at
+        // 1500 tokens), and 256-token runs cap it at no speed cost; fp16 holds far less, and
+        // 512-token runs save ~0.4 GB for ~10% slower prefill, where smaller ones slow it much more.
+        let chunk = if self.kv_type == TensorElementType::Float32 { 256 } else { 512 };
         loop {
             if cancel.is_cancelled() {
                 return Ok(Err(TranslateError::Cancelled));
             }
-            let step: Vec<i64> = ids[fed..].iter().map(|&t| i64::from(t)).collect();
-            let (n, total) = (step.len(), ids.len());
+            let total = ids.len().min(fed.saturating_add(chunk));
+            let step: Vec<i64> = ids[fed..total].iter().map(|&t| i64::from(t)).collect();
+            let n = step.len();
             let mut embedded = self.embed.run(ort::inputs!["input_ids" => Tensor::from_array(([1, n], step))?])?;
             binding.bind_input("inputs_embeds", &embedded.remove("inputs_embeds").ok_or_else(|| missing("inputs_embeds"))?)?;
             if self.per_layer_inputs {
@@ -446,6 +460,9 @@ impl Loaded {
                 .collect::<ort::Result<_>>()?;
             drop(outputs);
             fed = total;
+            if fed < ids.len() {
+                continue;
+            }
             prefill.get_or_insert_with(|| start.elapsed());
 
             let next = match logits.dtype().tensor_type() {
@@ -478,7 +495,7 @@ impl Loaded {
                 return Ok(Err(TranslateError::ContextFull(context)));
             }
         }
-        // The first step feeds every uncached prompt token; each later step feeds one.
+        // The prefill feeds every uncached prompt token; each later step feeds one.
         let prefill = prefill.unwrap_or_default();
         let decode = start.elapsed() - prefill;
         info!(
