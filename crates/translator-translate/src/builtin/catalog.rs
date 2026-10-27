@@ -87,9 +87,10 @@ impl BuiltinModelSpec {
         let bytes = |arts: &[ModelArtifact]| arts.iter().map(|a| a.expected_bytes).sum::<u64>();
         let kv = self.kv_bytes_per_token * u64::from(context);
         match device {
-            // Both sessions sit on the GPU, plus ~6% runtime buffers; ~30% of the weights stays resident in RAM.
+            // The decoder sits on the GPU, plus ~6% runtime buffers; ~30% of it stays resident in RAM.
+            // The embedding runs on the CPU (see below).
             OcrDevice::Webgpu | OcrDevice::Directml => {
-                let weights = bytes(self.embed) + bytes(self.decoder);
+                let weights = bytes(self.decoder);
                 (weights * 106 / 100 + kv, weights * 3 / 10)
             }
             // The embedding tables are memory-mapped and only the rows for seen tokens get paged in.

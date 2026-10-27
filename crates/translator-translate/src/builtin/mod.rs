@@ -303,7 +303,8 @@ impl Loaded {
     fn load(spec: &'static BuiltinModelSpec, device: OcrDevice, dir: &Path) -> ort::Result<Self> {
         initialize_ort_environment()?;
         let tokenizer = Tokenizer::from_file(dir.join(spec.tokenizer.file_name))?;
-        let embed = session(device, &dir.join(spec.embed[0].file_name))?;
+        // A table lookup: as fast on the CPU, and keeps the embedding tables out of VRAM.
+        let embed = session(OcrDevice::Cpu, &dir.join(spec.embed[0].file_name))?;
         let decoder = session(device, &dir.join(spec.decoder[0].file_name))?;
 
         let mut kv = Vec::new();
