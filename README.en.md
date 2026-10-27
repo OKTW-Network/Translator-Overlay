@@ -95,17 +95,16 @@ The **Smart detection** line merge also needs `pp-doclayoutv3_fp16.onnx` (about 
 
 ## Built-in translation model
 
-Sources:
-
-- Gemma 4 E4B: [onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-community/gemma-4-E4B-it-ONNX), downloaded to `models/gemma-4-e4b-it/`.
-- Gemma 4 26B A4B: [james58899/gemma-4-26B-A4B-it-qat-ONNX](https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX), converted from Google's QAT checkpoint, downloaded to `models/gemma-4-26b-a4b-it-qat/`.
+Source: [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx) (all converted from Google's QAT checkpoints), each downloaded to its own subdirectory under `models/`.
 
 | Model | Quantization | Download size |
 | --- | --- | --- |
-| E4B | q4f16 | 4.9 GB |
-| E4B | q4 (default) | 5.6 GB |
-| E4B | int8 | 9.8 GB |
-| 26B A4B | QAT q4f16 | 14.3 GB |
+| E4B | q4f16 | 4.3 GB |
+| E4B | q4 (default) | 4.8 GB |
+| 12B | q4f16 | 6.8 GB |
+| 12B | q4 | 7.6 GB |
+| 26B A4B | q4f16 | 14.3 GB |
+| 26B A4B | q4 | 15.9 GB |
 
 The device is WebGPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
 

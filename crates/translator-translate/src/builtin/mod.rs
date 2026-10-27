@@ -382,7 +382,7 @@ impl Loaded {
         cancel: &CancellationToken,
         mut on_text: impl FnMut(&str),
     ) -> ort::Result<Result<String, TranslateError>> {
-        // shortcut: only a whole cached prefix is reused (the Concat layers' KV cannot be cut);
+        // shortcut: only a whole cached prefix is reused (the out-of-place layers' KV cannot be cut);
         // trimmed history or a new system prompt re-prefills everything.
         // `filter` drops a stale cache before `empty_past` allocates the next one.
         let cache = self

@@ -956,7 +956,7 @@ model = "my-model"
     fn builtin_roundtrip_and_blanking() {
         let mut config = AppConfig::default();
         config.api.provider = ModelProvider::Builtin;
-        config.api.builtin_model = "gemma-4-e4b-it-q4f16".into();
+        config.api.builtin_model = "gemma-4-e4b-it-qat-q4f16".into();
         config.api.builtin_device = OcrDevice::Directml;
         let text = toml::to_string_pretty(&config).unwrap();
         assert!(text.contains("provider = \"builtin\""), "got:\n{text}");
