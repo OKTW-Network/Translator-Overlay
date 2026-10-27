@@ -95,13 +95,17 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 
 ## 內建翻譯模型
 
-來源：[onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-community/gemma-4-E4B-it-ONNX)，下載到 `models/gemma-4-e4b-it/`。
+來源：
 
-| 量化 | 下載大小 |
-| --- | --- |
-| q4f16 | 4.9 GB |
-| q4（預設） | 5.6 GB |
-| int8 | 9.8 GB |
+- Gemma 4 E4B：[onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-community/gemma-4-E4B-it-ONNX)，下載到 `models/gemma-4-e4b-it/`。
+- Gemma 4 26B A4B：[james58899/gemma-4-26B-A4B-it-qat-ONNX](https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX)，由 Google 的 QAT 檢查點轉換，下載到 `models/gemma-4-26b-a4b-it-qat/`。
+
+| 模型 | 量化 | 下載大小 |
+| --- | --- | --- |
+| E4B | q4f16 | 4.9 GB |
+| E4B | q4（預設） | 5.6 GB |
+| E4B | int8 | 9.8 GB |
+| 26B A4B | QAT q4f16 | 14.3 GB |
 
 裝置可選 WebGPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。
 

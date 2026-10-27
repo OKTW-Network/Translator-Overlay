@@ -97,7 +97,7 @@ pub(crate) async fn complete(
 ) -> Result<String, TranslateError> {
     let spec = ensure_loaded(&mut backend, api, models_dir, cancel, on_status).await?;
 
-    let prompt = spec.arch.render_prompt(messages);
+    let prompt = spec.arch.render_prompt(messages, spec.empty_thought);
     let max_tokens = api.max_tokens.map_or(DEFAULT_MAX_TOKENS, |n| n as usize);
     let context = api.builtin_context_tokens as usize;
     // Unset knobs take the model's recommended values; temperature 0 is greedy.

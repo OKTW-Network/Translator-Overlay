@@ -95,13 +95,17 @@ The **Smart detection** line merge also needs `pp-doclayoutv3_fp16.onnx` (about 
 
 ## Built-in translation model
 
-Source: [onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-community/gemma-4-E4B-it-ONNX), downloaded to `models/gemma-4-e4b-it/`.
+Sources:
 
-| Quantization | Download size |
-| --- | --- |
-| q4f16 | 4.9 GB |
-| q4 (default) | 5.6 GB |
-| int8 | 9.8 GB |
+- Gemma 4 E4B: [onnx-community/gemma-4-E4B-it-ONNX](https://huggingface.co/onnx-community/gemma-4-E4B-it-ONNX), downloaded to `models/gemma-4-e4b-it/`.
+- Gemma 4 26B A4B: [james58899/gemma-4-26B-A4B-it-qat-ONNX](https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX), converted from Google's QAT checkpoint, downloaded to `models/gemma-4-26b-a4b-it-qat/`.
+
+| Model | Quantization | Download size |
+| --- | --- | --- |
+| E4B | q4f16 | 4.9 GB |
+| E4B | q4 (default) | 5.6 GB |
+| E4B | int8 | 9.8 GB |
+| 26B A4B | QAT q4f16 | 14.3 GB |
 
 The device is WebGPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
 

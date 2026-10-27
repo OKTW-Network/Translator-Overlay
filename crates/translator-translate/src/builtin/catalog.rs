@@ -15,16 +15,27 @@ pub enum BuiltinArch {
 
 impl BuiltinArch {
     /// Prompt text for `messages`, ending with an open model turn.
-    pub fn render_prompt(self, messages: &[ChatMessage]) -> String {
+    pub fn render_prompt(self, messages: &[ChatMessage], empty_thought: bool) -> String {
         match self {
             // Thinking stays off: no `<|think|>` in the system turn.
             Self::Gemma4 => {
+                // Earlier model turns keep the empty thought channel and their untrimmed reply (the
+                // official template drops and trims both): that matches their cached KV, so it gets reused.
+                let model = if empty_thought {
+                    "model\n<|channel>thought\n<channel|>"
+                } else {
+                    "model\n"
+                };
                 let mut out = String::from("<bos>");
                 for m in messages {
-                    let role = if m.role == "assistant" { "model" } else { m.role.as_str() };
-                    out.push_str(&format!("<|turn>{role}\n{}<turn|>\n", m.content.trim()));
+                    if m.role == "assistant" {
+                        out.push_str(&format!("<|turn>{model}{}<turn|>\n", m.content));
+                    } else {
+                        out.push_str(&format!("<|turn>{}\n{}<turn|>\n", m.role, m.content.trim()));
+                    }
                 }
-                out.push_str("<|turn>model\n");
+                out.push_str("<|turn>");
+                out.push_str(model);
                 out
             }
         }
@@ -75,6 +86,9 @@ pub struct BuiltinModelSpec {
     pub decoder: &'static [ModelArtifact],
     /// KV bytes per context token: Σ heads × head_dim over every `past_key_values.*` input × element size.
     pub kv_bytes_per_token: u64,
+    /// The model's chat template opens the model turn with an empty thought channel when thinking
+    /// is off (Gemma 4 26B and up), so it answers without thinking.
+    pub empty_thought: bool,
 }
 
 impl BuiltinModelSpec {
@@ -127,6 +141,10 @@ const GEMMA4_E4B_TOKENIZER: ModelArtifact = art(GEMMA4_E4B, "tokenizer.json", 19
 /// 24 layers × K/V × 2 heads: 20 with head_dim 256, 4 with 512.
 const GEMMA4_E4B_KV_ELEMS: u64 = 2 * 2 * (20 * 256 + 4 * 512);
 
+const GEMMA4_26B: &str = "https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX/resolve/7ca3feb896b2c28d199f6addc432be487dfd00b7";
+const GEMMA4_26B_ONNX: &str =
+    "https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX/resolve/7ca3feb896b2c28d199f6addc432be487dfd00b7/onnx";
+
 /// Sorted by download size.
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     BuiltinModelSpec {
@@ -145,6 +163,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 812_318_720),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
+        empty_thought: false,
     },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-q4",
@@ -163,6 +182,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_286_205_440),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
+        empty_thought: false,
     },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-int8",
@@ -183,6 +203,32 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_quantized.onnx_data_2", 1_624_637_440),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
+        empty_thought: false,
+    },
+    BuiltinModelSpec {
+        id: "gemma-4-26b-a4b-it-qat-q4f16",
+        label: "Gemma 4 26B A4B · QAT q4f16 (14.3 GB)",
+        arch: BuiltinArch::Gemma4,
+        dir: "gemma-4-26b-a4b-it-qat",
+        tokenizer: art(GEMMA4_26B, "tokenizer.json", 32_169_626),
+        embed: &[
+            art(GEMMA4_26B_ONNX, "embed_tokens_q4f16.onnx", 585),
+            art(GEMMA4_26B_ONNX, "embed_tokens_q4f16.onnx_data", 415_236_096),
+        ],
+        decoder: &[
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx", 406_510),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_991_159_808),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_984_856_064),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_984_856_064),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_888_265_728),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_976_745_984),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_984_856_064),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_984_878_080),
+            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 46_137_344),
+        ],
+        // 30 layers × K/V: 25 sliding with 8 heads × 256, 5 global with 2 heads × 512; fp16.
+        kv_bytes_per_token: 2 * (25 * 8 * 256 + 5 * 2 * 512) * 2,
+        empty_thought: true,
     },
 ];
 
@@ -229,15 +275,19 @@ mod tests {
             content: content.into(),
             reasoning_content: None,
         };
-        let prompt = BuiltinArch::Gemma4.render_prompt(&[
+        let messages = [
             msg("system", "sys\n"),
             msg("user", " u1"),
-            msg("assistant", "a1"),
+            msg("assistant", "a1\n"),
             msg("user", "u2"),
-        ]);
+        ];
+        let expected =
+            "<bos><|turn>system\nsys<turn|>\n<|turn>user\nu1<turn|>\n<|turn>model\na1\n<turn|>\n<|turn>user\nu2<turn|>\n<|turn>model\n";
+        assert_eq!(BuiltinArch::Gemma4.render_prompt(&messages, false), expected);
+        // Earlier model turns keep the reply untrimmed and the empty thought channel, so the cached KV stays a prefix.
         assert_eq!(
-            prompt,
-            "<bos><|turn>system\nsys<turn|>\n<|turn>user\nu1<turn|>\n<|turn>model\na1<turn|>\n<|turn>user\nu2<turn|>\n<|turn>model\n"
+            BuiltinArch::Gemma4.render_prompt(&messages, true),
+            expected.replace("<|turn>model\n", "<|turn>model\n<|channel>thought\n<channel|>")
         );
     }
 }
