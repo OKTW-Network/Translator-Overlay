@@ -57,7 +57,11 @@ impl BuiltinArch {
     /// For KV inputs given as `(layer, head_dim)` in decoder input order: whether only
     /// `GroupQueryAttention` reads it, which appends into a preallocated
     /// `[1, heads, context, head_dim]` buffer bound as both past and present.
-    pub fn kv_in_place(self, inputs: &[(&str, i64)]) -> Vec<bool> {
+    /// `gqa_only`: see [`BuiltinModelSpec::kv_gqa_only`].
+    pub fn kv_in_place(self, inputs: &[(&str, i64)], gqa_only: bool) -> Vec<bool> {
+        if gqa_only {
+            return vec![true; inputs.len()];
+        }
         match self {
             Self::Gemma4 => {
                 // Global layers (head_dim 512) use a Concat attention. The last sliding layer lends its
@@ -86,6 +90,9 @@ pub struct BuiltinModelSpec {
     pub decoder: &'static [ModelArtifact],
     /// KV bytes per context token: Σ heads × head_dim over every `past_key_values.*` input × element size.
     pub kv_bytes_per_token: u64,
+    /// Every layer's attention is `GroupQueryAttention` and none shares another layer's KV (our own
+    /// exports), so every KV input goes in place.
+    pub kv_gqa_only: bool,
     /// The model's chat template opens the model turn with an empty thought channel when thinking
     /// is off (Gemma 4 26B and up), so it answers without thinking.
     pub empty_thought: bool,
@@ -163,6 +170,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 812_318_720),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
+        kv_gqa_only: false,
         empty_thought: false,
     },
     BuiltinModelSpec {
@@ -182,6 +190,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_286_205_440),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
+        kv_gqa_only: false,
         empty_thought: false,
     },
     BuiltinModelSpec {
@@ -203,6 +212,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_quantized.onnx_data_2", 1_624_637_440),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
+        kv_gqa_only: false,
         empty_thought: false,
     },
     BuiltinModelSpec {
@@ -228,6 +238,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         ],
         // 30 layers × K/V: 25 sliding with 8 heads × 256, 5 global with 2 heads × 512; fp16.
         kv_bytes_per_token: 2 * (25 * 8 * 256 + 5 * 2 * 512) * 2,
+        kv_gqa_only: true,
         empty_thought: true,
     },
 ];
@@ -265,7 +276,8 @@ mod tests {
             ("3", 512),
             ("3", 512),
         ];
-        assert_eq!(BuiltinArch::Gemma4.kv_in_place(&inputs), [true, true, false, false, false, false, false, false]);
+        assert_eq!(BuiltinArch::Gemma4.kv_in_place(&inputs, false), [true, true, false, false, false, false, false, false]);
+        assert_eq!(BuiltinArch::Gemma4.kv_in_place(&inputs, true), [true; 8]);
     }
 
     #[test]

@@ -331,7 +331,7 @@ impl Loaded {
             .iter()
             .map(|s| (s.present["present.".len()..].rsplit_once('.').map_or("", |(layer, _)| layer), s.head_dim))
             .collect();
-        let in_place = spec.arch.kv_in_place(&layers);
+        let in_place = spec.arch.kv_in_place(&layers, spec.kv_gqa_only);
         for (slot, in_place) in kv.iter_mut().zip(in_place) {
             slot.in_place = in_place;
         }
