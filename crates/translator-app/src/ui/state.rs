@@ -270,6 +270,14 @@ pub const DICTIONARIES: NamedStore = NamedStore {
         if ui.draft.translation.dictionary_profile.as_deref() == Some(name) {
             mark_dirty(ui);
         }
+        // Re-apply live config so the pipeline reloads the edited in-use glossary and rebuilds the prompt.
+        let apply_live = {
+            let s = ui.state.read();
+            (s.config.translation.dictionary_profile.as_deref() == Some(name)).then(|| s.config.clone())
+        };
+        if let Some(cfg) = apply_live {
+            let _ = ui.cmd_tx.send(PipelineCommand::ApplyConfig(Box::new(cfg)));
+        }
         ping_ui();
         Ok(())
     },
