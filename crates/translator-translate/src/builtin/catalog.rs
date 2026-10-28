@@ -140,13 +140,12 @@ const fn art(release: &'static str, file_name: &'static str, expected_bytes: u64
     }
 }
 
+const GEMMA4_E4B: &str = "https://huggingface.co/james58899/gemma-4-E4B-it-qat-ONNX/resolve/644d96e6a33edcf3f5e10a960d8fb3fddef5d079";
+const GEMMA4_E4B_ONNX: &str =
+    "https://huggingface.co/james58899/gemma-4-E4B-it-qat-ONNX/resolve/644d96e6a33edcf3f5e10a960d8fb3fddef5d079/onnx";
+const GEMMA4_E4B_TOKENIZER: ModelArtifact = art(GEMMA4_E4B, "tokenizer.json", 32_169_626);
 /// 24 layers × K/V × 2 heads: 20 with head_dim 256, 4 with 512.
 const GEMMA4_E4B_KV_ELEMS: u64 = 2 * 2 * (20 * 256 + 4 * 512);
-
-const GEMMA4_E4B_QAT: &str = "https://huggingface.co/james58899/gemma-4-E4B-it-qat-ONNX/resolve/644d96e6a33edcf3f5e10a960d8fb3fddef5d079";
-const GEMMA4_E4B_QAT_ONNX: &str =
-    "https://huggingface.co/james58899/gemma-4-E4B-it-qat-ONNX/resolve/644d96e6a33edcf3f5e10a960d8fb3fddef5d079/onnx";
-const GEMMA4_E4B_QAT_TOKENIZER: ModelArtifact = art(GEMMA4_E4B_QAT, "tokenizer.json", 32_169_626);
 
 const GEMMA4_12B: &str = "https://huggingface.co/james58899/gemma-4-12B-it-qat-ONNX/resolve/60555e645e7c456b4a013cc2e93e9bd6379e3006";
 const GEMMA4_12B_ONNX: &str =
@@ -169,15 +168,15 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Gemma 4 E4B · q4f16 (4.3 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-e4b-it-qat",
-        tokenizer: GEMMA4_E4B_QAT_TOKENIZER,
+        tokenizer: GEMMA4_E4B_TOKENIZER,
         embed: &[
-            art(GEMMA4_E4B_QAT_ONNX, "embed_tokens_q4f16.onnx", 1_283),
-            art(GEMMA4_E4B_QAT_ONNX, "embed_tokens_q4f16.onnx_data", 1_962_934_272),
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx", 1_283),
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx_data", 1_962_934_272),
         ],
         decoder: &[
-            art(GEMMA4_E4B_QAT_ONNX, "decoder_model_merged_q4f16.onnx", 425_326),
-            art(GEMMA4_E4B_QAT_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_981_871_104),
-            art(GEMMA4_E4B_QAT_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 296_493_056),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx", 425_326),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_981_871_104),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 296_493_056),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
         kv_gqa_only: false,
@@ -188,16 +187,16 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Gemma 4 E4B · q4 (4.8 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-e4b-it-qat",
-        tokenizer: GEMMA4_E4B_QAT_TOKENIZER,
+        tokenizer: GEMMA4_E4B_TOKENIZER,
         embed: &[
-            art(GEMMA4_E4B_QAT_ONNX, "embed_tokens_q4.onnx", 1_263),
-            art(GEMMA4_E4B_QAT_ONNX, "embed_tokens_q4.onnx_data", 1_828_716_544),
-            art(GEMMA4_E4B_QAT_ONNX, "embed_tokens_q4.onnx_data_1", 352_321_536),
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx", 1_263),
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx_data", 1_828_716_544),
+            art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx_data_1", 352_321_536),
         ],
         decoder: &[
-            art(GEMMA4_E4B_QAT_ONNX, "decoder_model_merged_q4.onnx", 477_484),
-            art(GEMMA4_E4B_QAT_ONNX, "decoder_model_merged_q4.onnx_data", 1_995_997_184),
-            art(GEMMA4_E4B_QAT_ONNX, "decoder_model_merged_q4.onnx_data_1", 573_476_864),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx", 477_484),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data", 1_995_997_184),
+            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 573_476_864),
         ],
         kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
         kv_gqa_only: false,
