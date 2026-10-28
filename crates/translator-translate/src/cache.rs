@@ -117,16 +117,12 @@ impl TranslationCache {
 
     /// Split a page into cache hits and unique misses.
     ///
-    /// `force` (Retry) and a disabled cache skip lookup and send every block.
+    /// `force` (Retry) and a disabled cache skip lookup and send each distinct text once.
     pub fn resolve(&mut self, blocks: &[OcrBlock], cfg: &TranslationConfig, force: bool) -> CacheResolve {
         if force || !cfg.cache_enabled {
             return CacheResolve {
                 hits: vec![None; blocks.len()],
-                misses: if force {
-                    unique_blocks_by_norm_text(blocks)
-                } else {
-                    blocks.to_vec()
-                },
+                misses: unique_blocks_by_norm_text(blocks),
             };
         }
 
@@ -358,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_disabled_sends_every_block() {
+    fn resolve_disabled_skips_hits_and_dedupes() {
         let mut cache = TranslationCache::new(8);
         let tcfg = TranslationConfig {
             cache_enabled: false,
@@ -367,7 +363,7 @@ mod tests {
         cache.insert("名前", "ja", "zh-TW", "名字");
         let blocks = vec![block(0, "名前"), block(1, "名前")];
         let resolved = cache.resolve(&blocks, &tcfg, false);
-        assert_eq!(resolved.misses.len(), 2);
+        assert_eq!(resolved.misses.len(), 1);
         assert!(resolved.hits.iter().all(Option::is_none));
     }
 

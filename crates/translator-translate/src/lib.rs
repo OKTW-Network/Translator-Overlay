@@ -54,6 +54,9 @@ pub enum TranslateError {
     /// The built-in model ran out of context; trimming history and resending can fix it.
     #[error("conversation exceeds the {0}-token context length")]
     ContextFull(usize),
+    /// The built-in model kept repeating one span; a resample usually escapes it.
+    #[error("model reply got stuck repeating itself")]
+    Looping,
     #[error("{0}")]
     Other(String),
 }
@@ -68,7 +71,7 @@ impl TranslateError {
         match self {
             Self::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
             Self::ApiStatus { status, .. } => *status >= 500 || *status == 429,
-            Self::CliExit(_) | Self::MissingBlocks(_) => true,
+            Self::CliExit(_) | Self::MissingBlocks(_) | Self::Looping => true,
             Self::CliProtocol(msg) => msg.contains("timed out") || msg.contains("closed stdout"),
             Self::Cancelled | Self::MissingBaseUrl | Self::CliNotFound(_) | Self::Parse(_) | Self::ContextFull(_) | Self::Other(_) => false,
         }

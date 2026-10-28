@@ -5,7 +5,11 @@
 
 mod catalog;
 
-use std::{path::Path, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Instant,
+};
 
 use half::f16;
 use ort::{
@@ -24,7 +28,18 @@ use translator_ocr::{download_artifact, initialize_ort_environment, part_path};
 pub use crate::builtin::catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model};
 use crate::{TranslateError, http::ChatMessage};
 
-const DEFAULT_MAX_TOKENS: usize = 2048;
+/// A reply whose last `LOOP_TOKENS` tokens (and at least three periods) repeat one span of up to
+/// `LOOP_TOKENS` tokens is stuck in a loop.
+const LOOP_TOKENS: usize = 64;
+
+/// DRY settings: llama.cpp's recommended multiplier and base.
+const DRY_MULTIPLIER: f32 = 0.8;
+const DRY_BASE: f32 = 1.75;
+/// Above llama.cpp's 2, so a short repeat the source itself has (`あああ`, a doubled word) still
+/// translates as written.
+const DRY_ALLOWED_LENGTH: usize = 4;
+/// A repeat match stops at a token holding one of these, so JSON quoting never counts as a repeat.
+const DRY_BREAKERS: [char; 4] = ['\n', ':', '"', '*'];
 
 /// The loaded model, if any. Lives behind a mutex on [`crate::TranslateClient`].
 #[derive(Default)]
@@ -98,27 +113,34 @@ pub(crate) async fn complete(
     let spec = ensure_loaded(&mut backend, api, models_dir, cancel, on_status).await?;
 
     let prompt = spec.arch.render_prompt(messages, spec.empty_thought);
-    let max_tokens = api.max_tokens.map_or(DEFAULT_MAX_TOKENS, |n| n as usize);
+    // The last message is the source payload, and the reply mirrors its JSON.
+    let source = messages.last().map_or_else(String::new, |m| m.content.clone());
+    let output_ratio = api.builtin_output_ratio;
+    let max_tokens_cap = api.max_tokens.map_or(usize::MAX, |n| n as usize);
     let context = api.builtin_context_tokens as usize;
     // Unset knobs take the model's recommended values; temperature 0 is greedy.
     let (temperature, top_p, top_k) = spec.arch.sampling_defaults();
-    let sampling = Some(Sampling {
-        temperature: api.temperature.unwrap_or(temperature),
-        top_p: api.top_p.unwrap_or(top_p),
-        // 0 turns top-k off.
-        top_k: match api.top_k.unwrap_or(top_k) {
-            0 => usize::MAX,
-            k => k as usize,
-        },
-    })
-    .filter(|s| s.temperature > 0.0);
+    let decoding = Decoding {
+        sampling: Some(Sampling {
+            temperature: api.temperature.unwrap_or(temperature),
+            top_p: api.top_p.unwrap_or(top_p),
+            // 0 turns top-k off.
+            top_k: match api.top_k.unwrap_or(top_k) {
+                0 => usize::MAX,
+                k => k as usize,
+            },
+        })
+        .filter(|s| s.temperature > 0.0),
+        dry: api.builtin_dry,
+    };
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let cancel_job = cancel.clone();
     let job = tokio::task::spawn_blocking(move || {
         let Some(loaded) = backend.loaded.as_mut() else {
             return Ok(Err(TranslateError::Cancelled));
         };
-        loaded.generate(&prompt, max_tokens, context, sampling, &cancel_job, |text| drop(tx.send(text.to_owned())))
+        let max_tokens = ((output_ratio * loaded.tokenizer.encode(source, false)?.len() as f32).ceil() as usize).min(max_tokens_cap);
+        loaded.generate(&prompt, max_tokens, context, decoding, &cancel_job, |text| drop(tx.send(text.to_owned())))
     });
     // Ends when the job drops its sender.
     while let Some(text) = rx.recv().await {
@@ -181,6 +203,8 @@ struct Loaded {
     per_layer_inputs: bool,
     cache: Option<KvCache>,
     rng: fastrand::Rng,
+    /// Tokens holding a [`DRY_BREAKERS`] character.
+    dry_breakers: HashSet<u32>,
     /// Allocates the in-place KV buffers. Declared after `cache` so it outlives them.
     kv_alloc: Allocator,
 }
@@ -228,15 +252,58 @@ fn missing(what: &str) -> ort::Error {
     ort::Error::new(format!("model has no {what}"))
 }
 
-fn argmax<T: Copy>(values: &[T], to_f32: impl Fn(T) -> f32) -> u32 {
+fn argmax(values: &[f32]) -> u32 {
     let mut best = (0, f32::NEG_INFINITY);
     for (i, &v) in values.iter().enumerate() {
-        let v = to_f32(v);
         if v > best.1 {
             best = (i, v);
         }
     }
     best.0 as u32
+}
+
+/// Whether `reply` ends in a loop (see [`LOOP_TOKENS`]).
+fn ends_in_loop(reply: &[u32]) -> bool {
+    (1..=LOOP_TOKENS).any(|period| {
+        let span = LOOP_TOKENS.max(3 * period);
+        reply.len() >= span && {
+            let tail = &reply[reply.len() - span..];
+            tail[period..].iter().zip(tail).all(|(a, b)| a == b)
+        }
+    })
+}
+
+/// DRY ("Don't Repeat Yourself"): a token that would extend a span of `reply` already seen earlier
+/// in `reply` loses `DRY_MULTIPLIER × DRY_BASE^(len − DRY_ALLOWED_LENGTH)` from its logit, `len`
+/// being the span's length. Only the reply counts: copying names from the source is expected.
+fn apply_dry(logits: &mut [f32], reply: &[u32], breakers: &HashSet<u32>) {
+    let Some(last) = reply.len().checked_sub(1) else {
+        return;
+    };
+    let mut longest = HashMap::<u32, usize>::new();
+    for end in 0..last {
+        let len = (0..=end)
+            .take_while(|&k| reply[end - k] == reply[last - k] && !breakers.contains(&reply[end - k]))
+            .count();
+        if len >= DRY_ALLOWED_LENGTH {
+            let next = longest.entry(reply[end + 1]).or_default();
+            *next = (*next).max(len);
+        }
+    }
+    for (token, len) in longest {
+        if let Some(logit) = logits.get_mut(token as usize) {
+            *logit -= DRY_MULTIPLIER * DRY_BASE.powi((len - DRY_ALLOWED_LENGTH) as i32);
+        }
+    }
+}
+
+/// How [`Loaded::generate`] picks each token.
+#[derive(Clone, Copy)]
+struct Decoding {
+    /// `None` decodes greedily.
+    sampling: Option<Sampling>,
+    /// See [`apply_dry`].
+    dry: bool,
 }
 
 /// Random token choice. Without it a retry after an unparsable reply repeats the same reply.
@@ -251,12 +318,12 @@ struct Sampling {
 }
 
 impl Sampling {
-    fn pick<T: Copy>(&self, logits: &[T], to_f32: impl Fn(T) -> f32, rng: &mut fastrand::Rng) -> u32 {
+    fn pick(&self, logits: &[f32], rng: &mut fastrand::Rng) -> u32 {
         // One pass keeping the best `top_k`; most tokens lose to the weakest kept one and are skipped.
         let mut cand: Vec<(u32, f32)> = Vec::with_capacity(self.top_k.min(logits.len()));
         let mut weakest = 0;
         for (i, &l) in logits.iter().enumerate() {
-            let c = (i as u32, to_f32(l));
+            let c = (i as u32, l);
             if cand.len() < self.top_k {
                 cand.push(c);
             } else if c.1 > cand[weakest].1 {
@@ -337,6 +404,12 @@ impl Loaded {
         }
         let per_layer_inputs = decoder.inputs().iter().any(|i| i.name() == "per_layer_inputs");
         let kv_alloc = Allocator::new(&decoder, kv_memory(device)?)?;
+        let dry_breakers = tokenizer
+            .get_vocab(true)
+            .into_iter()
+            .filter(|(t, _)| t.contains(DRY_BREAKERS))
+            .map(|(_, id)| id)
+            .collect();
         let in_place = kv.iter().filter(|s| s.in_place).count();
         info!(model = spec.id, kv_inputs = kv.len(), in_place, ?kv_type, per_layer_inputs, "built-in model sessions ready");
         Ok(Self {
@@ -350,6 +423,7 @@ impl Loaded {
             per_layer_inputs,
             cache: None,
             rng: fastrand::Rng::new(),
+            dry_breakers,
             kv_alloc,
         })
     }
@@ -379,14 +453,15 @@ impl Loaded {
             .collect()
     }
 
-    /// Decode greedily when `sampling` is `None`. `on_text` gets the whole reply so far after each token.
-    /// The inner error is [`TranslateError::Cancelled`] or [`TranslateError::ContextFull`].
+    /// `on_text` gets the whole reply so far after each token. The inner error is
+    /// [`TranslateError::Cancelled`], [`TranslateError::ContextFull`], or [`TranslateError::Looping`]
+    /// ([`TranslateError::Other`] when decoding greedily).
     fn generate(
         &mut self,
         prompt: &str,
         max_tokens: usize,
         context: usize,
-        sampling: Option<Sampling>,
+        decoding: Decoding,
         cancel: &CancellationToken,
         mut on_text: impl FnMut(&str),
     ) -> ort::Result<Result<String, TranslateError>> {
@@ -417,6 +492,8 @@ impl Loaded {
         let eos = self.spec.arch.eos_ids();
         let mut binding = self.decoder.create_binding()?;
         let mut text = String::new();
+        let mut logits_f32 = Vec::new();
+        let mut looping = false;
         let chunk = self.spec.prefill_chunk() as usize;
         loop {
             if cancel.is_cancelled() {
@@ -461,21 +538,17 @@ impl Loaded {
             }
             prefill.get_or_insert_with(|| start.elapsed());
 
-            let next = match logits.dtype().tensor_type() {
-                Some(TensorElementType::Float16) => {
-                    let values = logits.try_extract_tensor::<f16>()?.1;
-                    match &sampling {
-                        Some(s) => s.pick(values, f16::to_f32, &mut self.rng),
-                        None => argmax(values, f16::to_f32),
-                    }
-                }
-                _ => {
-                    let values = logits.try_extract_tensor::<f32>()?.1;
-                    match &sampling {
-                        Some(s) => s.pick(values, |v| v, &mut self.rng),
-                        None => argmax(values, |v| v),
-                    }
-                }
+            logits_f32.clear();
+            match logits.dtype().tensor_type() {
+                Some(TensorElementType::Float16) => logits_f32.extend(logits.try_extract_tensor::<f16>()?.1.iter().map(|v| v.to_f32())),
+                _ => logits_f32.extend_from_slice(logits.try_extract_tensor::<f32>()?.1),
+            }
+            if decoding.dry {
+                apply_dry(&mut logits_f32, &ids[prompt_len..], &self.dry_breakers);
+            }
+            let next = match &decoding.sampling {
+                Some(s) => s.pick(&logits_f32, &mut self.rng),
+                None => argmax(&logits_f32),
             };
             if eos.contains(&next) {
                 break;
@@ -483,6 +556,10 @@ impl Loaded {
             ids.push(next);
             text = self.tokenizer.decode(&ids[prompt_len..], true)?;
             on_text(&text);
+            if ends_in_loop(&ids[prompt_len..]) {
+                looping = true;
+                break;
+            }
             if ids.len() - prompt_len >= max_tokens {
                 break;
             }
@@ -511,7 +588,14 @@ impl Loaded {
             past,
             context,
         });
-        Ok(Ok(text))
+        Ok(match (looping, decoding.sampling) {
+            (false, _) => Ok(text),
+            (true, Some(_)) => Err(TranslateError::Looping),
+            // A greedy retry would replay the same loop, so fail without one.
+            (true, None) => {
+                Err(TranslateError::Other("model reply got stuck repeating itself; temperature 0 would repeat it on retry".into()))
+            }
+        })
     }
 }
 
@@ -521,15 +605,41 @@ mod tests {
 
     #[test]
     fn argmax_picks_first_max() {
-        assert_eq!(argmax(&[1.0_f32, 3.0, 3.0, -1.0], |v| v), 1);
-        assert_eq!(argmax(&[f16::from_f32(-2.0), f16::from_f32(0.5)], f16::to_f32), 1);
+        assert_eq!(argmax(&[1.0, 3.0, 3.0, -1.0]), 1);
+    }
+
+    #[test]
+    fn loop_needs_a_long_repeated_tail() {
+        let period = |p: u32, n: usize| (0..n).map(|i| i as u32 % p).collect::<Vec<_>>();
+        assert!(ends_in_loop(&period(1, LOOP_TOKENS)));
+        assert!(!ends_in_loop(&period(1, LOOP_TOKENS - 1)));
+        assert!(ends_in_loop(&[vec![99; 5], period(7, LOOP_TOKENS)].concat()));
+        // A long period needs three repeats, not just `LOOP_TOKENS` tokens.
+        assert!(!ends_in_loop(&period(40, 2 * 40)));
+        assert!(ends_in_loop(&period(40, 3 * 40)));
+        assert!(!ends_in_loop(&(0..500).collect::<Vec<_>>()));
+    }
+
+    #[test]
+    fn dry_penalizes_extending_a_repeat() {
+        let reply = [1, 2, 3, 4, 5, 9, 1, 2, 3, 4, 5];
+        let mut logits = [0.0; 10];
+        apply_dry(&mut logits, &reply, &HashSet::new());
+        // `1 2 3 4 5` repeats (length 5), so `9` would extend it.
+        let mut expected = [0.0; 10];
+        expected[9] = -DRY_MULTIPLIER * DRY_BASE;
+        assert_eq!(logits, expected);
+        // A breaker inside the span cuts the match below the allowed length.
+        let mut logits = [0.0; 10];
+        apply_dry(&mut logits, &reply, &HashSet::from([3]));
+        assert_eq!(logits, [0.0; 10]);
     }
 
     #[test]
     fn sampling_respects_top_k_and_top_p() {
         let logits = [0.0, 2.0, 1.9, -1.0, 1.8];
         let mut rng = fastrand::Rng::with_seed(7);
-        let pick = |s: Sampling, rng: &mut fastrand::Rng| (0..200).map(|_| s.pick(&logits, |v| v, rng)).collect::<Vec<_>>();
+        let pick = |s: Sampling, rng: &mut fastrand::Rng| (0..200).map(|_| s.pick(&logits, rng)).collect::<Vec<_>>();
         let s = Sampling {
             temperature: 1.0,
             top_p: 1.0,

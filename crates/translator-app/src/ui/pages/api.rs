@@ -313,6 +313,27 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     )?;
 
     let (builtin_model, builtin_device, builtin_context, builtin_memory) = builtin_section(b, cx)?;
+    let output_ratio = card_slider_number(
+        b,
+        SliderNumberParams {
+            key: "api-builtin-output-ratio",
+            header: t!("api.builtin_output_ratio"),
+            description: Some(t!("api.builtin_output_ratio_desc")),
+            min: 1.0,
+            max: 8.0,
+            step: 0.5,
+        },
+        |ui| (f64::from(ui.draft.api.builtin_output_ratio), true),
+        cx.edit(|ui, v: f64| ui.draft.api.builtin_output_ratio = v.max(1.0) as f32),
+    )?;
+    let dry = toggle(
+        b,
+        "api-builtin-dry",
+        &t!("api.builtin_dry"),
+        &t!("api.builtin_dry_desc"),
+        |api| api.builtin_dry,
+        |api, on| api.builtin_dry = on,
+    )?;
 
     let http: fn(ModelProvider) -> bool = ModelProvider::is_http;
     let builtin: fn(ModelProvider) -> bool = |p| p == ModelProvider::Builtin;
@@ -331,6 +352,8 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         shown_for(b, &builtin_model.root, builtin)?,
         shown_for(b, &builtin_device, builtin)?,
         shown_for(b, &builtin_context, builtin)?,
+        shown_for(b, &output_ratio.root, builtin)?,
+        shown_for(b, &dry, builtin)?,
         shown_for(b, &structured, http)?,
         shown_for(b, &stream, http)?,
         shown_for(b, &send_reasoning, http)?,

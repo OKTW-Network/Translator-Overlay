@@ -310,6 +310,13 @@ pub struct ApiConfig {
     /// Prompt + reply token limit of the built-in model; sizes its preallocated KV cache.
     /// Only for [`ModelProvider::Builtin`].
     pub builtin_context_tokens: u32,
+    /// Reply token limit of the built-in model, as a multiple of the source payload's tokens.
+    /// Only for [`ModelProvider::Builtin`].
+    pub builtin_output_ratio: f32,
+    /// DRY sampling on the built-in model: penalize tokens that extend a span already repeated in
+    /// the reply. Only for [`ModelProvider::Builtin`].
+    #[serde(skip_serializing_if = "is_true")]
+    pub builtin_dry: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_url: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -356,6 +363,8 @@ impl Default for ApiConfig {
             builtin_model: String::new(),
             builtin_device: OcrDevice::default(),
             builtin_context_tokens: 4096,
+            builtin_output_ratio: 4.0,
+            builtin_dry: true,
             base_url: String::new(),
             api_key: String::new(),
             model: String::new(),
@@ -400,6 +409,8 @@ impl ApiConfig {
             self.builtin_model.clear();
             self.builtin_device = defaults.builtin_device;
             self.builtin_context_tokens = defaults.builtin_context_tokens;
+            self.builtin_output_ratio = defaults.builtin_output_ratio;
+            self.builtin_dry = defaults.builtin_dry;
         }
     }
 }
