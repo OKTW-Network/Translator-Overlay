@@ -183,7 +183,17 @@ pub fn translation_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel
         settings_card_stack("tr-system-prompt", &t!("tr.system_prompt"), Some(&t!("tr.system_prompt_desc")), &prompt_field.tb)?;
     b.add(move |ui, _| prompt_field.set(ui.draft.translation.system_prompt.as_deref().unwrap_or_default()));
     let prompt = column(4.0)?;
-    children!(prompt; section_header(&t!("tr.prompt"))?, dictionary_card.root, prompt_card.root);
+    children!(prompt;
+        section_header(&t!("tr.prompt"))?,
+        dictionary_card.root,
+        card_toggle(
+            b,
+            ("tr-instruction-reminder", &t!("tr.instruction_reminder"), Some(&t!("tr.instruction_reminder_desc"))),
+            |ui| ui.draft.translation.instruction_reminder,
+            cx.edit(|ui, on| ui.draft.translation.instruction_reminder = on),
+        )?,
+        prompt_card.root,
+    );
 
     dictionary_editor_window(b, cx)?;
     let body = column(8.0)?;

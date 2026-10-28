@@ -210,7 +210,12 @@ impl Conversation {
     ) -> Self {
         self.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
         self.ensure_system(with_glossary(default_system_prompt(translation_cfg), glossary));
-        self.push_user(user_payload_from_blocks(blocks));
+        let mut user = user_payload_from_blocks(blocks);
+        if translation_cfg.instruction_reminder {
+            // Small models drift from a far-away system prompt; a line next to the reply keeps them on task.
+            user.push_str(&format!("\nTranslate every block into {}. Reply with the JSON only.", translation_cfg.target_lang.trim()));
+        }
+        self.push_user(user);
         self.clone()
     }
 
@@ -1338,6 +1343,21 @@ mod tests {
         let payload = user_payload_from_blocks(&source);
         assert_eq!(payload, r#"{"b":[[0,"Hi"]]}"#);
         assert!(!payload.contains('\n'));
+
+        let user = |instruction_reminder| {
+            let cfg = TranslationConfig {
+                instruction_reminder,
+                ..TranslationConfig::default()
+            };
+            Conversation::empty()
+                .begin_translate_request(&cfg, &source, &[])
+                .messages()
+                .pop()
+                .unwrap()
+                .content
+        };
+        assert_eq!(user(false), payload);
+        assert_eq!(user(true), format!("{payload}\nTranslate every block into zh-TW. Reply with the JSON only."));
     }
 
     #[test]

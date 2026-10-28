@@ -245,6 +245,8 @@ editor_title = "翻译对照"
 system_prompt = "系统提示"
 system_prompt_desc = "留空使用内置风格。自定义文字只覆盖风格；输出格式与语言设置仍会套用。"
 prompt_placeholder = "内置提示"
+instruction_reminder = "重复指令"
+instruction_reminder_desc = "在每段原文后重述目标语言。可改善小模型在长时间使用后停止翻译的问题。"
 
 [ocr]
 model = "模型"

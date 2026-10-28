@@ -37,7 +37,11 @@ pub fn cli_system_prompt(base: &str) -> String {
 }
 
 pub fn fence_user_payload(payload: &str) -> String {
-    format!("{UNTRUSTED_BEGIN}\n{}\n{UNTRUSTED_END}", payload.trim())
+    // The JSON payload is one line; lines after it are our own instruction reminder, kept outside.
+    match payload.trim().split_once('\n') {
+        Some((data, note)) => format!("{UNTRUSTED_BEGIN}\n{data}\n{UNTRUSTED_END}\n{note}"),
+        None => format!("{UNTRUSTED_BEGIN}\n{}\n{UNTRUSTED_END}", payload.trim()),
+    }
 }
 
 fn resolve_program(api: &ApiConfig) -> Result<PathBuf, TranslateError> {
@@ -428,5 +432,8 @@ mod tests {
         assert!(fenced.starts_with(UNTRUSTED_BEGIN));
         assert!(fenced.ends_with(UNTRUSTED_END));
         assert!(cli_system_prompt("base").contains(UNTRUSTED_BEGIN));
+
+        let fenced = fence_user_payload("{\"b\":[[0,\"hi\"]]}\nTranslate every block into zh-TW.");
+        assert!(fenced.ends_with(&format!("{UNTRUSTED_END}\nTranslate every block into zh-TW.")), "{fenced}");
     }
 }

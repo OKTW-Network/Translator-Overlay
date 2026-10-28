@@ -257,6 +257,8 @@ editor_title = "Glossary"
 system_prompt = "System prompt"
 system_prompt_desc = "Leave empty for the built-in style. Custom text replaces style only; output format and languages stay."
 prompt_placeholder = "Built-in prompt"
+instruction_reminder = "Repeat instruction"
+instruction_reminder_desc = "Restate the target language after each source text. Helps small models that stop translating in long sessions."
 
 [ocr]
 model = "Model"
