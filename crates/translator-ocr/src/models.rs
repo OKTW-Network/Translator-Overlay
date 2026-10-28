@@ -34,24 +34,30 @@ pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {
     }
 }
 
-/// Rough peak `(VRAM, RAM)` bytes on a 1080p frame, with the layout model if `layout`.
-/// Measured on a Radeon RX 9070 XT; ONNX Runtime arenas, not file size, dominate.
+/// Peak `(VRAM, RAM)` bytes with the layout model if `layout`, at the largest inputs the pipeline
+/// feeds. GPU devices also take a flat runtime allowance in RAM.
 pub fn memory_estimate(tier: ModelTier, device: OcrDevice, layout: bool) -> (u64, u64) {
-    const MB: u64 = 1 << 20;
-    let (vram, ram) = match (tier, device) {
-        (ModelTier::Tiny | ModelTier::Small, OcrDevice::Webgpu) => (350, 150),
-        (ModelTier::Tiny | ModelTier::Small, OcrDevice::Directml) => (410, 150),
-        (ModelTier::Tiny | ModelTier::Small, OcrDevice::Cpu) => (0, 100),
-        (ModelTier::Medium, OcrDevice::Webgpu) => (1550, 430),
-        (ModelTier::Medium, OcrDevice::Directml) => (1100, 420),
-        (ModelTier::Medium, OcrDevice::Cpu) => (0, 390),
+    const MIB: u64 = 1 << 20;
+    const RUNTIME_MIB: u64 = 256;
+    // `(GPU, CPU)` MiB per model, from its ONNX graph at the pipeline's input size (det 1×3×544×960
+    // for a 960-px long side, rec 4×3×48×3200 at the width cap, layout 1×3×800×800):
+    // - GPU: initializers (ORT WebGPU rounds each up to 16 bytes, outside the bucket cache), plus
+    //   the activation buffers ORT's allocation planner assigns, rounded up to their buckets (an
+    //   output reuses a freed buffer of the same size);
+    // - CPU: initializers plus the largest set of activations alive at once, which the CPU arena
+    //   reuses down to.
+    let det_rec = match tier {
+        ModelTier::Tiny => [(86, 34), (212, 89)],
+        ModelTier::Small => [(119, 57), (498, 249)],
+        ModelTier::Medium => [(358, 187), (1036, 335)],
     };
-    let (layout_vram, layout_ram) = match (layout, device) {
-        (false, _) => (0, 0),
-        (true, OcrDevice::Cpu) => (0, 300),
-        (true, OcrDevice::Webgpu | OcrDevice::Directml) => (500, 50),
-    };
-    ((vram + layout_vram) * MB, (ram + layout_ram) * MB)
+    let layout_model = (990, 380);
+    let models = det_rec.into_iter().chain(layout.then_some(layout_model));
+    let (gpu, cpu) = models.fold((0, 0), |(g, c), (mg, mc)| (g + mg, c + mc));
+    match device {
+        OcrDevice::Webgpu | OcrDevice::Directml => (gpu * MIB, RUNTIME_MIB * MIB),
+        OcrDevice::Cpu => (0, cpu * MIB),
+    }
 }
 
 const TINY: [ModelArtifact; 3] = [

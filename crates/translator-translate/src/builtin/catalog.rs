@@ -73,6 +73,23 @@ impl BuiltinArch {
     }
 }
 
+/// Decoder shape that weights, KV, and a WebGPU prefill run's largest buffers scale with.
+#[derive(Debug)]
+pub struct ArchShape {
+    /// Bytes at the start of the embedding's external data that the decoder's tied `lm_head` reads
+    /// as its own initializer.
+    pub lm_head_bytes: u64,
+    /// KV elements per context token: Σ heads × head_dim over every `past_key_values.*` input.
+    pub kv_elems_per_token: u64,
+    /// Query heads per layer.
+    pub heads: u64,
+    /// Layers attending with plain `MatMul` + `Softmax` (E4B's KV-shared layers), so their
+    /// attention scores are graph tensors.
+    pub matmul_attn_layers: u64,
+    /// `GroupQueryAttention` layers with head_dim 512.
+    pub gqa_512_layers: u64,
+}
+
 /// One selectable model (family + quantization).
 #[derive(Debug)]
 pub struct BuiltinModelSpec {
@@ -88,8 +105,9 @@ pub struct BuiltinModelSpec {
     pub embed: &'static [ModelArtifact],
     /// `.onnx` first, then its `.onnx_data*` files.
     pub decoder: &'static [ModelArtifact],
-    /// KV bytes per context token: Σ heads × head_dim over every `past_key_values.*` input × element size.
-    pub kv_bytes_per_token: u64,
+    /// Activation and KV element size: 4 for fp32 (q4), 2 for fp16 (q4f16).
+    pub elem_bytes: u64,
+    pub shape: &'static ArchShape,
     /// Every layer's attention is `GroupQueryAttention` and none shares another layer's KV (our own
     /// exports), so every KV input goes in place.
     pub kv_gqa_only: bool,
@@ -103,19 +121,60 @@ impl BuiltinModelSpec {
         std::iter::once(&self.tokenizer).chain(self.embed).chain(self.decoder)
     }
 
-    /// Rough `(VRAM, RAM)` bytes with a full `context`. Calibrated on q4 with a Radeon RX 9070 XT.
+    /// Tokens per prefill run. A WebGPU run holds the buffers ORT's cache drops until the GPU
+    /// finishes it, so each fed token costs VRAM until the run ends (see `memory_estimate`).
+    /// fp32 (q4) holds several MB per token (12B: +13 GB at 1500 tokens), and 256-token runs cap it
+    /// at no speed cost; fp16 holds far less, and 512-token runs save ~0.4 GB for ~10% slower
+    /// prefill, where smaller ones slow it much more.
+    pub fn prefill_chunk(&self) -> u64 {
+        if self.elem_bytes == 4 { 256 } else { 512 }
+    }
+
+    /// `(VRAM, RAM)` bytes after a prefill that fills `context`, from the decoder's weights, KV, and
+    /// the prefill buffers ORT's WebGPU buffer cache cannot keep, and the embedding tables. The
+    /// tokenizer, ORT, and Dawn take a flat allowance; activations kept between runs are left out.
     pub fn memory_estimate(&self, device: OcrDevice, context: u32) -> (u64, u64) {
-        let bytes = |arts: &[ModelArtifact]| arts.iter().map(|a| a.expected_bytes).sum::<u64>();
-        let kv = self.kv_bytes_per_token * u64::from(context);
+        /// ORT WebGPU's largest buffer-cache bucket. Bigger buffers bypass the cache and stay
+        /// allocated until the GPU finishes the run.
+        const MAX_BUCKET: u64 = 160 << 20;
+        /// Tokenizer, ORT, and Dawn.
+        const HOST: u64 = 512 << 20;
+        let ctx = u64::from(context);
+        let (s, e) = (self.shape, self.elem_bytes);
+        let kv = s.kv_elems_per_token * e * ctx;
+        // ORT WebGPU uploads initializers at their own size, outside the buffer-cache buckets.
+        let weights = self.decoder.iter().map(|a| a.expected_bytes).sum::<u64>() + s.lm_head_bytes;
+        // The embedding session always runs on the CPU, straight from its mmapped external data: a
+        // row stays resident once a token reads it, and over time every row can.
+        let ram = self.embed.iter().map(|a| a.expected_bytes).sum::<u64>() + HOST;
         match device {
-            // The decoder sits on the GPU, plus ~6% runtime buffers; ~30% of it stays resident in RAM.
-            // The embedding runs on the CPU (see below).
-            OcrDevice::Webgpu | OcrDevice::Directml => {
-                let weights = bytes(self.decoder);
-                (weights * 106 / 100 + kv, weights * 3 / 10)
+            OcrDevice::Webgpu => {
+                let chunk = self.prefill_chunk();
+                let mut held = 0;
+                // `MatMul` attention: scores (`e` bytes) → fp32 Cast → Where. Softmax and the second
+                // Cast reuse the first two buffers (ORT's allocation planner).
+                let scores = s.heads * chunk * ctx;
+                if scores * 4 > MAX_BUCKET {
+                    held += s.matmul_attn_layers * scores * (e + 8);
+                }
+                // fp32 head_dim-512 attention: dense prefill needs 2 × 512 × 4 B × 16 keys = 64 KiB of
+                // workgroup storage, over D3D12's 32 KiB, so ORT takes the split-reduce path: per
+                // 64-token tile, 512 fp32 partial outputs and 2 fp32 stats per query and head.
+                if e == 4 {
+                    let split = s.heads * chunk * ctx.div_ceil(64) * (512 + 2) * 4;
+                    if split > MAX_BUCKET {
+                        held += s.gqa_512_layers * split;
+                    }
+                }
+                (weights + kv + held, ram)
             }
-            // The embedding tables are memory-mapped and only the rows for seen tokens get paged in.
-            OcrDevice::Cpu => (0, bytes(self.decoder) + kv),
+            // [`crate::builtin::ensure_loaded`] rejects DirectML, so nothing gets loaded.
+            OcrDevice::Directml => (0, 0),
+            // Each 32-weight 4-bit block is 16 bytes plus its scale, which ORT's CPU kernels keep as
+            // fp32: q4f16's 2-byte scales grow it by 10/9.
+            // shortcut: 26B's QMoE keeps its FC3 scales fp16, so 26B q4f16 is ~0.5 GB high; fine
+            // unless CPU estimates for 26B need to be exact.
+            OcrDevice::Cpu => (0, if e == 2 { weights * 10 / 9 } else { weights } + kv + ram),
         }
     }
 }
@@ -144,22 +203,41 @@ const GEMMA4_E4B: &str = "https://huggingface.co/james58899/gemma-4-E4B-it-qat-O
 const GEMMA4_E4B_ONNX: &str =
     "https://huggingface.co/james58899/gemma-4-E4B-it-qat-ONNX/resolve/644d96e6a33edcf3f5e10a960d8fb3fddef5d079/onnx";
 const GEMMA4_E4B_TOKENIZER: ModelArtifact = art(GEMMA4_E4B, "tokenizer.json", 32_169_626);
-/// 24 layers × K/V × 2 heads: 20 with head_dim 256, 4 with 512.
-const GEMMA4_E4B_KV_ELEMS: u64 = 2 * 2 * (20 * 256 + 4 * 512);
+/// The last 18 of 42 layers reuse earlier layers' KV through `MatMul` attention.
+const GEMMA4_E4B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 335_544_320,
+    // 24 layers × K/V × 2 heads: 20 with head_dim 256, 4 with 512.
+    kv_elems_per_token: 2 * 2 * (20 * 256 + 4 * 512),
+    heads: 8,
+    matmul_attn_layers: 18,
+    gqa_512_layers: 4,
+};
 
 const GEMMA4_12B: &str = "https://huggingface.co/james58899/gemma-4-12B-it-qat-ONNX/resolve/60555e645e7c456b4a013cc2e93e9bd6379e3006";
 const GEMMA4_12B_ONNX: &str =
     "https://huggingface.co/james58899/gemma-4-12B-it-qat-ONNX/resolve/60555e645e7c456b4a013cc2e93e9bd6379e3006/onnx";
 const GEMMA4_12B_TOKENIZER: ModelArtifact = art(GEMMA4_12B, "tokenizer.json", 32_169_626);
-/// 48 layers × K/V: 40 sliding with 8 heads × 256, 8 global with 1 head × 512.
-const GEMMA4_12B_KV_ELEMS: u64 = 2 * (40 * 8 * 256 + 8 * 512);
+const GEMMA4_12B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 503_316_480,
+    // 48 layers × K/V: 40 sliding with 8 heads × 256, 8 global with 1 head × 512.
+    kv_elems_per_token: 2 * (40 * 8 * 256 + 8 * 512),
+    heads: 16,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 8,
+};
 
 const GEMMA4_26B: &str = "https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX/resolve/85d6d068fe1484b3958ad5a4b4eab2eb9dde2316";
 const GEMMA4_26B_ONNX: &str =
     "https://huggingface.co/james58899/gemma-4-26B-A4B-it-qat-ONNX/resolve/85d6d068fe1484b3958ad5a4b4eab2eb9dde2316/onnx";
 const GEMMA4_26B_TOKENIZER: ModelArtifact = art(GEMMA4_26B, "tokenizer.json", 32_169_626);
-/// 30 layers × K/V: 25 sliding with 8 heads × 256, 5 global with 2 heads × 512.
-const GEMMA4_26B_KV_ELEMS: u64 = 2 * (25 * 8 * 256 + 5 * 2 * 512);
+const GEMMA4_26B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 369_098_752,
+    // 30 layers × K/V: 25 sliding with 8 heads × 256, 5 global with 2 heads × 512.
+    kv_elems_per_token: 2 * (25 * 8 * 256 + 5 * 2 * 512),
+    heads: 16,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 5,
+};
 
 /// Sorted by download size.
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
@@ -178,7 +256,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_981_871_104),
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 296_493_056),
         ],
-        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 2,
+
+        elem_bytes: 2,
+        shape: &GEMMA4_E4B_SHAPE,
         kv_gqa_only: false,
         empty_thought: false,
     },
@@ -198,7 +278,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data", 1_995_997_184),
             art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 573_476_864),
         ],
-        kv_bytes_per_token: GEMMA4_E4B_KV_ELEMS * 4,
+
+        elem_bytes: 4,
+        shape: &GEMMA4_E4B_SHAPE,
         kv_gqa_only: false,
         empty_thought: false,
     },
@@ -219,7 +301,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_977_876_480),
             art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 232_169_472),
         ],
-        kv_bytes_per_token: GEMMA4_12B_KV_ELEMS * 2,
+
+        elem_bytes: 2,
+        shape: &GEMMA4_12B_SHAPE,
         kv_gqa_only: true,
         empty_thought: true,
     },
@@ -240,7 +324,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_2", 1_995_258_880),
             art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_3", 948_256_768),
         ],
-        kv_bytes_per_token: GEMMA4_12B_KV_ELEMS * 4,
+
+        elem_bytes: 4,
+        shape: &GEMMA4_12B_SHAPE,
         kv_gqa_only: true,
         empty_thought: true,
     },
@@ -265,7 +351,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_984_878_080),
             art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 46_137_344),
         ],
-        kv_bytes_per_token: GEMMA4_26B_KV_ELEMS * 2,
+
+        elem_bytes: 2,
+        shape: &GEMMA4_26B_SHAPE,
         kv_gqa_only: true,
         empty_thought: true,
     },
@@ -291,7 +379,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_7", 1_983_418_368),
             art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_8", 124_030_976),
         ],
-        kv_bytes_per_token: GEMMA4_26B_KV_ELEMS * 4,
+
+        elem_bytes: 4,
+        shape: &GEMMA4_26B_SHAPE,
         kv_gqa_only: true,
         empty_thought: true,
     },
@@ -307,7 +397,8 @@ mod tests {
             assert!(BUILTIN_MODELS[..i].iter().all(|o| o.id != m.id), "duplicate id {}", m.id);
             assert_eq!(m.tokenizer.file_name, "tokenizer.json", "{}", m.id);
             assert!(m.embed[0].file_name.ends_with(".onnx") && m.decoder[0].file_name.ends_with(".onnx"), "{}", m.id);
-            assert!(m.kv_bytes_per_token > 0, "{}", m.id);
+            assert!(m.shape.kv_elems_per_token > 0, "{}", m.id);
+            assert!(m.shape.lm_head_bytes <= m.embed[1].expected_bytes, "{}", m.id);
             for a in m.artifacts() {
                 assert!(a.expected_bytes > 0, "{} {}", m.id, a.file_name);
                 assert!(a.download_url().contains("/resolve/") && !a.download_url().contains("/resolve/main/"), "{}", a.download_url());

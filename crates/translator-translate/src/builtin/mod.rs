@@ -417,11 +417,7 @@ impl Loaded {
         let eos = self.spec.arch.eos_ids();
         let mut binding = self.decoder.create_binding()?;
         let mut text = String::new();
-        // A prefill run holds VRAM per fed token until it ends: buffers the WebGPU cache drops are
-        // reclaimed only once the GPU finishes. fp32 (q4) holds several MB per token (12B: +13 GB at
-        // 1500 tokens), and 256-token runs cap it at no speed cost; fp16 holds far less, and
-        // 512-token runs save ~0.4 GB for ~10% slower prefill, where smaller ones slow it much more.
-        let chunk = if self.kv_type == TensorElementType::Float32 { 256 } else { 512 };
+        let chunk = self.spec.prefill_chunk() as usize;
         loop {
             if cancel.is_cancelled() {
                 return Ok(Err(TranslateError::Cancelled));
