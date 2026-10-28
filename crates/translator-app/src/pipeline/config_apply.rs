@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use rust_i18n::t;
 use tracing::{error, info};
-use translator_core::{AppConfig, AppState, UiLanguage, config_path, load_active_dictionary};
+use translator_core::{AppConfig, AppState, ModelProvider, OcrDevice, UiLanguage, config_path, load_active_dictionary};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadUpdate, OcrEngine, StabilityGate};
 use translator_overlay::OverlayCommand;
 
@@ -91,17 +91,25 @@ impl Pipeline {
         if self.session.set_min_interval(cfg.capture.frame_interval()) {
             self.absorb_preview_sequence();
         }
-        let identity_changed = {
-            let prev = self.client.config();
-            prev.model != cfg.api.model
-                || prev.http_api != cfg.api.http_api
-                || prev.provider != cfg.api.provider
-                || prev.builtin_model != cfg.api.builtin_model
-                || prev.builtin_device != cfg.api.builtin_device
-        };
+        let prev = self.client.config();
+        let builtin_changed = prev.provider != cfg.api.provider
+            || prev.builtin_model != cfg.api.builtin_model
+            || prev.builtin_device != cfg.api.builtin_device;
+        let identity_changed = builtin_changed || prev.model != cfg.api.model || prev.http_api != cfg.api.http_api;
+        // ORT's WebGPU EP frees dropped weights only when a Conv PrePack (an OCR load) flushes them,
+        // or with the context both models share. A new OCR engine cleans up after itself; a new
+        // built-in model does not, so drop both and let the loads below start a fresh context.
+        let shared_webgpu =
+            self.ocr_device == OcrDevice::Webgpu && prev.provider == ModelProvider::Builtin && prev.builtin_device == OcrDevice::Webgpu;
         if identity_changed {
             self.cancel_inflight();
             self.conversation.clear();
+        }
+        if shared_webgpu && builtin_changed && self.state.read().auto_running {
+            // The unload would otherwise wait for an in-flight turn to finish.
+            self.cancel_inflight();
+            self.cancel_preload();
+            self.release_models().await;
         }
         self.client.update_config(cfg.api.clone());
         if let Ok(dir) = cfg.ocr.models_dir_path() {
@@ -154,25 +162,28 @@ impl Pipeline {
             self.ocr_device = cfg.ocr.device;
             self.ocr_layout = cfg.ocr.uses_layout();
             self.engine = None;
-            self.start_model_load();
-        } else if let Some(eng) = self.engine.as_mut() {
+        }
+        if let Some(eng) = self.engine.as_mut() {
             eng.apply_runtime_config(&cfg.ocr);
             self.state.write().restore_operational_status();
-        } else if self.model_load.is_none() {
-            // Engine missing and no load in flight (e.g. prior failure) — retry.
+        } else if self.model_load.is_some() {
+            // Keep Downloading/Loading status; a stale engine restarts once its load ends.
+            self.sync_model_load();
+        } else if self.state.read().auto_running {
+            // Engine reload, or a prior failure — load now.
             self.start_model_load();
         } else {
-            // Keep Downloading/Loading status; do not wipe via restore_operational_status.
-            self.sync_model_load();
+            // Idle: models load on the next Start.
+            self.state.write().restore_operational_status();
         }
     }
 
-    /// `true` when the OCR engine is ready. Starts a background load if needed.
+    /// `true` when the OCR engine is ready. Starts a background load if needed while capturing.
     pub(crate) fn ensure_engine(&mut self) -> bool {
         if self.engine.is_some() {
             return true;
         }
-        if self.model_load.is_none() {
+        if self.model_load.is_none() && self.state.read().auto_running {
             self.start_model_load();
         }
         false

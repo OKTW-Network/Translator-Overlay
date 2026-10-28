@@ -38,7 +38,6 @@ mod i18n_tests {
     fn pipeline_messages_are_localized() {
         for key in [
             "err.models_loading",
-            "err.engine_not_ready",
             "err.overlay_unavailable",
             "err.no_frame",
             "err.models_task_ended",

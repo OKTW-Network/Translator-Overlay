@@ -698,9 +698,12 @@ impl TranslateClient {
         backend.close().await;
         let teardowns = std::mem::take(&mut backend.teardowns);
         let _ = tokio::task::spawn_blocking(move || teardowns.into_iter().for_each(|t| drop(t.join()))).await;
-        // A model load cannot be interrupted; unload once it ends instead of stalling Stop.
-        let builtin = Arc::clone(&self.builtin);
-        tokio::spawn(async move { builtin.lock().await.unload() });
+    }
+
+    /// Drop the built-in model's ORT sessions. Waits out a cancelled turn or a model load (which
+    /// cannot be interrupted).
+    pub async fn unload_builtin(&self) {
+        self.builtin.lock().await.unload();
     }
 
     pub fn config(&self) -> &ApiConfig {

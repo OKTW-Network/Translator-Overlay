@@ -194,7 +194,7 @@ impl Pipeline {
             }
         };
 
-        let mut pipeline = Self {
+        let pipeline = Self {
             state,
             session: CaptureSession::new(),
             gate: StabilityGate::from_config(&ocr_cfg),
@@ -221,8 +221,6 @@ impl Pipeline {
 
         pipeline.sync_reader_placeholder();
         apply_dictionary_profile(&mut pipeline.state.write());
-        // Kick off download + load without blocking the command loop / UI.
-        pipeline.start_model_load();
         pipeline
     }
 
@@ -299,9 +297,9 @@ impl Pipeline {
             PipelineCommand::Shutdown => {
                 self.cancel_inflight();
                 self.cancel_preload();
-                self.model_load = None;
                 self.session.stop();
                 self.conversation.clear();
+                self.release_models().await;
                 self.client.close_session().await;
                 if let Some(mut o) = self.overlay.take() {
                     let _ = o.send(OverlayCommand::Clear);
@@ -514,20 +512,17 @@ impl Pipeline {
     }
 
     fn begin_start_capture(&mut self, hwnd: isize, title: String) {
-        if self.model_load.is_some() {
-            warn!("start capture ignored — OCR models still loading");
-            self.state.write().last_error = Some(t!("err.models_loading").into_owned());
-        } else if self.engine.is_none() {
-            self.state.write().set_error(t!("err.engine_not_ready"));
-        } else {
-            self.cancel_inflight();
-            let interval = self.state.read().config.capture.frame_interval();
-            match self.session.start_window(hwnd, title, interval) {
-                Ok(()) => self.on_capture_started(),
-                Err(e) => {
-                    error!(error = %e, "start capture failed");
-                    self.state.write().set_error(e.to_string());
-                }
+        self.cancel_inflight();
+        let interval = self.state.read().config.capture.frame_interval();
+        match self.session.start_window(hwnd, title, interval) {
+            Ok(()) => {
+                self.on_capture_started();
+                // Models load only while capturing; frames before the engine is ready update the preview only.
+                self.ensure_engine();
+            }
+            Err(e) => {
+                error!(error = %e, "start capture failed");
+                self.state.write().set_error(e.to_string());
             }
         }
     }
@@ -578,6 +573,7 @@ impl Pipeline {
         self.session.stop();
         self.reset_ocr_session(false);
         self.conversation.clear();
+        self.release_models().await;
         self.client.close_session().await;
         let mut s = self.state.write();
         s.auto_running = false;
@@ -586,6 +582,16 @@ impl Pipeline {
         s.target_hwnd = None;
         s.translate_in_flight = false;
         s.status = PipelineStatus::Idle;
+    }
+
+    /// Drop every ORT session (OCR + built-in model), waiting out loads in progress. WebGPU
+    /// frees VRAM only once no session holds its shared context.
+    pub(crate) async fn release_models(&mut self) {
+        self.engine = None;
+        if let Some(job) = self.model_load.take() {
+            job.close().await;
+        }
+        self.client.unload_builtin().await;
     }
 
     /// Reset gate / timers / captions. Optionally clear LLM conversation.

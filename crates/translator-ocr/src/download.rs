@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tokio::{fs, io::AsyncWriteExt, sync::watch};
+use tokio::{fs, io::AsyncWriteExt, sync::watch, task::JoinHandle};
 use tracing::info;
 use translator_core::{ModelKind, ModelTier, OcrConfig, OcrDevice, PipelineStatus};
 
@@ -27,13 +27,23 @@ pub struct ModelLoadTask {
     pub device: OcrDevice,
     /// Built with PP-DocLayoutV3 ([`OcrConfig::uses_layout`]).
     pub layout: bool,
+    join: JoinHandle<()>,
+}
+
+impl ModelLoadTask {
+    /// Abandon a pending download, then wait for the task to end. A finished or in-progress load
+    /// is dropped inside the task, so its ORT sessions are gone when this returns.
+    pub async fn close(self) {
+        drop(self.rx);
+        let _ = self.join.await;
+    }
 }
 
 impl OcrEngine {
     /// Download missing models (if needed) then build the ORT session in the background.
     ///
     /// Returns a [`ModelLoadTask`] whose `watch` receiver always holds the latest phase.
-    /// Dropping the receiver ignores the result; the task may still finish in the background.
+    /// Dropping the receiver abandons a pending download; an ORT load still runs to the end.
     pub fn start_load(config: OcrConfig) -> ModelLoadTask {
         let tier = config.model_tier;
         let device = config.device;
@@ -50,7 +60,7 @@ impl OcrEngine {
         };
 
         let (tx, rx) = watch::channel(initial);
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             let update = match download_and_load(&config, &tx).await {
                 Ok(engine) => ModelLoadUpdate::Ready(engine),
                 Err(e) => ModelLoadUpdate::Failed(e.to_string()),
@@ -58,7 +68,13 @@ impl OcrEngine {
             let _ = tx.send(update);
         });
 
-        ModelLoadTask { rx, tier, device, layout }
+        ModelLoadTask {
+            rx,
+            tier,
+            device,
+            layout,
+            join,
+        }
     }
 }
 
@@ -85,11 +101,22 @@ async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdat
             .build()
             .map_err(|e| OcrError::Download(format!("http client: {e}")))?;
         for (index, art) in missing.iter().enumerate() {
-            download_artifact(&client, art, &models_dir, |percent| {
+            let download = download_artifact(&client, art, &models_dir, |percent| {
                 let _ = tx.send(ModelLoadUpdate::Progress(downloading(art.file_name, index, missing.len(), percent)));
-            })
-            .await?;
+            });
+            tokio::select! {
+                biased;
+                () = tx.closed() => {
+                    let _ = fs::remove_file(part_path(&models_dir, art)).await;
+                    return Err(OcrError::Other("OCR model load abandoned".into()));
+                }
+                result = download => result?,
+            }
         }
+    }
+    // Abandoned: skip the load. Once started it is not interrupted ([`ModelLoadTask::close`] waits for it).
+    if tx.is_closed() {
+        return Err(OcrError::Other("OCR model load abandoned".into()));
     }
     let _ = tx.send(ModelLoadUpdate::Progress(PipelineStatus::LoadingModels { kind: ModelKind::Ocr }));
     OcrEngine::load(config).await

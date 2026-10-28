@@ -45,7 +45,7 @@ Real-time translation overlay for the Windows desktop: pick a target window → 
 4. **Save**
 5. Pick a window on the **Dashboard** → **Start** at the bottom of the left navigation
 
-If OCR models are missing on first run, they are downloaded from [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0) into `models/` next to the exe. **Start** is unavailable until that finishes. With the built-in model, the first **Start** downloads the translation model in the background, with progress in the status bar.
+OCR and translation models load only after **Start**; missing ones are first downloaded into `models/` next to the exe (OCR from [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0)), with progress in the status bar. **Stop** waits until the models are fully unloaded and their VRAM is freed.
 
 ## Usage
 

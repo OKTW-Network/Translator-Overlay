@@ -45,7 +45,7 @@ Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-
 4. **Save**
 5. **Dashboard** 選視窗 → 左側導覽底部 **Start**
 
-首次執行若缺少 OCR 模型，會從 [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0) 下載到 exe 同目錄的 `models/`；完成前無法 Start。使用內建模型時，第一次 Start 會在背景下載翻譯模型，進度顯示在狀態列。
+OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同目錄的 `models/`（OCR 來自 [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0)），進度顯示在狀態列。Stop 會等模型完全卸載、釋放 VRAM 後才結束。
 
 ## 使用
 
