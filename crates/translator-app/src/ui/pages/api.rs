@@ -5,7 +5,10 @@ use std::borrow::Cow;
 use rust_i18n::t;
 use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ServiceTier};
 use translator_translate::{BUILTIN_MODELS, find_builtin_model};
-use translator_winui::{Border, HorizontalAlignment, InfoBar, Interface, Layout, Result, StackPanel, UIElement, VerticalAlignment};
+use translator_winui::{
+    Border, Flyout, FlyoutPlacementMode, HorizontalAlignment, InfoBar, Interface, Layout, Result, StackPanel, Style, TextWrapping,
+    UIElement, VerticalAlignment, XamlReader,
+};
 
 use crate::{
     children,
@@ -14,16 +17,16 @@ use crate::{
         state::{API_PROFILES, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list, selected_api_profile},
         widgets::{
             Binds, Prop, button,
-            cards::{Card, section_header, settings_card},
+            cards::{Card, SEMI_BOLD, section_header, settings_card},
             column,
             controls::{
                 ModelSuggestParams, OptionalTextParams, SliderNumberParams, card_model_suggest, card_password, card_slider_number,
                 card_text, card_toggle, optional_number_row, optional_slider_row, optional_text_row, radio,
             },
             fields::Combo,
-            hs,
+            hs, icon_button,
             named::{name_entry_row, named_combo, named_confirm_dialog, named_delete_button},
-            row,
+            row, text,
         },
     },
 };
@@ -166,10 +169,35 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         }
     })?;
     provider.cb.width(200.0)?.valign(VerticalAlignment::Center)?;
-    let provider_card = settings_card("api-provider", &t!("api.provider"), Some(&t!("api.provider_desc")), &provider.cb)?;
+    let hint_title = text(&t!("api.builtin_hint_title"))?;
+    hint_title.SetFontWeight(SEMI_BOLD)?;
+    let hint_body = text(&t!("api.builtin_hint"))?;
+    hint_body.SetTextWrapping(TextWrapping::Wrap)?;
+    hint_body.max_width(320.0)?;
+    let hint = column(8.0)?;
+    children!(hint; hint_title, hint_body);
+    let flyout = Flyout::new()?;
+    flyout.SetContent(&hint)?;
+    // The default ThemeShadow paints as a solid block over Mica. A presenter style replaces the
+    // default one, so inherit it to keep corners, padding and colours.
+    let no_shadow = "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='FlyoutPresenter' \
+                     BasedOn='{StaticResource DefaultFlyoutPresenterStyle}'>\
+                     <Setter Property='IsDefaultShadowEnabled' Value='False'/></Style>";
+    flyout.SetPlacement(FlyoutPlacementMode::Left)?;
+    flyout.SetFlyoutPresenterStyle(&XamlReader::Load(&hs(no_shadow))?.cast::<Style>()?)?;
+    // The button's Flyout opens on click and light-dismisses on its own.
+    let info = icon_button("\u{E946}", || {})?;
+    info.tooltip(&t!("api.builtin_hint_title"))?;
+    info.SetFlyout(&flyout)?;
+    let provider_row = row(4.0)?;
+    provider_row.valign(VerticalAlignment::Center)?;
+    children!(provider_row; info, provider.cb);
+    let provider_card = settings_card("api-provider", &t!("api.provider"), Some(&t!("api.provider_desc")), &provider_row)?;
+    let mut info_shown = Prop::default();
     b.add(move |ui, _| {
         let items = PROVIDERS.iter().map(|&p| provider_label(p).to_string()).collect();
-        provider.set(items, PROVIDERS.iter().position(|&p| p == ui.draft.api.provider), true)
+        provider.set(items, PROVIDERS.iter().position(|&p| p == ui.draft.api.provider), true)?;
+        info_shown.set(ui.draft.api.provider == ModelProvider::Builtin, |&v| info.visible(v).map(drop))
     });
 
     let pick = |choice: HttpApi| {

@@ -283,3 +283,14 @@ Microsoft::UI::Xaml::Controls::IImageIconSource::put_ImageSource
 Microsoft::UI::Xaml::Controls::ImageIconSource
 Microsoft::UI::Xaml::Controls::IIconSourceStatics::{}
 Microsoft::UI::Xaml::Controls::IImageIconSourceStatics::{}
+Microsoft::UI::Xaml::Controls::Flyout::CreateInstance
+Microsoft::UI::Xaml::Controls::Flyout
+Microsoft::UI::Xaml::Controls::IFlyout::{put_Content, put_FlyoutPresenterStyle}
+Microsoft::UI::Xaml::Controls::IButton::put_Flyout
+Microsoft::UI::Xaml::Controls::IFlyoutStatics::{}
+Microsoft::UI::Xaml::Controls::Primitives::FlyoutBase
+Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBase::put_Placement
+Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode
+Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBaseFactory::{}
+Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBaseStatics::{}
+Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBaseStatics2::{}

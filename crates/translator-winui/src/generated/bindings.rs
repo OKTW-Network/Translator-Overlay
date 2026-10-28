@@ -933,6 +933,13 @@ pub struct Button(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(Button, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(Button, ButtonBase, ContentControl, Control, FrameworkElement, UIElement, DependencyObject);
 impl Button {
+    pub fn SetFlyout<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<FlyoutBase>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetFlyout)(windows_core::Interface::as_raw(self), value.param().abi()).ok() }
+    }
+
     pub fn Click<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
     where
         F: Fn(windows_core::Ref<windows_core::IInspectable>, windows_core::Ref<RoutedEventArgs>) + Send + 'static,
@@ -3317,6 +3324,170 @@ impl windows_core::RuntimeType for ElementTheme {
 }
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Flyout(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(Flyout, windows_core::IUnknown, windows_core::IInspectable);
+windows_core::imp::required_hierarchy!(Flyout, FlyoutBase, DependencyObject);
+impl Flyout {
+    pub fn ClearValue<P0>(&self, dp: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DependencyProperty>,
+    {
+        let this = &windows_core::Interface::cast::<IDependencyObject>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).ClearValue)(windows_core::Interface::as_raw(this), dp.param().abi()).ok() }
+    }
+
+    pub fn SetContent<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<UIElement>,
+    {
+        unsafe { (windows_core::Interface::vtable(self).SetContent)(windows_core::Interface::as_raw(self), value.param().abi()).ok() }
+    }
+
+    pub fn SetFlyoutPresenterStyle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<Style>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetFlyoutPresenterStyle)(windows_core::Interface::as_raw(self), value.param().abi()).ok()
+        }
+    }
+
+    pub fn SetPlacement(&self, value: FlyoutPlacementMode) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFlyoutBase>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetPlacement)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn new() -> windows_core::Result<Self> {
+        Self::IFlyoutFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+
+    pub fn compose<T>(compose: T) -> windows_core::Result<Self>
+    where
+        T: windows_core::Compose,
+    {
+        Self::IFlyoutFactory(|this| unsafe {
+            let (derived__, base__) = windows_core::Compose::compose(compose);
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(&derived__),
+                base__ as *mut _ as _,
+                &mut result__,
+            )
+            .ok()?;
+            let _ = &derived__;
+            windows_core::imp::Type::from_abi(result__)
+        })
+    }
+
+    fn IFlyoutFactory<R, F: FnOnce(&IFlyoutFactory) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<Flyout, IFlyoutFactory> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+
+    fn IFlyoutStatics<R, F: FnOnce(&IFlyoutStatics) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<Flyout, IFlyoutStatics> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for Flyout {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IFlyout>();
+}
+unsafe impl windows_core::Interface for Flyout {
+    type Vtable = <IFlyout as windows_core::Interface>::Vtable;
+
+    const IID: windows_core::GUID = <IFlyout as windows_core::Interface>::IID;
+}
+impl windows_core::RuntimeName for Flyout {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.Flyout";
+}
+unsafe impl Send for Flyout {}
+unsafe impl Sync for Flyout {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlyoutBase(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(FlyoutBase, windows_core::IUnknown, windows_core::IInspectable);
+windows_core::imp::required_hierarchy!(FlyoutBase, DependencyObject);
+impl FlyoutBase {
+    pub fn ClearValue<P0>(&self, dp: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DependencyProperty>,
+    {
+        let this = &windows_core::Interface::cast::<IDependencyObject>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).ClearValue)(windows_core::Interface::as_raw(this), dp.param().abi()).ok() }
+    }
+
+    pub fn SetPlacement(&self, value: FlyoutPlacementMode) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetPlacement)(windows_core::Interface::as_raw(self), value).ok() }
+    }
+
+    fn IFlyoutBaseFactory<R, F: FnOnce(&IFlyoutBaseFactory) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<FlyoutBase, IFlyoutBaseFactory> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+
+    fn IFlyoutBaseStatics<R, F: FnOnce(&IFlyoutBaseStatics) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<FlyoutBase, IFlyoutBaseStatics> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+
+    fn IFlyoutBaseStatics2<R, F: FnOnce(&IFlyoutBaseStatics2) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<FlyoutBase, IFlyoutBaseStatics2> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for FlyoutBase {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IFlyoutBase>();
+}
+unsafe impl windows_core::Interface for FlyoutBase {
+    type Vtable = <IFlyoutBase as windows_core::Interface>::Vtable;
+
+    const IID: windows_core::GUID = <IFlyoutBase as windows_core::Interface>::IID;
+}
+impl windows_core::RuntimeName for FlyoutBase {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase";
+}
+unsafe impl Send for FlyoutBase {}
+unsafe impl Sync for FlyoutBase {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FlyoutPlacementMode(pub i32);
+impl FlyoutPlacementMode {
+    pub const Auto: Self = Self(13);
+    pub const Bottom: Self = Self(1);
+    pub const BottomEdgeAlignedLeft: Self = Self(7);
+    pub const BottomEdgeAlignedRight: Self = Self(8);
+    pub const Full: Self = Self(4);
+    pub const Left: Self = Self(2);
+    pub const LeftEdgeAlignedBottom: Self = Self(10);
+    pub const LeftEdgeAlignedTop: Self = Self(9);
+    pub const Right: Self = Self(3);
+    pub const RightEdgeAlignedBottom: Self = Self(12);
+    pub const RightEdgeAlignedTop: Self = Self(11);
+    pub const Top: Self = Self(0);
+    pub const TopEdgeAlignedLeft: Self = Self(5);
+    pub const TopEdgeAlignedRight: Self = Self(6);
+}
+impl windows_core::imp::TypeKind for FlyoutPlacementMode {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for FlyoutPlacementMode {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode");
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"enum(Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode;i4)");
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FontIcon(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(FontIcon, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(FontIcon, IconElement, FrameworkElement, UIElement, DependencyObject);
@@ -4484,6 +4655,8 @@ impl windows_core::RuntimeType for IButton {
 #[repr(C)]
 pub struct IButton_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
+    Flyout: usize,
+    pub SetFlyout: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(IButtonBase, IButtonBase_Vtbl, 0x65714269_2473_5327_a652_0ea6bce7f403);
 impl windows_core::RuntimeType for IButtonBase {
@@ -5170,6 +5343,85 @@ impl windows_core::RuntimeType for IDispatcherQueueStatics {
 pub struct IDispatcherQueueStatics_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
     pub GetForCurrentThread: unsafe extern "system" fn(*mut core::ffi::c_void, *mut *mut core::ffi::c_void) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IFlyout, IFlyout_Vtbl, 0xd4a1eb7d_59b8_5df9_87c3_bd5e3856923f);
+impl windows_core::RuntimeType for IFlyout {
+    const NAME: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.IFlyout");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyout_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    Content: usize,
+    pub SetContent: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+    FlyoutPresenterStyle: usize,
+    pub SetFlyoutPresenterStyle: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IFlyoutBase, IFlyoutBase_Vtbl, 0xbb6603bf_744d_5c31_a87d_744394634d77);
+impl windows_core::RuntimeType for IFlyoutBase {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.IFlyoutBase");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyoutBase_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    Placement: usize,
+    pub SetPlacement: unsafe extern "system" fn(*mut core::ffi::c_void, FlyoutPlacementMode) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IFlyoutBaseFactory, IFlyoutBaseFactory_Vtbl, 0x006d738f_7c91_5ef3_8a80_a548108dab8b);
+impl windows_core::RuntimeType for IFlyoutBaseFactory {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.IFlyoutBaseFactory");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyoutBaseFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(IFlyoutBaseStatics, IFlyoutBaseStatics_Vtbl, 0x63ee628e_d2e3_5515_aea4_e461088c0c4e);
+impl windows_core::RuntimeType for IFlyoutBaseStatics {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.IFlyoutBaseStatics");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyoutBaseStatics_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(IFlyoutBaseStatics2, IFlyoutBaseStatics2_Vtbl, 0x2403cd2c_a6b8_5dc2_be3b_2a4bdd072ef1);
+impl windows_core::RuntimeType for IFlyoutBaseStatics2 {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.IFlyoutBaseStatics2");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyoutBaseStatics2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(IFlyoutFactory, IFlyoutFactory_Vtbl, 0xfd19002e_66b3_5656_b49c_b2aca11e9602);
+impl windows_core::RuntimeType for IFlyoutFactory {
+    const NAME: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.IFlyoutFactory");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyoutFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateInstance: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IFlyoutStatics, IFlyoutStatics_Vtbl, 0x23ae001a_aaa6_5d19_9947_917ecbd883ca);
+impl windows_core::RuntimeType for IFlyoutStatics {
+    const NAME: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.IFlyoutStatics");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IFlyoutStatics_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(IFontIcon, IFontIcon_Vtbl, 0x6eba5ed9_d233_5f5e_91a8_f5134292658a);
 impl windows_core::RuntimeType for IFontIcon {
