@@ -449,7 +449,7 @@ impl Default for TranslationConfig {
             target_lang: "zh-TW".to_string(),
             history_max_items: 8,
             conversation_max_turns: 20,
-            instruction_reminder: false,
+            instruction_reminder: true,
             cache_enabled: true,
             cache_max_entries: TRANSLATION_CACHE_MAX_DEFAULT,
             system_prompt: None,

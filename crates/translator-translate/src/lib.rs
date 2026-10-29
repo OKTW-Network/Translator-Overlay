@@ -257,7 +257,6 @@ pub fn default_system_prompt(cfg: &TranslationConfig) -> String {
                  - Prefer concise wording that fits the original on-screen space. Do not pad or explain.\n\
                  - Translate each block on its own. Blocks are separate screen regions, not one paragraph.\n\
                  - Keep proper nouns, character names, titles, and recurring UI terms consistent with earlier turns. Leave them untranslated when that is conventional in {dst}.\n\
-                 - If a block is already {dst}, copy it through unchanged.\n\
                  - Source may contain OCR errors (wrong glyphs, missing punctuation, glued words). Recover the intended wording when it is obvious; do not invent missing content.\n\
                  - Translate fully. Do not mix leftover source-language sentences into the output unless you are preserving a name or term.\n\
                  - Do not add romanization, parenthetical glosses, or labels such as (note).\n"
