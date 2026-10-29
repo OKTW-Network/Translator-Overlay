@@ -132,6 +132,10 @@ pub(crate) async fn complete(
         })
         .filter(|s| s.temperature > 0.0),
         dry: api.builtin_dry,
+        shape: Some(ReplyShape {
+            ids: crate::peek_translation_pairs(&source).into_iter().map(|(id, _)| id).collect(),
+        })
+        .filter(|s| !s.ids.is_empty()),
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let cancel_job = cancel.clone();
@@ -298,12 +302,96 @@ fn apply_dry(logits: &mut [f32], reply: &[u32], breakers: &HashSet<u32>) {
 }
 
 /// How [`Loaded::generate`] picks each token.
-#[derive(Clone, Copy)]
 struct Decoding {
     /// `None` decodes greedily.
     sampling: Option<Sampling>,
     /// See [`apply_dry`].
     dry: bool,
+    /// `None` leaves the reply unconstrained.
+    shape: Option<ReplyShape>,
+}
+
+/// Holds a reply to `{"b":[[id,"text"],...]}` with exactly the source's ids, in order. Small models
+/// otherwise write `，` for `,` or a stray `]`, and the parser loses every block after the slip.
+struct ReplyShape {
+    /// Not empty.
+    ids: Vec<u32>,
+}
+
+/// Progress through a [`ReplyShape`]: block `lit`'s literal (`lit` = ids.len() is the closing one),
+/// then its text.
+#[derive(Clone, Copy, Default)]
+struct ShapeState {
+    lit: usize,
+    /// Bytes of literal `lit` written.
+    written: usize,
+    in_text: bool,
+    escape: Escape,
+    /// The text's last char is `]`. A text never holds `]]`, `],` or `]}`: that is the model closing
+    /// it without `"`, after a `」` it took for the quote.
+    bracket: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+enum Escape {
+    #[default]
+    None,
+    Backslash,
+    /// `\u` hex digits left.
+    Hex(u8),
+}
+
+impl ReplyShape {
+    /// The fixed text before block `i`'s string content, or the reply's end for the last `i`.
+    fn literal(&self, i: usize) -> String {
+        match self.ids.get(i) {
+            Some(id) if i == 0 => format!("{{\"b\":[[{id},\""),
+            Some(id) => format!("\"],[{id},\""),
+            None => "\"]]}".into(),
+        }
+    }
+
+    fn done(&self, s: ShapeState) -> bool {
+        s.lit == self.ids.len() && s.written == self.literal(s.lit).len()
+    }
+
+    /// The state after `piece`, or `None` if `piece` breaks the shape.
+    fn feed(&self, mut s: ShapeState, piece: &str) -> Option<ShapeState> {
+        let mut lit = self.literal(s.lit);
+        for c in piece.chars() {
+            if !s.in_text {
+                if !lit[s.written..].starts_with(c) {
+                    return None;
+                }
+                s.written += c.len_utf8();
+                // The closing literal has no text after it.
+                s.in_text = s.written == lit.len() && s.lit < self.ids.len();
+                continue;
+            }
+            if s.bracket && matches!(c, ']' | ',' | '}') {
+                return None;
+            }
+            s.bracket = c == ']' && matches!(s.escape, Escape::None);
+            s.escape = match (s.escape, c) {
+                (Escape::None, '"') => {
+                    s.in_text = false;
+                    s.lit += 1;
+                    lit = self.literal(s.lit);
+                    s.written = 1;
+                    Escape::None
+                }
+                (Escape::None, '\\') => Escape::Backslash,
+                (Escape::None, c) if c < ' ' => return None,
+                (Escape::None, _) => Escape::None,
+                (Escape::Backslash, 'u') => Escape::Hex(4),
+                (Escape::Backslash, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't') => Escape::None,
+                (Escape::Hex(1), c) if c.is_ascii_hexdigit() => Escape::None,
+                (Escape::Hex(n), c) if c.is_ascii_hexdigit() => Escape::Hex(n - 1),
+                _ => return None,
+            };
+        }
+        Some(s)
+    }
 }
 
 /// Random token choice. Without it a retry after an unparsable reply repeats the same reply.
@@ -504,6 +592,7 @@ impl Loaded {
         let mut text = String::new();
         let mut logits_f32 = Vec::new();
         let mut looping = false;
+        let mut shape_state = ShapeState::default();
         let chunk = self.spec.prefill_chunk() as usize;
         loop {
             if cancel.is_cancelled() {
@@ -556,16 +645,54 @@ impl Loaded {
             if decoding.dry {
                 apply_dry(&mut logits_f32, &ids[prompt_len..], &self.dry_breakers);
             }
-            let next = match &decoding.sampling {
+            let mut next = match &decoding.sampling {
                 Some(s) => s.pick(&logits_f32, &mut self.rng),
                 None => argmax(&logits_f32),
             };
+            if let Some(shape) = &decoding.shape {
+                // The shape ends the reply itself, so no EOS fits it.
+                let fits = |t: u32| -> ort::Result<Option<ShapeState>> {
+                    Ok(if eos.contains(&t) {
+                        None
+                    } else {
+                        shape.feed(shape_state, &self.tokenizer.decode(&[t], false)?)
+                    })
+                };
+                let fitted = match fits(next)? {
+                    Some(s) => Some((next, s)),
+                    // The model's best token that fits. Ending, or closing a text without `"`, means the
+                    // text is done, so then the best one that closes it.
+                    None => {
+                        let closing = shape_state.in_text
+                            && (eos.contains(&next) || self.tokenizer.decode(&[next], false)?.starts_with([']', ',', '}']));
+                        let mut order: Vec<u32> = (0..logits_f32.len() as u32).collect();
+                        order.sort_unstable_by(|&a, &b| logits_f32[b as usize].total_cmp(&logits_f32[a as usize]));
+                        let mut found = None;
+                        for t in order {
+                            if let Some(s) = fits(t)?
+                                && (!closing || s.lit > shape_state.lit)
+                            {
+                                found = Some((t, s));
+                                break;
+                            }
+                        }
+                        found
+                    }
+                };
+                let Some((t, s)) = fitted else {
+                    return Ok(Err(TranslateError::Other("no token fits the reply JSON".into())));
+                };
+                (next, shape_state) = (t, s);
+            }
             if eos.contains(&next) {
                 break;
             }
             ids.push(next);
             text = self.tokenizer.decode(&ids[prompt_len..], true)?;
             on_text(&text);
+            if decoding.shape.as_ref().is_some_and(|s| s.done(shape_state)) {
+                break;
+            }
             if ends_in_loop(&ids[prompt_len..]) {
                 looping = true;
                 break;
@@ -679,5 +806,37 @@ mod tests {
             .iter()
             .all(|&t| t == 1)
         );
+    }
+
+    #[test]
+    fn reply_shape_holds_the_source_ids() {
+        let shape = ReplyShape { ids: vec![3, 12] };
+        let feed = |pieces: &[&str]| {
+            pieces
+                .iter()
+                .try_fold(ShapeState::default(), |s, p| shape.feed(s, p))
+                .map(|s| shape.done(s))
+        };
+        // Any split into tokens; `"`, `\\` and `\u` escapes stay inside the text.
+        assert_eq!(feed(&[r#"{"b":[[3,"早"#, r#"安\"\\é"],"#, r#"[12,""#, r#""]]}"#]), Some(true));
+        assert_eq!(feed(&[r#"{"b":[[3,"a"],[12,"#]), Some(false));
+        assert_eq!(feed(&[r#"{"b":[[3,"[HP] [MP]"#]), Some(false));
+        // The slips 1.8B and 7B make (7B closes a text with `」`, then `]]}`), a wrong or skipped id,
+        // and anything after the end.
+        for bad in [
+            r#"{"b":[[3，"#,
+            r#"{"b":[[3],"#,
+            r#"{"b":[[3,"a」]]"#,
+            r#"{"b":[[3,"a」],"#,
+            r#"{"b":[[3,"a」]}"#,
+            r#"{"b":[[4,"#,
+            r#"{"b":[[3,"a"]]}"#,
+            r#"{"b":[[3,"a"],[12,"b"]]} "#,
+            "{\"b\":[[3,\"a\nb",
+            r#"{"b":[[3,"\x"#,
+            r#"{"b":[[3,"\u00g"#,
+        ] {
+            assert_eq!(feed(&[bad]), None, "{bad}");
+        }
     }
 }
