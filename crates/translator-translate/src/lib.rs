@@ -1580,9 +1580,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "runs the built-in model; downloads it into TRANSLATOR_MODELS_DIR (default target/release/models) if missing"]
+    #[ignore = "runs the built-in model (TRANSLATOR_BUILTIN_MODEL, default the config's); downloads it into TRANSLATOR_MODELS_DIR (default target/release/models) if missing"]
     async fn builtin_model_translates() {
-        let mut client = TranslateClient::new(ApiConfig::default());
+        let mut api = ApiConfig::default();
+        if let Ok(id) = std::env::var("TRANSLATOR_BUILTIN_MODEL") {
+            api.builtin_model = id;
+        }
+        let mut client = TranslateClient::new(api);
         let models_dir = std::env::var_os("TRANSLATOR_MODELS_DIR")
             .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/models"), PathBuf::from);
         client.set_models_dir(models_dir);

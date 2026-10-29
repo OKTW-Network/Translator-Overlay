@@ -95,16 +95,24 @@ The **Smart detection** line merge also needs `pp-doclayoutv3_fp16.onnx` (about 
 
 ## Built-in translation model
 
-Source: [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx) (all converted from Google's QAT checkpoints), each downloaded to its own subdirectory under `models/`.
+Sources (each downloaded to its own subdirectory under `models/`):
+
+- [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx): all converted from Google's QAT checkpoints.
+- [Hy-MT2 ONNX](https://huggingface.co/collections/james58899/hy-mt2-onnx): fp16 converted from Tencent's original weights, q4f16 from Intel's AutoRound int4 checkpoints.
 
 | Model | Quantization | Download size |
 | --- | --- | --- |
-| E4B | q4f16 | 4.3 GB |
-| E4B | q4 (default) | 4.8 GB |
-| 12B | q4f16 | 6.8 GB |
-| 12B | q4 | 7.6 GB |
-| 26B A4B | q4f16 | 14.3 GB |
-| 26B A4B | q4 | 15.9 GB |
+| Gemma 4 E4B | q4f16 | 4.3 GB |
+| Gemma 4 E4B | q4 (default) | 4.8 GB |
+| Gemma 4 12B | q4f16 | 6.8 GB |
+| Gemma 4 12B | q4 | 7.6 GB |
+| Gemma 4 26B A4B | q4f16 | 14.3 GB |
+| Gemma 4 26B A4B | q4 | 15.9 GB |
+| Hy-MT2 1.8B | q4f16 | 1.3 GB |
+| Hy-MT2 1.8B | fp16 | 3.6 GB |
+| Hy-MT2 7B | q4f16 | 4.7 GB |
+| Hy-MT2 7B | fp16 | 15.0 GB |
+| Hy-MT2 30B A3B | q4f16 | 16.3 GB |
 
 The device is WebGPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
 

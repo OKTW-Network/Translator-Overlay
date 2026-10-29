@@ -11,12 +11,70 @@ use crate::http::ChatMessage;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinArch {
     Gemma4,
+    /// Hy-MT2 1.8B.
+    HyMt2Small,
+    /// Hy-MT2 7B.
+    HyMt2Medium,
+    /// Hy-MT2 30B-A3B.
+    HyMt2Moe,
 }
 
 impl BuiltinArch {
     /// Prompt text for `messages`, ending with an open model turn.
     pub fn render_prompt(self, messages: &[ChatMessage], empty_thought: bool) -> String {
+        // The Hy-MT2 templates keep every message untrimmed and only read a leading system message.
+        let (system, turns) = match messages.split_first() {
+            Some((first, rest)) if first.role == "system" => (Some(first.content.as_str()), rest),
+            _ => (None, messages),
+        };
         match self {
+            Self::HyMt2Small => {
+                let mut out = String::from("<｜hy_begin▁of▁sentence｜>");
+                if let Some(system) = system {
+                    out.push_str(&format!("{system}<｜hy_place▁holder▁no▁3｜>"));
+                }
+                for m in turns {
+                    match m.role.as_str() {
+                        "user" => out.push_str(&format!("<｜hy_User｜>{}", m.content)),
+                        "assistant" => out.push_str(&format!("<｜hy_Assistant｜>{}<｜hy_place▁holder▁no▁2｜>", m.content)),
+                        _ => {}
+                    }
+                }
+                out.push_str("<｜hy_Assistant｜>");
+                out
+            }
+            // No generation prompt: the model turn opens right after the user's `<|extra_0|>`.
+            Self::HyMt2Medium => {
+                let mut out = String::new();
+                // A non-empty system message takes the first user turn's `<|startoftext|>`.
+                let mut head = false;
+                if let Some(system) = system.filter(|s| !s.is_empty()) {
+                    out.push_str(&format!("<|startoftext|>{system}<|extra_4|>"));
+                    head = true;
+                }
+                for m in turns {
+                    match m.role.as_str() {
+                        "user" if std::mem::take(&mut head) => out.push_str(&format!("{}<|extra_0|>", m.content)),
+                        "user" => out.push_str(&format!("<|startoftext|>{}<|extra_0|>", m.content)),
+                        "assistant" => out.push_str(&format!("{}<|eos|>", m.content)),
+                        _ => {}
+                    }
+                }
+                out
+            }
+            // Thinking stays off: `reasoning_effort:no_think` and an empty think block in every model turn.
+            Self::HyMt2Moe => {
+                let mut out = format!("<｜hy_begin▁of▁sentence｜>{}<｜reasoning_mode｜>reasoning_effort:no_think", system.unwrap_or(""));
+                for m in turns {
+                    match m.role.as_str() {
+                        "user" => out.push_str(&format!("<｜hy_User｜>{}", m.content)),
+                        "assistant" => out.push_str(&format!("<｜hy_Assistant｜><think></think>{}<eos:6124c78e>", m.content)),
+                        _ => {}
+                    }
+                }
+                out.push_str("<｜hy_Assistant｜><think></think>");
+                out
+            }
             // Thinking stays off: no `<|think|>` in the system turn.
             Self::Gemma4 => {
                 // Earlier model turns keep the empty thought channel and their untrimmed reply (the
@@ -44,13 +102,19 @@ impl BuiltinArch {
     pub fn eos_ids(self) -> &'static [u32] {
         match self {
             Self::Gemma4 => &[1, 106, 50],
+            Self::HyMt2Small => &[120020],
+            Self::HyMt2Medium => &[127960, 127967],
+            Self::HyMt2Moe => &[120025, 120026],
         }
     }
 
-    /// `(temperature, top_p, top_k)` from the model's `generation_config.json`.
+    /// `(temperature, top_p, top_k)` from the model's `generation_config.json`, or its model card when
+    /// that has none. `top_k` 0 is off.
     pub fn sampling_defaults(self) -> (f32, f32, u32) {
         match self {
             Self::Gemma4 => (1.0, 0.95, 64),
+            Self::HyMt2Small | Self::HyMt2Medium => (0.7, 0.8, 20),
+            Self::HyMt2Moe => (0.7, 1.0, 0),
         }
     }
 
@@ -69,6 +133,8 @@ impl BuiltinArch {
                 let donor = |d| inputs.iter().rev().find(|&&(_, d2)| d2 == d).map(|&(layer, _)| layer);
                 inputs.iter().map(|&(layer, d)| Some(layer) != donor(d)).collect()
             }
+            // Every Hy-MT2 entry sets `kv_gqa_only`.
+            Self::HyMt2Small | Self::HyMt2Medium | Self::HyMt2Moe => vec![true; inputs.len()],
         }
     }
 }
@@ -172,8 +238,9 @@ impl BuiltinModelSpec {
             OcrDevice::Directml => (0, 0),
             // Each 32-weight 4-bit block is 16 bytes plus its scale, which ORT's CPU kernels keep as
             // fp32: q4f16's 2-byte scales grow it by 10/9.
-            // shortcut: 26B's QMoE keeps its FC3 scales fp16, so 26B q4f16 is ~0.5 GB high; fine
-            // unless CPU estimates for 26B need to be exact.
+            // shortcut: 26B's QMoE keeps its FC3 scales fp16, so 26B q4f16 is ~0.5 GB high, and Hy-MT2
+            // (fp16 weights, or 4-bit blocks of 128) comes out 7–11% high; fine unless CPU estimates need
+            // to be exact.
             OcrDevice::Cpu => (0, if e == 2 { weights * 10 / 9 } else { weights } + kv + ram),
         }
     }
@@ -239,7 +306,43 @@ const GEMMA4_26B_SHAPE: ArchShape = ArchShape {
     gqa_512_layers: 5,
 };
 
-/// Sorted by download size.
+const HY_MT2_1_8B: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/4eba3702a3c289d4842b684161cfa4d0b9e8e3ff";
+const HY_MT2_1_8B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/4eba3702a3c289d4842b684161cfa4d0b9e8e3ff/onnx";
+const HY_MT2_1_8B_TOKENIZER: ModelArtifact = art(HY_MT2_1_8B, "tokenizer.json", 9_527_287);
+const HY_MT2_1_8B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 494_870_528,
+    // 32 layers × K/V × 4 heads × 128.
+    kv_elems_per_token: 32 * 2 * 4 * 128,
+    heads: 16,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 0,
+};
+
+const HY_MT2_7B: &str = "https://huggingface.co/james58899/Hy-MT2-7B-ONNX/resolve/a1390f8c0cfc1272e0b62d97289d75a7cd395e3b";
+const HY_MT2_7B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-7B-ONNX/resolve/a1390f8c0cfc1272e0b62d97289d75a7cd395e3b/onnx";
+const HY_MT2_7B_TOKENIZER: ModelArtifact = art(HY_MT2_7B, "tokenizer.json", 16_388_221);
+const HY_MT2_7B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 1_049_944_064,
+    // 32 layers × K/V × 8 heads × 128.
+    kv_elems_per_token: 32 * 2 * 8 * 128,
+    heads: 32,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 0,
+};
+
+const HY_MT2_30B: &str = "https://huggingface.co/james58899/Hy-MT2-30B-A3B-ONNX/resolve/eb24537e937a4faa6be21d594ca62b19e4b94300";
+const HY_MT2_30B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-30B-A3B-ONNX/resolve/eb24537e937a4faa6be21d594ca62b19e4b94300/onnx";
+/// The untied `lm_head` sits in the decoder's own external data.
+const HY_MT2_30B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 0,
+    // 48 layers × K/V × 4 heads × 128.
+    kv_elems_per_token: 48 * 2 * 4 * 128,
+    heads: 32,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 0,
+};
+
+/// Grouped by family, each sorted by download size.
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-qat-q4f16",
@@ -385,6 +488,123 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         kv_gqa_only: true,
         empty_thought: true,
     },
+    BuiltinModelSpec {
+        id: "hy-mt2-1.8b-q4f16",
+        label: "Hy-MT2 1.8B · q4f16 (1.3 GB)",
+        arch: BuiltinArch::HyMt2Small,
+        dir: "hy-mt2-1.8b",
+        tokenizer: HY_MT2_1_8B_TOKENIZER,
+        embed: &[
+            art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx", 355),
+            art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx_data", 494_870_528),
+        ],
+        decoder: &[
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx", 239_026),
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx_data", 796_135_424),
+        ],
+
+        elem_bytes: 2,
+        shape: &HY_MT2_1_8B_SHAPE,
+        kv_gqa_only: true,
+        empty_thought: false,
+    },
+    BuiltinModelSpec {
+        id: "hy-mt2-1.8b-fp16",
+        label: "Hy-MT2 1.8B · fp16 (3.6 GB)",
+        arch: BuiltinArch::HyMt2Small,
+        dir: "hy-mt2-1.8b",
+        tokenizer: HY_MT2_1_8B_TOKENIZER,
+        embed: &[
+            art(HY_MT2_1_8B_ONNX, "embed_tokens_fp16.onnx", 354),
+            art(HY_MT2_1_8B_ONNX, "embed_tokens_fp16.onnx_data", 494_870_528),
+        ],
+        decoder: &[
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx", 189_471),
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx_data", 1_950_523_392),
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx_data_1", 1_136_750_592),
+        ],
+
+        elem_bytes: 2,
+        shape: &HY_MT2_1_8B_SHAPE,
+        kv_gqa_only: true,
+        empty_thought: false,
+    },
+    BuiltinModelSpec {
+        id: "hy-mt2-7b-q4f16",
+        label: "Hy-MT2 7B · q4f16 (4.7 GB)",
+        arch: BuiltinArch::HyMt2Medium,
+        dir: "hy-mt2-7b",
+        tokenizer: HY_MT2_7B_TOKENIZER,
+        embed: &[
+            art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx", 356),
+            art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx_data", 1_049_944_064),
+        ],
+        decoder: &[
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx", 239_944),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_994_293_248),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_604_952_064),
+        ],
+
+        elem_bytes: 2,
+        shape: &HY_MT2_7B_SHAPE,
+        kv_gqa_only: true,
+        empty_thought: false,
+    },
+    BuiltinModelSpec {
+        id: "hy-mt2-7b-fp16",
+        label: "Hy-MT2 7B · fp16 (15.0 GB)",
+        arch: BuiltinArch::HyMt2Medium,
+        dir: "hy-mt2-7b",
+        tokenizer: HY_MT2_7B_TOKENIZER,
+        embed: &[
+            art(HY_MT2_7B_ONNX, "embed_tokens_fp16.onnx", 355),
+            art(HY_MT2_7B_ONNX, "embed_tokens_fp16.onnx_data", 1_049_944_064),
+        ],
+        decoder: &[
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx", 189_886),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data", 1_828_798_464),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_1", 1_979_777_024),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_2", 1_946_238_976),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_3", 1_979_777_024),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_4", 1_946_238_976),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_5", 1_979_777_024),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_6", 1_946_238_976),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_7", 352_329_728),
+        ],
+
+        elem_bytes: 2,
+        shape: &HY_MT2_7B_SHAPE,
+        kv_gqa_only: true,
+        empty_thought: false,
+    },
+    BuiltinModelSpec {
+        id: "hy-mt2-30b-a3b-q4f16",
+        label: "Hy-MT2 30B A3B · q4f16 (16.3 GB)",
+        arch: BuiltinArch::HyMt2Moe,
+        dir: "hy-mt2-30b-a3b",
+        tokenizer: art(HY_MT2_30B, "tokenizer.json", 9_527_108),
+        embed: &[
+            art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx", 355),
+            art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx_data", 494_927_872),
+        ],
+        decoder: &[
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx", 498_896),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_990_320_128),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_947_893_760),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_947_893_760),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_947_893_760),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_947_893_760),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_947_893_760),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_947_893_760),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 1_612_460_032),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_8", 494_927_872),
+        ],
+
+        elem_bytes: 2,
+        shape: &HY_MT2_30B_SHAPE,
+        kv_gqa_only: true,
+        empty_thought: false,
+    },
 ];
 
 #[cfg(test)]
@@ -446,5 +666,37 @@ mod tests {
             BuiltinArch::Gemma4.render_prompt(&messages, true),
             expected.replace("<|turn>model\n", "<|turn>model\n<|channel>thought\n<channel|>")
         );
+    }
+
+    #[test]
+    fn hy_mt2_prompts_match_chat_templates() {
+        let msg = |role: &str, content: &str| ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            reasoning_content: None,
+        };
+        let messages = [
+            msg("system", "sys\n"),
+            msg("user", " u1"),
+            msg("assistant", "a1\n"),
+            msg("user", "u2"),
+        ];
+        // Each checkpoint's `apply_chat_template(messages, add_generation_prompt=True)`.
+        let cases = [
+            (
+                BuiltinArch::HyMt2Small,
+                "<｜hy_begin▁of▁sentence｜>sys\n<｜hy_place▁holder▁no▁3｜><｜hy_User｜> u1<｜hy_Assistant｜>a1\n<｜hy_place▁holder▁no▁2｜><｜hy_User｜>u2<｜hy_Assistant｜>",
+            ),
+            (BuiltinArch::HyMt2Medium, "<|startoftext|>sys\n<|extra_4|> u1<|extra_0|>a1\n<|eos|><|startoftext|>u2<|extra_0|>"),
+            (
+                BuiltinArch::HyMt2Moe,
+                "<｜hy_begin▁of▁sentence｜>sys\n<｜reasoning_mode｜>reasoning_effort:no_think<｜hy_User｜> u1<｜hy_Assistant｜><think></think>a1\n<eos:6124c78e><｜hy_User｜>u2<｜hy_Assistant｜><think></think>",
+            ),
+        ];
+        for (arch, expected) in cases {
+            assert_eq!(arch.render_prompt(&messages, false), expected, "{arch:?}");
+        }
+        // Without a system message, 7B's first user turn opens with `<|startoftext|>`.
+        assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&messages[1..2], false), "<|startoftext|> u1<|extra_0|>");
     }
 }

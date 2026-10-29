@@ -95,16 +95,24 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 
 ## 內建翻譯模型
 
-來源：[Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx)（皆由 Google 的 QAT 檢查點轉換），各自下載到 `models/` 下的子目錄。
+來源（各自下載到 `models/` 下的子目錄）：
+
+- [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx)：皆由 Google 的 QAT 檢查點轉換。
+- [Hy-MT2 ONNX](https://huggingface.co/collections/james58899/hy-mt2-onnx)：fp16 由騰訊的原始權重轉換，q4f16 由 Intel 的 AutoRound int4 檢查點轉換。
 
 | 模型 | 量化 | 下載大小 |
 | --- | --- | --- |
-| E4B | q4f16 | 4.3 GB |
-| E4B | q4（預設） | 4.8 GB |
-| 12B | q4f16 | 6.8 GB |
-| 12B | q4 | 7.6 GB |
-| 26B A4B | q4f16 | 14.3 GB |
-| 26B A4B | q4 | 15.9 GB |
+| Gemma 4 E4B | q4f16 | 4.3 GB |
+| Gemma 4 E4B | q4（預設） | 4.8 GB |
+| Gemma 4 12B | q4f16 | 6.8 GB |
+| Gemma 4 12B | q4 | 7.6 GB |
+| Gemma 4 26B A4B | q4f16 | 14.3 GB |
+| Gemma 4 26B A4B | q4 | 15.9 GB |
+| Hy-MT2 1.8B | q4f16 | 1.3 GB |
+| Hy-MT2 1.8B | fp16 | 3.6 GB |
+| Hy-MT2 7B | q4f16 | 4.7 GB |
+| Hy-MT2 7B | fp16 | 15.0 GB |
+| Hy-MT2 30B A3B | q4f16 | 16.3 GB |
 
 裝置可選 WebGPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。
 
