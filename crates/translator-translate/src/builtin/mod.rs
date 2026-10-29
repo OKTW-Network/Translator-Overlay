@@ -465,26 +465,36 @@ impl Loaded {
         cancel: &CancellationToken,
         mut on_text: impl FnMut(&str),
     ) -> ort::Result<Result<String, TranslateError>> {
-        // shortcut: only a whole cached prefix is reused (the out-of-place layers' KV cannot be cut);
-        // trimmed history or a new system prompt re-prefills everything.
-        let (cache, stale) = match self.cache.take() {
-            Some(c) if c.context == context && prompt.len() > c.text.len() && prompt.starts_with(&c.text) => (Some(c), Vec::new()),
-            Some(c) if c.context == context => (None, c.past),
-            _ => (None, Vec::new()),
-        };
-        let mut ids = match &cache {
-            Some(c) => [c.ids.as_slice(), self.tokenizer.encode(&prompt[c.text.len()..], false)?.get_ids()].concat(),
-            None => self.tokenizer.encode(prompt, false)?.get_ids().to_vec(),
+        let cache = self.cache.take().filter(|c| c.context == context);
+        let (mut ids, reused) = match &cache {
+            Some(c) if prompt.len() > c.text.len() && prompt.starts_with(&c.text) => {
+                ([c.ids.as_slice(), self.tokenizer.encode(&prompt[c.text.len()..], false)?.get_ids()].concat(), c.ids.len())
+            }
+            // In-place KV past the shared tokens just gets overwritten, so a retry, a request after a
+            // cancelled one, or trimmed history still reuses what comes before.
+            // shortcut: out-of-place layers' KV cannot be cut, so those models re-prefill everything.
+            Some(c) if self.kv.iter().all(|s| s.in_place) => {
+                let ids = self.tokenizer.encode(prompt, false)?.get_ids().to_vec();
+                // Feed at least one token for the logits.
+                let shared = ids
+                    .iter()
+                    .zip(&c.ids)
+                    .take_while(|(a, b)| a == b)
+                    .count()
+                    .min(ids.len().saturating_sub(1));
+                (ids, shared)
+            }
+            _ => (self.tokenizer.encode(prompt, false)?.get_ids().to_vec(), 0),
         };
         let prompt_len = ids.len();
         if prompt_len > context {
             return Ok(Err(TranslateError::ContextFull(context)));
         }
-        let (mut past, mut fed) = match cache {
-            Some(c) => (c.past, c.ids.len()),
-            None => (self.empty_past(context, stale)?, 0),
+        let mut past = match cache {
+            Some(c) if reused > 0 => c.past,
+            stale => self.empty_past(context, stale.map_or_else(Vec::new, |c| c.past))?,
         };
-        let reused = fed;
+        let mut fed = reused;
         let start = Instant::now();
         let mut prefill = None;
         let kv_mem = kv_memory(self.device)?;
