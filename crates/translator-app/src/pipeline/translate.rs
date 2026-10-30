@@ -562,4 +562,61 @@ mod tests {
         assert!(p.inflight.is_none(), "a trimmed history that still overflows must fail");
         assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
     }
+
+    #[tokio::test]
+    async fn vanished_line_is_captioned_again_on_return() {
+        let mut p = pipeline(0);
+        // Settle off: durable OCR is the raw frame, so no sleeps.
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let both = vec![block(1, "X"), block(2, "Y")];
+        p.consume_raw_ocr(both.clone(), 100, 100).await;
+        p.consume_raw_ocr(both.clone(), 100, 100).await;
+        let job = p.inflight.take().expect("page translates");
+        p.finish_translate(job, reply(r#"{"b":[[1,"TX"],[2,"TY"]]}"#, 0));
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 2);
+
+        p.consume_raw_ocr(vec![block(1, "X")], 100, 100).await;
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "vanished line drops its caption");
+
+        p.consume_raw_ocr(both.clone(), 100, 100).await;
+        p.consume_raw_ocr(both, 100, 100).await;
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 2, "returning line is captioned again");
+    }
+
+    #[tokio::test]
+    async fn page_returning_after_hold_expiry_is_translated_again() {
+        let mut p = pipeline(0);
+        p.state.write().config.ocr.hold_ms = 20;
+        p.persist = BlockPersistenceFilter::new(20, 20, 0);
+        p.gate = StabilityGate::new(0);
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(30));
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        settle();
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        let job = p.inflight.take().expect("page translates");
+        // The settle filter renumbers block ids from 0.
+        p.finish_translate(job, reply(r#"{"b":[[0,"TX"]]}"#, 0));
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1);
+
+        // Dialog closes over flickering text that never settles: captions expire after hold.
+        let noise = |text: &str| {
+            vec![OcrBlock {
+                bbox: Rect::new(60.0, 60.0, 10.0, 10.0),
+                ..block(1, text)
+            }]
+        };
+        settle();
+        p.consume_raw_ocr(noise("n1"), 100, 100).await;
+        settle();
+        p.consume_raw_ocr(noise("n2"), 100, 100).await;
+        assert!(p.state.read().latest_translated_blocks.is_empty());
+
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        settle();
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x, 100, 100).await;
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "same page is translated again");
+    }
 }

@@ -475,18 +475,15 @@ pub struct OcrConfig {
     /// Directory for model files (relative to exe dir unless absolute).
     pub models_dir: String,
     pub confidence_threshold: f32,
-    /// Page-level: wait this long with unchanged OCR before translating.
-    pub stable_duration_ms: u64,
-    /// If OCR content keeps changing, force-translate after this many ms anyway.
-    /// Covers thrash that never settles (e.g. trailing glyph flicker). 0 = off.
-    pub max_unstable_ms: u64,
+    /// Text must stay unchanged at roughly the same place this long before it is
+    /// translated. Filters icons/animations that OCR misreads as text. 0 = disabled.
+    pub settle_ms: u64,
+    /// If OCR text keeps changing, translate anyway after this many ms. 0 = off.
+    pub max_wait_ms: u64,
+    /// Keep captions this long after their source text is no longer detected.
+    pub hold_ms: u64,
     /// Drop single ASCII letter/digit OCR hits (e.g. "0", "V", "C").
     pub filter_single_char: bool,
-    /// Per-block: text must stay at roughly the same place this long before emit.
-    /// Filters icons/animations that OCR misreads as changing text. 0 = disabled.
-    pub block_persist_ms: u64,
-    /// Forget a track if it is missing from frames longer than this.
-    pub block_max_miss_ms: u64,
     /// Multi-line / paragraph merge heuristics (tunable).
     pub line_merge: LineMergeConfig,
 }
@@ -498,11 +495,10 @@ impl Default for OcrConfig {
             device: OcrDevice::Webgpu,
             models_dir: "models".to_string(),
             confidence_threshold: 0.8,
-            stable_duration_ms: 500,
-            max_unstable_ms: 1000,
+            settle_ms: 500,
+            max_wait_ms: 1500,
+            hold_ms: 750,
             filter_single_char: true,
-            block_persist_ms: 500,
-            block_max_miss_ms: 750,
             line_merge: LineMergeConfig::default(),
         }
     }

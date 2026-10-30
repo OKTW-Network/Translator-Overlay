@@ -158,7 +158,7 @@ pub(crate) struct Pipeline {
     pub preview_seq_bias: u64,
     /// Wall-clock: raw OCR first went empty (may still have hysteresis tracks).
     pub raw_empty_since: Option<Instant>,
-    /// Wall-clock since raw OCR last became non-empty.
+    /// Wall-clock since raw OCR last became non-empty (or the last emit); for the waiting status.
     pub raw_content_since: Option<Instant>,
     /// Sticky remap failed while captions still present.
     pub remap_miss_since: Option<Instant>,

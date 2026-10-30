@@ -1,11 +1,14 @@
 //! Auto / manual OCR paths, sticky overlay, and raw-empty expiry.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use rust_i18n::t;
 use tracing::{debug, error, info, warn};
 use translator_capture::CapturedFrame;
-use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect};
+use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect, normalize_ocr_text};
 use translator_ocr::{OcrFingerprint, StabilityOutcome};
 use translator_overlay::OverlayCommand;
 
@@ -76,7 +79,7 @@ impl Pipeline {
     }
 
     fn raw_empty_grace(&self) -> Duration {
-        let ms = self.state.read().config.ocr.block_max_miss_ms.max(1);
+        let ms = self.state.read().config.ocr.hold_ms.max(1);
         Duration::from_millis(ms)
     }
 
@@ -102,6 +105,9 @@ impl Pipeline {
         }
         self.remap_miss_since = None;
         self.clear_translated_captions_only("sticky remap empty past grace (layout gone)");
+        // Captions are gone: let the same page re-translate if it returns.
+        self.gate.reset_all();
+        self.last_page = None;
     }
 
     /// Run pending overlay expiry. Call every capture interval, including skipped OCR.
@@ -208,46 +214,50 @@ impl Pipeline {
         }
         self.raw_empty_since = None;
         let content_since = *self.raw_content_since.get_or_insert_with(Instant::now);
-        let max_unstable_ms = self.state.read().config.ocr.max_unstable_ms;
-        let content_elapsed = content_since.elapsed();
-        let force_unstable = max_unstable_ms > 0 && content_elapsed >= Duration::from_millis(max_unstable_ms);
 
-        // Prefer durable (linger-filtered) blocks. If OCR never settles long enough
-        // for persistence, after max_unstable force the latest raw reading through
-        // so thrash still translates instead of spinning on Capturing forever.
-        // After a capture-surface resize, persist was reset — use raw immediately
-        // so sticky remap can adopt boxes in the new pixel space.
-        let (blocks, forced_raw) = if content_resized {
-            (raw.clone(), false)
+        // Prefer durable (settle-filtered) blocks; thrashing text reaches it through
+        // the filter's own max_wait force-confirm. After a capture-surface resize,
+        // persist was reset — use raw immediately so sticky remap can adopt boxes in
+        // the new pixel space.
+        let blocks = if content_resized {
+            raw
         } else if !durable.is_empty() {
-            (durable, false)
-        } else if force_unstable {
-            info!(elapsed_ms = content_elapsed.as_millis() as u64, raw = raw.len(), "OCR thrash — forcing raw blocks past persistence");
-            (raw.clone(), true)
+            durable
         } else {
-            // Still waiting for linger / force. Keep OCR preview, do not wipe an
-            // existing overlay every frame (that made thrash look like "no translate").
+            // Nothing settled (or only unsettled noise left). Keep the OCR preview
+            // and let captions whose source vanished expire after the hold grace.
+            self.apply_sticky_overlay(&[], frame_w, frame_h);
             let mut s = self.state.write();
             s.latest_ocr_blocks = raw;
             s.status = PipelineStatus::WaitingForStable {
-                elapsed_ms: content_elapsed.as_millis() as u64,
+                elapsed_ms: content_since.elapsed().as_millis() as u64,
             };
             return;
         };
 
         let fp = OcrFingerprint::from_blocks(&blocks);
-
-        match self.gate.observe(fp) {
-            StabilityOutcome::Changed => {
-                // Confirmed fingerprint switch: drop old captions so the wrong
-                // language is not painted over a new scene while waiting for stable.
-                {
-                    let mut s = self.state.write();
-                    s.latest_ocr_blocks = blocks.clone();
-                    s.status = PipelineStatus::WaitingForStable { elapsed_ms: 0 };
-                }
-                self.clear_translated_captions_only("fingerprint changed");
+        // Lines vanishing from the emitted page only drop their captions (sticky
+        // remap is by source text); re-translating the remainder flickered.
+        let subset_of_last = self.last_page.as_ref().is_some_and(|p| {
+            let prior: HashSet<String> = p.blocks.iter().map(|b| normalize_ocr_text(&b.text)).collect();
+            blocks.iter().all(|b| prior.contains(&normalize_ocr_text(&b.text)))
+        });
+        let outcome = if subset_of_last {
+            // Remap drops a vanished line's caption: shrink the emitted page so the
+            // line's return reaches the gate as new content, not a captionless sticky hit.
+            if let Some(p) = self.last_page.as_mut()
+                && blocks.len() < p.blocks.len()
+            {
+                p.blocks = blocks.clone();
+                p.fingerprint = fp;
+                let _ = self.gate.force_emit(fp);
             }
+            StabilityOutcome::AlreadyEmitted { fingerprint: fp }
+        } else {
+            self.gate.observe(fp)
+        };
+
+        match outcome {
             StabilityOutcome::Waiting { elapsed_ms } => {
                 // Settling a not-yet-emitted page: keep sticky only when most prior
                 // captions still match (partial thrash); otherwise clear.
@@ -256,7 +266,7 @@ impl Pipeline {
                 s.status = PipelineStatus::WaitingForStable { elapsed_ms };
             }
             StabilityOutcome::Ready { elapsed_ms, fingerprint } => {
-                info!(blocks = blocks.len(), elapsed_ms, forced_raw, ?fingerprint, "OCR stable — translating");
+                info!(blocks = blocks.len(), elapsed_ms, ?fingerprint, "OCR stable — translating");
                 // New content about to translate — do not show prior-page text
                 // over the new scene for the whole network latency window.
                 {
@@ -264,7 +274,7 @@ impl Pipeline {
                     s.latest_ocr_blocks = blocks.clone();
                 }
                 self.clear_translated_captions_only("new page ready for translate");
-                // Fresh content session for force-raw after this emit settles.
+                // Waiting status counts from this emit.
                 self.raw_content_since = Some(Instant::now());
                 let page = PendingPage {
                     blocks: blocks.clone(),
@@ -388,6 +398,8 @@ impl Pipeline {
         };
         let fp = OcrFingerprint::from_blocks(&blocks);
         let _ = self.gate.force_emit(fp);
+        // Re-learn every track: frozen (possibly misread) text would re-emit over this translate.
+        self.persist.reset();
 
         info!(blocks = blocks.len(), "manual OCR complete — translating");
         let page = PendingPage {
