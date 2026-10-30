@@ -431,6 +431,8 @@ pub struct TranslationConfig {
     pub conversation_max_turns: usize,
     /// Restate the target language after each user payload, so long histories keep translating.
     pub instruction_reminder: bool,
+    /// Repeat the dictionary entries found in the source after each user payload.
+    pub dictionary_reminder: bool,
     /// Skip the API for OCR block texts already translated this session.
     pub cache_enabled: bool,
     /// Max unique source strings kept in the in-memory LFU cache.
@@ -450,6 +452,7 @@ impl Default for TranslationConfig {
             history_max_items: 8,
             conversation_max_turns: 20,
             instruction_reminder: true,
+            dictionary_reminder: true,
             cache_enabled: true,
             cache_max_entries: TRANSLATION_CACHE_MAX_DEFAULT,
             system_prompt: None,

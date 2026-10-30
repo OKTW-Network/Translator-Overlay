@@ -211,6 +211,19 @@ impl Conversation {
         self.compress_if_needed(translation_cfg.conversation_max_turns, translation_cfg.history_max_items);
         self.ensure_system(with_glossary(default_system_prompt(translation_cfg), glossary));
         let mut user = user_payload_from_blocks(blocks);
+        if translation_cfg.dictionary_reminder {
+            // Small models skip the system-prompt glossary; repeat the entries this payload actually contains.
+            let hits: Vec<_> = glossary
+                .iter()
+                .filter(|p| blocks.iter().any(|b| b.text.contains(&p.source)))
+                .collect();
+            if !hits.is_empty() {
+                user.push_str("\nGlossary terms in this text (use these translations):");
+                for pair in hits {
+                    user.push_str(&format!("\n{} → {}", pair.source, pair.target));
+                }
+            }
+        }
         if translation_cfg.instruction_reminder {
             // Small models drift from a far-away system prompt; a line next to the reply keeps them on task.
             user.push_str(&format!("\nTranslate every block into {}. Reply with the JSON only.", translation_cfg.target_lang.trim()));
@@ -1357,6 +1370,28 @@ mod tests {
         };
         assert_eq!(user(false), payload);
         assert_eq!(user(true), format!("{payload}\nTranslate every block into zh-TW. Reply with the JSON only."));
+
+        let pairs = [
+            DictionaryPair {
+                source: "Hi".into(),
+                target: "嗨".into(),
+            },
+            DictionaryPair {
+                source: "Bye".into(),
+                target: "掰".into(),
+            },
+        ];
+        let cfg = TranslationConfig {
+            instruction_reminder: false,
+            ..TranslationConfig::default()
+        };
+        let user = Conversation::empty()
+            .begin_translate_request(&cfg, &source, &pairs)
+            .messages()
+            .pop()
+            .unwrap()
+            .content;
+        assert_eq!(user, format!("{payload}\nGlossary terms in this text (use these translations):\nHi → 嗨"));
     }
 
     #[test]

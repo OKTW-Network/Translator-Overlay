@@ -192,6 +192,12 @@ pub fn translation_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel
             |ui| ui.draft.translation.instruction_reminder,
             cx.edit(|ui, on| ui.draft.translation.instruction_reminder = on),
         )?,
+        card_toggle(
+            b,
+            ("tr-dictionary-reminder", &t!("tr.dictionary_reminder"), Some(&t!("tr.dictionary_reminder_desc"))),
+            |ui| ui.draft.translation.dictionary_reminder,
+            cx.edit(|ui, on| ui.draft.translation.dictionary_reminder = on),
+        )?,
         prompt_card.root,
     );
 

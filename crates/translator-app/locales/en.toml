@@ -259,6 +259,8 @@ system_prompt_desc = "Leave empty for the built-in style. Custom text replaces s
 prompt_placeholder = "Built-in prompt"
 instruction_reminder = "Repeat instruction"
 instruction_reminder_desc = "Restate the target language after each source text. Helps small models that stop translating in long sessions."
+dictionary_reminder = "Repeat glossary"
+dictionary_reminder_desc = "When the source contains glossary terms, list them again after that source text. Helps small models that ignore the glossary."
 
 [ocr]
 model = "Model"

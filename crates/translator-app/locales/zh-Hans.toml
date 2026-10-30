@@ -247,6 +247,8 @@ system_prompt_desc = "留空使用内置风格。自定义文字只覆盖风格�
 prompt_placeholder = "内置提示"
 instruction_reminder = "重复指令"
 instruction_reminder_desc = "在每段原文后重述目标语言。可改善小模型在长时间使用后停止翻译的问题。"
+dictionary_reminder = "重复翻译对照"
+dictionary_reminder_desc = "原文含有翻译对照的词条时，在该段原文后再附上一次。可改善小模型不参考翻译对照的问题。"
 
 [ocr]
 model = "模型"
