@@ -20,8 +20,9 @@ use translator_translate::list_models;
 use translator_winui::{
     AppWindowTitleBar, Application, Border, Color, Grid, HSTRING, IInspectable, ImageIconSource, Interface, Layout, MicaBackdrop, MicaKind,
     NavigationView, NavigationViewBackButtonVisible, NavigationViewItem, NavigationViewItemHeader, NavigationViewPaneDisplayMode, Ref,
-    Result, ScrollViewer, SizeInt32, Symbol, SymbolIcon, TitleBar, TitleBarHeightOption, TitleBarTheme, UIElement, Window, XamlRoot, auto,
-    bitmap, boxed, boxed_f64, grid, keep, post, set_ui_thread, solid_brush, star, thickness, unboxed, window_hwnd,
+    ResourceDictionary, Result, ScrollViewer, SizeInt32, Symbol, SymbolIcon, TitleBar, TitleBarHeightOption, TitleBarTheme, UIElement,
+    Window, XamlReader, XamlRoot, auto, bitmap, boxed, boxed_f64, grid, keep, post, set_ui_thread, solid_brush, star, thickness, unboxed,
+    window_hwnd,
 };
 use windows::{
     Win32::{
@@ -507,7 +508,7 @@ fn build_page(cx: &UiCx, page: Page) -> Result<(UIElement, PageView)> {
 }
 
 /// Application-wide resource overrides: transparent NavigationView content (Mica shows between
-/// cards) and a narrow title-bar drag strip.
+/// cards), a narrow title-bar drag strip and a constant InfoBar height.
 fn apply_resource_overrides() -> Result<()> {
     let resources = Application::Current()?.Resources()?;
     let clear = solid_brush(Color::default())?;
@@ -516,6 +517,15 @@ fn apply_resource_overrides() -> Result<()> {
     }
     // WinUI default is 48; keep a sliver so the caption buttons are not flush against the combo.
     resources.Insert(&boxed("TitleBarMinDragRegionWidth"), &boxed_f64(8.0))?;
+    // An InfoBar with only a title stacks vertically with an 18 px bottom pad, taller than the one-line
+    // title + message layout; a 14 px pad fits within its MinHeight so both are the same height.
+    let infobar: ResourceDictionary = XamlReader::Load(&HSTRING::from(
+        "<ResourceDictionary xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' \
+         xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>\
+         <Thickness x:Key='InfoBarPanelVerticalOrientationPadding'>0,14,0,14</Thickness></ResourceDictionary>",
+    ))?
+    .cast()?;
+    resources.MergedDictionaries()?.Append(&infobar)?;
     Ok(())
 }
 
