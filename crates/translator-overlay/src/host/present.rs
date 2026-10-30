@@ -392,6 +392,7 @@ impl OverlayHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::captions::SourceSpan;
 
     const RECT: ClientRect = (10, 20, 800, 600);
 
@@ -634,8 +635,7 @@ mod tests {
                     h: 28,
                 },
                 long,
-                28,
-                40,
+                SourceSpan { w: 40, h: 28, lines: 1 },
                 &[],
                 surface,
             )
@@ -664,8 +664,7 @@ mod tests {
                     h: 28,
                 },
                 "I understand completely",
-                28,
-                40,
+                SourceSpan { w: 40, h: 28, lines: 1 },
                 &obstacles,
                 surface,
             )
@@ -678,7 +677,11 @@ mod tests {
             h: 28,
         };
         let (rect_two, ..) = host
-            .layout_label(two_line_base, "Please wait right here", 52, 120, &[], surface)
+            .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 120, h: 52, lines: 2 }, &[], surface)
+            .map_err(|e| e.to_string())?;
+        // Same ink span from one tilted line: widen instead of wrapping.
+        let (rect_tilt, ..) = host
+            .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 120, h: 52, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
         let (_, font_short, _) = host
             .layout_label(
@@ -689,8 +692,7 @@ mod tests {
                     h: 28,
                 },
                 "OK",
-                28,
-                40,
+                SourceSpan { w: 40, h: 28, lines: 1 },
                 &[],
                 surface,
             )
@@ -704,8 +706,7 @@ mod tests {
                     h: 200,
                 },
                 long,
-                200,
-                20,
+                SourceSpan { w: 20, h: 200, lines: 1 },
                 &[],
                 surface,
             )
@@ -717,10 +718,10 @@ mod tests {
             h: 120,
         };
         let (rect_cjk, _, vertical_cjk) = host
-            .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", 120, 20, &[], surface)
+            .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", SourceSpan { w: 20, h: 120, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
         let (_, _, vertical_short) = host
-            .layout_label(column, "嗯？", 120, 20, &[], surface)
+            .layout_label(column, "嗯？", SourceSpan { w: 20, h: 120, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
 
         // Five 16px glyphs fit one column: all ink lands at the right edge of a wide label.
@@ -765,6 +766,9 @@ mod tests {
 
         if rect_two.w != 120 || rect_two.h < 52 {
             return Err(format!("two-line source must wrap onto its second line before widening, got {rect_two:?}"));
+        }
+        if rect_tilt.w <= 120 {
+            return Err(format!("one tilted source line must widen before wrapping, got {rect_tilt:?}"));
         }
 
         // Too long for the 1.75× width cap: the font shrinks before wrapping.

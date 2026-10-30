@@ -17,6 +17,14 @@ use crate::{
     host::OverlayHost,
 };
 
+/// Original ink a caption covers: surface px span and detector line count.
+#[derive(Clone, Copy)]
+pub(crate) struct SourceSpan {
+    pub(crate) w: i32,
+    pub(crate) h: i32,
+    pub(crate) lines: i32,
+}
+
 impl OverlayHost {
     pub(crate) fn repaint(&mut self) -> Result<(), OverlayError> {
         let w = self.surface_w.max(1);
@@ -28,7 +36,7 @@ impl OverlayHost {
         // Layout first (needs GDI measure / font) before borrowing DIB pixels.
         let content_w = self.content_w;
         let content_h = self.content_h;
-        let mut pending: Vec<(SurfaceRect, String, i32, i32)> = self
+        let mut pending: Vec<(SurfaceRect, String, SourceSpan)> = self
             .blocks
             .iter()
             .filter_map(|block| {
@@ -41,9 +49,12 @@ impl OverlayHost {
                     let glyph = glyph.max(1.0);
                     ((ink.max(glyph) / glyph) * side as f32).round().max(side as f32) as i32
                 };
-                let source_span_h = cover(block.source_height, block.bbox.height, base.h);
-                let source_span_w = cover(block.source_width, block.bbox.width, base.w);
-                Some((base, text.to_string(), source_span_h, source_span_w))
+                let span = SourceSpan {
+                    w: cover(block.source_width, block.bbox.width, base.w),
+                    h: cover(block.source_height, block.bbox.height, base.h),
+                    lines: block.source_lines.max(1) as i32,
+                };
+                Some((base, text.to_string(), span))
             })
             .collect();
         // Top to bottom, so each caption grows only into room no earlier caption took.
@@ -51,7 +62,7 @@ impl OverlayHost {
         let sources: Vec<SurfaceRect> = pending.iter().map(|(base, ..)| *base).collect();
 
         let mut labels: Vec<(SurfaceRect, String, i32, bool)> = Vec::with_capacity(pending.len());
-        for (i, (base, text, source_span_h, source_span_w)) in pending.into_iter().enumerate() {
+        for (i, (base, text, span)) in pending.into_iter().enumerate() {
             let obstacles: Vec<SurfaceRect> = sources
                 .iter()
                 .enumerate()
@@ -59,7 +70,7 @@ impl OverlayHost {
                 .map(|(_, r)| *r)
                 .chain(labels.iter().map(|(rect, ..)| *rect))
                 .collect();
-            let (expanded, font_px, vertical) = self.layout_label(base, &text, source_span_h, source_span_w, &obstacles, surface)?;
+            let (expanded, font_px, vertical) = self.layout_label(base, &text, span, &obstacles, surface)?;
             labels.push((expanded, text, font_px, vertical));
         }
 
@@ -126,8 +137,8 @@ impl OverlayHost {
     ///   shrinking further (down to 8px) while that would reach the next
     ///   obstacle below. Widening stops at the next obstacle on the right.
     ///   Obstacles are the other source boxes and the captions placed so far.
-    /// - Height is at least `source_span_h` so a short translation still covers
-    ///   every original line. Width is at least `source_span_w` so a tilted
+    /// - Height is at least `span.h` so a short translation still covers
+    ///   every original line. Width is at least `span.w` so a tilted
     ///   vertical run still covers its AABB.
     /// - Column source (`h ≥ 2w`): a Han / kana translation is laid out in
     ///   columns (returned `true`), adding columns to the left; anything else
@@ -136,19 +147,18 @@ impl OverlayHost {
         &mut self,
         base: SurfaceRect,
         text: &str,
-        source_span_h: i32,
-        source_span_w: i32,
+        span: SourceSpan,
         obstacles: &[SurfaceRect],
         surface: draw::SurfaceSize,
     ) -> Result<(SurfaceRect, i32, bool), OverlayError> {
         let max_w = (surface.width - base.x).max(1);
-        let source_w = source_span_w.max(base.w).clamp(1, max_w);
+        let source_w = span.w.max(base.w).clamp(1, max_w);
         let override_px = self.config.font_px_clamped();
         let font_px = match override_px {
             Some(px) => px,
             None => self.fit_font_to_source_box(base)?,
         };
-        let min_h = source_span_h.max(base.h);
+        let min_h = span.h.max(base.h);
 
         if draw::glyph_box(base).1 >= 1.0 {
             let pad = label_pad(font_px);
@@ -190,14 +200,13 @@ impl OverlayHost {
         let room_h = (bottom - base.y).max(min_h);
         let cap = (((source_w as f32) * 1.75).round() as i32).min(right - base.x).max(source_w);
         let floor = (font_px * 7 / 10).max(8);
-        // `base.h` is one source line; tight line spacing leaves `min_h` a few px short of N GDI lines.
-        let source_lines = ((min_h as f32) / (base.h.max(1) as f32)).round().max(1.0) as i32;
 
         let mut px = font_px;
         loop {
             let pad = label_pad(px);
             let line_h = self.measure_single_line(text, px)?.1;
-            let source_text_h = (min_h - pad * 2).max(line_h * source_lines);
+            // Tight line spacing leaves `min_h` a few px short of N GDI lines; tilt inflates it past one.
+            let source_text_h = (min_h - pad * 2).max(line_h * span.lines);
             let mut box_w = source_w;
             let (text_w, text_h) = loop {
                 let (text_w, text_h) = self.measure_wrapped(text, px, (box_w - pad * 2).max(8))?;

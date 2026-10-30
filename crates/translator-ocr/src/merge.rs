@@ -270,11 +270,13 @@ fn assemble_group(
     let mut cover_x1 = f32::MIN;
     let mut heights: Vec<f32> = Vec::with_capacity(members.len());
     let mut widths: Vec<f32> = Vec::with_capacity(members.len());
+    let mut source_lines = 0u32;
 
     for (k, &idx) in members.iter().enumerate() {
         let b = &blocks[idx];
         if k == 0 {
             text = b.text.clone();
+            source_lines = b.source_lines.max(1);
         } else {
             // X-pass is already same-row (stagger included). Y-pass is stacked.
             // Columns swap the two: side by side is the next line, stacked is the same one.
@@ -294,6 +296,12 @@ fn assemble_group(
                 cfg.join
             };
             text = join_text(&text, &b.text, join);
+            // Fragments on the same row share its line; only stacked rows add lines.
+            source_lines = if same_row {
+                source_lines.max(b.source_lines.max(1))
+            } else {
+                source_lines + b.source_lines.max(1)
+            };
         }
         conf += b.confidence;
         x0 = x0.min(b.bbox.x);
@@ -313,7 +321,6 @@ fn assemble_group(
     } else {
         Rect::new(x0, y0, (x1 - x0).max(1.0), median_f32(heights))
     };
-    let source_lines = members.iter().map(|&idx| blocks[idx].source_lines.max(1)).sum::<u32>().max(1);
     let source_height = (y1 - y0).max(bbox.height);
     let source_width = (cover_x1 - x0).max(bbox.width);
 
@@ -950,7 +957,7 @@ mod tests {
         let merged = merge_with(blocks, cfg, true);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Left Right");
-        assert_eq!(merged[0].source_lines, 2);
+        assert_eq!(merged[0].source_lines, 1, "side by side is still one row");
         assert!((merged[0].source_height - 20.0).abs() < 0.5, "same-row union is ~one line, got {}", merged[0].source_height);
     }
 
