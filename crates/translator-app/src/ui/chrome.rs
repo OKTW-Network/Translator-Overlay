@@ -5,8 +5,8 @@ use std::borrow::Cow;
 use rust_i18n::t;
 use translator_core::{ModelKind, PipelineStatus, SETTINGS_SAVED, UiLanguage};
 use translator_winui::{
-    Border, Button, ComboBox, Grid, HorizontalAlignment, InfoBar, InfoBarSeverity, Interface, Layout, Result, TextBlock, TextTrimming,
-    TextWrapping, UIElement, VerticalAlignment, auto, grid, star, thickness,
+    Border, Button, ComboBox, Grid, HorizontalAlignment, InfoBar, InfoBarSeverity, Interface, Layout, ProgressBar, Result, TextBlock,
+    TextTrimming, TextWrapping, UIElement, VerticalAlignment, auto, grid, star, thickness,
 };
 
 use crate::{
@@ -25,31 +25,78 @@ use crate::{
     },
 };
 
-/// Pipeline InfoBar for the Dashboard only. Always open (Informational when idle).
-pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<InfoBar> {
+/// Pipeline InfoBar for the Dashboard only. Always open; the severity (and so its icon) follows the status,
+/// with a progress bar along its bottom edge while the pipeline is working.
+pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<Grid> {
     let bar = InfoBar::new()?;
     bar.SetIsOpen(true)?;
     bar.SetIsClosable(false)?;
+    // Overlaid in the same cell rather than InfoBar content, which would add height and indent past the icon.
+    // Side margins keep it inside the rounded corners; the bottom one inside the border.
+    let bar_progress = ProgressBar::new()?;
+    bar_progress.SetMaximum(100.0)?;
+    bar_progress.valign(VerticalAlignment::Bottom)?.margin(4.0, 0.0, 4.0, 1.0)?;
+    let host = Grid::new()?;
+    children!(host; bar, bar_progress);
     let el = bar.clone();
     let mut shown = Prop::default();
     b.add(move |_, snap| {
-        let target = snap.target.as_deref().map(Cow::Borrowed).unwrap_or_else(|| t!("target.none"));
+        use InfoBarSeverity as Sev;
         let (title, message, severity) = match (&snap.status, snap.last_error.as_deref().filter(|s| !s.is_empty())) {
-            (PipelineStatus::RetryingTranslate { attempt, max_retries, .. }, Some(err)) => (
-                err.to_string(),
-                t!("status.retrying_short", attempt = attempt, max_retries = max_retries).into_owned(),
-                InfoBarSeverity::Warning,
-            ),
-            (_, Some(err)) => (err.to_string(), String::new(), InfoBarSeverity::Error),
-            _ => (status_text(&snap.status).into_owned(), target.into_owned(), InfoBarSeverity::Informational),
+            (PipelineStatus::RetryingTranslate { message, .. }, _) => (status_text(&snap.status), message.clone(), Sev::Warning),
+            (_, Some(err)) => (t!("status.error_title"), err.to_owned(), Sev::Error),
+            (PipelineStatus::Error { message }, None) => (t!("status.error_title"), message.clone(), Sev::Error),
+            (PipelineStatus::WaitingForStable { elapsed_ms }, None) => {
+                (t!("status.waiting_stable_title"), format!("{elapsed_ms} ms"), Sev::Informational)
+            }
+            (
+                PipelineStatus::DownloadingModels {
+                    kind,
+                    file,
+                    file_index,
+                    file_count,
+                    percent,
+                },
+                None,
+            ) => {
+                let title = match kind {
+                    ModelKind::Ocr => t!("status.downloading_title"),
+                    ModelKind::Translation => t!("status.downloading_translation_title"),
+                };
+                let progress =
+                    t!("status.download_progress", file = file, file_index = file_index, file_count = file_count, percent = percent);
+                (title, progress.into_owned(), Sev::Informational)
+            }
+            (status, None) => {
+                let severity = match status {
+                    PipelineStatus::OverlayActive => Sev::Success,
+                    PipelineStatus::Paused | PipelineStatus::Cancelled => Sev::Warning,
+                    _ => Sev::Informational,
+                };
+                (status_text(status), String::new(), severity)
+            }
         };
-        shown.set((title, message, severity.0), |(title, message, severity)| {
+        // `None` hides the bar; `Some(None)` is indeterminate.
+        let progress = match &snap.status {
+            PipelineStatus::DownloadingModels { percent, .. } => Some(Some(*percent)),
+            PipelineStatus::Capturing
+            | PipelineStatus::RunningOcr
+            | PipelineStatus::WaitingForStable { .. }
+            | PipelineStatus::LoadingModels { .. }
+            | PipelineStatus::Translating
+            | PipelineStatus::RetryingTranslate { .. } => Some(None),
+            _ => None,
+        };
+        shown.set((title.into_owned(), message, severity.0, progress), |(title, message, severity, progress)| {
             el.SetTitle(&hs(title))?;
             el.SetMessage(&hs(message))?;
-            el.SetSeverity(InfoBarSeverity(*severity))
+            el.SetSeverity(InfoBarSeverity(*severity))?;
+            bar_progress.visible(progress.is_some())?;
+            bar_progress.SetIsIndeterminate(matches!(progress, Some(None)))?;
+            bar_progress.SetValue(f64::from(progress.flatten().unwrap_or(0)))
         })
     });
-    Ok(bar)
+    Ok(host)
 }
 
 /// Compact title-bar status: pipeline label and target window only.
@@ -470,11 +517,12 @@ pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
             file_count,
             percent,
         } => {
-            let key = match kind {
-                ModelKind::Ocr => "status.downloading",
-                ModelKind::Translation => "status.downloading_translation",
+            let title = match kind {
+                ModelKind::Ocr => t!("status.downloading_title"),
+                ModelKind::Translation => t!("status.downloading_translation_title"),
             };
-            t!(key, file = file, file_index = file_index, file_count = file_count, percent = percent)
+            let progress = t!("status.download_progress", file = file, file_index = file_index, file_count = file_count, percent = percent);
+            Cow::Owned(format!("{title} {progress}"))
         }
         PipelineStatus::LoadingModels { kind: ModelKind::Ocr } => t!("status.loading_models"),
         PipelineStatus::LoadingModels {

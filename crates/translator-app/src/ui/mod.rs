@@ -41,7 +41,7 @@ mod i18n_tests {
             "err.overlay_unavailable",
             "err.no_frame",
             "err.models_task_ended",
-            "status.downloading_translation",
+            "status.downloading_translation_title",
             "status.loading_translation_model",
             "reader.placeholder",
         ] {

@@ -89,6 +89,7 @@ Microsoft::UI::Xaml::Controls::INumberBox::{add_ValueChanged, get_Value, put_Max
 Microsoft::UI::Xaml::Controls::INumberBoxValueChangedEventArgs::get_NewValue
 Microsoft::UI::Xaml::Controls::IPanel::{get_Children, put_Background}
 Microsoft::UI::Xaml::Controls::IPasswordBox::{add_PasswordChanged, get_Password, put_Password, put_PasswordRevealMode}
+Microsoft::UI::Xaml::Controls::IProgressBar::put_IsIndeterminate
 Microsoft::UI::Xaml::Controls::IProgressRing::{put_IsActive, put_IsIndeterminate}
 Microsoft::UI::Xaml::Controls::IRadioButton::put_GroupName
 Microsoft::UI::Xaml::Controls::IRowDefinition::put_Height
@@ -116,6 +117,7 @@ Microsoft::UI::Xaml::Controls::Primitives::IRangeBaseValueChangedEventArgs::get_
 Microsoft::UI::Xaml::Controls::Primitives::ISelector::{add_SelectionChanged, get_SelectedIndex, put_SelectedIndex}
 Microsoft::UI::Xaml::Controls::Primitives::IToggleButton::{add_Checked, get_IsChecked, put_IsChecked}
 Microsoft::UI::Xaml::Controls::Primitives::PlacementMode
+Microsoft::UI::Xaml::Controls::ProgressBar::CreateInstance
 Microsoft::UI::Xaml::Controls::ProgressRing::CreateInstance
 Microsoft::UI::Xaml::Controls::RadioButton::CreateInstance
 Microsoft::UI::Xaml::Controls::RowDefinition::CreateInstance
@@ -165,6 +167,7 @@ Microsoft::UI::Xaml::Controls::NavigationViewItem
 Microsoft::UI::Xaml::Controls::NavigationViewItemHeader
 Microsoft::UI::Xaml::Controls::NumberBox
 Microsoft::UI::Xaml::Controls::PasswordBox
+Microsoft::UI::Xaml::Controls::ProgressBar
 Microsoft::UI::Xaml::Controls::ProgressRing
 Microsoft::UI::Xaml::Controls::RadioButton
 Microsoft::UI::Xaml::Controls::RowDefinition
@@ -244,6 +247,7 @@ Microsoft::UI::Xaml::Controls::INavigationViewItemStatics3::{}
 Microsoft::UI::Xaml::Controls::INavigationViewItemStatics::{}
 Microsoft::UI::Xaml::Controls::INavigationViewStatics2::{}
 Microsoft::UI::Xaml::Controls::INavigationViewStatics::{}
+Microsoft::UI::Xaml::Controls::IProgressBarStatics::{}
 Microsoft::UI::Xaml::Controls::IProgressRingStatics::{}
 Microsoft::UI::Xaml::Controls::IRowDefinitionStatics::{}
 Microsoft::UI::Xaml::Controls::IScrollViewerStatics::{}
