@@ -20,9 +20,10 @@ use windows::Win32::{
         Input::KeyboardAndMouse::EnableWindow,
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            GWL_STYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, GetWindowRect, ICON_BIG, ICON_SMALL, SC_MINIMIZE, SW_MINIMIZE, SW_PARENTOPENING,
-            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-            WM_GETICON, WM_NCDESTROY, WM_SETICON, WM_SHOWWINDOW, WM_SYSCOMMAND, WS_MAXIMIZEBOX, WS_THICKFRAME,
+            GWL_STYLE, GWLP_HWNDPARENT, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, ICON_BIG, ICON_SMALL, SC_MINIMIZE,
+            SW_MINIMIZE, SW_PARENTOPENING, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
+            SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_GETICON, WM_NCDESTROY, WM_SETICON, WM_SHOWWINDOW, WM_SYSCOMMAND,
+            WS_MAXIMIZEBOX, WS_THICKFRAME,
         },
     },
 };
@@ -239,19 +240,30 @@ unsafe extern "system" fn minimize_owner(hwnd: HWND, msg: u32, wparam: WPARAM, l
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
+/// Re-enables the control window and hands it the focus the editor had. Call while the editor still
+/// exists: once it is gone, Windows activates another app instead of the owner.
+fn release_owner(owner: HWND, editor: HWND) {
+    // SAFETY: `owner` is the control window, which outlives the editor.
+    let _ = unsafe { EnableWindow(owner, true) };
+    // SAFETY: takes no arguments; only reads the foreground window handle.
+    if unsafe { GetForegroundWindow() } == editor {
+        // SAFETY: `owner` is the live control window on this thread, and this process is foreground.
+        let _ = unsafe { SetForegroundWindow(owner) };
+    }
+}
+
 /// A closed WinUI window cannot be shown again, so each open builds a new one.
 /// It disables the control window while it lives, like a modal dialog.
 struct Editor {
     window: Window,
+    hwnd: HWND,
     owner: HWND,
     binds: Binds<UiShared>,
 }
 
 impl Drop for Editor {
     fn drop(&mut self) {
-        // Re-enable the owner while this window still exists, or Windows activates another app.
-        // SAFETY: `owner` is the control window, which outlives this editor.
-        let _ = unsafe { EnableWindow(self.owner, true) };
+        release_owner(self.owner, self.hwnd);
         let _ = self.window.Close();
     }
 }
@@ -400,6 +412,8 @@ impl Editor {
         mica.SetKind(MicaKind::Base)?;
         window.SetSystemBackdrop(&mica)?;
         let owner = control_hwnd().unwrap_or_default();
+        let hwnd = HWND(window_hwnd(&window)? as *mut _);
+        let editor = hwnd.0 as isize;
         keep(window.Closed({
             let cx = cx.clone();
             move |_, args| {
@@ -418,13 +432,10 @@ impl Editor {
                         }
                     });
                 }
-                // Re-enable the owner before this window goes away, or Windows activates another app.
-                // SAFETY: `owner` is the control window, which outlives this editor.
-                let _ = unsafe { EnableWindow(HWND(owner as *mut _), true) };
+                release_owner(HWND(owner as *mut _), HWND(editor as *mut _));
             }
         }))?;
 
-        let hwnd = HWND(window_hwnd(&window)? as *mut _);
         let owner_hwnd = HWND(owner as *mut _);
         // SAFETY: `owner_hwnd` is the live control window.
         let dpi = unsafe { GetDpiForWindow(owner_hwnd) }.max(96);
@@ -497,6 +508,7 @@ impl Editor {
         });
         Ok(Self {
             window,
+            hwnd,
             owner: owner_hwnd,
             binds,
         })
