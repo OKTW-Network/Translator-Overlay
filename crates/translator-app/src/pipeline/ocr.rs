@@ -180,7 +180,8 @@ impl Pipeline {
             }
             // OCR can take hundreds of ms; avoid clobbering "waiting / overlay" so the
             // UI does not look stuck on "Running OCR" while text is already stable.
-            if !matches!(s.status, PipelineStatus::WaitingForStable { .. } | PipelineStatus::OverlayActive) {
+            // An already-emitted page never leaves RunningOcr after a failed translate, so keep Error.
+            if !matches!(s.status, PipelineStatus::WaitingForStable { .. } | PipelineStatus::OverlayActive | PipelineStatus::Error { .. }) {
                 s.status = PipelineStatus::RunningOcr;
             }
         }

@@ -78,6 +78,8 @@ pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<Grid> {
         };
         // `None` hides the bar; `Some(None)` is indeterminate.
         let progress = match &snap.status {
+            // A sticky `last_error` outlives the status the auto loop moves on to (e.g. `WaitingForStable`).
+            _ if severity == Sev::Error => None,
             PipelineStatus::DownloadingModels { percent, .. } => Some(Some(*percent)),
             PipelineStatus::Capturing
             | PipelineStatus::RunningOcr
