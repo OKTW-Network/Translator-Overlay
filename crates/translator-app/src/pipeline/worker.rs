@@ -283,7 +283,7 @@ impl Pipeline {
     }
 
     fn next_wait(&self) -> Option<Duration> {
-        if self.session.is_running() && self.inflight.is_none() && !self.state.read().capture_paused {
+        if self.session.is_running() && !self.state.read().capture_paused {
             let ms = self.state.read().config.capture.min_interval_ms.max(50);
             Some(Duration::from_millis(ms))
         } else {
@@ -674,7 +674,8 @@ impl Pipeline {
     }
 
     async fn drive_capture(&mut self) {
-        if !self.session.is_running() || self.inflight.is_some() || self.state.read().capture_paused {
+        // Keeps running while a translation is in flight so captions keep following the screen.
+        if !self.session.is_running() || self.state.read().capture_paused {
             return;
         }
         // Skip OCR / preview / caption expiry while the target is in its

@@ -48,7 +48,7 @@ impl Pipeline {
 
         if !had_content {
             // Still warming up (icons/flicker filtered out) — do not thrash status.
-            if !matches!(s.status, PipelineStatus::WaitingForStable { .. }) && s.auto_running {
+            if !s.translate_in_flight && !matches!(s.status, PipelineStatus::WaitingForStable { .. }) && s.auto_running {
                 s.status = PipelineStatus::Capturing;
             }
             return;
@@ -57,10 +57,13 @@ impl Pipeline {
         info!(%reason, "clearing stale overlay");
         s.latest_ocr_blocks.clear();
         s.latest_translated_blocks.clear();
-        if s.auto_running {
-            s.status = PipelineStatus::Capturing;
-        } else {
-            s.status = PipelineStatus::Idle;
+        // A pending translation keeps its status.
+        if !s.translate_in_flight {
+            s.status = if s.auto_running {
+                PipelineStatus::Capturing
+            } else {
+                PipelineStatus::Idle
+            };
         }
         drop(s);
 
@@ -173,7 +176,10 @@ impl Pipeline {
     /// Status guard + persist / stability gate / remap. Runs on every capture
     /// tick, including cache hits (`raw` / dims taken from the cache).
     pub(crate) async fn consume_raw_ocr(&mut self, raw: Vec<OcrBlock>, frame_w: u32, frame_h: u32) {
-        {
+        // A pending translation runs the caption rules below but leaves status and the
+        // stability gate alone; show_captions maps its paints onto latest_ocr_blocks.
+        let translating = self.inflight.is_some();
+        if !translating {
             let mut s = self.state.write();
             if s.translate_in_flight || s.status.is_translating() {
                 return;
@@ -230,11 +236,18 @@ impl Pipeline {
             self.apply_sticky_overlay(&[], frame_w, frame_h);
             let mut s = self.state.write();
             s.latest_ocr_blocks = raw;
-            s.status = PipelineStatus::WaitingForStable {
-                elapsed_ms: content_since.elapsed().as_millis() as u64,
-            };
+            if !translating {
+                s.status = PipelineStatus::WaitingForStable {
+                    elapsed_ms: content_since.elapsed().as_millis() as u64,
+                };
+            }
             return;
         };
+        if translating {
+            // The gate would emit a new page that start_translate drops while busy.
+            self.apply_sticky_overlay(&blocks, frame_w, frame_h);
+            return;
+        }
 
         let fp = OcrFingerprint::from_blocks(&blocks);
         // Lines vanishing from the emitted page only drop their captions (sticky
@@ -411,6 +424,7 @@ impl Pipeline {
         };
         self.last_page = Some(page.clone());
         self.state.write().latest_ocr_blocks = blocks;
+        self.clear_translated_captions_only("manual capture");
         // Manual always forces a new API call (user intent).
         self.start_translate(page, true);
     }

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use translator_core::{OcrBlock, PipelineStatus, TranslatedBlock};
 use translator_ocr::OcrEngine;
-use translator_overlay::{OverlayCommand, OverlayController};
+use translator_overlay::OverlayCommand;
 use translator_translate::{
     Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations, peek_translation_pairs, should_retry,
 };
@@ -17,7 +17,7 @@ use crate::{
     attention::flash_control_window_taskbar,
     pipeline::{
         ping_ui,
-        worker::{InflightTranslate, PendingPage, Pipeline, SharedState, TranslateJobMsg},
+        worker::{InflightTranslate, PendingPage, Pipeline, TranslateJobMsg, remap_translations_to_ocr},
     },
 };
 
@@ -67,7 +67,7 @@ impl Pipeline {
             let translated = TranslationCache::stitch(&page.blocks, &resolved.hits, &[]);
             self.last_translated_fp = Some(page.fingerprint);
             self.state.write().translation_cache_len = self.translation_cache.len();
-            apply_translated(&self.state, self.overlay.as_ref(), translated, page.content_width, page.content_height);
+            self.apply_translated(translated, page.content_width, page.content_height);
             return;
         }
 
@@ -122,7 +122,7 @@ impl Pipeline {
         // Show remembered captions now; new lines wait for the API.
         let preview = TranslationCache::stitch(&page.blocks, &cached_hits, &[]);
         if !preview.is_empty() {
-            show_captions(&self.state, self.overlay.as_ref(), preview, page.content_width, page.content_height);
+            self.show_captions(preview, page.content_width, page.content_height);
         }
 
         let prepared = self.conversation.begin_translate_request(&tcfg, &miss_blocks, &glossary);
@@ -225,7 +225,7 @@ impl Pipeline {
                             }
                             hits
                         });
-                        show_captions(&self.state, self.overlay.as_ref(), translated, job.content_width, job.content_height);
+                        self.show_captions(translated, job.content_width, job.content_height);
                         self.state.write().translation_cache_len = self.translation_cache.len();
                         if let Some(hits) = hits {
                             info!(
@@ -254,7 +254,6 @@ impl Pipeline {
                         turns = self.conversation.turn_count(),
                         "translation complete"
                     );
-                    self.last_translated_fp = Some(job.fingerprint);
                     {
                         let mut s = self.state.write();
                         s.translation_cache_len = self.translation_cache.len();
@@ -264,7 +263,14 @@ impl Pipeline {
                             tcfg.conversation_max_turns,
                         );
                     }
-                    apply_translated(&self.state, self.overlay.as_ref(), translated, job.content_width, job.content_height);
+                    self.apply_translated(translated, job.content_width, job.content_height);
+                    if self.state.read().latest_translated_blocks.is_empty() {
+                        // The page left the screen mid-translation: let it emit again (from the cache) on return.
+                        self.last_page = None;
+                        self.gate.reset_all();
+                    } else {
+                        self.last_translated_fp = Some(job.fingerprint);
+                    }
                 }
                 Err(e) => {
                     // Drop the pending user turn so the next translate does not
@@ -348,7 +354,7 @@ impl Pipeline {
 
     pub(crate) fn apply_stream_preview(&self, job: &InflightTranslate, pairs: &[(u32, String)]) {
         if pairs.is_empty() && !job.revert_blocks.is_empty() {
-            show_captions(&self.state, self.overlay.as_ref(), job.revert_blocks.clone(), job.content_width, job.content_height);
+            self.show_captions(job.revert_blocks.clone(), job.content_width, job.content_height);
             return;
         }
         let mut hits = job.cached_hits.clone();
@@ -358,53 +364,45 @@ impl Pipeline {
             }
         }
         let preview = TranslationCache::stitch(&job.blocks, &hits, &[]);
-        show_captions(&self.state, self.overlay.as_ref(), preview, job.content_width, job.content_height);
+        self.show_captions(preview, job.content_width, job.content_height);
     }
-}
 
-/// Send captions to the overlay and store them on the state. Does not finish the job or
-/// append history, so it also paints cache hits and stream previews.
-fn show_captions(
-    state: &SharedState,
-    overlay: Option<&OverlayController>,
-    translated: Vec<TranslatedBlock>,
-    content_width: u32,
-    content_height: u32,
-) {
-    if let Some(o) = overlay {
-        if let Some(hwnd) = state.read().target_hwnd {
-            let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
+    /// Send captions to the overlay and store them on the state. Does not finish the job or
+    /// append history, so it also paints cache hits and stream previews.
+    fn show_captions(&self, translated: Vec<TranslatedBlock>, content_width: u32, content_height: u32) {
+        // Map onto the current OCR: the page may have changed or the window resized while translating.
+        let (w, h) = self
+            .last_raw_ocr
+            .as_ref()
+            .map_or((content_width, content_height), |c| (c.width, c.height));
+        let resized = (w, h) != (content_width, content_height);
+        let translated = remap_translations_to_ocr(&translated, &self.state.read().latest_ocr_blocks, resized);
+        if let Some(o) = self.overlay.as_ref() {
+            if let Some(hwnd) = self.state.read().target_hwnd {
+                let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
+            }
+            if let Err(e) = o.send(OverlayCommand::SetBlocks {
+                blocks: translated.clone(),
+                locale: self.state.read().config.translation.target_lang.clone(),
+                content_width: w,
+                content_height: h,
+            }) {
+                warn!(error = %e, "failed to update overlay captions");
+            }
         }
-        if let Err(e) = o.send(OverlayCommand::SetBlocks {
-            blocks: translated.clone(),
-            locale: state.read().config.translation.target_lang.clone(),
-            content_width,
-            content_height,
-        }) {
-            warn!(error = %e, "failed to update overlay captions");
-        }
+        self.state.write().latest_translated_blocks = translated;
     }
-    state.write().latest_translated_blocks = translated;
-}
 
-/// Show a finished page and mark the translation done.
-fn apply_translated(
-    state: &SharedState,
-    overlay: Option<&OverlayController>,
-    translated: Vec<TranslatedBlock>,
-    content_width: u32,
-    content_height: u32,
-) {
-    show_captions(state, overlay, translated, content_width, content_height);
-    let mut s = state.write();
-    s.translate_in_flight = false;
-    s.last_error = None;
-    s.status = if s.capture_paused {
-        PipelineStatus::Paused
-    } else {
-        PipelineStatus::OverlayActive
-    };
-    s.attention_sent = false;
+    /// Show a finished page and mark the translation done.
+    fn apply_translated(&self, translated: Vec<TranslatedBlock>, content_width: u32, content_height: u32) {
+        self.show_captions(translated, content_width, content_height);
+        let mut s = self.state.write();
+        s.translate_in_flight = false;
+        s.last_error = None;
+        // Not OverlayActive when nothing was kept (the page left the screen).
+        s.restore_operational_status();
+        s.attention_sent = false;
+    }
 }
 
 #[cfg(test)]
@@ -416,6 +414,7 @@ mod tests {
     use translator_translate::{Conversation, TranslateClient};
 
     use super::*;
+    use crate::pipeline::worker::LastRawOcr;
 
     fn block(id: u32, text: &str) -> OcrBlock {
         OcrBlock {
@@ -581,6 +580,138 @@ mod tests {
         p.consume_raw_ocr(both.clone(), 100, 100).await;
         p.consume_raw_ocr(both, 100, 100).await;
         assert_eq!(p.state.read().latest_translated_blocks.len(), 2, "returning line is captioned again");
+    }
+
+    #[tokio::test]
+    async fn result_only_paints_lines_still_on_screen() {
+        let mut p = pipeline(0);
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let page = vec![block(1, "X"), block(2, "Y")];
+        p.consume_raw_ocr(page.clone(), 100, 100).await;
+        p.consume_raw_ocr(page, 100, 100).await;
+        assert!(p.inflight.is_some(), "page translates");
+
+        // Y is replaced while waiting: its caption must not land on the new text.
+        let changed = vec![block(1, "X"), block(2, "Z")];
+        p.consume_raw_ocr(changed.clone(), 100, 100).await;
+        p.consume_raw_ocr(changed.clone(), 100, 100).await;
+        let job = p.inflight.take().expect("the request is not cancelled");
+        p.finish_translate(job, reply(r#"{"b":[[1,"TX"],[2,"TY"]]}"#, 0));
+        assert_eq!(
+            p.state
+                .read()
+                .latest_translated_blocks
+                .iter()
+                .map(|b| b.translation.as_str())
+                .collect::<Vec<_>>(),
+            ["TX"]
+        );
+        assert_eq!(p.translation_cache.len(), 2, "the hidden line is still cached");
+
+        // The gate saw nothing while busy, so the changed page still translates.
+        p.consume_raw_ocr(changed.clone(), 100, 100).await;
+        p.consume_raw_ocr(changed, 100, 100).await;
+        let job = p.inflight.as_ref().expect("changed page translates");
+        assert_eq!(job.miss_blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), ["Z"]);
+    }
+
+    #[tokio::test]
+    async fn page_gone_during_translation_shows_from_cache_on_return() {
+        let mut p = pipeline(0);
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        let b = vec![block(1, "B")];
+        p.consume_raw_ocr(b.clone(), 100, 100).await;
+        p.consume_raw_ocr(b.clone(), 100, 100).await;
+        let job = p.inflight.take().expect("job");
+        p.finish_translate(job, reply(r#"{"b":[[1,"TX"]]}"#, 0));
+        assert!(p.state.read().latest_translated_blocks.is_empty(), "nothing painted over new text");
+        assert_ne!(p.state.read().status, PipelineStatus::OverlayActive, "no captions, no overlay status");
+
+        // The gate saw nothing while busy, so the new page still translates.
+        p.consume_raw_ocr(b.clone(), 100, 100).await;
+        p.consume_raw_ocr(b, 100, 100).await;
+        let job = p.inflight.take().expect("new page translates");
+        p.finish_translate(job, reply(r#"{"b":[[1,"TB"]]}"#, 0));
+
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x, 100, 100).await;
+        assert_eq!(p.state.read().latest_translated_blocks[0].translation, "TX");
+    }
+
+    #[tokio::test]
+    async fn blank_screen_clears_pending_captions_after_one_hold() {
+        let mut p = pipeline(0);
+        p.state.write().config.ocr.hold_ms = 20;
+        p.persist = BlockPersistenceFilter::new(20, 20, 0);
+        p.gate = StabilityGate::new(0);
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(30));
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        settle();
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x, 100, 100).await;
+        let job = p.inflight.as_ref().expect("page translates");
+        // The settle filter renumbers block ids from 0.
+        p.apply_stream_preview(job, &[(0, "TX".into())]);
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1);
+
+        p.consume_raw_ocr(Vec::new(), 100, 100).await;
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "held for hold_ms");
+        settle();
+        p.consume_raw_ocr(Vec::new(), 100, 100).await;
+        assert!(p.state.read().latest_translated_blocks.is_empty(), "cleared once the hold elapses");
+        assert_eq!(p.state.read().status, PipelineStatus::Translating, "the blank reset keeps the translating status");
+    }
+
+    #[tokio::test]
+    async fn result_lands_in_the_resized_pixel_space() {
+        let mut p = pipeline(0);
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x, 100, 100).await;
+        assert!(p.inflight.is_some(), "page translates");
+
+        // The window doubles in size before the reply.
+        let big = OcrBlock {
+            bbox: Rect::new(0.0, 0.0, 20.0, 20.0),
+            ..block(1, "X")
+        };
+        p.last_raw_ocr = Some(LastRawOcr {
+            sequence: 0,
+            width: 200,
+            height: 200,
+            scope: Vec::new(),
+            blocks: Vec::new(),
+        });
+        p.consume_raw_ocr(vec![big.clone()], 200, 200).await;
+        let job = p.inflight.take().expect("job");
+        p.finish_translate(job, reply(r#"{"b":[[1,"TX"]]}"#, 0));
+        assert_eq!(p.state.read().latest_translated_blocks[0].bbox, big.bbox);
+    }
+
+    #[tokio::test]
+    async fn unsettled_ocr_during_translation_keeps_page_paintable() {
+        let mut p = pipeline(0);
+        p.persist = BlockPersistenceFilter::new(20, 20, 0);
+        p.gate = StabilityGate::new(0);
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        assert!(p.inflight.is_some(), "page translates");
+
+        // A manual capture resets persist: nothing is settled while the request runs.
+        p.persist.reset();
+        p.consume_raw_ocr(x, 100, 100).await;
+        let job = p.inflight.as_ref().expect("job");
+        // The settle filter renumbers block ids from 0.
+        p.apply_stream_preview(job, &[(0, "TX".into())]);
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "stream preview still paints");
     }
 
     #[tokio::test]
