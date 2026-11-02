@@ -49,14 +49,18 @@ impl Rect {
     }
 
     /// True when both edges on an axis moved the same way by more than half the line
-    /// thickness — a scroll/pan, not detector jitter or a trailing glyph (one edge only).
+    /// thickness (scroll/pan), or the line thickness changed by over a quarter (zoom /
+    /// font resize) — not detector jitter or a trailing glyph (one edge only).
     pub fn shifted_from(self, prev: Self) -> bool {
-        let tol = (prev.width.min(prev.height) * 0.5).max(4.0);
+        let thick = prev.width.min(prev.height);
+        let tol = (thick * 0.5).max(4.0);
         let axis = |a0: f32, a1: f32, b0: f32, b1: f32| {
             let (d0, d1) = (b0 - a0, b1 - a1);
             d0 * d1 > 0.0 && d0.abs().min(d1.abs()) > tol
         };
-        axis(prev.x, prev.x + prev.width, self.x, self.x + self.width) || axis(prev.y, prev.y + prev.height, self.y, self.y + self.height)
+        axis(prev.x, prev.x + prev.width, self.x, self.x + self.width)
+            || axis(prev.y, prev.y + prev.height, self.y, self.y + self.height)
+            || (self.width.min(self.height) - thick).abs() > (thick * 0.25).max(4.0)
     }
 }
 
@@ -254,6 +258,10 @@ mod tests {
         assert!(Rect::new(100.0, 188.0, 160.0, 20.0).shifted_from(line));
         // Horizontal pan.
         assert!(Rect::new(130.0, 200.0, 160.0, 20.0).shifted_from(line));
+        // Zoom around the center: edges move apart, the line gets thicker.
+        assert!(Rect::new(80.0, 190.0, 200.0, 40.0).shifted_from(line));
+        // Font shrink anchored at the top-left corner.
+        assert!(Rect::new(100.0, 200.0, 96.0, 12.0).shifted_from(line));
     }
 
     #[test]
