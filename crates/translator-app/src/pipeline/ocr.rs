@@ -12,6 +12,7 @@ use translator_capture::CapturedFrame;
 use translator_core::{NormRect, OcrBlock, PipelineStatus, Rect, normalize_ocr_text};
 use translator_ocr::{OcrError, OcrFingerprint, StabilityOutcome};
 use translator_overlay::OverlayCommand;
+use translator_translate::TranslationCache;
 
 use crate::pipeline::worker::{LastRawOcr, OcrJob, PendingPage, Pipeline, remap_translations_to_ocr};
 
@@ -24,7 +25,6 @@ impl Pipeline {
         }
         info!(%reason, "clearing translated captions");
         self.set_captions(Vec::new());
-        self.remap_miss_since = None;
         self.send_overlay(OverlayCommand::Clear);
     }
 
@@ -59,7 +59,6 @@ impl Pipeline {
         self.persist.reset();
         self.gate.reset_all();
         self.last_page = None;
-        self.remap_miss_since = None;
         self.send_overlay(OverlayCommand::Clear);
     }
 
@@ -78,27 +77,6 @@ impl Pipeline {
         }
         self.raw_empty_since = None;
         self.clear_stale_overlay("raw OCR empty grace elapsed (no new frames)");
-    }
-
-    /// Expire sticky captions when remap has been empty past grace (no new OCR needed).
-    pub(crate) fn maybe_expire_remap_miss(&mut self) {
-        let Some(since) = self.remap_miss_since else {
-            return;
-        };
-        if since.elapsed() < self.raw_empty_grace() {
-            return;
-        }
-        self.remap_miss_since = None;
-        self.clear_translated_captions_only("sticky remap empty past grace (layout gone)");
-        // Captions are gone: let the same page re-translate if it returns.
-        self.gate.reset_all();
-        self.last_page = None;
-    }
-
-    /// Run pending overlay expiry. Call every capture interval, including skipped OCR.
-    pub(crate) fn expire_pending(&mut self) {
-        self.maybe_expire_raw_empty();
-        self.maybe_expire_remap_miss();
     }
 
     pub(crate) fn run_ocr_auto(&mut self, frame: &CapturedFrame) {
@@ -213,8 +191,7 @@ impl Pipeline {
         let durable = self.persist.filter(raw.clone());
 
         if raw.is_empty() {
-            self.raw_content_since = None;
-            self.remap_miss_since = None;
+            self.change_since = None;
             let grace = self.raw_empty_grace();
             let since = *self.raw_empty_since.get_or_insert_with(Instant::now);
             if durable.is_empty() || since.elapsed() >= grace {
@@ -227,7 +204,6 @@ impl Pipeline {
             return;
         }
         self.raw_empty_since = None;
-        let content_since = *self.raw_content_since.get_or_insert_with(Instant::now);
 
         // Prefer durable (settle-filtered) blocks; thrashing text reaches it through
         // the filter's own max_wait force-confirm. After a capture-surface resize,
@@ -238,13 +214,19 @@ impl Pipeline {
         } else if !durable.is_empty() {
             durable
         } else {
-            // Nothing settled (or only unsettled noise left). Keep the OCR preview
-            // and let captions whose source vanished expire after the hold grace.
-            self.apply_sticky_overlay(&[], frame_w, frame_h);
-            self.set_ocr_blocks(raw);
+            // Nothing settled: captions whose source left the screen outlived their hold, or
+            // persist was just reset (manual capture) and raw still shows their page. Remap
+            // onto raw so only the former drop; let a dropped page re-translate if it returns.
+            let had_captions = !self.captions.is_empty();
+            self.apply_sticky_overlay(&raw, frame_w, frame_h);
+            if had_captions && self.captions.is_empty() {
+                self.gate.reset_all();
+                self.last_page = None;
+            }
+            let since = *self.change_since.get_or_insert_with(Instant::now);
             if !translating {
                 self.state.write().status = PipelineStatus::WaitingForStable {
-                    elapsed_ms: content_since.elapsed().as_millis() as u64,
+                    elapsed_ms: since.elapsed().as_millis() as u64,
                 };
             }
             return;
@@ -263,6 +245,7 @@ impl Pipeline {
             blocks.iter().all(|b| prior.contains(&normalize_ocr_text(&b.text)))
         });
         let outcome = if subset_of_last {
+            self.change_since = None;
             // Remap drops a vanished line's caption: shrink the emitted page so the
             // line's return reaches the gate as new content, not a captionless sticky hit.
             if let Some(p) = self.last_page.as_mut()
@@ -273,23 +256,64 @@ impl Pipeline {
             }
             StabilityOutcome::AlreadyEmitted { fingerprint: fp }
         } else {
-            self.gate.observe(fp)
+            // Counted from the change, not per unsettled stretch: a thrashing track that
+            // persist force-adopts settles for one frame each time and would restart it.
+            let since = *self.change_since.get_or_insert_with(Instant::now);
+            let (wait_all, max_wait) = {
+                let ocr = &self.state.read().config.ocr;
+                (ocr.wait_all_settled, ocr.max_wait_ms)
+            };
+            // max_wait 0 waits as long as it takes.
+            if wait_all && !self.persist.settled() && (max_wait == 0 || since.elapsed() < Duration::from_millis(max_wait)) {
+                // Text still settling or held over: emitting now would mix old and new lines.
+                StabilityOutcome::Waiting {
+                    elapsed_ms: since.elapsed().as_millis() as u64,
+                }
+            } else {
+                self.gate.observe(fp)
+            }
         };
 
         match outcome {
             StabilityOutcome::Waiting { elapsed_ms } => {
-                // Only before the first emit or after a gate reset: captions whose
-                // source is still on screen stay, the rest drop.
+                // New page still settling: captions whose source is still on screen stay,
+                // the rest drop.
                 self.apply_sticky_overlay(&blocks, frame_w, frame_h);
+                // Settled lines already in the cache show now instead of waiting for the page.
+                // A shown line has a caption next frame, so each appearance counts one cache use.
+                let cached = {
+                    let s = self.state.read();
+                    let tcfg = &s.config.translation;
+                    let shown: HashSet<String> = self.captions.iter().map(|c| normalize_ocr_text(&c.source)).collect();
+                    let hits: Vec<Option<String>> = blocks
+                        .iter()
+                        .map(|b| {
+                            let fresh = tcfg.cache_enabled && !shown.contains(&normalize_ocr_text(&b.text));
+                            fresh
+                                .then(|| self.translation_cache.lookup(&b.text, &tcfg.source_lang, &tcfg.target_lang))
+                                .flatten()
+                        })
+                        .collect();
+                    TranslationCache::stitch(&blocks, &hits, &[])
+                };
+                if !cached.is_empty() {
+                    let mut captions = self.captions.clone();
+                    captions.extend(cached);
+                    self.paint_captions(captions, frame_w, frame_h);
+                }
                 self.state.write().status = PipelineStatus::WaitingForStable { elapsed_ms };
             }
             StabilityOutcome::Ready { elapsed_ms, fingerprint } => {
                 info!(blocks = blocks.len(), elapsed_ms, ?fingerprint, "OCR stable — translating");
-                // New content about to translate — do not show prior-page text
-                // over the new scene for the whole network latency window.
-                self.clear_translated_captions_only("new page ready for translate");
-                // Waiting status counts from this emit.
-                self.raw_content_since = Some(Instant::now());
+                // Keep captions still on the new page (e.g. shown early from the cache). The
+                // translate preview repaints from cache hits only, so without the cache they
+                // would blink out at the first streamed row.
+                if self.state.read().config.translation.cache_enabled {
+                    self.apply_sticky_overlay(&blocks, frame_w, frame_h);
+                } else {
+                    self.clear_translated_captions_only("new page ready for translate");
+                }
+                self.change_since = None;
                 let page = PendingPage {
                     blocks,
                     content_width: frame_w,
@@ -309,30 +333,19 @@ impl Pipeline {
         }
     }
 
-    /// Sticky remap + delayed caption-only clear when nothing maps for a grace period.
+    /// Sticky remap onto settled `blocks`; captions whose source left them drop.
     fn apply_sticky_overlay(&mut self, blocks: &[OcrBlock], frame_w: u32, frame_h: u32) {
         let content_resized = self.capture_content_resized(frame_w, frame_h) || self.last_page.is_none();
         let remapped = remap_translations_to_ocr(&self.captions, blocks, content_resized);
         self.set_ocr_blocks(blocks.to_vec());
 
         if remapped.is_empty() {
-            let had_captions = !self.captions.is_empty();
-            if had_captions && !blocks.is_empty() {
-                // Durable OCR changed (persist adopted a new string). Raw
-                // single-frame jitter must not reach here — persist still
-                // emits the last source until the new reading lingers.
-                self.clear_translated_captions_only("source no longer matches captions");
-                return;
-            }
-            if had_captions {
-                let _ = self.remap_miss_since.get_or_insert_with(Instant::now);
-                self.maybe_expire_remap_miss();
-            }
-            // Empty OCR: keep last captions during short miss / vanish grace.
+            // Durable OCR changed (persist adopted or dropped a string). Raw single-frame
+            // jitter must not reach here — persist still emits the last source for a frame.
+            self.clear_translated_captions_only("source no longer matches captions");
             return;
         }
 
-        self.remap_miss_since = None;
         if self.paint_captions(remapped, frame_w, frame_h)
             && let Some(page) = self.last_page.as_mut()
         {

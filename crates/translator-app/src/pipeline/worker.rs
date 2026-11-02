@@ -200,10 +200,9 @@ pub(crate) struct Pipeline {
     pub preview_seq_bias: u64,
     /// Wall-clock: raw OCR first went empty (may still have hysteresis tracks).
     pub raw_empty_since: Option<Instant>,
-    /// Wall-clock since raw OCR last became non-empty (or the last emit); for the waiting status.
-    pub raw_content_since: Option<Instant>,
-    /// Sticky remap failed while captions still present.
-    pub remap_miss_since: Option<Instant>,
+    /// When settled OCR first differed from the last page (or the last emit); bounds the
+    /// settle wait by `max_wait` and feeds the waiting status.
+    pub change_since: Option<Instant>,
     pub overlay: Option<OverlayController>,
 }
 
@@ -266,8 +265,7 @@ impl Pipeline {
             next_tick: None,
             preview_seq_bias: 0,
             raw_empty_since: None,
-            raw_content_since: None,
-            remap_miss_since: None,
+            change_since: None,
             overlay: None,
         }
     }
@@ -660,8 +658,7 @@ impl Pipeline {
         self.forget_raw_ocr();
         self.manual_queued = false;
         self.raw_empty_since = None;
-        self.raw_content_since = None;
-        self.remap_miss_since = None;
+        self.change_since = None;
         // Drop OCR + caption state so sticky remap cannot resurrect a prior session.
         self.set_ocr_blocks(Vec::new());
         self.set_captions(Vec::new());
@@ -803,7 +800,7 @@ impl Pipeline {
             }
         }
 
-        self.expire_pending();
+        self.maybe_expire_raw_empty();
     }
 }
 

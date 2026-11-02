@@ -483,6 +483,10 @@ pub struct OcrConfig {
     pub settle_ms: u64,
     /// If OCR text keeps changing, translate anyway after this many ms. 0 = off.
     pub max_wait_ms: u64,
+    /// Hold a new page until every line on screen has settled (bounded by `max_wait_ms`),
+    /// so a line still changing or lingering is not sent half old, half new. Off: send
+    /// whatever text has settled.
+    pub wait_all_settled: bool,
     /// Keep captions this long after their source text is no longer detected.
     pub hold_ms: u64,
     /// Drop single ASCII letter/digit OCR hits (e.g. "0", "V", "C").
@@ -500,6 +504,7 @@ impl Default for OcrConfig {
             confidence_threshold: 0.8,
             settle_ms: 500,
             max_wait_ms: 1500,
+            wait_all_settled: true,
             hold_ms: 750,
             filter_single_char: true,
             line_merge: LineMergeConfig::default(),

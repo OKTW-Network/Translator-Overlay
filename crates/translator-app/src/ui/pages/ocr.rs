@@ -213,6 +213,12 @@ pub fn ocr_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
             |ui| ui.draft.ocr.max_wait_ms,
             |ui, v| ui.draft.ocr.max_wait_ms = v,
         )?,
+        card_toggle(
+            b,
+            ("ocr-wait-all-settled", &t!("ocr.wait_all_settled"), Some(&t!("ocr.wait_all_settled_desc"))),
+            |ui| ui.draft.ocr.wait_all_settled,
+            cx.edit(|ui, v| ui.draft.ocr.wait_all_settled = v),
+        )?,
         ms_card(
             b,
             cx,

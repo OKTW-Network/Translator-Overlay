@@ -592,6 +592,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replaced_line_caption_expires_after_hold_while_waiting() {
+        let mut p = pipeline();
+        // Settle longer than hold: the new line is still settling when the hold runs out.
+        p.persist = BlockPersistenceFilter::new(60, 30, 0);
+        p.gate = StabilityGate::new(0);
+        let sleep = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        let x = vec![block(1, "アオイ")];
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        sleep(70);
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        // The settle filter renumbers block ids from 0.
+        finish(&mut p, r#"{"b":[[0,"Aoi"]]}"#);
+        assert_eq!(p.captions.len(), 1);
+
+        let y = vec![block(1, "ハル")];
+        p.consume_raw_ocr(y.clone(), 100, 100);
+        assert_eq!(p.captions.len(), 1, "held for hold");
+        sleep(40);
+        p.consume_raw_ocr(y, 100, 100);
+        assert!(p.captions.is_empty(), "the replaced line's caption expires after hold");
+    }
+
+    #[tokio::test]
+    async fn unsettled_text_still_translates_after_max_wait() {
+        use std::time::{Duration, Instant};
+        let mut p = pipeline();
+        {
+            // Persist shares max_wait, so it force-adopts the counter's readings too.
+            let mut s = p.state.write();
+            let ocr = &mut s.config.ocr;
+            (ocr.settle_ms, ocr.hold_ms, ocr.max_wait_ms) = (20, 30, 50);
+            p.persist = BlockPersistenceFilter::from_config(ocr);
+        }
+        p.gate = StabilityGate::new(0);
+        // X settles; a counter beside it changes every frame.
+        let frame = |n: usize| {
+            vec![block(1, "X"), OcrBlock {
+                bbox: Rect::new(0.0, 60.0, 10.0, 10.0),
+                ..block(2, &format!("n{n}"))
+            }]
+        };
+        let start = Instant::now();
+        let mut n = 0;
+        while start.elapsed() < Duration::from_millis(30) {
+            p.consume_raw_ocr(frame(n), 100, 100);
+            n += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(p.inflight.is_none(), "waits while the counter flickers");
+
+        while p.inflight.is_none() && start.elapsed() < Duration::from_millis(400) {
+            p.consume_raw_ocr(frame(n), 100, 100);
+            n += 1;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(p.inflight.is_some(), "max_wait sends the settled text anyway");
+    }
+
+    #[tokio::test]
+    async fn wait_all_settled_off_translates_settled_text_without_max_wait() {
+        use std::time::{Duration, Instant};
+        for wait_all in [true, false] {
+            let mut p = pipeline();
+            {
+                let mut s = p.state.write();
+                let ocr = &mut s.config.ocr;
+                (ocr.settle_ms, ocr.hold_ms, ocr.max_wait_ms, ocr.wait_all_settled) = (20, 30, 0, wait_all);
+                p.persist = BlockPersistenceFilter::from_config(ocr);
+            }
+            p.gate = StabilityGate::new(0);
+            // X settles; with max_wait 0 the counter beside it never does.
+            let frame = |n: usize| {
+                vec![block(1, "X"), OcrBlock {
+                    bbox: Rect::new(0.0, 60.0, 10.0, 10.0),
+                    ..block(2, &format!("n{n}"))
+                }]
+            };
+            let start = Instant::now();
+            let mut n = 0;
+            while p.inflight.is_none() && start.elapsed() < Duration::from_millis(150) {
+                p.consume_raw_ocr(frame(n), 100, 100);
+                n += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(p.inflight.is_some(), !wait_all, "wait_all_settled = {wait_all}");
+            if !wait_all {
+                let texts: Vec<_> = p.last_page.as_ref().expect("page").blocks.iter().map(|b| b.text.as_str()).collect();
+                assert_eq!(texts, ["X"]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_settled_line_shows_while_the_page_waits() {
+        use std::time::Duration;
+        let mut p = pipeline();
+        {
+            let mut s = p.state.write();
+            let ocr = &mut s.config.ocr;
+            (ocr.settle_ms, ocr.hold_ms, ocr.max_wait_ms) = (20, 30, 0);
+            p.persist = BlockPersistenceFilter::from_config(ocr);
+            let tr = &s.config.translation;
+            p.translation_cache.insert("X", &tr.source_lang, &tr.target_lang, "TX");
+        }
+        p.gate = StabilityGate::new(0);
+        // X settles; the counter beside it never does, so the page waits for good.
+        let frame = |n: usize| {
+            vec![block(1, "X"), OcrBlock {
+                bbox: Rect::new(0.0, 60.0, 10.0, 10.0),
+                ..block(2, &format!("n{n}"))
+            }]
+        };
+        for n in 0..12 {
+            p.consume_raw_ocr(frame(n), 100, 100);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(p.inflight.is_none(), "the page still waits");
+        let shown: Vec<_> = p.captions.iter().map(|c| c.translation.as_str()).collect();
+        assert_eq!(shown, ["TX"], "the cached settled line shows anyway");
+    }
+
+    #[tokio::test]
+    async fn held_line_is_not_mixed_into_the_next_page() {
+        let mut p = pipeline();
+        p.state.write().config.ocr.max_wait_ms = 50;
+        p.persist = BlockPersistenceFilter::new(20, 60, 0);
+        p.gate = StabilityGate::new(0);
+        let sleep = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        let at = |text: &str, y: f32| {
+            vec![OcrBlock {
+                bbox: Rect::new(0.0, y, 10.0, 10.0),
+                ..block(1, text)
+            }]
+        };
+        let a = at("A", 0.0);
+        p.consume_raw_ocr(a.clone(), 100, 100);
+        sleep(30);
+        p.consume_raw_ocr(a.clone(), 100, 100);
+        p.consume_raw_ocr(a.clone(), 100, 100);
+        finish(&mut p, r#"{"b":[[0,"TA"]]}"#);
+        // A stays up past max_wait: max_wait counts from the change, not from the last page.
+        sleep(55);
+        p.consume_raw_ocr(a, 100, 100);
+
+        // A leaves and B shows up elsewhere: B settles while A is still held by hysteresis.
+        let b = at("B", 80.0);
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        sleep(30);
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        assert!(p.inflight.is_none(), "no page while A is still held");
+
+        sleep(40);
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        p.consume_raw_ocr(b, 100, 100);
+        assert!(p.inflight.is_some(), "B translates once A expired");
+        let texts: Vec<_> = p.last_page.as_ref().expect("page").blocks.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["B"]);
+    }
+
+    #[tokio::test]
     async fn result_lands_in_the_resized_pixel_space() {
         let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
@@ -631,10 +793,20 @@ mod tests {
 
         // A manual capture resets persist: nothing is settled while the request runs.
         p.persist.reset();
-        p.consume_raw_ocr(x, 100, 100);
+        p.consume_raw_ocr(x.clone(), 100, 100);
         // The settle filter renumbers block ids from 0.
         p.apply_stream_preview(&[(0, "TX".into())]);
         assert_eq!(p.captions.len(), 1, "stream preview still paints");
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        assert_eq!(p.captions.len(), 1, "a reset persist does not drop the preview");
+
+        finish(&mut p, r#"{"b":[[0,"TX"]]}"#);
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        assert_eq!(p.captions.len(), 1, "nor the result");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        assert!(p.inflight.is_none(), "the page is not translated again once it settles");
     }
 
     #[tokio::test]

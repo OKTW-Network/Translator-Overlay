@@ -89,6 +89,8 @@ pub struct BlockPersistenceFilter {
     /// Force-confirm thrashing tracks after this long. Zero = disabled.
     max_wait: Duration,
     tracks: Vec<Track>,
+    /// Last frame had no unconfirmed, changing, or hysteresis-held text.
+    settled: bool,
 }
 
 /// Spatial quantize step in pixels for center matching.
@@ -138,6 +140,7 @@ impl BlockPersistenceFilter {
             hold: Duration::from_millis(hold_ms),
             max_wait: Duration::from_millis(max_wait_ms),
             tracks: Vec::new(),
+            settled: true,
         }
     }
 
@@ -147,6 +150,13 @@ impl BlockPersistenceFilter {
 
     pub fn reset(&mut self) {
         self.tracks.clear();
+        self.settled = true;
+    }
+
+    /// The last [`Self::filter`] saw only confirmed, unchanged text, and emitted nothing
+    /// held over from earlier frames: the output is a stable page.
+    pub fn settled(&self) -> bool {
+        self.settled
     }
 
     /// Update tracks from this frame and return only persistent blocks.
@@ -283,15 +293,18 @@ impl BlockPersistenceFilter {
             }
         }
 
-        // Emit every confirmed track still within the hold window.
-        // Hysteresis: keep showing text even if this frame's OCR missed the box.
+        // Emit every confirmed track whose shown text was on screen within the hold window
+        // (missed by OCR or replaced by other text counts as gone).
         let hold = self.hold;
-        let mut out: Vec<OcrBlock> = self
+        let within = |t: Option<Instant>| t.is_none_or(|t| now.saturating_duration_since(t) <= hold);
+        let live = |t: &Track| t.confirmed && within(Some(t.last_seen)) && within(t.thrash_since);
+        // Seen text all confirmed and unchanged, and nothing emitted only by hysteresis.
+        self.settled = self
             .tracks
             .iter()
-            .filter(|t| t.confirmed && now.saturating_duration_since(t.last_seen) <= hold)
-            .map(|t| t.last_block.clone())
-            .collect();
+            .zip(&claimed)
+            .all(|(t, &seen)| if seen { t.confirmed && t.pending_text.is_none() } else { !live(t) });
+        let mut out: Vec<OcrBlock> = self.tracks.iter().filter(|t| live(t)).map(|t| t.last_block.clone()).collect();
 
         out.sort_by(|a, b| {
             (a.bbox.y as i32)
@@ -653,6 +666,47 @@ mod tests {
         assert_eq!(f.filter(vec![full.clone()])[0].text, "今日はいい天気");
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(f.filter(vec![full])[0].text, "今日はいい天気ですね");
+    }
+
+    #[test]
+    fn replaced_text_expires_after_hold_before_adopt() {
+        // Settle longer than hold: the new reading is still pending when the old text expires.
+        let mut f = BlockPersistenceFilter::new(100, 30, 2_000);
+        let old = block_wh("アオイ", 100.0, 200.0, 80.0, 22.0);
+        let _ = f.filter(vec![old.clone()]);
+        std::thread::sleep(Duration::from_millis(110));
+        assert_eq!(f.filter(vec![old]).len(), 1);
+        assert!(f.settled());
+
+        let new = block_wh("ハル", 100.0, 200.0, 60.0, 22.0);
+        assert_eq!(f.filter(vec![new.clone()])[0].text, "アオイ", "held for hold");
+        assert!(!f.settled());
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(f.filter(vec![new.clone()]).is_empty(), "replaced text expires after hold");
+        assert!(!f.settled());
+
+        std::thread::sleep(Duration::from_millis(70));
+        assert_eq!(f.filter(vec![new])[0].text, "ハル");
+        assert!(f.settled());
+    }
+
+    #[test]
+    fn held_track_is_emitted_but_not_settled() {
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
+        let _ = f.filter(vec![block("Menu", 10.0, 10.0)]);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(f.filter(vec![block("Menu", 10.0, 10.0)]).len(), 1);
+        assert!(f.settled());
+
+        assert_eq!(f.filter(vec![]).len(), 1, "hysteresis keeps the text");
+        assert!(!f.settled(), "held text is not on screen this frame");
+    }
+
+    #[test]
+    fn unconfirmed_text_is_not_settled() {
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
+        assert!(f.filter(vec![block("Menu", 10.0, 10.0)]).is_empty());
+        assert!(!f.settled(), "new text is still settling");
     }
 
     #[test]
