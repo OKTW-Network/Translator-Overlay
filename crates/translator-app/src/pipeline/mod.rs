@@ -29,12 +29,8 @@ pub fn ping_ui() {
 /// Commands the UI sends to the pipeline worker.
 #[derive(Debug)]
 pub enum PipelineCommand {
-    StartCapture {
-        hwnd: isize,
-        title: String,
-    },
-    PauseCapture,
-    ResumeCapture,
+    /// Start the selected window, or pause / resume a running capture.
+    StartPause,
     StopCapture,
     /// Dashboard window combo; wakes the worker so the Start hotkey can enable.
     SetSelectedWindow,
@@ -58,11 +54,8 @@ pub enum PipelineCommand {
     },
     /// Cancel the in-flight translation request (if any).
     CancelTranslate,
-    /// Open the on-target region picker (`hwnd` is the capture / selected window).
-    BeginRegionSelect {
-        hwnd: isize,
-    },
-    ConfirmRegionSelect,
+    /// Open the region picker on the capture (or selected) window, or confirm an open one.
+    ToggleRegionSelect,
     ClearRegionSelect,
     /// Run one shortcut. The hook gated fire/swallow; the handler must still no-op if the action is no longer valid.
     Hotkey(HotkeyAction),

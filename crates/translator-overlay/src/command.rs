@@ -19,8 +19,6 @@ pub enum OverlayCommand {
     UpdateConfig(OverlayConfig),
     /// Hide or restore in-place captions without dropping stored blocks.
     SetCaptionsVisible(bool),
-    /// Pipeline heartbeat: re-assert the reader's always-on-top.
-    RestoreTopmost,
     /// Localized text the translation window shows while it has nothing to show.
     SetReaderPlaceholder(String),
     BeginRegionSelect {

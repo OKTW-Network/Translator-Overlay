@@ -42,9 +42,7 @@ impl Pipeline {
             s.config.overlay.hud_enabled = hud_enabled;
             s.config.overlay.clone()
         };
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::UpdateConfig(overlay));
-        }
+        self.send_overlay(OverlayCommand::UpdateConfig(overlay));
         if !self.persist_live_config() {
             return;
         }
@@ -53,9 +51,7 @@ impl Pipeline {
 
     /// Send the translation-window placeholder in the current UI language.
     pub(crate) fn sync_reader_placeholder(&self) {
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::SetReaderPlaceholder(t!("reader.placeholder").into_owned()));
-        }
+        self.send_overlay(OverlayCommand::SetReaderPlaceholder(t!("reader.placeholder").into_owned()));
     }
 
     /// Persist only the control-window language on the live config.
@@ -83,7 +79,7 @@ impl Pipeline {
 
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
         // Threshold / filter / merge knobs change how raw blocks are derived.
-        self.last_raw_ocr = None;
+        self.forget_raw_ocr();
         let engine_reload =
             (self.ocr_tier, self.ocr_device, self.ocr_layout) != (cfg.ocr.model_tier, cfg.ocr.device, cfg.ocr.uses_layout());
         self.gate = StabilityGate::from_config(&cfg.ocr);
@@ -123,9 +119,7 @@ impl Pipeline {
         }
         self.translation_cache.set_max(cfg.translation.cache_max_entries_clamped());
 
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::UpdateConfig(cfg.overlay.clone()));
-        }
+        self.send_overlay(OverlayCommand::UpdateConfig(cfg.overlay.clone()));
         // Reload from disk can change the UI language.
         self.sync_reader_placeholder();
 
@@ -152,7 +146,6 @@ impl Pipeline {
             self.conversation.clear();
             self.client.reset_session();
             self.translation_cache.clear();
-            self.last_translated_fp = None;
         }
         self.state.write().translation_cache_len = self.translation_cache.len();
         info!("config applied and saved");
@@ -161,6 +154,8 @@ impl Pipeline {
             self.ocr_tier = cfg.ocr.model_tier;
             self.ocr_device = cfg.ocr.device;
             self.ocr_layout = cfg.ocr.uses_layout();
+            // Free the old engine before the new one loads.
+            self.wait_ocr_job().await;
             self.engine = None;
         }
         if let Some(eng) = self.engine.as_mut() {

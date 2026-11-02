@@ -13,8 +13,9 @@ use windows::{
             CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW,
             GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOPMOST,
             MINMAXINFO, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WM_CLOSE, WM_DESTROY,
-            WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_OVERLAPPED, WS_POPUP,
+            SWP_NOZORDER, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, UnregisterClassW, WM_CLOSE, WM_DESTROY,
+            WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_OVERLAPPED,
+            WS_POPUP,
         },
     },
     core::{PCWSTR, w},
@@ -41,6 +42,8 @@ const MIN_W: i32 = 160;
 const MIN_H: i32 = 80;
 const EDGE: i32 = 8;
 const TEXT_INSET: i32 = 12;
+const TOPMOST_TIMER: usize = 1;
+const TOPMOST_INTERVAL_MS: u32 = 1000;
 
 /// Join the non-empty block translations for the reader, one per line.
 pub fn format_reader_text(blocks: &[TranslatedBlock]) -> String {
@@ -130,6 +133,10 @@ impl ReaderWindow {
         });
 
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, &raw mut *reader as isize) };
+        // Topmost heartbeat: WinUI drops independent topmost windows at launch.
+        if unsafe { SetTimer(Some(hwnd), TOPMOST_TIMER, TOPMOST_INTERVAL_MS, None) } == 0 {
+            warn!("reader topmost timer failed to start");
+        }
         if let Err(e) = reader.repaint() {
             reader.teardown();
             return Err(e);
@@ -348,6 +355,10 @@ unsafe extern "system" fn reader_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
         }
         WM_CLOSE => {
             reader.dismiss();
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TOPMOST_TIMER => {
+            reader.restore_topmost_if_needed();
             LRESULT(0)
         }
         WM_DESTROY => {

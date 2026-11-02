@@ -385,9 +385,13 @@ fn build_window_row(d: &mut Binds<DashSnap>, cx: &UiCx) -> Result<StackPanel> {
         let cx = cx.clone();
         move || {
             cx.with_mut(|ui| {
+                let old = ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd));
                 ui.windows = list_windows().unwrap_or_default();
-                if ui.selected_idx.is_some_and(|i| i >= ui.windows.len()) {
-                    ui.selected_idx = None;
+                // Follow the selected window to its new index: Start captures `selected_hwnd`.
+                ui.selected_idx = old.and_then(|hwnd| ui.windows.iter().position(|w| w.hwnd == hwnd));
+                if let Some(w) = ui.selected_idx.and_then(|i| ui.windows.get(i)) {
+                    ui.state.write().selected_title = Some(w.title.clone());
+                } else if old.is_some() {
                     {
                         let mut s = ui.state.write();
                         s.selected_hwnd = None;
@@ -465,19 +469,7 @@ fn build_regions_pane(b: &mut Binds<UiShared>, d: &mut Binds<DashSnap>, cx: &UiC
     select.SetContent(&select_label)?;
     click(&select, {
         let cx = cx.clone();
-        move || {
-            let (selecting, hwnd) = {
-                let ui = cx.shared.lock();
-                let selected = ui.selected_idx.and_then(|i| ui.windows.get(i).map(|w| w.hwnd));
-                let s = ui.state.read();
-                (s.region_select_active, if s.auto_running { s.target_hwnd } else { selected })
-            };
-            if selecting {
-                cx.send_cmd(PipelineCommand::ConfirmRegionSelect);
-            } else if let Some(hwnd) = hwnd {
-                cx.send_cmd(PipelineCommand::BeginRegionSelect { hwnd });
-            }
-        }
+        move || cx.send_cmd(PipelineCommand::ToggleRegionSelect)
     })?;
     let clear = button(&t!("action.clear"), {
         let cx = cx.clone();

@@ -177,6 +177,17 @@ impl AppState {
         }
     }
 
+    /// Status after a translation is cancelled. Keeps the Idle a Stop already set.
+    pub fn restore_after_cancel(&mut self) {
+        if self.capture_paused {
+            self.status = PipelineStatus::Paused;
+        } else if self.auto_running {
+            self.status = PipelineStatus::Capturing;
+        } else if self.status != PipelineStatus::Idle {
+            self.status = PipelineStatus::Cancelled;
+        }
+    }
+
     pub fn push_history(&mut self, source_text: String, translated_text: String, max_items: usize) {
         let id = self.next_history_id;
         self.next_history_id += 1;

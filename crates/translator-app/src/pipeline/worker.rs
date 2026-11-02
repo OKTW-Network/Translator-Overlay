@@ -1,21 +1,22 @@
 //! Pipeline worker: owns capture / OCR / translate state and the command loop.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use parking_lot::RwLock;
 use rust_i18n::t;
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    task::{JoinError, JoinHandle},
+    time::{self, Duration},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
 use translator_core::{AppState, HotkeyAction, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
-use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrFingerprint, StabilityGate};
+use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrError, StabilityGate};
 use translator_overlay::{OverlayCommand, OverlayController, OverlayEvent};
-use translator_translate::{Completion, Conversation, TranslateClient, TranslateError, TranslationCache};
+use translator_translate::{Conversation, PageResult, TranslateClient, TranslationCache};
 
 use crate::{
     hotkey,
@@ -27,31 +28,61 @@ pub type CmdRx = mpsc::UnboundedReceiver<PipelineCommand>;
 pub type CmdTx = mpsc::UnboundedSender<PipelineCommand>;
 
 pub(crate) enum TranslateJobMsg {
+    /// Pairs streaming in for the request in flight.
     Partial(Vec<(u32, String)>),
-    Done(Result<(Completion, u32), TranslateError>),
+    /// About to resend. `kept` is set when the page itself is resent (omitted blocks / bad
+    /// JSON): the model translations so far. `None` = a transport retry of the same request.
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        message: String,
+        kept: Option<Vec<TranslatedBlock>>,
+    },
+    Done(PageResult),
 }
 
 pub(crate) struct InflightTranslate {
     pub cancel: CancellationToken,
     pub rx: mpsc::UnboundedReceiver<TranslateJobMsg>,
-    pub fingerprint: OcrFingerprint,
-    pub blocks: Vec<OcrBlock>,
-    pub content_width: u32,
-    pub content_height: u32,
-    /// Unique miss blocks actually sent to the model (ids preserved).
-    pub miss_blocks: Vec<OcrBlock>,
+    pub page: PendingPage,
     /// Per-source-block cache hits (`None` = wait for the model).
     pub cached_hits: Vec<Option<String>>,
-    /// Overlay at job start (cache-hit preview or last committed page). Restored on retry / fail.
-    pub revert_blocks: Vec<TranslatedBlock>,
+    /// Model translations from earlier passes over this page.
+    pub kept: Vec<TranslatedBlock>,
+}
+
+impl InflightTranslate {
+    /// The page so far: cache hits, earlier passes, then `pairs` streaming in.
+    pub(crate) fn preview(&self, pairs: &[(u32, String)]) -> Vec<TranslatedBlock> {
+        let mut hits = self.cached_hits.clone();
+        for (id, text) in pairs {
+            if let Some(i) = self.page.blocks.iter().position(|b| b.id == *id) {
+                hits[i] = Some(text.clone());
+            }
+        }
+        TranslationCache::stitch(&self.page.blocks, &hits, &self.kept)
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct PendingPage {
     pub blocks: Vec<OcrBlock>,
-    pub fingerprint: OcrFingerprint,
     pub content_width: u32,
     pub content_height: u32,
+}
+
+/// OCR inference running beside the pipeline loop; its result arrives as an event.
+pub(crate) struct OcrJob {
+    pub handle: JoinHandle<Result<Vec<OcrBlock>, OcrError>>,
+    pub started: Instant,
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+    pub scope: Vec<Bytes>,
+    /// Manual capture: translate the result right away.
+    pub manual: bool,
+    /// The session, stream, or OCR settings changed since the job started: drop the result.
+    pub stale: bool,
 }
 
 /// Raw OCR of one capture frame, keyed by frame identity.
@@ -143,9 +174,12 @@ pub(crate) struct Pipeline {
     pub conversation: Conversation,
     pub translation_cache: TranslationCache,
     pub client: TranslateClient,
-    pub last_translated_fp: Option<OcrFingerprint>,
     pub last_page: Option<PendingPage>,
+    /// Set / take through [`Self::set_inflight`] / [`Self::take_inflight`] (mirrors `translate_in_flight`).
     pub inflight: Option<InflightTranslate>,
+    pub ocr_job: Option<OcrJob>,
+    /// Manual capture asked for while an OCR job ran; starts when it ends.
+    pub manual_queued: bool,
     /// Cancels the background built-in model load started with the capture.
     pub preload: Option<CancellationToken>,
     pub model_load: Option<ModelLoadTask>,
@@ -153,6 +187,14 @@ pub(crate) struct Pipeline {
     pub ocr_device: OcrDevice,
     pub ocr_layout: bool,
     pub last_raw_ocr: Option<LastRawOcr>,
+    /// Current OCR blocks (mirrored to `AppState::latest_ocr_blocks`).
+    pub ocr_blocks: Vec<OcrBlock>,
+    /// Captions on the overlay (mirrored to `AppState::latest_translated_blocks`).
+    pub captions: Vec<TranslatedBlock>,
+    /// Content size the overlay last got with `captions`.
+    pub painted_size: (u32, u32),
+    /// Next capture tick while a capture session is live and not paused. Events never move it.
+    pub next_tick: Option<time::Instant>,
     /// Raise-on-restart offset added to frame sequences in preview state, so a
     /// renumbered stream never reuses a sequence the preview skip / UI cache saw.
     pub preview_seq_bias: u64,
@@ -176,15 +218,6 @@ pub fn spawn_pipeline(state: SharedState) -> (CmdTx, tokio::task::JoinHandle<()>
 
 impl Pipeline {
     async fn new(state: SharedState) -> Self {
-        let ocr_cfg = state.read().config.ocr.clone();
-        let ocr_tier = ocr_cfg.model_tier;
-        let ocr_device = ocr_cfg.device;
-        let ocr_layout = ocr_cfg.uses_layout();
-        let mut client = TranslateClient::new(state.read().config.api.clone());
-        if let Ok(dir) = ocr_cfg.models_dir_path() {
-            client.set_models_dir(dir);
-        }
-        let cache_max = state.read().config.translation.cache_max_entries_clamped();
         let overlay_cfg = state.read().config.overlay.clone();
         let overlay = match OverlayController::spawn(overlay_cfg).await {
             Ok(o) => Some(o),
@@ -193,8 +226,22 @@ impl Pipeline {
                 None
             }
         };
+        let mut pipeline = Self::detached(state);
+        pipeline.overlay = overlay;
+        pipeline.sync_reader_placeholder();
+        apply_dictionary_profile(&mut pipeline.state.write());
+        pipeline
+    }
 
-        let pipeline = Self {
+    /// Pipeline with no overlay host and no capture; [`Self::new`] attaches the overlay.
+    pub(crate) fn detached(state: SharedState) -> Self {
+        let ocr_cfg = state.read().config.ocr.clone();
+        let mut client = TranslateClient::new(state.read().config.api.clone());
+        if let Ok(dir) = ocr_cfg.models_dir_path() {
+            client.set_models_dir(dir);
+        }
+        let cache_max = state.read().config.translation.cache_max_entries_clamped();
+        Self {
             state,
             session: CaptureSession::new(),
             gate: StabilityGate::from_config(&ocr_cfg),
@@ -203,92 +250,105 @@ impl Pipeline {
             conversation: Conversation::empty(),
             translation_cache: TranslationCache::new(cache_max),
             client,
-            last_translated_fp: None,
             last_page: None,
             inflight: None,
+            ocr_job: None,
+            manual_queued: false,
             preload: None,
             model_load: None,
-            ocr_tier,
-            ocr_device,
-            ocr_layout,
+            ocr_tier: ocr_cfg.model_tier,
+            ocr_device: ocr_cfg.device,
+            ocr_layout: ocr_cfg.uses_layout(),
             last_raw_ocr: None,
+            ocr_blocks: Vec::new(),
+            captions: Vec::new(),
+            painted_size: (0, 0),
+            next_tick: None,
             preview_seq_bias: 0,
             raw_empty_since: None,
             raw_content_since: None,
             remap_miss_since: None,
-            overlay,
-        };
-
-        pipeline.sync_reader_placeholder();
-        apply_dictionary_profile(&mut pipeline.state.write());
-        pipeline
+            overlay: None,
+        }
     }
 
     async fn run(&mut self, mut rx: CmdRx) {
         loop {
-            while let Ok(cmd) = rx.try_recv() {
-                if self.handle_command(cmd).await {
-                    return;
-                }
-            }
-
-            self.drive_capture().await;
             self.beat_ui();
-            let wait = self.next_wait();
-            match next_event(&mut rx, self.inflight.as_mut(), self.model_load.as_mut(), self.overlay.as_mut(), wait).await {
+            let event = next_event(
+                &mut rx,
+                self.inflight.as_mut(),
+                self.ocr_job.as_mut(),
+                self.model_load.as_mut(),
+                self.overlay.as_mut(),
+                self.next_tick,
+            )
+            .await;
+            match event {
                 PipelineEvent::Command(None) => return,
                 PipelineEvent::Command(Some(cmd)) => {
                     if self.handle_command(cmd).await {
                         return;
                     }
                 }
-                PipelineEvent::Translate(msg) => match msg {
-                    Some(TranslateJobMsg::Partial(pairs)) => {
-                        if let Some(job) = self.inflight.as_ref() {
-                            self.apply_stream_preview(job, &pairs);
-                        }
-                    }
-                    Some(TranslateJobMsg::Done(result)) => {
-                        let job = self.inflight.take().expect("inflight present");
-                        self.finish_translate(job, result);
-                    }
-                    None => {
-                        let job = self.inflight.take().expect("inflight present");
-                        self.finish_translate(job, Err(TranslateError::Other("translate task dropped".into())));
-                    }
-                },
+                PipelineEvent::Translate(msg) => self.on_translate_msg(msg),
+                PipelineEvent::Ocr(result) => self.finish_ocr(result),
                 PipelineEvent::ModelLoad => self.sync_model_load(),
                 PipelineEvent::Overlay(None) => {
                     warn!("overlay host event channel closed");
                     self.overlay = None;
                 }
                 PipelineEvent::Overlay(Some(ev)) => {
-                    self.apply_overlay_event(ev).await;
+                    self.apply_overlay_event(ev);
                     while let Some(ev) = self.overlay.as_mut().and_then(OverlayController::try_recv_event) {
-                        self.apply_overlay_event(ev).await;
+                        self.apply_overlay_event(ev);
                     }
                 }
-                PipelineEvent::Tick => continue,
+                PipelineEvent::Tick => self.tick().await,
             }
-            self.beat_ui();
         }
     }
 
-    fn beat_ui(&mut self) {
+    fn beat_ui(&self) {
         hotkey::sync_state(&self.state.read());
         ping_ui();
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::RestoreTopmost);
+    }
+
+    /// Send to the overlay host, if it is running.
+    pub(crate) fn send_overlay(&self, cmd: OverlayCommand) {
+        if let Some(o) = self.overlay.as_ref()
+            && let Err(e) = o.send(cmd)
+        {
+            warn!(error = %e, "overlay command failed");
         }
     }
 
-    fn next_wait(&self) -> Option<Duration> {
-        if self.session.is_running() && !self.state.read().capture_paused {
-            let ms = self.state.read().config.capture.min_interval_ms.max(50);
-            Some(Duration::from_millis(ms))
-        } else {
-            None
+    pub(crate) fn set_ocr_blocks(&mut self, blocks: Vec<OcrBlock>) {
+        self.state.write().latest_ocr_blocks = blocks.clone();
+        self.ocr_blocks = blocks;
+    }
+
+    pub(crate) fn set_captions(&mut self, captions: Vec<TranslatedBlock>) {
+        self.state.write().latest_translated_blocks = captions.clone();
+        self.captions = captions;
+    }
+
+    /// Show already remapped captions and store them. Returns `false` when neither the boxes
+    /// nor the content size changed: the overlay keeps its layout instead of re-fitting labels.
+    pub(crate) fn paint_captions(&mut self, captions: Vec<TranslatedBlock>, content_width: u32, content_height: u32) -> bool {
+        if self.painted_size == (content_width, content_height) && !translated_geometry_changed(&self.captions, &captions) {
+            return false;
         }
+        let locale = self.state.read().config.translation.target_lang.clone();
+        self.send_overlay(OverlayCommand::SetBlocks {
+            blocks: captions.clone(),
+            locale,
+            content_width,
+            content_height,
+        });
+        self.painted_size = (content_width, content_height);
+        self.set_captions(captions);
+        true
     }
 
     /// Returns `true` when the worker should shut down.
@@ -313,16 +373,7 @@ impl Pipeline {
                     info!("cancelling in-flight translation");
                     job.cancel.cancel();
                 } else {
-                    let mut s = self.state.write();
-                    s.translate_in_flight = false;
-                    if s.capture_paused {
-                        s.status = PipelineStatus::Paused;
-                    } else if s.auto_running {
-                        s.status = PipelineStatus::Capturing;
-                    } else if s.status != PipelineStatus::Idle {
-                        // Stop already set Idle; a Cancel queued during close must not overwrite it.
-                        s.status = PipelineStatus::Cancelled;
-                    }
+                    self.state.write().restore_after_cancel();
                 }
             }
             PipelineCommand::ApplyConfig(cfg) => self.apply_config(*cfg).await,
@@ -332,32 +383,20 @@ impl Pipeline {
                 hud_enabled,
             } => self.set_overlay_display(enabled, reader_enabled, hud_enabled),
             PipelineCommand::SetUiLanguage { language } => self.set_ui_language(language),
-            PipelineCommand::PauseCapture => self.pause_capture(),
-            PipelineCommand::ResumeCapture => self.resume_capture(),
+            PipelineCommand::StartPause => self.start_pause(),
             PipelineCommand::StopCapture => self.stop_capture().await,
             // Combo already wrote AppState; this only wakes beat_ui (hotkey enable state).
             PipelineCommand::SetSelectedWindow => {}
-            PipelineCommand::BeginRegionSelect { hwnd } => self.begin_region_select(hwnd),
-            PipelineCommand::ConfirmRegionSelect => {
-                if let Some(o) = self.overlay.as_ref() {
-                    let _ = o.send(OverlayCommand::ConfirmRegionSelect);
-                }
-            }
+            PipelineCommand::ToggleRegionSelect => self.toggle_region_select(),
             PipelineCommand::ClearRegionSelect => {
-                if let Some(o) = self.overlay.as_ref() {
-                    let _ = o.send(OverlayCommand::ClearRegionSelect);
-                }
-                let mut s = self.state.write();
-                s.region_select_draft.clear();
+                self.send_overlay(OverlayCommand::ClearRegionSelect);
+                self.state.write().region_select_draft.clear();
             }
             PipelineCommand::SetCaptureRegions { regions } => {
-                if let Some(o) = self.overlay.as_ref() {
-                    let _ = o.send(OverlayCommand::CancelRegionSelect);
-                }
+                self.send_overlay(OverlayCommand::CancelRegionSelect);
                 self.apply_ocr_regions(regions);
             }
-            PipelineCommand::StartCapture { hwnd, title } => self.begin_start_capture(hwnd, title),
-            PipelineCommand::ManualCapture => self.manual_capture().await,
+            PipelineCommand::ManualCapture => self.manual_capture(),
             PipelineCommand::ResetConversation => self.reset_conversation(),
             // Picker Esc arrives as SelectRegion and must work with shortcuts off.
             PipelineCommand::Hotkey(action)
@@ -371,27 +410,14 @@ impl Pipeline {
                     self.stop_capture().await;
                 }
             }
-            PipelineCommand::Hotkey(HotkeyAction::SelectRegion) => {
-                let (active, hwnd) = {
-                    let s = self.state.read();
-                    let hwnd = if s.auto_running { s.target_hwnd } else { s.selected_hwnd };
-                    (s.region_select_active, hwnd)
-                };
-                if active {
-                    if let Some(overlay) = self.overlay.as_ref() {
-                        let _ = overlay.send(OverlayCommand::ConfirmRegionSelect);
-                    }
-                } else if let Some(hwnd) = hwnd {
-                    self.begin_region_select(hwnd);
-                }
-            }
+            PipelineCommand::Hotkey(HotkeyAction::SelectRegion) => self.toggle_region_select(),
             PipelineCommand::Hotkey(HotkeyAction::Retry) => {
                 let ready = {
                     let s = self.state.read();
                     s.auto_running && !s.translate_in_flight && !s.capture_busy
                 };
                 if ready {
-                    self.manual_capture().await;
+                    self.manual_capture();
                 }
             }
             PipelineCommand::Hotkey(HotkeyAction::ClearHistory) => self.reset_conversation(),
@@ -407,12 +433,25 @@ impl Pipeline {
         false
     }
 
+    pub(crate) fn set_inflight(&mut self, job: InflightTranslate) {
+        self.state.write().translate_in_flight = true;
+        self.inflight = Some(job);
+    }
+
+    pub(crate) fn take_inflight(&mut self) -> Option<InflightTranslate> {
+        self.state.write().translate_in_flight = false;
+        self.inflight.take()
+    }
+
+    /// Abort the translation in flight. The live conversation never saw its turn, so there is
+    /// nothing to roll back.
     pub(crate) fn cancel_inflight(&mut self) {
-        if let Some(job) = self.inflight.take() {
+        if let Some(job) = self.take_inflight() {
             job.cancel.cancel();
-            // Drop the pending user turn so stop/shutdown mid-request does not
-            // leave a dangling multi-user conversation for the next translate.
-            self.conversation.rollback_user_turn();
+            let mut s = self.state.write();
+            if s.status.is_translating() {
+                s.restore_operational_status();
+            }
         }
     }
 
@@ -421,23 +460,33 @@ impl Pipeline {
         self.reset_ocr_session(true);
         // The fresh stream renumbers frames from 1.
         self.absorb_preview_sequence();
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
-            let _ = o.send(OverlayCommand::Clear);
-            if let Some(hwnd) = self.session.target_hwnd() {
-                let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
-            }
+        self.send_overlay(OverlayCommand::SetCaptionsVisible(true));
+        if let Some(hwnd) = self.session.target_hwnd() {
+            self.send_overlay(OverlayCommand::Attach { target_hwnd: hwnd });
         }
+        self.next_tick = Some(time::Instant::now());
         let mut s = self.state.write();
         s.auto_running = true;
         s.capture_paused = false;
         s.target_window_title = self.session.target_title();
         s.target_hwnd = self.session.target_hwnd();
-        s.translate_in_flight = false;
         s.last_error = None;
         s.status = PipelineStatus::Capturing;
         drop(s);
         self.start_preload();
+    }
+
+    /// Open the picker on the capture (or selected) window, or confirm an open one.
+    fn toggle_region_select(&mut self) {
+        let (active, hwnd) = {
+            let s = self.state.read();
+            (s.region_select_active, if s.auto_running { s.target_hwnd } else { s.selected_hwnd })
+        };
+        if active {
+            self.send_overlay(OverlayCommand::ConfirmRegionSelect);
+        } else if let Some(hwnd) = hwnd {
+            self.begin_region_select(hwnd);
+        }
     }
 
     fn begin_region_select(&mut self, hwnd: isize) {
@@ -463,7 +512,7 @@ impl Pipeline {
         info!("region picker started");
     }
 
-    async fn apply_overlay_event(&mut self, ev: OverlayEvent) {
+    fn apply_overlay_event(&mut self, ev: OverlayEvent) {
         match ev {
             OverlayEvent::RegionsCommitted(regions) => {
                 info!(count = regions.len(), "OCR regions committed");
@@ -482,10 +531,10 @@ impl Pipeline {
         }
     }
 
-    fn reset_conversation(&mut self) {
+    pub(crate) fn reset_conversation(&mut self) {
+        // A new session id: a translation still in flight will not write its turn back.
         self.conversation.clear();
         self.client.reset_session();
-        self.last_translated_fp = None;
         self.state.write().history.clear();
         info!("LLM conversation reset");
         // Leave Downloading/Loading alone while models are still loading.
@@ -536,9 +585,9 @@ impl Pipeline {
             s.capture_paused = true;
             s.status = PipelineStatus::Paused;
         }
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::SetCaptionsVisible(false));
-        }
+        // Sleep until resume.
+        self.next_tick = None;
+        self.send_overlay(OverlayCommand::SetCaptionsVisible(false));
         info!("capture paused");
     }
 
@@ -551,26 +600,22 @@ impl Pipeline {
             s.capture_paused = false;
             s.restore_operational_status();
         }
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
-        }
+        self.next_tick = Some(time::Instant::now());
+        self.send_overlay(OverlayCommand::SetCaptionsVisible(true));
         info!("capture resumed");
     }
 
-    async fn stop_capture(&mut self) {
+    pub(crate) async fn stop_capture(&mut self) {
         self.state.write().capture_busy = true;
         hotkey::sync_state(&self.state.read());
         ping_ui();
-        if let Some(o) = self.overlay.as_ref() {
-            let _ = o.send(OverlayCommand::SetCaptionsVisible(true));
-            let _ = o.send(OverlayCommand::CancelRegionSelect);
-            let _ = o.send(OverlayCommand::Detach);
-            let _ = o.send(OverlayCommand::Clear);
-        }
+        self.send_overlay(OverlayCommand::SetCaptionsVisible(true));
+        self.send_overlay(OverlayCommand::CancelRegionSelect);
+        self.send_overlay(OverlayCommand::Detach);
         self.cancel_inflight();
         self.cancel_preload();
-        self.state.write().translate_in_flight = false;
         self.session.stop();
+        self.next_tick = None;
         self.reset_ocr_session(false);
         self.conversation.clear();
         self.release_models().await;
@@ -580,18 +625,27 @@ impl Pipeline {
         s.capture_paused = false;
         s.capture_busy = false;
         s.target_hwnd = None;
-        s.translate_in_flight = false;
         s.status = PipelineStatus::Idle;
     }
 
-    /// Drop every ORT session (OCR + built-in model), waiting out loads in progress. WebGPU
-    /// frees VRAM only once no session holds its shared context.
+    /// Drop every ORT session (OCR + built-in model), waiting out loads and inference in
+    /// progress. WebGPU frees VRAM only once no session holds its shared context.
     pub(crate) async fn release_models(&mut self) {
+        self.wait_ocr_job().await;
         self.engine = None;
         if let Some(job) = self.model_load.take() {
             job.close().await;
         }
         self.client.unload_builtin().await;
+    }
+
+    /// Wait out the OCR job in progress, dropping its result: it holds an engine clone until it ends.
+    pub(crate) async fn wait_ocr_job(&mut self) {
+        if let Some(job) = self.ocr_job.take() {
+            let _ = job.handle.await;
+        }
+        // The capture queued behind it would otherwise fire after some later job.
+        self.manual_queued = false;
     }
 
     /// Reset gate / timers / captions. Optionally clear LLM conversation.
@@ -602,17 +656,24 @@ impl Pipeline {
             self.conversation.clear();
             self.client.reset_session();
         }
-        self.last_translated_fp = None;
         self.last_page = None;
-        self.last_raw_ocr = None;
+        self.forget_raw_ocr();
+        self.manual_queued = false;
         self.raw_empty_since = None;
         self.raw_content_since = None;
         self.remap_miss_since = None;
         // Drop OCR + caption state so sticky remap cannot resurrect a prior session.
-        let mut s = self.state.write();
-        s.latest_ocr_blocks.clear();
-        s.latest_translated_blocks.clear();
-        s.translate_in_flight = false;
+        self.set_ocr_blocks(Vec::new());
+        self.set_captions(Vec::new());
+        self.send_overlay(OverlayCommand::Clear);
+    }
+
+    /// Drop the raw-OCR cache and any result still being computed for it.
+    pub(crate) fn forget_raw_ocr(&mut self) {
+        self.last_raw_ocr = None;
+        if let Some(job) = self.ocr_job.as_mut() {
+            job.stale = true;
+        }
     }
 
     pub(crate) fn update_preview(&self, frame: &CapturedFrame) {
@@ -632,7 +693,7 @@ impl Pipeline {
     /// for an unchanged frame.
     fn consume_stream_restart(&mut self) {
         if self.session.sync_stream() {
-            self.last_raw_ocr = None;
+            self.forget_raw_ocr();
             self.absorb_preview_sequence();
         }
     }
@@ -645,7 +706,7 @@ impl Pipeline {
         self.preview_seq_bias = self.preview_seq_bias.saturating_add(last);
     }
 
-    async fn manual_capture(&mut self) {
+    pub(crate) fn manual_capture(&mut self) {
         if self.inflight.is_some() {
             warn!("manual capture ignored — translation in flight (cancel first)");
             return;
@@ -658,68 +719,87 @@ impl Pipeline {
         if !self.ensure_engine() {
             return;
         }
-
         if self.session.in_movesize() {
             warn!("manual capture ignored — target is being moved or resized");
+            return;
+        }
+        if self.ocr_job.is_some() {
+            // One inference at a time on the GPU; this one starts when the running job ends.
+            self.manual_queued = true;
             return;
         }
         self.consume_stream_restart();
         match self.session.latest_frame() {
             Some(frame) => {
                 self.update_preview(&frame);
-                self.run_ocr_manual(&frame).await;
+                self.state.write().status = PipelineStatus::RunningOcr;
+                let rects = self.ocr_pixel_regions(frame.width, frame.height);
+                self.start_ocr(&frame, &rects, true);
             }
             None => self.state.write().set_error(t!("err.no_frame")),
         }
     }
 
-    async fn drive_capture(&mut self) {
-        // Keeps running while a translation is in flight so captions keep following the screen.
-        if !self.session.is_running() || self.state.read().capture_paused {
+    /// One capture interval: notice a closed target, then OCR or reuse the latest frame.
+    pub(crate) async fn tick(&mut self) {
+        let ms = self.state.read().config.capture.min_interval_ms.max(50);
+        self.next_tick = Some(time::Instant::now() + Duration::from_millis(ms));
+        if !self.session.is_running() {
+            // The target window closed (WGC ends the stream), or a restart after a resize failed.
+            warn!("capture stream ended; stopping");
+            self.stop_capture().await;
+            self.state.write().set_error(t!("err.capture_ended"));
             return;
         }
-        // Skip OCR / preview / caption expiry while the target is in its
+        self.drive_capture();
+    }
+
+    fn drive_capture(&mut self) {
+        // Skip OCR / preview / caption expiry while paused or while the target is in its
         // move/size loop. Frames are not published until MOVESIZEEND.
-        if self.session.in_movesize() {
+        if self.state.read().capture_paused || self.session.in_movesize() {
             return;
         }
 
         self.consume_stream_restart();
 
-        // Stale tick (no new frame published): consume the cached blocks without
-        // the client-area crop, Win32 queries, or a preview write.
-        let stale = self
-            .last_raw_ocr
-            .as_ref()
-            .filter(|c| Some(c.sequence) == self.session.latest_sequence())
-            .map(|c| (c.sequence, c.blocks.clone(), c.width, c.height));
+        // A running job owns the next result; its frame is newer than the cache.
+        if self.ocr_job.is_none() {
+            // Stale tick (no new frame published): consume the cached blocks without
+            // the client-area crop, Win32 queries, or a preview write.
+            let stale = self
+                .last_raw_ocr
+                .as_ref()
+                .filter(|c| Some(c.sequence) == self.session.latest_sequence())
+                .map(|c| (c.sequence, c.blocks.clone(), c.width, c.height));
 
-        if let Some((sequence, blocks, w, h)) = stale {
-            debug!(frame = sequence, "capture frame unchanged — reusing cached OCR");
-            self.consume_raw_ocr(blocks, w, h).await;
-        } else if let Some(frame) = self.session.latest_frame() {
-            self.update_preview(&frame);
-            if self.engine.is_none() {
-                // Do not auto-retry after a failed load — wait for ApplyConfig / tier change.
-                let load_failed = matches!(self.state.read().status, PipelineStatus::Error { .. });
-                if !load_failed {
-                    let _ = self.ensure_engine();
+            if let Some((sequence, blocks, w, h)) = stale {
+                debug!(frame = sequence, "capture frame unchanged — reusing cached OCR");
+                self.consume_raw_ocr(blocks, w, h);
+            } else if let Some(frame) = self.session.latest_frame() {
+                self.update_preview(&frame);
+                if self.engine.is_none() {
+                    // Do not auto-retry after a failed load — wait for ApplyConfig / tier change.
+                    let load_failed = matches!(self.state.read().status, PipelineStatus::Error { .. });
+                    if !load_failed {
+                        let _ = self.ensure_engine();
+                    }
+                    let mut s = self.state.write();
+                    if !matches!(
+                        s.status,
+                        PipelineStatus::Error { .. }
+                            | PipelineStatus::DownloadingModels { .. }
+                            | PipelineStatus::LoadingModels { .. }
+                            | PipelineStatus::Translating
+                            | PipelineStatus::RetryingTranslate { .. }
+                            | PipelineStatus::OverlayActive
+                            | PipelineStatus::Cancelled
+                    ) {
+                        s.status = PipelineStatus::Capturing;
+                    }
+                } else {
+                    self.run_ocr_auto(&frame);
                 }
-                let mut s = self.state.write();
-                if !matches!(
-                    s.status,
-                    PipelineStatus::Error { .. }
-                        | PipelineStatus::DownloadingModels { .. }
-                        | PipelineStatus::LoadingModels { .. }
-                        | PipelineStatus::Translating
-                        | PipelineStatus::RetryingTranslate { .. }
-                        | PipelineStatus::OverlayActive
-                        | PipelineStatus::Cancelled
-                ) {
-                    s.status = PipelineStatus::Capturing;
-                }
-            } else {
-                self.run_ocr_auto(&frame).await;
             }
         }
 
@@ -730,6 +810,7 @@ impl Pipeline {
 enum PipelineEvent {
     Command(Option<PipelineCommand>),
     Translate(Option<TranslateJobMsg>),
+    Ocr(Result<Result<Vec<OcrBlock>, OcrError>, JoinError>),
     ModelLoad,
     Overlay(Option<OverlayEvent>),
     Tick,
@@ -738,9 +819,10 @@ enum PipelineEvent {
 async fn next_event(
     rx: &mut CmdRx,
     inflight: Option<&mut InflightTranslate>,
+    ocr_job: Option<&mut OcrJob>,
     model_load: Option<&mut ModelLoadTask>,
     overlay: Option<&mut OverlayController>,
-    wait: Option<Duration>,
+    next_tick: Option<time::Instant>,
 ) -> PipelineEvent {
     let overlay_event = async {
         match overlay {
@@ -748,10 +830,15 @@ async fn next_event(
             None => std::future::pending().await,
         }
     };
-
     let translate = async {
         match inflight {
             Some(job) => job.rx.recv().await,
+            None => std::future::pending().await,
+        }
+    };
+    let ocr = async {
+        match ocr_job {
+            Some(job) => (&mut job.handle).await,
             None => std::future::pending().await,
         }
     };
@@ -763,21 +850,21 @@ async fn next_event(
             None => std::future::pending().await,
         }
     };
+    let tick = async {
+        match next_tick {
+            Some(at) => time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    };
 
     tokio::select! {
         biased;
         cmd = rx.recv() => PipelineEvent::Command(cmd),
         result = translate => PipelineEvent::Translate(result),
+        result = ocr => PipelineEvent::Ocr(result),
         _ = model => PipelineEvent::ModelLoad,
         ev = overlay_event => PipelineEvent::Overlay(ev),
-        () = sleep_or_pending(wait) => PipelineEvent::Tick,
-    }
-}
-
-async fn sleep_or_pending(wait: Option<Duration>) {
-    match wait {
-        Some(d) => tokio::time::sleep(d).await,
-        None => std::future::pending().await,
+        () = tick => PipelineEvent::Tick,
     }
 }
 

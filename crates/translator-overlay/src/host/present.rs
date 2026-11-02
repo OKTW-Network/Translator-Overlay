@@ -58,7 +58,8 @@ impl OverlayHost {
             return;
         }
 
-        if self.in_movesize {
+        // Mid-drag, new captions (streaming) still repaint; drag frames alone only move the window.
+        if self.in_movesize && !(self.dirty && self.picker.is_none()) {
             self.follow_move();
             return;
         }
@@ -585,6 +586,52 @@ mod tests {
         }
         if !blank_clear {
             return Err("Clear left non-zero pixels in the overlay DIB".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn captions_arriving_mid_drag_are_painted() -> Result<(), String> {
+        use translator_core::{Rect, TranslatedBlock};
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        use crate::command::OverlayCommand;
+
+        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        host.apply_overlay(true);
+
+        // The user is dragging the target when a streamed caption lands.
+        host.in_movesize = true;
+        host.handle(OverlayCommand::SetBlocks {
+            blocks: vec![TranslatedBlock {
+                id: 1,
+                source: "src".into(),
+                translation: "hello".into(),
+                confidence: 1.0,
+                bbox: Rect::new(20.0, 20.0, 200.0, 40.0),
+                source_lines: 1,
+                source_height: 40.0,
+                source_width: 200.0,
+            }],
+            locale: "zh-TW".into(),
+            content_width: 400,
+            content_height: 300,
+        });
+        host.apply_overlay(true);
+        let ink = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
+        let still_dragging = host.in_movesize;
+
+        host.teardown();
+        let _ = unsafe { DestroyWindow(target) };
+
+        if !ink {
+            return Err("a caption set mid-drag was not painted".into());
+        }
+        if !still_dragging {
+            return Err("painting mid-drag ended the drag fast path".into());
         }
         Ok(())
     }

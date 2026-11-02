@@ -892,6 +892,88 @@ impl TranslateClient {
     }
 }
 
+/// Outcome of [`translate_page`].
+pub struct PageResult {
+    /// The request's conversation with every committed turn; adopt it while still in the same session.
+    pub conversation: Conversation,
+    /// Model translations received so far (ids of the request blocks).
+    pub translated: Vec<TranslatedBlock>,
+    /// What ended the page early; `None` once every block is translated.
+    pub error: Option<TranslateError>,
+}
+
+/// Translate `pending` on a copy of `conv`, resending what a reply omits or garbles.
+///
+/// A reply missing blocks is committed and only the missing blocks are resent; an unparsable
+/// reply is dropped and resent. Both resends share the attempt budget `complete` uses for
+/// transport retries (it gets the attempt to start from and returns the attempt it ended on).
+/// A full context trims history to `history_max_items` turns and resends once.
+/// `on_retry(attempt, error, translated)` runs before each resend.
+pub async fn translate_page<Fut>(
+    mut conv: Conversation,
+    cfg: &TranslationConfig,
+    glossary: &[DictionaryPair],
+    mut pending: Vec<OcrBlock>,
+    max_retries: u32,
+    mut complete: impl FnMut(Conversation, u32) -> Fut,
+    mut on_retry: impl FnMut(u32, &TranslateError, &[TranslatedBlock]),
+) -> PageResult
+where
+    Fut: Future<Output = Result<(Completion, u32), TranslateError>>,
+{
+    let mut attempt = 0;
+    let mut translated = Vec::new();
+    let error = loop {
+        let request = conv.begin_translate_request(cfg, &pending, glossary);
+        let error = match complete(request, attempt).await {
+            Ok((completion, used)) => {
+                attempt = used;
+                match merge_translations(&pending, &completion.text) {
+                    Ok(blocks) => {
+                        conv.commit_completion(&completion);
+                        pending.retain(|b| !blocks.iter().any(|t| t.id == b.id));
+                        translated.extend(blocks);
+                        if pending.is_empty() {
+                            break None;
+                        }
+                        TranslateError::MissingBlocks(pending.iter().map(|b| b.id).collect())
+                    }
+                    // Keep invalid JSON out of the context. A cut-off reply (e.g. a dropped
+                    // closing quote) often parses on the next try.
+                    Err(e) => {
+                        conv.rollback_user_turn();
+                        e
+                    }
+                }
+            }
+            // Turn-based compression never fires while every request fails, so trim on overflow.
+            // Once trimmed, another overflow falls through to the plain error.
+            Err(TranslateError::ContextFull(context)) if conv.turn_count() > cfg.history_max_items => {
+                conv.rollback_user_turn();
+                conv.compress_if_needed(0, cfg.history_max_items);
+                tracing::info!(context, keep = cfg.history_max_items, "context full; trimmed history and resending");
+                attempt = 0;
+                continue;
+            }
+            Err(e) => {
+                conv.rollback_user_turn();
+                break Some(e);
+            }
+        };
+        if attempt >= max_retries {
+            break Some(error);
+        }
+        attempt += 1;
+        tracing::warn!(attempt, max_retries, error = %error, "translation incomplete; resending");
+        on_retry(attempt, &error, &translated);
+    };
+    PageResult {
+        conversation: conv,
+        translated,
+        error,
+    }
+}
+
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Fetch available model ids for the current provider (HTTP `/models` or a short-lived CLI session).
@@ -1640,5 +1722,114 @@ mod tests {
             .unwrap();
         let out = merge_translations(&source, &completion.text).unwrap();
         assert!(!out[0].translation.trim().is_empty(), "{}", completion.text);
+    }
+
+    fn page_block(id: u32, text: &str) -> OcrBlock {
+        OcrBlock {
+            id,
+            text: text.into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }
+    }
+
+    /// Run [`translate_page`] against scripted replies. Returns the result, the block ids each
+    /// request carried, and the attempt each `on_retry` got.
+    async fn run_page(
+        conv: Conversation,
+        cfg: &TranslationConfig,
+        blocks: Vec<OcrBlock>,
+        max_retries: u32,
+        replies: Vec<Result<&str, TranslateError>>,
+    ) -> (PageResult, Vec<Vec<u32>>, Vec<u32>) {
+        let mut replies = replies.into_iter();
+        let mut requests = Vec::new();
+        let mut retries = Vec::new();
+        let result = translate_page(
+            conv,
+            cfg,
+            &[],
+            blocks,
+            max_retries,
+            |request: Conversation, attempt| {
+                // The payload JSON is the first line of the last user message.
+                let payload = request.messages().last().map(|m| m.content.clone()).unwrap_or_default();
+                let json: serde_json::Value = serde_json::from_str(payload.lines().next().unwrap_or_default()).unwrap();
+                requests.push(
+                    json["b"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| row[0].as_u64().unwrap() as u32)
+                        .collect(),
+                );
+                let reply = replies.next().expect("a scripted reply per request");
+                async move {
+                    reply.map(|text| {
+                        (
+                            Completion {
+                                text: text.into(),
+                                replay_items: Vec::new(),
+                            },
+                            attempt,
+                        )
+                    })
+                }
+            },
+            |attempt, _, _| retries.push(attempt),
+        )
+        .await;
+        (result, requests, retries)
+    }
+
+    #[tokio::test]
+    async fn omitted_block_is_resent_alone_then_fails_when_retries_run_out() {
+        let cfg = TranslationConfig::default();
+        let blocks = vec![page_block(1, "A"), page_block(2, "B")];
+        let replies = vec![Ok(r#"{"b":[[1,"T1"]]}"#), Ok(r#"{"b":[]}"#)];
+        let (result, requests, retries) = run_page(Conversation::empty(), &cfg, blocks, 1, replies).await;
+        assert_eq!(requests, [vec![1, 2], vec![2]], "only the omitted block is resent");
+        assert_eq!(retries, [1]);
+        assert!(matches!(result.error, Some(TranslateError::MissingBlocks(ref ids)) if ids == &[2]));
+        assert_eq!(result.translated.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>(), ["T1"]);
+        assert_eq!(result.conversation.turn_count(), 2, "both answered turns are kept");
+    }
+
+    #[tokio::test]
+    async fn unparsable_reply_is_resent_then_fails_when_retries_run_out() {
+        let cfg = TranslationConfig::default();
+        // Dropped closing quote.
+        let replies = vec![Ok(r#"{"b":[[1,"T]}"#), Ok(r#"{"b":[[1,"T]}"#)];
+        let (result, requests, retries) = run_page(Conversation::empty(), &cfg, vec![page_block(1, "A")], 1, replies).await;
+        assert_eq!(requests, [vec![1], vec![1]]);
+        assert_eq!(retries, [1]);
+        assert!(matches!(result.error, Some(TranslateError::Parse(_))));
+        assert_eq!(result.conversation.turn_count(), 0, "no unparsable turn is kept");
+        assert!(!result.conversation.messages().iter().any(|m| m.role == "user"), "the failed user turn is rolled back");
+    }
+
+    #[tokio::test]
+    async fn context_full_trims_history_once_then_fails() {
+        let cfg = TranslationConfig {
+            history_max_items: 1,
+            ..TranslationConfig::default()
+        };
+        let mut conv = Conversation::empty();
+        for text in ["A", "B", "C"] {
+            conv = run_page(conv, &cfg, vec![page_block(1, text)], 0, vec![Ok(r#"{"b":[[1,"T"]]}"#)])
+                .await
+                .0
+                .conversation;
+        }
+        assert_eq!(conv.turn_count(), 3);
+
+        let replies = vec![Err(TranslateError::ContextFull(4096)), Err(TranslateError::ContextFull(4096))];
+        let (result, requests, _) = run_page(conv, &cfg, vec![page_block(1, "D")], 0, replies).await;
+        assert_eq!(requests.len(), 2, "resent once with a trimmed history");
+        assert!(matches!(result.error, Some(TranslateError::ContextFull(_))), "a trimmed history that still overflows fails");
+        assert_eq!(result.conversation.turn_count(), 1, "the trim is kept");
     }
 }

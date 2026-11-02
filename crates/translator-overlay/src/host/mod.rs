@@ -184,15 +184,11 @@ impl OverlayHost {
                 content_width,
                 content_height,
             } => {
-                let size_changed = self.content_w != content_width || self.content_h != content_height;
+                // apply_captions sizes the surface to the content.
                 self.blocks = blocks;
                 self.locale = locale;
                 self.content_w = content_width;
                 self.content_h = content_height;
-                if size_changed {
-                    self.surface_w = content_width as i32;
-                    self.surface_h = content_height as i32;
-                }
                 self.dirty = true;
                 self.sync_caption_windows();
             }
@@ -207,13 +203,6 @@ impl OverlayHost {
                 self.captions_hidden = !visible;
                 self.dirty = true;
                 self.sync_caption_windows();
-            }
-            OverlayCommand::RestoreTopmost => {
-                // Reader has no idle heartbeat of its own; this recovers it after WinUI
-                // drops independent topmost windows at launch.
-                if let Some(reader) = self.reader.as_mut() {
-                    reader.restore_topmost_if_needed();
-                }
             }
             OverlayCommand::UpdateConfig(cfg) => {
                 self.config = cfg;

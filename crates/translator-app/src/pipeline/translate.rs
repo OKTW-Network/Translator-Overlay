@@ -5,12 +5,12 @@ use std::sync::Arc;
 use rust_i18n::t;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use translator_core::{OcrBlock, PipelineStatus, TranslatedBlock};
 use translator_ocr::OcrEngine;
 use translator_overlay::OverlayCommand;
 use translator_translate::{
-    Completion, TranslateError, TranslationCache, blocks_to_translated_text, merge_translations, peek_translation_pairs, should_retry,
+    Conversation, PageResult, TranslateError, TranslationCache, blocks_to_translated_text, peek_translation_pairs, translate_page,
 };
 
 use crate::{
@@ -26,36 +26,14 @@ impl Pipeline {
         if self.inflight.is_some() {
             return;
         }
-
-        {
-            let mut s = self.state.write();
-            s.latest_ocr_blocks = page.blocks.clone();
-        }
+        self.set_ocr_blocks(page.blocks.clone());
 
         if page.blocks.iter().all(|b| b.text.trim().is_empty()) {
-            self.last_translated_fp = None;
             self.last_page = None;
-            {
-                let mut s = self.state.write();
-                s.latest_translated_blocks.clear();
-                s.translate_in_flight = false;
-                s.restore_operational_status();
-            }
+            self.set_captions(Vec::new());
+            self.state.write().restore_operational_status();
             // Manual / empty-page path must also wipe the live overlay window.
-            if let Some(o) = self.overlay.as_ref()
-                && let Err(e) = o.send(OverlayCommand::Clear)
-            {
-                warn!(error = %e, "failed to clear overlay on empty page");
-            }
-            return;
-        }
-
-        // Skip identical content unless forced (saves API calls).
-        if !force && self.last_translated_fp == Some(page.fingerprint) {
-            info!(?page.fingerprint, "skip translate — content unchanged");
-            let mut s = self.state.write();
-            s.translate_in_flight = false;
-            s.restore_operational_status();
+            self.send_overlay(OverlayCommand::Clear);
             return;
         }
 
@@ -65,14 +43,13 @@ impl Pipeline {
         if resolved.misses.is_empty() {
             info!(hits = hit_count, blocks = page.blocks.len(), "translate cache — all hits, skipping API");
             let translated = TranslationCache::stitch(&page.blocks, &resolved.hits, &[]);
-            self.last_translated_fp = Some(page.fingerprint);
             self.state.write().translation_cache_len = self.translation_cache.len();
             self.apply_translated(translated, page.content_width, page.content_height);
             return;
         }
 
         info!(hits = hit_count, unique_misses = resolved.misses.len(), blocks = page.blocks.len(), force, "translate cache partition");
-        self.launch_translate_job(page, resolved.hits, resolved.misses, 0);
+        self.launch_translate_job(page, resolved.hits, resolved.misses);
     }
 
     /// Load the built-in translation model in the background so the first page does not wait
@@ -105,243 +82,182 @@ impl Pipeline {
         }
     }
 
-    fn launch_translate_job(
-        &mut self,
-        page: PendingPage,
-        cached_hits: Vec<Option<String>>,
-        miss_blocks: Vec<OcrBlock>,
-        start_attempt: u32,
-    ) {
-        let (api, tcfg, glossary) = {
+    /// Translate `miss_blocks` on a copy of the conversation; progress arrives as
+    /// [`TranslateJobMsg`]s and [`Self::finish_translate`] adopts the result.
+    fn launch_translate_job(&mut self, page: PendingPage, cached_hits: Vec<Option<String>>, miss_blocks: Vec<OcrBlock>) {
+        let (tcfg, glossary, max_retries) = {
             let s = self.state.read();
-            (s.config.api.clone(), s.config.translation.clone(), s.dictionary_pairs.clone())
+            (s.config.translation.clone(), s.dictionary_pairs.clone(), s.config.api.max_retries)
         };
-        let max_retries = api.max_retries;
-        self.client.update_config(api);
+        let cancel = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let job = InflightTranslate {
+            cancel: cancel.clone(),
+            rx,
+            page,
+            cached_hits,
+            kept: Vec::new(),
+        };
 
         // Show remembered captions now; new lines wait for the API.
-        let preview = TranslationCache::stitch(&page.blocks, &cached_hits, &[]);
+        let preview = job.preview(&[]);
         if !preview.is_empty() {
-            self.show_captions(preview, page.content_width, page.content_height);
+            self.show_captions(preview, job.page.content_width, job.page.content_height);
         }
-
-        let prepared = self.conversation.begin_translate_request(&tcfg, &miss_blocks, &glossary);
-        self.state.write().history.truncate(self.conversation.turn_count());
-
-        let cancel = CancellationToken::new();
-        let cancel_job = cancel.clone();
-        let client_clone = self.client.clone();
-        let state_cb = Arc::clone(&self.state);
-        let state_status = Arc::clone(&self.state);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let tx_done = tx.clone();
-        let tx_retry = tx.clone();
-
         {
             let mut s = self.state.write();
-            s.translate_in_flight = true;
-            if start_attempt == 0 {
-                s.status = PipelineStatus::Translating;
-                s.last_error = None;
-            } else {
-                s.status = PipelineStatus::RetryingTranslate {
-                    attempt: start_attempt,
-                    max_retries,
-                    message: s.last_error.clone().unwrap_or_default(),
-                };
-            }
+            s.status = PipelineStatus::Translating;
+            s.last_error = None;
         }
 
+        let conversation = self.conversation.clone();
+        let client = self.client.clone();
+        let state = Arc::clone(&self.state);
         tokio::spawn(async move {
-            let result = client_clone
-                .complete_with_retry_on(
-                    &prepared,
-                    &cancel_job,
-                    start_attempt,
-                    move |attempt, max_retries, error, _backoff_ms| {
-                        let _ = tx_retry.send(TranslateJobMsg::Partial(Vec::new()));
-                        let message = error.to_string();
-                        let mut s = state_cb.write();
-                        s.last_error = Some(message.clone());
-                        s.status = PipelineStatus::RetryingTranslate {
+            let complete = |request: Conversation, attempt: u32| {
+                let (client, cancel, state) = (client.clone(), cancel.clone(), Arc::clone(&state));
+                let (tx_retry, tx_text) = (tx.clone(), tx.clone());
+                async move {
+                    client
+                        .complete_with_retry_on(
+                            &request,
+                            &cancel,
                             attempt,
-                            max_retries,
-                            message,
-                        };
-                    },
-                    &mut move |load| {
-                        state_status.write().translation_model_load = load;
-                        ping_ui();
-                    },
-                    &mut move |text| {
-                        let pairs = peek_translation_pairs(text);
-                        if !pairs.is_empty() {
-                            let _ = tx.send(TranslateJobMsg::Partial(pairs));
-                        }
-                    },
-                )
+                            move |attempt, max_retries, error, _backoff_ms| {
+                                let _ = tx_retry.send(TranslateJobMsg::Retrying {
+                                    attempt,
+                                    max_retries,
+                                    message: error.to_string(),
+                                    kept: None,
+                                });
+                            },
+                            &mut move |load| {
+                                state.write().translation_model_load = load;
+                                ping_ui();
+                            },
+                            &mut move |text| {
+                                let pairs = peek_translation_pairs(text);
+                                if !pairs.is_empty() {
+                                    let _ = tx_text.send(TranslateJobMsg::Partial(pairs));
+                                }
+                            },
+                        )
+                        .await
+                }
+            };
+            let result =
+                translate_page(conversation, &tcfg, &glossary, miss_blocks, max_retries, complete, |attempt, error, translated| {
+                    let _ = tx.send(TranslateJobMsg::Retrying {
+                        attempt,
+                        max_retries,
+                        message: error.to_string(),
+                        kept: Some(translated.to_vec()),
+                    });
+                })
                 .await;
-            let _ = tx_done.send(TranslateJobMsg::Done(result));
+            let _ = tx.send(TranslateJobMsg::Done(result));
         });
 
-        let revert_blocks = self.state.read().latest_translated_blocks.clone();
-        self.inflight = Some(InflightTranslate {
-            cancel,
-            rx,
-            fingerprint: page.fingerprint,
-            blocks: page.blocks,
-            content_width: page.content_width,
-            content_height: page.content_height,
-            miss_blocks,
-            cached_hits,
-            revert_blocks,
-        });
+        self.set_inflight(job);
     }
 
-    pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: Result<(Completion, u32), TranslateError>) {
-        match result {
-            Ok((completion, retry_attempt)) => match merge_translations(&job.miss_blocks, &completion.text) {
-                Ok(blocks) => {
-                    self.conversation.commit_completion(&completion);
-                    let (tcfg, max_retries) = {
-                        let s = self.state.read();
-                        (s.config.translation.clone(), s.config.api.max_retries)
-                    };
-                    self.translation_cache.store_model_pairs(&blocks, &tcfg);
-                    let translated = TranslationCache::stitch(&job.blocks, &job.cached_hits, &blocks);
-                    let miss_blocks: Vec<OcrBlock> = job
-                        .miss_blocks
-                        .into_iter()
-                        .filter(|b| !blocks.iter().any(|t| t.id == b.id))
-                        .collect();
-                    if !miss_blocks.is_empty() {
-                        let err = TranslateError::MissingBlocks(miss_blocks.iter().map(|b| b.id).collect());
-                        let hits = should_retry(&err, retry_attempt, max_retries).then(|| {
-                            let mut hits = vec![None; job.blocks.len()];
-                            for tb in &translated {
-                                if let Some(i) = job.blocks.iter().position(|b| b.id == tb.id) {
-                                    hits[i] = Some(tb.translation.clone());
-                                }
-                            }
-                            hits
-                        });
-                        self.show_captions(translated, job.content_width, job.content_height);
-                        self.state.write().translation_cache_len = self.translation_cache.len();
-                        if let Some(hits) = hits {
-                            info!(
-                                attempt = retry_attempt + 1,
-                                max_retries,
-                                error = %err,
-                                "response omitted blocks; resending"
-                            );
-                            self.state.write().last_error = Some(err.to_string());
-                            let page = PendingPage {
-                                blocks: job.blocks,
-                                fingerprint: job.fingerprint,
-                                content_width: job.content_width,
-                                content_height: job.content_height,
-                            };
-                            self.launch_translate_job(page, hits, miss_blocks, retry_attempt + 1);
-                            return;
-                        }
-                        error!(error = %err, "response omitted blocks; retries exhausted");
-                        self.fail_translate(t!("err.translate", error = err.to_string()).into_owned());
-                        return;
-                    }
-                    info!(
-                        blocks = translated.len(),
-                        cached = job.cached_hits.iter().filter(|h| h.is_some()).count(),
-                        turns = self.conversation.turn_count(),
-                        "translation complete"
-                    );
-                    {
-                        let mut s = self.state.write();
-                        s.translation_cache_len = self.translation_cache.len();
-                        s.push_history(
-                            OcrEngine::blocks_to_text(&job.blocks),
-                            blocks_to_translated_text(&translated),
-                            tcfg.conversation_max_turns,
-                        );
-                    }
-                    self.apply_translated(translated, job.content_width, job.content_height);
-                    if self.state.read().latest_translated_blocks.is_empty() {
-                        // The page left the screen mid-translation: let it emit again (from the cache) on return.
-                        self.last_page = None;
-                        self.gate.reset_all();
-                    } else {
-                        self.last_translated_fp = Some(job.fingerprint);
-                    }
+    pub(crate) fn on_translate_msg(&mut self, msg: Option<TranslateJobMsg>) {
+        match msg {
+            Some(TranslateJobMsg::Partial(pairs)) => self.apply_stream_preview(&pairs),
+            Some(TranslateJobMsg::Retrying {
+                attempt,
+                max_retries,
+                message,
+                kept,
+            }) => {
+                if let (Some(job), Some(kept)) = (self.inflight.as_mut(), kept) {
+                    job.kept = kept;
                 }
-                Err(e) => {
-                    // Drop the pending user turn so the next translate does not
-                    // store invalid model JSON as assistant context.
-                    self.conversation.rollback_user_turn();
-                    self.apply_stream_preview(&job, &[]);
-                    let max_retries = self.state.read().config.api.max_retries;
-                    // A cut-off or malformed reply (e.g. a dropped closing quote) often parses on the next try.
-                    if retry_attempt < max_retries {
-                        warn!(attempt = retry_attempt + 1, max_retries, error = %e, "unparsable translation; resending");
-                        self.state.write().last_error = Some(e.to_string());
-                        let page = PendingPage {
-                            blocks: job.blocks,
-                            fingerprint: job.fingerprint,
-                            content_width: job.content_width,
-                            content_height: job.content_height,
-                        };
-                        self.launch_translate_job(page, job.cached_hits, job.miss_blocks, retry_attempt + 1);
-                        return;
-                    }
-                    error!(error = %e, "failed to merge translation");
-                    self.fail_translate(t!("err.translate_parse", error = e.to_string()).into_owned());
-                }
-            },
-            // Turn-based compression never fires while every request fails, so trim on overflow.
-            // Once trimmed, another overflow falls through to the plain error.
-            Err(TranslateError::ContextFull(context))
-                if self.conversation.turn_count() > self.state.read().config.translation.history_max_items =>
-            {
-                self.conversation.rollback_user_turn();
-                let turns = self.conversation.turn_count();
-                let keep = self.state.read().config.translation.history_max_items;
-                self.conversation.compress_if_needed(0, keep);
-                info!(context, turns, keep, "context full; trimmed history and resending");
-                // Restore the captions first: the resent job keeps them as its revert point.
-                self.apply_stream_preview(&job, &[]);
-                let page = PendingPage {
-                    blocks: job.blocks,
-                    fingerprint: job.fingerprint,
-                    content_width: job.content_width,
-                    content_height: job.content_height,
-                };
-                self.launch_translate_job(page, job.cached_hits, job.miss_blocks, 0);
-            }
-            Err(e) if e.is_cancelled() => {
-                info!("translation cancelled");
-                self.conversation.rollback_user_turn();
-                self.apply_stream_preview(&job, &[]);
+                // Drop the half-streamed reply; keep what earlier passes translated.
+                self.apply_stream_preview(&[]);
                 let mut s = self.state.write();
-                s.translate_in_flight = false;
-                if s.capture_paused {
-                    s.status = PipelineStatus::Paused;
-                } else if s.auto_running {
-                    s.status = PipelineStatus::Capturing;
-                } else {
-                    s.status = PipelineStatus::Cancelled;
+                s.last_error = Some(message.clone());
+                s.status = PipelineStatus::RetryingTranslate {
+                    attempt,
+                    max_retries,
+                    message,
+                };
+            }
+            Some(TranslateJobMsg::Done(result)) => {
+                let job = self.take_inflight().expect("inflight present");
+                self.finish_translate(job, result);
+            }
+            None => {
+                let job = self.take_inflight().expect("inflight present");
+                let result = PageResult {
+                    conversation: self.conversation.clone(),
+                    translated: Vec::new(),
+                    error: Some(TranslateError::Other("translate task dropped".into())),
+                };
+                self.finish_translate(job, result);
+            }
+        }
+    }
+
+    pub(crate) fn finish_translate(&mut self, job: InflightTranslate, result: PageResult) {
+        // A Reset or a new capture started a new session meanwhile; keep its empty history.
+        let adopted = result.conversation.session_id == self.conversation.session_id;
+        if adopted {
+            self.conversation = result.conversation;
+        }
+        let tcfg = self.state.read().config.translation.clone();
+        // Partial results are cached too: a resend only asks for what is still missing.
+        self.translation_cache.store_model_pairs(&result.translated, &tcfg);
+        self.state.write().translation_cache_len = self.translation_cache.len();
+        let translated = TranslationCache::stitch(&job.page.blocks, &job.cached_hits, &result.translated);
+        let (w, h) = (job.page.content_width, job.page.content_height);
+
+        match result.error {
+            None => {
+                info!(
+                    blocks = translated.len(),
+                    cached = job.cached_hits.iter().filter(|h| h.is_some()).count(),
+                    turns = self.conversation.turn_count(),
+                    "translation complete"
+                );
+                if adopted {
+                    self.state.write().push_history(
+                        OcrEngine::blocks_to_text(&job.page.blocks),
+                        blocks_to_translated_text(&translated),
+                        tcfg.conversation_max_turns,
+                    );
+                }
+                self.apply_translated(translated, w, h);
+                if self.captions.is_empty() {
+                    // The page left the screen mid-translation: let it emit again (from the cache) on return.
+                    self.last_page = None;
+                    self.gate.reset_all();
                 }
             }
-            Err(e) => {
-                error!(error = %e, "translation failed");
-                self.conversation.rollback_user_turn();
-                self.apply_stream_preview(&job, &[]);
-                self.fail_translate(t!("err.translate", error = e.to_string()).into_owned());
+            Some(e) if e.is_cancelled() => {
+                info!("translation cancelled");
+                self.show_captions(translated, w, h);
+                self.state.write().restore_after_cancel();
             }
+            Some(e) => {
+                error!(error = %e, "translation failed");
+                self.show_captions(translated, w, h);
+                let message = match e {
+                    TranslateError::Parse(_) => t!("err.translate_parse", error = e.to_string()),
+                    _ => t!("err.translate", error = e.to_string()),
+                };
+                self.fail_translate(message.into_owned());
+            }
+        }
+        if adopted {
+            // The history rows follow the model context when it is trimmed (after this page's row).
+            self.state.write().history.truncate(self.conversation.turn_count());
         }
     }
 
     fn fail_translate(&self, message: String) {
         let flash = {
             let mut s = self.state.write();
-            s.translate_in_flight = false;
             s.set_error(message);
             let flash = !s.attention_sent;
             s.attention_sent = true;
@@ -352,52 +268,32 @@ impl Pipeline {
         }
     }
 
-    pub(crate) fn apply_stream_preview(&self, job: &InflightTranslate, pairs: &[(u32, String)]) {
-        if pairs.is_empty() && !job.revert_blocks.is_empty() {
-            self.show_captions(job.revert_blocks.clone(), job.content_width, job.content_height);
+    /// Paint the in-flight page with `pairs` streaming in.
+    pub(crate) fn apply_stream_preview(&mut self, pairs: &[(u32, String)]) {
+        let Some(job) = self.inflight.as_ref() else {
             return;
-        }
-        let mut hits = job.cached_hits.clone();
-        for (id, text) in pairs {
-            if let Some(i) = job.blocks.iter().position(|b| b.id == *id) {
-                hits[i] = Some(text.clone());
-            }
-        }
-        let preview = TranslationCache::stitch(&job.blocks, &hits, &[]);
-        self.show_captions(preview, job.content_width, job.content_height);
+        };
+        let (preview, w, h) = (job.preview(pairs), job.page.content_width, job.page.content_height);
+        self.show_captions(preview, w, h);
     }
 
-    /// Send captions to the overlay and store them on the state. Does not finish the job or
-    /// append history, so it also paints cache hits and stream previews.
-    fn show_captions(&self, translated: Vec<TranslatedBlock>, content_width: u32, content_height: u32) {
-        // Map onto the current OCR: the page may have changed or the window resized while translating.
+    /// Map captions onto the current OCR and show them. Does not finish the job or append
+    /// history, so it also paints cache hits and stream previews.
+    fn show_captions(&mut self, translated: Vec<TranslatedBlock>, content_width: u32, content_height: u32) {
+        // The page may have changed or the window resized while translating.
         let (w, h) = self
             .last_raw_ocr
             .as_ref()
             .map_or((content_width, content_height), |c| (c.width, c.height));
         let resized = (w, h) != (content_width, content_height);
-        let translated = remap_translations_to_ocr(&translated, &self.state.read().latest_ocr_blocks, resized);
-        if let Some(o) = self.overlay.as_ref() {
-            if let Some(hwnd) = self.state.read().target_hwnd {
-                let _ = o.send(OverlayCommand::Attach { target_hwnd: hwnd });
-            }
-            if let Err(e) = o.send(OverlayCommand::SetBlocks {
-                blocks: translated.clone(),
-                locale: self.state.read().config.translation.target_lang.clone(),
-                content_width: w,
-                content_height: h,
-            }) {
-                warn!(error = %e, "failed to update overlay captions");
-            }
-        }
-        self.state.write().latest_translated_blocks = translated;
+        let remapped = remap_translations_to_ocr(&translated, &self.ocr_blocks, resized);
+        self.paint_captions(remapped, w, h);
     }
 
     /// Show a finished page and mark the translation done.
-    fn apply_translated(&self, translated: Vec<TranslatedBlock>, content_width: u32, content_height: u32) {
+    fn apply_translated(&mut self, translated: Vec<TranslatedBlock>, content_width: u32, content_height: u32) {
         self.show_captions(translated, content_width, content_height);
         let mut s = self.state.write();
-        s.translate_in_flight = false;
         s.last_error = None;
         // Not OverlayActive when nothing was kept (the page left the screen).
         s.restore_operational_status();
@@ -408,13 +304,12 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use parking_lot::RwLock;
-    use translator_capture::CaptureSession;
     use translator_core::{AppConfig, AppState, ModelProvider, Rect};
-    use translator_ocr::{BlockPersistenceFilter, OcrFingerprint, StabilityGate};
-    use translator_translate::{Conversation, TranslateClient};
+    use translator_ocr::{BlockPersistenceFilter, StabilityGate};
+    use translator_translate::{Completion, merge_translations};
 
     use super::*;
-    use crate::pipeline::worker::LastRawOcr;
+    use crate::pipeline::worker::{LastRawOcr, OcrJob};
 
     fn block(id: u32, text: &str) -> OcrBlock {
         OcrBlock {
@@ -428,251 +323,281 @@ mod tests {
         }
     }
 
-    fn pipeline(max_retries: u32) -> Pipeline {
+    fn pipeline() -> Pipeline {
         let mut config = AppConfig::default();
-        config.api.max_retries = max_retries;
+        config.api.max_retries = 0;
         // Not the built-in default: a spawned job must never download or run a model.
         config.api.provider = ModelProvider::OpenaiCompatible;
-        Pipeline {
-            session: CaptureSession::new(),
-            gate: StabilityGate::from_config(&config.ocr),
-            persist: BlockPersistenceFilter::from_config(&config.ocr),
-            engine: None,
-            conversation: Conversation::empty(),
-            translation_cache: TranslationCache::new(config.translation.cache_max_entries_clamped()),
-            client: TranslateClient::new(config.api.clone()),
-            last_translated_fp: None,
-            last_page: None,
-            inflight: None,
-            preload: None,
-            model_load: None,
-            ocr_tier: config.ocr.model_tier,
-            ocr_device: config.ocr.device,
-            ocr_layout: config.ocr.uses_layout(),
-            last_raw_ocr: None,
-            preview_seq_bias: 0,
-            raw_empty_since: None,
-            raw_content_since: None,
-            remap_miss_since: None,
-            overlay: None,
-            state: Arc::new(RwLock::new(AppState::new(config))),
+        Pipeline::detached(Arc::new(RwLock::new(AppState::new(config))))
+    }
+
+    /// A model reply for the in-flight page, as the job would hand it back.
+    fn reply(p: &Pipeline, job: &InflightTranslate, json: &str) -> PageResult {
+        PageResult {
+            conversation: p.conversation.clone(),
+            translated: merge_translations(&job.page.blocks, json).expect("valid reply"),
+            error: None,
         }
     }
 
-    fn reply(text: &str, attempt: u32) -> Result<(Completion, u32), TranslateError> {
-        Ok((
-            Completion {
-                text: text.into(),
-                replay_items: Vec::new(),
-            },
-            attempt,
-        ))
+    fn finish(p: &mut Pipeline, json: &str) {
+        let job = p.take_inflight().expect("job");
+        let result = reply(p, &job, json);
+        p.finish_translate(job, result);
+    }
+
+    fn page(blocks: Vec<OcrBlock>) -> PendingPage {
+        PendingPage {
+            blocks,
+            content_width: 100,
+            content_height: 100,
+        }
     }
 
     #[tokio::test]
-    async fn omitted_block_is_resent_alone_then_fails_when_retries_run_out() {
-        let mut p = pipeline(1);
-        let blocks = vec![block(1, "A"), block(2, "B")];
-        p.start_translate(
-            PendingPage {
-                fingerprint: OcrFingerprint::from_blocks(&blocks),
-                blocks,
-                content_width: 100,
-                content_height: 100,
-            },
-            false,
-        );
+    async fn cancelled_job_does_not_block_the_next_page() {
+        let mut p = pipeline();
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        assert!(p.inflight.is_some(), "page translates");
 
-        // First reply omits block 2: keep block 1, resend only block 2 as attempt 1.
-        let job = p.inflight.take().expect("first job");
-        p.finish_translate(job, reply(r#"{"b":[[1,"T1"]]}"#, 0));
-        let retry = p.inflight.as_ref().expect("retry job for the omitted block");
-        assert_eq!(retry.miss_blocks.iter().map(|b| b.id).collect::<Vec<_>>(), [2]);
-        assert_eq!(retry.cached_hits, [Some("T1".to_string()), None]);
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1);
-        assert!(matches!(p.state.read().status, PipelineStatus::RetryingTranslate { attempt: 1, .. }));
+        // A config or in-use glossary change cancels the request.
+        p.cancel_inflight();
+        assert!(!p.state.read().translate_in_flight);
+        assert!(!p.state.read().status.is_translating());
 
-        // Retry omits block 2 again with the budget spent: fail instead of looping.
-        let job = p.inflight.take().expect("retry job");
-        p.finish_translate(job, reply(r#"{"b":[]}"#, 1));
-        assert!(p.inflight.is_none(), "exhausted retries must not launch another job");
-        let s = p.state.read();
-        assert!(matches!(s.status, PipelineStatus::Error { .. }), "{:?}", s.status);
-        assert!(!s.translate_in_flight);
-        assert_eq!(p.translation_cache.len(), 1, "the translated block stays cached");
+        let y = vec![block(1, "Y")];
+        p.consume_raw_ocr(y.clone(), 100, 100);
+        p.consume_raw_ocr(y, 100, 100);
+        assert!(p.inflight.is_some(), "the next page translates");
     }
 
     #[tokio::test]
-    async fn unparsable_reply_is_resent_then_fails_when_retries_run_out() {
-        let mut p = pipeline(1);
-        let blocks = vec![block(1, "A")];
-        p.start_translate(
-            PendingPage {
-                fingerprint: OcrFingerprint::from_blocks(&blocks),
-                blocks,
-                content_width: 100,
-                content_height: 100,
-            },
-            false,
-        );
-
-        // Dropped closing quote: resend the same block as attempt 1 without keeping the bad turn.
-        let job = p.inflight.take().expect("first job");
-        p.finish_translate(job, reply(r#"{"b":[[1,"T]}"#, 0));
-        let retry = p.inflight.as_ref().expect("retry job for the unparsable reply");
-        assert_eq!(retry.miss_blocks.iter().map(|b| b.id).collect::<Vec<_>>(), [1]);
-        assert!(matches!(p.state.read().status, PipelineStatus::RetryingTranslate { attempt: 1, .. }));
-
-        let job = p.inflight.take().expect("retry job");
-        p.finish_translate(job, reply(r#"{"b":[[1,"T]}"#, 1));
-        assert!(p.inflight.is_none(), "exhausted retries must not launch another job");
-        assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
-        assert_eq!(p.conversation.turn_count(), 0, "no unparsable turn is kept");
-    }
-
-    #[tokio::test]
-    async fn context_full_trims_history_once_then_fails() {
-        let mut p = pipeline(0);
-        p.state.write().config.translation.history_max_items = 1;
-        let page = |text: &str| {
-            let blocks = vec![block(1, text)];
-            PendingPage {
-                fingerprint: OcrFingerprint::from_blocks(&blocks),
-                blocks,
-                content_width: 100,
-                content_height: 100,
-            }
+    async fn history_matches_the_trimmed_model_context() {
+        let mut p = pipeline();
+        let tcfg = p.state.read().config.translation.clone();
+        let answer = Completion {
+            text: r#"{"b":[[1,"T"]]}"#.into(),
+            replay_items: Vec::new(),
         };
-        for text in ["A", "B", "C"] {
-            p.start_translate(page(text), false);
-            let job = p.inflight.take().expect("job");
-            p.finish_translate(job, reply(r#"{"b":[[1,"T"]]}"#, 0));
+        for i in 0..tcfg.conversation_max_turns {
+            let _ = p.conversation.begin_translate_request(&tcfg, &[block(1, &i.to_string())], &[]);
+            p.conversation.commit_completion(&answer);
+            p.state.write().push_history(i.to_string(), "T".into(), tcfg.conversation_max_turns);
         }
-        assert_eq!(p.conversation.turn_count(), 3);
 
-        p.start_translate(page("D"), false);
-        let job = p.inflight.take().expect("job");
-        p.finish_translate(job, Err(TranslateError::ContextFull(4096)));
-        assert!(p.inflight.is_some(), "resent with a trimmed history");
-        assert_eq!(p.conversation.turn_count(), 1);
+        p.start_translate(page(vec![block(1, "new")]), false);
+        let job = p.take_inflight().expect("job");
+        // The request trims the context to history_max_items turns, then adds this reply.
+        let mut answered = p.conversation.clone();
+        let _ = answered.begin_translate_request(&tcfg, &job.page.blocks, &[]);
+        answered.commit_completion(&answer);
+        let result = PageResult {
+            translated: merge_translations(&job.page.blocks, &answer.text).unwrap(),
+            conversation: answered,
+            error: None,
+        };
+        p.finish_translate(job, result);
 
-        let job = p.inflight.take().expect("job");
-        p.finish_translate(job, Err(TranslateError::ContextFull(4096)));
-        assert!(p.inflight.is_none(), "a trimmed history that still overflows must fail");
-        assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
+        let s = p.state.read();
+        assert_eq!(s.history.len(), tcfg.history_max_items + 1, "one row per turn left in the context");
+        assert_eq!(s.history[0].source_text, "new");
+    }
+
+    /// Start an auto OCR job that returns `blocks`.
+    fn spawn_ocr(p: &mut Pipeline, blocks: Vec<OcrBlock>) {
+        p.ocr_job = Some(OcrJob {
+            handle: tokio::spawn(async move { Ok(blocks) }),
+            started: std::time::Instant::now(),
+            sequence: 1,
+            width: 100,
+            height: 100,
+            scope: Vec::new(),
+            manual: false,
+            stale: false,
+        });
+    }
+
+    async fn land_ocr(p: &mut Pipeline) {
+        let result = (&mut p.ocr_job.as_mut().expect("job").handle).await;
+        p.finish_ocr(result);
+    }
+
+    #[tokio::test]
+    async fn ocr_result_is_dropped_after_a_reset_and_kept_off_the_page_while_paused() {
+        let mut p = pipeline();
+        let x = vec![block(1, "X")];
+        spawn_ocr(&mut p, x.clone());
+        p.reset_ocr_session(false);
+        land_ocr(&mut p).await;
+        assert!(p.last_raw_ocr.is_none(), "a result from before the reset is dropped");
+        assert!(p.ocr_blocks.is_empty());
+
+        {
+            let mut s = p.state.write();
+            s.auto_running = true;
+            s.capture_paused = true;
+            s.status = PipelineStatus::Paused;
+        }
+        spawn_ocr(&mut p, x);
+        land_ocr(&mut p).await;
+        assert!(p.last_raw_ocr.is_some(), "the frame is still cached");
+        assert_eq!(p.state.read().status, PipelineStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn queued_manual_capture_is_not_preempted_by_an_auto_translate() {
+        let mut p = pipeline();
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        // The next auto result would make the page stable; Retry was pressed while it ran.
+        spawn_ocr(&mut p, x);
+        p.manual_queued = true;
+        land_ocr(&mut p).await;
+        assert!(p.inflight.is_none(), "no auto translate in front of the manual capture");
+        assert!(p.last_raw_ocr.is_some(), "the frame is still cached");
+        assert!(!p.manual_queued);
+    }
+
+    #[tokio::test]
+    async fn closed_target_stops_the_capture() {
+        let mut p = pipeline();
+        // No stream is running: the target window was closed.
+        p.state.write().auto_running = true;
+        p.tick().await;
+        let s = p.state.read();
+        assert!(!s.auto_running);
+        assert!(matches!(s.status, PipelineStatus::Error { .. }), "{:?}", s.status);
+        assert!(p.next_tick.is_none(), "no more ticks");
+    }
+
+    #[tokio::test]
+    async fn reset_during_translation_keeps_the_new_session_empty() {
+        let mut p = pipeline();
+        p.start_translate(page(vec![block(1, "A")]), false);
+        let job = p.take_inflight().expect("job");
+        let mut answered = p.conversation.clone();
+        let _ = answered.begin_translate_request(&p.state.read().config.translation, &job.page.blocks, &[]);
+        answered.commit_completion(&Completion {
+            text: r#"{"b":[[1,"T"]]}"#.into(),
+            replay_items: Vec::new(),
+        });
+
+        p.reset_conversation();
+        let result = PageResult {
+            translated: merge_translations(&job.page.blocks, r#"{"b":[[1,"T"]]}"#).unwrap(),
+            conversation: answered,
+            error: None,
+        };
+        p.finish_translate(job, result);
+        assert_eq!(p.conversation.turn_count(), 0, "the old session's turn is not written back");
+        assert!(p.state.read().history.is_empty(), "nor is its history row");
+        assert_eq!(p.captions.len(), 1, "the translation still shows");
     }
 
     #[tokio::test]
     async fn vanished_line_is_captioned_again_on_return() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         // Settle off: durable OCR is the raw frame, so no sleeps.
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
         let both = vec![block(1, "X"), block(2, "Y")];
-        p.consume_raw_ocr(both.clone(), 100, 100).await;
-        p.consume_raw_ocr(both.clone(), 100, 100).await;
-        let job = p.inflight.take().expect("page translates");
-        p.finish_translate(job, reply(r#"{"b":[[1,"TX"],[2,"TY"]]}"#, 0));
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 2);
+        p.consume_raw_ocr(both.clone(), 100, 100);
+        p.consume_raw_ocr(both.clone(), 100, 100);
+        finish(&mut p, r#"{"b":[[1,"TX"],[2,"TY"]]}"#);
+        assert_eq!(p.captions.len(), 2);
 
-        p.consume_raw_ocr(vec![block(1, "X")], 100, 100).await;
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "vanished line drops its caption");
+        p.consume_raw_ocr(vec![block(1, "X")], 100, 100);
+        assert_eq!(p.captions.len(), 1, "vanished line drops its caption");
 
-        p.consume_raw_ocr(both.clone(), 100, 100).await;
-        p.consume_raw_ocr(both, 100, 100).await;
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 2, "returning line is captioned again");
+        p.consume_raw_ocr(both.clone(), 100, 100);
+        p.consume_raw_ocr(both, 100, 100);
+        assert_eq!(p.captions.len(), 2, "returning line is captioned again");
     }
 
     #[tokio::test]
     async fn result_only_paints_lines_still_on_screen() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
         let page = vec![block(1, "X"), block(2, "Y")];
-        p.consume_raw_ocr(page.clone(), 100, 100).await;
-        p.consume_raw_ocr(page, 100, 100).await;
+        p.consume_raw_ocr(page.clone(), 100, 100);
+        p.consume_raw_ocr(page, 100, 100);
         assert!(p.inflight.is_some(), "page translates");
 
         // Y is replaced while waiting: its caption must not land on the new text.
         let changed = vec![block(1, "X"), block(2, "Z")];
-        p.consume_raw_ocr(changed.clone(), 100, 100).await;
-        p.consume_raw_ocr(changed.clone(), 100, 100).await;
-        let job = p.inflight.take().expect("the request is not cancelled");
-        p.finish_translate(job, reply(r#"{"b":[[1,"TX"],[2,"TY"]]}"#, 0));
-        assert_eq!(
-            p.state
-                .read()
-                .latest_translated_blocks
-                .iter()
-                .map(|b| b.translation.as_str())
-                .collect::<Vec<_>>(),
-            ["TX"]
-        );
+        p.consume_raw_ocr(changed.clone(), 100, 100);
+        p.consume_raw_ocr(changed.clone(), 100, 100);
+        finish(&mut p, r#"{"b":[[1,"TX"],[2,"TY"]]}"#);
+        assert_eq!(p.captions.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>(), ["TX"]);
         assert_eq!(p.translation_cache.len(), 2, "the hidden line is still cached");
+        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "the UI sees the same captions");
 
         // The gate saw nothing while busy, so the changed page still translates.
-        p.consume_raw_ocr(changed.clone(), 100, 100).await;
-        p.consume_raw_ocr(changed, 100, 100).await;
+        p.consume_raw_ocr(changed.clone(), 100, 100);
+        p.consume_raw_ocr(changed, 100, 100);
         let job = p.inflight.as_ref().expect("changed page translates");
-        assert_eq!(job.miss_blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), ["Z"]);
+        assert_eq!(job.cached_hits, [Some("TX".to_string()), None], "only Z goes to the model");
     }
 
     #[tokio::test]
     async fn page_gone_during_translation_shows_from_cache_on_return() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x.clone(), 100, 100);
         let b = vec![block(1, "B")];
-        p.consume_raw_ocr(b.clone(), 100, 100).await;
-        p.consume_raw_ocr(b.clone(), 100, 100).await;
-        let job = p.inflight.take().expect("job");
-        p.finish_translate(job, reply(r#"{"b":[[1,"TX"]]}"#, 0));
-        assert!(p.state.read().latest_translated_blocks.is_empty(), "nothing painted over new text");
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        finish(&mut p, r#"{"b":[[1,"TX"]]}"#);
+        assert!(p.captions.is_empty(), "nothing painted over new text");
         assert_ne!(p.state.read().status, PipelineStatus::OverlayActive, "no captions, no overlay status");
 
         // The gate saw nothing while busy, so the new page still translates.
-        p.consume_raw_ocr(b.clone(), 100, 100).await;
-        p.consume_raw_ocr(b, 100, 100).await;
-        let job = p.inflight.take().expect("new page translates");
-        p.finish_translate(job, reply(r#"{"b":[[1,"TB"]]}"#, 0));
+        p.consume_raw_ocr(b.clone(), 100, 100);
+        p.consume_raw_ocr(b, 100, 100);
+        finish(&mut p, r#"{"b":[[1,"TB"]]}"#);
 
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x, 100, 100).await;
-        assert_eq!(p.state.read().latest_translated_blocks[0].translation, "TX");
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        assert_eq!(p.captions[0].translation, "TX");
     }
 
     #[tokio::test]
     async fn blank_screen_clears_pending_captions_after_one_hold() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         p.state.write().config.ocr.hold_ms = 20;
         p.persist = BlockPersistenceFilter::new(20, 20, 0);
         p.gate = StabilityGate::new(0);
         let settle = || std::thread::sleep(std::time::Duration::from_millis(30));
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
         settle();
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x, 100, 100).await;
-        let job = p.inflight.as_ref().expect("page translates");
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        assert!(p.inflight.is_some(), "page translates");
         // The settle filter renumbers block ids from 0.
-        p.apply_stream_preview(job, &[(0, "TX".into())]);
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1);
+        p.apply_stream_preview(&[(0, "TX".into())]);
+        assert_eq!(p.captions.len(), 1);
 
-        p.consume_raw_ocr(Vec::new(), 100, 100).await;
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "held for hold_ms");
+        p.consume_raw_ocr(Vec::new(), 100, 100);
+        assert_eq!(p.captions.len(), 1, "held for hold_ms");
         settle();
-        p.consume_raw_ocr(Vec::new(), 100, 100).await;
-        assert!(p.state.read().latest_translated_blocks.is_empty(), "cleared once the hold elapses");
+        p.consume_raw_ocr(Vec::new(), 100, 100);
+        assert!(p.captions.is_empty(), "cleared once the hold elapses");
         assert_eq!(p.state.read().status, PipelineStatus::Translating, "the blank reset keeps the translating status");
     }
 
     #[tokio::test]
     async fn result_lands_in_the_resized_pixel_space() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x, 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
         assert!(p.inflight.is_some(), "page translates");
 
         // The window doubles in size before the reply.
@@ -687,49 +612,46 @@ mod tests {
             scope: Vec::new(),
             blocks: Vec::new(),
         });
-        p.consume_raw_ocr(vec![big.clone()], 200, 200).await;
-        let job = p.inflight.take().expect("job");
-        p.finish_translate(job, reply(r#"{"b":[[1,"TX"]]}"#, 0));
-        assert_eq!(p.state.read().latest_translated_blocks[0].bbox, big.bbox);
+        p.consume_raw_ocr(vec![big.clone()], 200, 200);
+        finish(&mut p, r#"{"b":[[1,"TX"]]}"#);
+        assert_eq!(p.captions[0].bbox, big.bbox);
     }
 
     #[tokio::test]
     async fn unsettled_ocr_during_translation_keeps_page_paintable() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(20, 20, 0);
         p.gate = StabilityGate::new(0);
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
         std::thread::sleep(std::time::Duration::from_millis(30));
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x.clone(), 100, 100);
         assert!(p.inflight.is_some(), "page translates");
 
         // A manual capture resets persist: nothing is settled while the request runs.
         p.persist.reset();
-        p.consume_raw_ocr(x, 100, 100).await;
-        let job = p.inflight.as_ref().expect("job");
+        p.consume_raw_ocr(x, 100, 100);
         // The settle filter renumbers block ids from 0.
-        p.apply_stream_preview(job, &[(0, "TX".into())]);
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "stream preview still paints");
+        p.apply_stream_preview(&[(0, "TX".into())]);
+        assert_eq!(p.captions.len(), 1, "stream preview still paints");
     }
 
     #[tokio::test]
     async fn page_returning_after_hold_expiry_is_translated_again() {
-        let mut p = pipeline(0);
+        let mut p = pipeline();
         p.state.write().config.ocr.hold_ms = 20;
         p.persist = BlockPersistenceFilter::new(20, 20, 0);
         p.gate = StabilityGate::new(0);
         let settle = || std::thread::sleep(std::time::Duration::from_millis(30));
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
         settle();
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        let job = p.inflight.take().expect("page translates");
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x.clone(), 100, 100);
         // The settle filter renumbers block ids from 0.
-        p.finish_translate(job, reply(r#"{"b":[[0,"TX"]]}"#, 0));
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1);
+        finish(&mut p, r#"{"b":[[0,"TX"]]}"#);
+        assert_eq!(p.captions.len(), 1);
 
         // Dialog closes over flickering text that never settles: captions expire after hold.
         let noise = |text: &str| {
@@ -739,15 +661,15 @@ mod tests {
             }]
         };
         settle();
-        p.consume_raw_ocr(noise("n1"), 100, 100).await;
+        p.consume_raw_ocr(noise("n1"), 100, 100);
         settle();
-        p.consume_raw_ocr(noise("n2"), 100, 100).await;
-        assert!(p.state.read().latest_translated_blocks.is_empty());
+        p.consume_raw_ocr(noise("n2"), 100, 100);
+        assert!(p.captions.is_empty());
 
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
+        p.consume_raw_ocr(x.clone(), 100, 100);
         settle();
-        p.consume_raw_ocr(x.clone(), 100, 100).await;
-        p.consume_raw_ocr(x, 100, 100).await;
-        assert_eq!(p.state.read().latest_translated_blocks.len(), 1, "same page is translated again");
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        assert_eq!(p.captions.len(), 1, "same page is translated again");
     }
 }
