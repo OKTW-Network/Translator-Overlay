@@ -23,7 +23,7 @@ use tokio::sync::{OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus};
-use translator_ocr::{download_artifact, initialize_ort_environment, part_path};
+use translator_ocr::{download_artifact, download_client, initialize_ort_environment, part_path};
 
 pub use crate::builtin::catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model};
 use crate::{TranslateError, http::ChatMessage};
@@ -170,9 +170,7 @@ async fn download_missing(
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| TranslateError::Other(format!("create {}: {e}", dir.display())))?;
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("translator-overlay/", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let client = download_client()?;
     for (index, art) in missing.iter().enumerate() {
         let download = download_artifact(&client, art, dir, |percent| {
             on_status(Some(PipelineStatus::DownloadingModels {

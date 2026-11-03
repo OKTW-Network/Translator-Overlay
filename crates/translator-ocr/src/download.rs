@@ -1,6 +1,9 @@
 //! PP-OCRv6 / PP-DocLayoutV3 model download (GitHub Releases → `models_dir`) and load orchestration.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use tokio::{fs, io::AsyncWriteExt, sync::watch, task::JoinHandle};
 use tracing::info;
@@ -96,10 +99,7 @@ async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdat
         fs::create_dir_all(&models_dir)
             .await
             .map_err(|e| OcrError::Other(format!("create models dir {}: {e}", models_dir.display())))?;
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("translator-overlay/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| OcrError::Download(format!("http client: {e}")))?;
+        let client = download_client().map_err(|e| OcrError::Download(format!("http client: {e}")))?;
         for (index, art) in missing.iter().enumerate() {
             let download = download_artifact(&client, art, &models_dir, |percent| {
                 let _ = tx.send(ModelLoadUpdate::Progress(downloading(art.file_name, index, missing.len(), percent)));
@@ -129,6 +129,16 @@ fn missing_artifacts(models_dir: &Path, config: &OcrConfig) -> Vec<&'static Mode
         .chain(layout)
         .filter(|a| !models_dir.join(a.file_name).is_file())
         .collect()
+}
+
+/// HTTP client for model downloads. The timeouts turn a stalled connection into an error
+/// instead of a progress bar that stays frozen.
+pub fn download_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("translator-overlay/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
+        .build()
 }
 
 /// Temporary file [`download_artifact`] writes before the rename. A caller that drops the future early deletes it.
