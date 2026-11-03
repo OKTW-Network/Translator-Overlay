@@ -873,6 +873,8 @@ async fn next_event(
 /// swings cannot walk or re-fit the caption. A whole-box shift (scroll/pan) or a
 /// capture-surface resize takes the latest OCR box.
 pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[OcrBlock], content_resized: bool) -> Vec<TranslatedBlock> {
+    // Normalized once: this runs every capture tick.
+    let keys: Vec<String> = translated.iter().map(|t| normalize_ocr_text(&t.source)).collect();
     let mut used = vec![false; translated.len()];
     let mut out = Vec::new();
 
@@ -882,14 +884,7 @@ pub(crate) fn remap_translations_to_ocr(translated: &[TranslatedBlock], ocr: &[O
             continue;
         }
 
-        let text_hit = translated.iter().enumerate().find_map(|(ti, t)| {
-            if used[ti] {
-                return None;
-            }
-            if normalize_ocr_text(&t.source) == key { Some(ti) } else { None }
-        });
-
-        let Some(ti) = text_hit else {
+        let Some(ti) = (0..translated.len()).find(|&ti| !used[ti] && keys[ti] == key) else {
             continue;
         };
         used[ti] = true;
@@ -920,11 +915,13 @@ pub(crate) fn translated_geometry_changed(previous: &[TranslatedBlock], remapped
     if previous.len() != remapped.len() {
         return true;
     }
+    let previous_keys: Vec<String> = previous.iter().map(|p| normalize_ocr_text(&p.source)).collect();
     for b in remapped {
         let key = normalize_ocr_text(&b.source);
-        let Some(a) = previous
+        let Some((a, _)) = previous
             .iter()
-            .find(|p| normalize_ocr_text(&p.source) == key && p.translation == b.translation)
+            .zip(&previous_keys)
+            .find(|(p, k)| **k == key && p.translation == b.translation)
         else {
             return true;
         };
