@@ -98,7 +98,8 @@ fn init_tracing() {
             let _ = fs::remove_file(&previous);
             let _ = fs::rename(&current, &previous);
         }
-        fs::File::create(current).ok()
+        // Append, like the panic hook's own handle: a plain write handle would later write over its message.
+        fs::OpenOptions::new().create(true).append(true).open(current).ok()
     });
     let subscriber = tracing_subscriber::fmt().with_env_filter(env_filter).with_ansi(false);
     match file {
