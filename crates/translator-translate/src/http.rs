@@ -393,15 +393,27 @@ async fn consume_sse_response(
     }
 }
 
+/// Decode `bytes` up to a character cut off at the end, which waits for the next chunk.
+/// An invalid byte becomes U+FFFD instead of holding back everything after it.
 fn take_utf8_prefix(bytes: &mut Vec<u8>) -> String {
-    let n = match std::str::from_utf8(bytes) {
-        Ok(s) => s.len(),
-        Err(e) => e.valid_up_to(),
-    };
-    if n == 0 {
-        return String::new();
+    let mut out = String::new();
+    loop {
+        let (valid, invalid) = match std::str::from_utf8(bytes) {
+            Ok(s) => (s.len(), None),
+            Err(e) => (e.valid_up_to(), e.error_len()),
+        };
+        out.push_str(&String::from_utf8_lossy(&bytes[..valid]));
+        match invalid {
+            Some(n) => {
+                out.push(char::REPLACEMENT_CHARACTER);
+                bytes.drain(..valid + n);
+            }
+            None => {
+                bytes.drain(..valid);
+                return out;
+            }
+        }
     }
-    String::from_utf8(bytes.drain(..n).collect()).unwrap_or_default()
 }
 
 fn push_sse_events(buf: &mut String, acc: &mut SseAcc, on_text: &mut impl FnMut(&str), flush: bool) -> Result<(), TranslateError> {
@@ -789,6 +801,16 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_prefix_replaces_bad_bytes_and_waits_for_cut_chars() {
+        // A stray byte, then `中` cut after its second byte.
+        let mut raw = b"ab\xffcd\xe4\xb8".to_vec();
+        assert_eq!(take_utf8_prefix(&mut raw), "ab\u{fffd}cd");
+        raw.push(0xad);
+        assert_eq!(take_utf8_prefix(&mut raw), "中");
+        assert!(raw.is_empty());
+    }
 
     #[test]
     fn translation_schema_keeps_items_as_object() {
