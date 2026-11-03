@@ -1,7 +1,5 @@
 //! Config apply and OCR engine load wiring.
 
-use std::path::PathBuf;
-
 use rust_i18n::t;
 use tracing::{error, info};
 use translator_core::{AppConfig, AppState, ModelProvider, OcrDevice, UiLanguage, config_path, load_active_dictionary};
@@ -20,19 +18,18 @@ pub(crate) fn apply_dictionary_profile(state: &mut AppState) {
     }
 }
 
-impl Pipeline {
-    /// Resolve the default config path; on failure record `save config:` and return `None`.
-    fn default_config_path(&mut self) -> Option<PathBuf> {
-        match config_path() {
-            Ok(p) => Some(p),
-            Err(e) => {
-                error!(error = %e, "failed to resolve config path");
-                self.state.write().set_error(t!("err.save_config", error = e.to_string()));
-                None
-            }
-        }
+/// Write `cfg` to `config.toml`. Returns the error message on failure.
+fn save_config(cfg: &AppConfig) -> Option<String> {
+    let result = config_path()
+        .map_err(|e| e.to_string())
+        .and_then(|path| cfg.save(&path).map_err(|e| e.to_string()));
+    if let Err(e) = &result {
+        error!(error = %e, "failed to save config");
     }
+    result.err()
+}
 
+impl Pipeline {
     /// Persist only overlay / reader / HUD visibility on the live config.
     pub(crate) fn set_overlay_display(&mut self, enabled: bool, reader_enabled: bool, hud_enabled: bool) {
         let overlay = {
@@ -65,16 +62,12 @@ impl Pipeline {
     }
 
     fn persist_live_config(&mut self) -> bool {
-        let save = self.state.read().config.clone();
-        let Some(path) = self.default_config_path() else {
-            return false;
+        let live = self.state.read().config.clone();
+        let Some(e) = save_config(&live) else {
+            return true;
         };
-        if let Err(e) = save.save(&path) {
-            error!(error = %e, "failed to save live config");
-            self.state.write().set_error(t!("err.save_config", error = e.to_string()));
-            return false;
-        }
-        true
+        self.state.write().set_error(t!("err.save_config", error = e));
+        false
     }
 
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
@@ -123,21 +116,18 @@ impl Pipeline {
         // Reload from disk can change the UI language.
         self.sync_reader_placeholder();
 
+        let prompt_changed = self.state.read().config.translation.system_prompt != cfg.translation.system_prompt;
         self.state.write().config = cfg.clone();
-        let Some(path) = self.default_config_path() else {
-            return;
-        };
-        if let Err(e) = cfg.save(&path) {
-            error!(error = %e, "failed to save config");
-            self.state.write().set_error(t!("err.save_config", error = e.to_string()));
-            return;
-        }
+        // The live config already holds `cfg`, so the rest applies even when the save fails.
+        let save_error = save_config(&cfg);
 
         let old_pairs = self.state.read().dictionary_pairs.clone();
         let glossary_changed = {
             let mut s = self.state.write();
-            s.settings_message = Some(translator_core::SETTINGS_SAVED.into());
-            s.last_error = None;
+            if save_error.is_none() {
+                s.settings_message = Some(translator_core::SETTINGS_SAVED.into());
+                s.last_error = None;
+            }
             apply_dictionary_profile(&mut s);
             s.dictionary_pairs != old_pairs
         };
@@ -145,10 +135,13 @@ impl Pipeline {
             self.cancel_inflight();
             self.conversation.clear();
             self.client.reset_session();
+        }
+        // Cached lines would keep the old model's, prompt's, or glossary's translation.
+        if glossary_changed || identity_changed || prompt_changed {
             self.translation_cache.clear();
         }
         self.state.write().translation_cache_len = self.translation_cache.len();
-        info!("config applied and saved");
+        info!(saved = save_error.is_none(), "config applied");
 
         if engine_reload {
             self.ocr_tier = cfg.ocr.model_tier;
@@ -170,6 +163,10 @@ impl Pipeline {
         } else {
             // Idle: models load on the next Start.
             self.state.write().restore_operational_status();
+        }
+        // Last, so the status restores above do not hide it.
+        if let Some(e) = save_error {
+            self.state.write().set_error(t!("err.save_config", error = e));
         }
     }
 
@@ -257,5 +254,41 @@ impl Pipeline {
                 self.state.write().set_error(t!("err.models_task_ended"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn new_model_or_prompt_drops_cached_translations() {
+        // apply_config saves to `config_path()`, which this override points at a real config.
+        if std::env::var_os("TRANSLATOR_OVERLAY_ROOT").is_some() {
+            return;
+        }
+        let mut config = AppConfig::default();
+        // Not the built-in default: nothing may download or load a model.
+        config.api.provider = ModelProvider::OpenaiCompatible;
+        let mut p = Pipeline::detached(Arc::new(RwLock::new(AppState::new(config.clone()))));
+        let tr = config.translation.clone();
+        let cache_one = |p: &mut Pipeline| p.translation_cache.insert("X", &tr.source_lang, &tr.target_lang, "TX");
+
+        cache_one(&mut p);
+        p.apply_config(config.clone()).await;
+        assert_eq!(p.translation_cache.len(), 1, "an unchanged config keeps the cache");
+
+        config.api.model = "other-model".into();
+        p.apply_config(config.clone()).await;
+        assert!(p.translation_cache.is_empty(), "a new model drops the cache");
+
+        cache_one(&mut p);
+        config.translation.system_prompt = Some("Use a casual tone.".into());
+        p.apply_config(config).await;
+        assert!(p.translation_cache.is_empty(), "a new system prompt drops the cache");
     }
 }
