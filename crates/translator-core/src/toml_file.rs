@@ -14,34 +14,45 @@ pub enum TomlFileError {
     Io { path: PathBuf, source: std::io::Error },
     #[error("invalid TOML: {0}")]
     Parse(#[from] toml::de::Error),
-    #[error("invalid TOML, moved to {backup}: {source}")]
-    Broken { backup: PathBuf, source: toml::de::Error },
+    #[error("invalid TOML, moved to {backup}: {reason}")]
+    Broken { backup: PathBuf, reason: String },
     #[error(transparent)]
     Serialize(#[from] toml::ser::Error),
     #[error(transparent)]
     Edit(#[from] toml_edit::ser::Error),
 }
 
-/// Read and parse `path`. On a parse error the file is renamed to `<name>.broken-<unix secs>`
-/// so the next save cannot overwrite what the user had.
+/// Read and parse `path`. On a parse error or non-UTF-8 content the file is renamed to
+/// `<name>.broken-<unix secs>` so the next save cannot overwrite what the user had.
 pub(crate) fn parse_file<T>(path: &Path, parse: impl FnOnce(&str) -> Result<T, TomlFileError>) -> Result<T, TomlFileError> {
-    let text = std::fs::read_to_string(path).map_err(|source| TomlFileError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    parse(&text).map_err(|e| {
-        let TomlFileError::Parse(source) = e else {
-            return e;
-        };
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let mut backup = path.as_os_str().to_owned();
-        backup.push(format!(".broken-{secs}"));
-        let backup = PathBuf::from(backup);
-        match std::fs::rename(path, &backup) {
-            Ok(()) => TomlFileError::Broken { backup, source },
-            Err(_) => TomlFileError::Parse(source),
+    let unreadable = match std::fs::read_to_string(path) {
+        Ok(text) => match parse(&text) {
+            Err(TomlFileError::Parse(source)) => TomlFileError::Parse(source),
+            other => return other,
+        },
+        // Saved in another encoding (e.g. Big5): as unreadable as a syntax error.
+        Err(source) if source.kind() == std::io::ErrorKind::InvalidData => TomlFileError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+        Err(source) => {
+            return Err(TomlFileError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
         }
-    })
+    };
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(format!(".broken-{secs}"));
+    let backup = PathBuf::from(backup);
+    match std::fs::rename(path, &backup) {
+        Ok(()) => Err(TomlFileError::Broken {
+            backup,
+            reason: unreadable.to_string(),
+        }),
+        Err(_) => Err(unreadable),
+    }
 }
 
 pub(crate) fn load_toml_or_empty<T: DeserializeOwned + Default>(path: &Path) -> Result<T, TomlFileError> {
@@ -102,6 +113,22 @@ mod tests {
         };
         assert!(!path.exists(), "the next save must start from an empty slot");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "[[[not valid");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn non_utf8_file_is_moved_aside_with_its_bytes() {
+        let dir = std::env::temp_dir().join(format!("toml-file-big5-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        // `中文` in Big5.
+        let bytes = b"system_prompt = \"\xa4\xa4\xa4\xe5\"\n";
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let Err(TomlFileError::Broken { backup, .. }) = load_toml_or_empty::<toml::Table>(&path) else {
+            panic!("expected Broken");
+        };
+        assert!(!path.exists(), "the next save must not overwrite it");
+        assert_eq!(std::fs::read(&backup).unwrap(), bytes);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
