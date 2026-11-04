@@ -1,0 +1,29 @@
+name: Downloads badge
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  badge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish app download count to the badges branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # App zips only; model assets (models-v1) are excluded. --jq runs per page, so awk sums the pages.
+          n=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '[.[].assets[] | select(.name | endswith("-win-x64.zip")) | .download_count] | add // 0' \
+            | awk '{ s += $1 } END { print s + 0 }')
+          mkdir badge && cd badge
+          printf '{"schemaVersion":1,"label":"downloads","message":"%s","color":"67ac09"}\n' "$n" > downloads.json
+          git init -q -b badges
+          git add downloads.json
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "Update downloads badge"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
