@@ -89,8 +89,9 @@ async fn main() {
 }
 
 fn init_tracing() {
+    // `xet` prefix-matches every hf-xet crate (`xet_client`, `xet_data`, …), which log each request at info.
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn,xet=warn"));
     let file = log_path().ok().and_then(|current| {
         if let Ok(previous) = prev_log_path()
             && current.exists()

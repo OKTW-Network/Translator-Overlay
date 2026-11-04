@@ -24,7 +24,7 @@ use tokenizers::Tokenizer;
 use tokio::sync::{OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, download_artifact, download_client, part_path};
+use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, download_artifacts, part_path};
 
 pub use crate::builtin::catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model};
 use crate::{TranslateError, http::ChatMessage};
@@ -171,27 +171,17 @@ async fn download_missing(
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| TranslateError::Other(format!("create {}: {e}", dir.display())))?;
-    let client = download_client()?;
-    for (index, art) in missing.iter().enumerate() {
-        let download = download_artifact(&client, art, dir, |percent| {
-            on_status(Some(PipelineStatus::DownloadingModels {
-                kind: ModelKind::Translation,
-                file: art.file_name.to_string(),
-                file_index: index as u32 + 1,
-                file_count: missing.len() as u32,
-                percent,
-            }));
-        });
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
+    let download = download_artifacts(ModelKind::Translation, &missing, dir, |status| on_status(Some(status)));
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            for art in &missing {
                 let _ = tokio::fs::remove_file(part_path(dir, art)).await;
-                return Err(TranslateError::Cancelled);
             }
-            result = download => result.map_err(|e| TranslateError::Other(e.to_string()))?,
+            Err(TranslateError::Cancelled)
         }
+        result = download => result.map_err(|e| TranslateError::Other(e.to_string())),
     }
-    Ok(())
 }
 
 struct Loaded {

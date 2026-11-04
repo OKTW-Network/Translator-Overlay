@@ -52,7 +52,6 @@ pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<Grid> {
             (
                 PipelineStatus::DownloadingModels {
                     kind,
-                    file,
                     file_index,
                     file_count,
                     percent,
@@ -63,8 +62,7 @@ pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<Grid> {
                     ModelKind::Ocr => t!("status.downloading_title"),
                     ModelKind::Translation => t!("status.downloading_translation_title"),
                 };
-                let progress =
-                    t!("status.download_progress", file = file, file_index = file_index, file_count = file_count, percent = percent);
+                let progress = t!("status.download_progress", file_index = file_index, file_count = file_count, percent = percent);
                 (title, progress.into_owned(), Sev::Informational)
             }
             (status, None) => {
@@ -493,7 +491,6 @@ pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
         PipelineStatus::WaitingForStable { elapsed_ms } => t!("status.waiting_stable", elapsed_ms = elapsed_ms),
         PipelineStatus::DownloadingModels {
             kind,
-            file,
             file_index,
             file_count,
             percent,
@@ -502,7 +499,7 @@ pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
                 ModelKind::Ocr => t!("status.downloading_title"),
                 ModelKind::Translation => t!("status.downloading_translation_title"),
             };
-            let progress = t!("status.download_progress", file = file, file_index = file_index, file_count = file_count, percent = percent);
+            let progress = t!("status.download_progress", file_index = file_index, file_count = file_count, percent = percent);
             Cow::Owned(format!("{title} {progress}"))
         }
         PipelineStatus::LoadingModels { kind: ModelKind::Ocr } => t!("status.loading_models"),

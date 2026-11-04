@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bytes = { workspace = true }
+hf-xet = { version = "1.8.0", default-features = false, features = ["native-tls", "no-default-cache"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

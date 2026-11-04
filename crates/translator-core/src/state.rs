@@ -23,10 +23,10 @@ pub enum PipelineStatus {
     /// App-owned model download (→ `models_dir`); UI stays operable.
     DownloadingModels {
         kind: ModelKind,
-        file: String,
-        /// 1-based index among files being fetched this run.
+        /// Files finished this run + 1, at most `file_count`.
         file_index: u32,
         file_count: u32,
+        /// Of all bytes this run.
         percent: u8,
     },
     /// Building the ONNX Runtime session after files are on disk.
