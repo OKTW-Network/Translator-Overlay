@@ -1,6 +1,6 @@
 <img width="960" height="200" alt="AI Slop" src="https://github.com/user-attachments/assets/9d681a9b-7548-43e6-9cff-8d01d9f00f54" />
 
-# <img width="32" height="32" src="crates/translator-app/assets/icon.png"> Translator Overlay [![CI](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml) [![GitHub Release](https://img.shields.io/github/v/release/OKTW-Network/Translator-Overlay)](https://github.com/OKTW-Network/Translator-Overlay/releases) [![GitHub Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FOKTW-Network%2FTranslator-Overlay%2Fbadges%2Fdownloads.json)](https://github.com/OKTW-Network/Translator-Overlay/releases)
+# <img width="32" height="32" src="crates/translator-app/assets/icon.png"> Translator Overlay [![CI](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/OKTW-Network/Translator-Overlay/actions/workflows/ci.yml) [![GitHub Release](https://img.shields.io/github/v/release/OKTW-Network/Translator-Overlay)](https://github.com/OKTW-Network/Translator-Overlay/releases) [![GitHub Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FOKTW-Network%2FTranslator-Overlay%2Fbadges%2Fdownloads.json)](https://github.com/OKTW-Network/Translator-Overlay/releases/latest)
 繁體中文 | [English](README.en.md)
 
 Windows 桌面即時翻譯 Overlay：選取目標視窗 → 擷取畫面 → PP-OCRv6 辨識文字 → 用內建模型、OpenAI 相容 API 或本機 CLI 翻譯 → 在原位置以點擊可穿透的 Overlay 顯示譯文。
