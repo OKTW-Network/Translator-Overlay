@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 bytes = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 toml = "1.1.8"
 toml_edit = { version = "0.25.17", default-features = false, features = ["display", "serde"] }
+tracing = { workspace = true }

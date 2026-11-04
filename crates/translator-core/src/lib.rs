@@ -3,7 +3,9 @@
 mod api_profiles;
 mod config;
 mod dictionaries;
+mod download;
 mod hotkey;
+mod http;
 mod paths;
 mod region_presets;
 mod state;
@@ -14,7 +16,9 @@ pub use crate::{
     api_profiles::*,
     config::*,
     dictionaries::*,
+    download::*,
     hotkey::{HotkeyAction, HotkeyChord, HotkeyConfig, is_modifier_vk, is_win_vk},
+    http::http_client,
     paths::*,
     region_presets::*,
     state::*,

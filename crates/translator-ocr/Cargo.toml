@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 image = { workspace = true }
 oar-ocr = { version = "0.10.2", default-features = false, features = ["directml", "simd", "webgpu"] }
-reqwest = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

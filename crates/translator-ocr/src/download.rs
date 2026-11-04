@@ -1,17 +1,15 @@
 //! PP-OCRv6 / PP-DocLayoutV3 model download (GitHub Releases → `models_dir`) and load orchestration.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::Path;
 
-use tokio::{fs, io::AsyncWriteExt, sync::watch, task::JoinHandle};
-use tracing::info;
-use translator_core::{ModelKind, ModelTier, OcrConfig, OcrDevice, PipelineStatus};
+use tokio::{fs, sync::watch, task::JoinHandle};
+use translator_core::{
+    DownloadError, ModelArtifact, ModelKind, ModelTier, OcrConfig, OcrDevice, PipelineStatus, download_artifact, download_client, part_path,
+};
 
 use crate::{
     OcrEngine, OcrError,
-    models::{LAYOUT_ARTIFACT, ModelArtifact, artifacts_for_tier},
+    models::{LAYOUT_ARTIFACT, artifacts_for_tier},
 };
 
 /// Latest download / ORT-load phase (`watch` coalesces to the newest value).
@@ -99,7 +97,7 @@ async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdat
         fs::create_dir_all(&models_dir)
             .await
             .map_err(|e| OcrError::Other(format!("create models dir {}: {e}", models_dir.display())))?;
-        let client = download_client().map_err(|e| OcrError::Download(format!("http client: {e}")))?;
+        let client = download_client().map_err(|e| DownloadError(format!("http client: {e}")))?;
         for (index, art) in missing.iter().enumerate() {
             let download = download_artifact(&client, art, &models_dir, |percent| {
                 let _ = tx.send(ModelLoadUpdate::Progress(downloading(art.file_name, index, missing.len(), percent)));
@@ -129,110 +127,4 @@ fn missing_artifacts(models_dir: &Path, config: &OcrConfig) -> Vec<&'static Mode
         .chain(layout)
         .filter(|a| !models_dir.join(a.file_name).is_file())
         .collect()
-}
-
-/// HTTP client for model downloads. The timeouts turn a stalled connection into an error
-/// instead of a progress bar that stays frozen.
-pub fn download_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(concat!("translator-overlay/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(60))
-        .build()
-}
-
-/// Temporary file [`download_artifact`] writes before the rename. A caller that drops the future early deletes it.
-pub fn part_path(models_dir: &Path, art: &ModelArtifact) -> PathBuf {
-    // The process id keeps a crashed run's leftover from clashing with this one.
-    models_dir.join(format!(".{}.{}.part", art.file_name, std::process::id()))
-}
-
-/// Download one artifact into `models_dir` through a `.part` file.
-///
-/// HTTPS plus the exact byte length is the integrity check (no hash). `on_percent` fires once
-/// per integer percent.
-pub async fn download_artifact(
-    client: &reqwest::Client,
-    art: &ModelArtifact,
-    models_dir: &Path,
-    mut on_percent: impl FnMut(u8),
-) -> Result<(), OcrError> {
-    let url = art.download_url();
-    info!(file = art.file_name, %url, expected = art.expected_bytes, "downloading model");
-
-    let mut response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| OcrError::Download(format!("{}: request failed: {e}", art.file_name)))?
-        .error_for_status()
-        .map_err(|e| OcrError::Download(format!("{}: {e}", art.file_name)))?;
-
-    if let Some(len) = response.content_length()
-        && len != art.expected_bytes
-    {
-        return Err(OcrError::Download(format!("{}: Content-Length {len} != expected {}", art.file_name, art.expected_bytes)));
-    }
-
-    let part = part_path(models_dir, art);
-    let mut file = fs::File::create(&part)
-        .await
-        .map_err(|e| OcrError::Download(format!("create {}: {e}", part.display())))?;
-    let written = async {
-        let mut downloaded = 0_u64;
-        let mut percent = 0;
-        on_percent(percent);
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| OcrError::Download(format!("{}: stream: {e}", art.file_name)))?
-        {
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| OcrError::Download(format!("{}: write: {e}", art.file_name)))?;
-            downloaded = downloaded.saturating_add(chunk.len() as u64);
-            if downloaded > art.expected_bytes {
-                return Err(OcrError::Download(format!(
-                    "{}: downloaded {downloaded} bytes > expected {}",
-                    art.file_name, art.expected_bytes
-                )));
-            }
-            // Report only when the integer percent changes, not per chunk.
-            let now = (downloaded * 100 / art.expected_bytes) as u8;
-            if now != percent {
-                percent = now;
-                on_percent(percent);
-            }
-        }
-        file.flush()
-            .await
-            .map_err(|e| OcrError::Download(format!("{}: flush: {e}", art.file_name)))?;
-        if downloaded != art.expected_bytes {
-            return Err(OcrError::Download(format!("{}: downloaded {downloaded} bytes != expected {}", art.file_name, art.expected_bytes)));
-        }
-        Ok(())
-    }
-    .await;
-    drop(file);
-
-    let dest = models_dir.join(art.file_name);
-    let result = match written {
-        Ok(()) => fs::rename(&part, &dest)
-            .await
-            .map_err(|e| OcrError::Download(format!("rename {} → {}: {e}", part.display(), dest.display()))),
-        Err(e) => Err(e),
-    };
-    if let Err(e) = result {
-        let _ = fs::remove_file(&part).await;
-        return Err(e);
-    }
-
-    // Load only checks that the file exists, so a wrong-sized file here would never be fetched again.
-    if !std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == art.expected_bytes) {
-        let _ = fs::remove_file(&dest).await;
-        return Err(OcrError::Download(format!("{}: size check failed after rename", art.file_name)));
-    }
-
-    info!(file = art.file_name, bytes = art.expected_bytes, "model download complete");
-    Ok(())
 }

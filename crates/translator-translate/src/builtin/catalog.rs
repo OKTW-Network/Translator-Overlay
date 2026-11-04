@@ -2,8 +2,7 @@
 //!
 //! Each repo's files are pinned to a commit and checked by exact byte length on download.
 
-use translator_core::OcrDevice;
-use translator_ocr::ModelArtifact;
+use translator_core::{ModelArtifact, OcrDevice};
 
 use crate::http::ChatMessage;
 

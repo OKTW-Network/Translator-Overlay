@@ -3155,10 +3155,13 @@ name = "translator-core"
 version = "0.7.0"
 dependencies = [
  "bytes",
+ "reqwest",
  "serde",
  "thiserror",
+ "tokio",
  "toml 1.1.8+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -3167,7 +3170,6 @@ version = "0.7.0"
 dependencies = [
  "image",
  "oar-ocr",
- "reqwest",
  "thiserror",
  "tokio",
  "tracing",
@@ -3203,7 +3205,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "translator-core",
- "translator-ocr",
 ]
 
 [[package]]

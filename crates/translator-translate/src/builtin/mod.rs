@@ -13,7 +13,9 @@ use std::{
 
 use half::f16;
 use ort::{
+    environment::Environment,
     ep,
+    logging::LogLevel,
     memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
     value::{DynTensor, DynValue, Tensor, TensorElementType},
@@ -22,8 +24,7 @@ use tokenizers::Tokenizer;
 use tokio::sync::{OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus};
-use translator_ocr::{download_artifact, download_client, initialize_ort_environment, part_path};
+use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, download_artifact, download_client, part_path};
 
 pub use crate::builtin::catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model};
 use crate::{TranslateError, http::ChatMessage};
@@ -454,7 +455,10 @@ impl Sampling {
 
 impl Loaded {
     fn load(spec: &'static BuiltinModelSpec, device: OcrDevice, dir: &Path) -> ort::Result<Self> {
-        initialize_ort_environment()?;
+        // Same default oar-ocr gives OCR (errors only); whichever loads first configures the shared environment.
+        if ort::init().commit() {
+            Environment::current()?.set_log_level(LogLevel::Error);
+        }
         let tokenizer = Tokenizer::from_file(dir.join(spec.tokenizer.file_name))?;
         // A table lookup: as fast on the CPU, and keeps the embedding tables out of VRAM.
         let embed = session(OcrDevice::Cpu, &dir.join(spec.embed[0].file_name))?;

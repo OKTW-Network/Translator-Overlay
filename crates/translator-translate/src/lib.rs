@@ -18,7 +18,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, DictionaryPair, HttpApi, ModelProvider, OcrBlock, PipelineStatus, TranslatedBlock, TranslationConfig};
+use translator_core::{
+    ApiConfig, DictionaryPair, HttpApi, ModelProvider, OcrBlock, PipelineStatus, TranslatedBlock, TranslationConfig, http_client,
+};
 
 use crate::{
     builtin::BuiltinBackend,
@@ -990,12 +992,9 @@ pub async fn list_models(api: &ApiConfig, cancel: &CancellationToken) -> Result<
 }
 
 fn build_http_client(config: &ApiConfig) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
-    if config.request_timeout_secs > 0 {
-        let idle = Duration::from_secs(config.request_timeout_secs);
-        builder = builder.connect_timeout(idle).read_timeout(idle);
-    }
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+    let idle = (config.request_timeout_secs > 0).then(|| Duration::from_secs(config.request_timeout_secs));
+    // Fails only when the TLS backend cannot start, where `reqwest::Client::new` panics too.
+    http_client(idle).expect("HTTP client")
 }
 
 /// Join translated block texts for UI / history.

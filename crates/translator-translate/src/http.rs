@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, HttpApi};
+use translator_core::{ApiConfig, HttpApi, http_client};
 
 use crate::{Completion, TranslateError};
 
@@ -298,7 +298,7 @@ pub(crate) async fn list_http_models(
         return Err(TranslateError::MissingBaseUrl);
     }
     let url = format!("{base}/models");
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = http_client(None)?.get(&url);
     if !api.api_key.trim().is_empty() {
         req = req.bearer_auth(api.api_key.trim());
     }

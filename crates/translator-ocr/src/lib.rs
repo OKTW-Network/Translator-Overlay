@@ -8,9 +8,8 @@ mod merge;
 mod models;
 mod stability;
 
-pub use oar_ocr::core::inference::initialize_ort_environment;
 use thiserror::Error;
-use translator_core::{OcrBlock, PathError};
+use translator_core::{DownloadError, OcrBlock, PathError};
 
 pub use crate::{crop::*, download::*, engine::*, filter::*, merge::*, models::*, stability::*};
 
@@ -27,8 +26,8 @@ pub enum OcrError {
     Engine(String),
     #[error("image error: {0}")]
     Image(String),
-    #[error("model download: {0}")]
-    Download(String),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
     #[error(transparent)]
     Path(#[from] PathError),
     #[error("{0}")]

@@ -5,25 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use translator_core::{ModelTier, OcrDevice};
+use translator_core::{ModelArtifact, ModelTier, OcrDevice};
 
 const OAR_V070: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0";
-
-/// One file required for a given model tier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelArtifact {
-    pub file_name: &'static str,
-    /// GitHub release download prefix that hosts the file.
-    pub release: &'static str,
-    /// Exact byte length from that GitHub release.
-    pub expected_bytes: u64,
-}
-
-impl ModelArtifact {
-    pub fn download_url(&self) -> String {
-        format!("{}/{}", self.release, self.file_name)
-    }
-}
 
 /// Detection, recognition, and dictionary files for `tier`, in that order.
 pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {

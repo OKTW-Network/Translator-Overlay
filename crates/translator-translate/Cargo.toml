@@ -17,4 +17,3 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 translator-core = { path = "../translator-core" }
-translator-ocr = { path = "../translator-ocr" }
