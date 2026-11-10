@@ -475,6 +475,9 @@ pub struct OcrConfig {
     pub model_tier: ModelTier,
     /// ONNX Runtime device. Reloads the engine when changed.
     pub device: OcrDevice,
+    /// Detection shrinks a frame whose long side exceeds this many pixels; 0 = no shrink.
+    /// Reloads the engine when changed.
+    pub det_max_side: u32,
     /// Directory for model files (relative to exe dir unless absolute).
     pub models_dir: String,
     pub confidence_threshold: f32,
@@ -500,6 +503,7 @@ impl Default for OcrConfig {
         Self {
             model_tier: ModelTier::Small,
             device: OcrDevice::Webgpu,
+            det_max_side: 0,
             models_dir: "models".to_string(),
             confidence_threshold: 0.8,
             settle_ms: 500,

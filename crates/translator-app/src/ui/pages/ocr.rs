@@ -131,6 +131,7 @@ fn rules_only(m: &LineMergeConfig) -> bool {
 pub fn ocr_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     const TIERS: [ModelTier; 3] = [ModelTier::Tiny, ModelTier::Small, ModelTier::Medium];
     const DEVICES: [OcrDevice; 3] = [OcrDevice::Webgpu, OcrDevice::Directml, OcrDevice::Cpu];
+    const DET_SIDES: [u32; 4] = [0, 1920, 1280, 960];
     const ORDERS: [LineMergeOrder; 2] = [LineMergeOrder::LeftToRightTopToBottom, LineMergeOrder::TopToBottomRightToLeft];
 
     let model = column(4.0)?;
@@ -138,7 +139,7 @@ pub fn ocr_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         section_header(&t!("ocr.model"))?,
         memory_infobar(b, |ui| {
             let ocr = &ui.draft.ocr;
-            memory_estimate(ocr.model_tier, ocr.device, ocr.uses_layout())
+            memory_estimate(ocr.model_tier, ocr.device, ocr.uses_layout(), ocr.det_max_side)
         })?,
         radio_card(
             b,
@@ -165,6 +166,24 @@ pub fn ocr_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
             false,
             |ui| (DEVICES.iter().position(|&d| d == ui.draft.ocr.device).unwrap_or(0), true),
             |ui, v| ui.draft.ocr.device = v,
+        )?,
+        radio_card(
+            b,
+            cx,
+            ("ocr-det-side", &t!("ocr.det_side"), &t!("ocr.det_side_desc")),
+            (
+                "ocr-det-side",
+                &[
+                    ("ocr.det_side_off", Some(80.0), None),
+                    ("ocr.det_side_1920", Some(80.0), None),
+                    ("ocr.det_side_1280", Some(80.0), None),
+                    ("ocr.det_side_960", Some(80.0), None),
+                ],
+                &DET_SIDES,
+            ),
+            false,
+            |ui| (DET_SIDES.iter().position(|&s| s == ui.draft.ocr.det_max_side).unwrap_or(0), true),
+            |ui, v| ui.draft.ocr.det_max_side = v,
         )?,
     );
 

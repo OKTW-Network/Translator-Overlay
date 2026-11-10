@@ -18,9 +18,10 @@ pub fn artifacts_for_tier(tier: ModelTier) -> &'static [ModelArtifact; 3] {
     }
 }
 
-/// Peak `(VRAM, RAM)` bytes with the layout model if `layout`, at the largest inputs the pipeline
-/// feeds. GPU devices also take a flat runtime allowance in RAM.
-pub fn memory_estimate(tier: ModelTier, device: OcrDevice, layout: bool) -> (u64, u64) {
+/// Peak `(VRAM, RAM)` bytes with the layout model if `layout`, for a frame whose long side is
+/// `det_max_side` (0 = no shrink, costed as a 1920-px frame; a larger window takes more).
+/// GPU devices also take a flat runtime allowance in RAM.
+pub fn memory_estimate(tier: ModelTier, device: OcrDevice, layout: bool, det_max_side: u32) -> (u64, u64) {
     const MIB: u64 = 1 << 20;
     const RUNTIME_MIB: u64 = 256;
     // `(GPU, CPU)` MiB per model, from its ONNX graph at the pipeline's input size (det 1×3×544×960
@@ -30,13 +31,16 @@ pub fn memory_estimate(tier: ModelTier, device: OcrDevice, layout: bool) -> (u64
     //   output reuses a freed buffer of the same size);
     // - CPU: initializers plus the largest set of activations alive at once, which the CPU arena
     //   reuses down to.
-    let det_rec = match tier {
-        ModelTier::Tiny => [(86, 34), (212, 89)],
-        ModelTier::Small => [(119, 57), (498, 249)],
-        ModelTier::Medium => [(358, 187), (1036, 335)],
+    let (det_weights, det, rec) = match tier {
+        ModelTier::Tiny => (2, (86, 34), (212, 89)),
+        ModelTier::Small => (9, (119, 57), (498, 249)),
+        ModelTier::Medium => (59, (358, 187), (1036, 335)),
     };
+    // Detection activations (everything but the weights) grow with the input area.
+    let side = u64::from(if det_max_side == 0 { 1920 } else { det_max_side });
+    let grow = |mib: u64| det_weights + (mib - det_weights) * side * side / (960 * 960);
     let layout_model = (990, 380);
-    let models = det_rec.into_iter().chain(layout.then_some(layout_model));
+    let models = [(grow(det.0), grow(det.1)), rec].into_iter().chain(layout.then_some(layout_model));
     let (gpu, cpu) = models.fold((0, 0), |(g, c), (mg, mc)| (g + mg, c + mc));
     match device {
         OcrDevice::Webgpu | OcrDevice::Directml => (gpu * MIB, RUNTIME_MIB * MIB),
@@ -130,6 +134,14 @@ impl ModelPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detection_memory_grows_with_input_side() {
+        let at = |side| memory_estimate(ModelTier::Small, OcrDevice::Webgpu, false, side).0 >> 20;
+        assert_eq!(at(960), 119 + 498, "the table is measured at a 960-px long side");
+        assert_eq!(at(1920), 9 + 110 * 4 + 498);
+        assert_eq!(at(0), at(1920));
+    }
 
     #[test]
     fn medium_shares_dict_with_small() {

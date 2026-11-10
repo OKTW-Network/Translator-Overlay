@@ -73,8 +73,8 @@ impl Pipeline {
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
         // Threshold / filter / merge knobs change how raw blocks are derived.
         self.forget_raw_ocr();
-        let engine_reload =
-            (self.ocr_tier, self.ocr_device, self.ocr_layout) != (cfg.ocr.model_tier, cfg.ocr.device, cfg.ocr.uses_layout());
+        let engine_reload = (self.ocr_tier, self.ocr_device, self.ocr_layout, self.ocr_det_max_side)
+            != (cfg.ocr.model_tier, cfg.ocr.device, cfg.ocr.uses_layout(), cfg.ocr.det_max_side);
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         if self.session.set_min_interval(cfg.capture.frame_interval()) {
@@ -147,6 +147,7 @@ impl Pipeline {
             self.ocr_tier = cfg.ocr.model_tier;
             self.ocr_device = cfg.ocr.device;
             self.ocr_layout = cfg.ocr.uses_layout();
+            self.ocr_det_max_side = cfg.ocr.det_max_side;
             // Free the old engine before the new one loads.
             self.wait_ocr_job().await;
             self.engine = None;
@@ -189,12 +190,14 @@ impl Pipeline {
     pub(crate) fn start_model_load(&mut self) {
         let desired = self.state.read().config.ocr.clone();
         if let Some(job) = self.model_load.as_ref() {
-            if (job.tier, job.device, job.layout) == (desired.model_tier, desired.device, desired.uses_layout()) {
+            if (job.tier, job.device, job.layout, job.det_max_side)
+                == (desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side)
+            {
                 info!(tier = ?desired.model_tier, device = ?desired.device, layout = job.layout, "OCR model load already in progress");
             } else {
                 info!(
-                    in_flight = ?(job.tier, job.device, job.layout),
-                    desired = ?(desired.model_tier, desired.device, desired.uses_layout()),
+                    in_flight = ?(job.tier, job.device, job.layout, job.det_max_side),
+                    desired = ?(desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side),
                     "OCR model load already in progress for another engine; will restart after it finishes"
                 );
             }
@@ -206,6 +209,7 @@ impl Pipeline {
         self.ocr_tier = task.tier;
         self.ocr_device = task.device;
         self.ocr_layout = task.layout;
+        self.ocr_det_max_side = task.det_max_side;
         info!(tier = ?task.tier, device = ?task.device, layout = task.layout, "OCR model load started");
         self.model_load = Some(task);
         self.sync_model_load();
@@ -217,7 +221,7 @@ impl Pipeline {
             return;
         };
         let sender_gone = job.rx.has_changed().is_err();
-        let (tier, device, layout) = (job.tier, job.device, job.layout);
+        let (tier, device, layout, det_max_side) = (job.tier, job.device, job.layout, job.det_max_side);
         let finished = match job.rx.borrow_and_update().clone() {
             ModelLoadUpdate::Progress(status) if !sender_gone => {
                 self.state.write().status = status;
@@ -229,10 +233,10 @@ impl Pipeline {
         // The job is done, or its task ended without a result.
         self.model_load = None;
         let desired = self.state.read().config.ocr.clone();
-        if (tier, device, layout) != (desired.model_tier, desired.device, desired.uses_layout()) {
+        if (tier, device, layout, det_max_side) != (desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side) {
             info!(
-                finished = ?(tier, device, layout),
-                desired = ?(desired.model_tier, desired.device, desired.uses_layout()),
+                finished = ?(tier, device, layout, det_max_side),
+                desired = ?(desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side),
                 "OCR load ended for a stale engine; starting the desired one"
             );
             self.start_model_load();

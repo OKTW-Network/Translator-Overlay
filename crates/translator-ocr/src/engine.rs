@@ -5,14 +5,14 @@ use std::sync::Arc;
 use image::RgbImage;
 use oar_ocr::{
     core::config::{OrtExecutionProvider, OrtSessionConfig},
-    domain::tasks::LayoutDetectionConfig,
+    domain::tasks::{LayoutDetectionConfig, TextDetectionConfig},
     oarocr::{OAROCR, TextRegion},
     predictors::LayoutDetectionPredictor,
     prelude::OAROCRBuilder,
-    processors::BoundingBox,
+    processors::{BoundingBox, LimitType},
 };
 use tracing::info;
-use translator_core::{LineMergeConfig, LineMergeMode, OcrBlock, OcrConfig, OcrDevice, Rect};
+use translator_core::{LineMergeConfig, LineMergeMode, ModelTier, OcrBlock, OcrConfig, OcrDevice, Rect};
 
 use crate::{
     OcrError,
@@ -61,6 +61,18 @@ impl OcrEngine {
         let det = paths.det.to_string_lossy().into_owned();
         let rec = paths.rec.to_string_lossy().into_owned();
         let dict = paths.dict.to_string_lossy().into_owned();
+        // PaddleOCR's published PP-OCRv6 `DBPostProcess` values; oar-ocr's own defaults are the
+        // stricter PP-OCRv5 ones and shrink every frame to a 960-px long side.
+        let det_config = TextDetectionConfig {
+            score_threshold: 0.2,
+            box_threshold: if config.model_tier == ModelTier::Tiny { 0.4 } else { 0.45 },
+            unclip_ratio: 1.4,
+            max_candidates: 3000,
+            // "No shrink" stops at oar-ocr's 4000-px out-of-memory guard.
+            limit_side_len: Some(if config.det_max_side == 0 { 4000 } else { config.det_max_side }),
+            limit_type: Some(LimitType::Max),
+            max_side_len: None,
+        };
         let ort = OrtSessionConfig::new().with_execution_providers(execution_providers(config.device));
 
         let (inner, layout) = tokio::task::spawn_blocking(move || {
@@ -77,6 +89,7 @@ impl OcrEngine {
             let ocr = OAROCRBuilder::new(det, rec, dict)
                 .region_batch_size(4)
                 .image_batch_size(4)
+                .text_detection_config(det_config)
                 .ort_session(ort)
                 .build()
                 .map_err(|e| OcrError::Engine(e.to_string()))?;

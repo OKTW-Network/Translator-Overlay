@@ -26,6 +26,7 @@ pub struct ModelLoadTask {
     pub device: OcrDevice,
     /// Built with PP-DocLayoutV3 ([`OcrConfig::uses_layout`]).
     pub layout: bool,
+    pub det_max_side: u32,
     join: JoinHandle<()>,
 }
 
@@ -47,6 +48,7 @@ impl OcrEngine {
         let tier = config.model_tier;
         let device = config.device;
         let layout = config.uses_layout();
+        let det_max_side = config.det_max_side;
         let initial = match config.models_dir_path() {
             Ok(dir) => {
                 let missing = missing_artifacts(&dir, &config);
@@ -78,6 +80,7 @@ impl OcrEngine {
             tier,
             device,
             layout,
+            det_max_side,
             join,
         }
     }

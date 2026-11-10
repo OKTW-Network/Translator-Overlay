@@ -186,6 +186,7 @@ pub(crate) struct Pipeline {
     pub ocr_tier: ModelTier,
     pub ocr_device: OcrDevice,
     pub ocr_layout: bool,
+    pub ocr_det_max_side: u32,
     pub last_raw_ocr: Option<LastRawOcr>,
     /// Current OCR blocks (mirrored to `AppState::latest_ocr_blocks`).
     pub ocr_blocks: Vec<OcrBlock>,
@@ -258,6 +259,7 @@ impl Pipeline {
             ocr_tier: ocr_cfg.model_tier,
             ocr_device: ocr_cfg.device,
             ocr_layout: ocr_cfg.uses_layout(),
+            ocr_det_max_side: ocr_cfg.det_max_side,
             last_raw_ocr: None,
             ocr_blocks: Vec::new(),
             captions: Vec::new(),
