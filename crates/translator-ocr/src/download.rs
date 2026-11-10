@@ -3,11 +3,13 @@
 use std::path::Path;
 
 use tokio::{fs, sync::watch, task::JoinHandle};
-use translator_core::{ModelArtifact, ModelKind, ModelTier, OcrConfig, OcrDevice, PipelineStatus, download_artifacts, part_path};
+use translator_core::{
+    ModelArtifact, ModelKind, ModelTier, OcrConfig, OcrDevice, OcrModel, PipelineStatus, V5Det, download_artifacts, part_path,
+};
 
 use crate::{
     OcrEngine, OcrError,
-    models::{LAYOUT_ARTIFACT, artifacts_for_tier},
+    models::{LAYOUT_ARTIFACT, artifacts},
 };
 
 /// Latest download / ORT-load phase (`watch` coalesces to the newest value).
@@ -23,6 +25,8 @@ pub enum ModelLoadUpdate {
 pub struct ModelLoadTask {
     pub rx: watch::Receiver<ModelLoadUpdate>,
     pub tier: ModelTier,
+    pub model: OcrModel,
+    pub v5_det: V5Det,
     pub device: OcrDevice,
     /// Built with PP-DocLayoutV3 ([`OcrConfig::uses_layout`]).
     pub layout: bool,
@@ -46,6 +50,8 @@ impl OcrEngine {
     /// Dropping the receiver abandons a pending download; an ORT load still runs to the end.
     pub fn start_load(config: OcrConfig) -> ModelLoadTask {
         let tier = config.model_tier;
+        let model = config.model;
+        let v5_det = config.v5_det;
         let device = config.device;
         let layout = config.uses_layout();
         let det_max_side = config.det_max_side;
@@ -78,6 +84,8 @@ impl OcrEngine {
         ModelLoadTask {
             rx,
             tier,
+            model,
+            v5_det,
             device,
             layout,
             det_max_side,
@@ -117,8 +125,8 @@ async fn download_and_load(config: &OcrConfig, tx: &watch::Sender<ModelLoadUpdat
 
 fn missing_artifacts(models_dir: &Path, config: &OcrConfig) -> Vec<&'static ModelArtifact> {
     let layout = config.uses_layout().then_some(&LAYOUT_ARTIFACT);
-    artifacts_for_tier(config.model_tier)
-        .iter()
+    artifacts(config.model_tier, config.model, config.v5_det)
+        .into_iter()
         .chain(layout)
         .filter(|a| !models_dir.join(a.file_name).is_file())
         .collect()

@@ -91,6 +91,8 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 
 較小較快，較大較準。換尺寸或裝置後 **Save** 會重新載入。
 
+**模型** 預設是上表的 PP-OCRv6 通用；認不準時可改選單一語系的 PP-OCRv5（英文、拉丁、韓文、西里爾、東斯拉夫、希臘、天城文、坦米爾、泰盧固、泰文），只能辨識該語系；大小選 Mobile（預設）或 Server，Server 較準但慢很多、記憶體用量也高很多。檔案來自 [oar-ocr v0.3.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.3.0)，自動下載：`pp-ocrv5_mobile_det.onnx`（約 5 MB）或 `pp-ocrv5_server_det.onnx`（約 84 MB），加上該語系的 `<語系>_pp-ocrv5_mobile_rec.onnx` 與字典（約 8–13 MB）。
+
 多行合併選 **智慧偵測** 時另需 `pp-doclayoutv3_fp16.onnx`（約 65 MB，同樣自動下載，來自本 repo [models-v1](https://github.com/OKTW-Network/Translator-Overlay/releases/tag/models-v1)）：官方 [PaddlePaddle/PP-DocLayoutV3_onnx](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx) 經 `uv run scripts/optimize-doclayout.py inference.onnx pp-doclayoutv3_fp16.onnx` 轉成 FP16 並移除未使用的 mask 輸出。
 
 ## 內建翻譯模型

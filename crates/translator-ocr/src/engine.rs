@@ -1,4 +1,4 @@
-//! PP-OCRv6 (+ optional PP-DocLayoutV3) engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
+//! PP-OCRv6 / PP-OCRv5 (+ optional PP-DocLayoutV3) engine backed by `oar-ocr` (ONNX Runtime + WebGPU / DirectML on Windows).
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use oar_ocr::{
     processors::{BoundingBox, LimitType},
 };
 use tracing::info;
-use translator_core::{LineMergeConfig, LineMergeMode, ModelTier, OcrBlock, OcrConfig, OcrDevice, Rect};
+use translator_core::{LineMergeConfig, LineMergeMode, ModelTier, OcrBlock, OcrConfig, OcrDevice, OcrModel, Rect};
 
 use crate::{
     OcrError,
@@ -51,7 +51,7 @@ impl OcrEngine {
     /// This only requires the files to exist; download verifies sizes.
     pub async fn load(config: &OcrConfig) -> Result<Self, OcrError> {
         let models_dir = config.models_dir_path()?;
-        let paths = ModelPaths::from_dir(&models_dir, config.model_tier);
+        let paths = ModelPaths::from_dir(&models_dir, config.model_tier, config.model, config.v5_det);
         let layout_path = models_dir.join(LAYOUT_ARTIFACT.file_name);
         let use_layout = config.uses_layout();
         if !paths.all_present() || (use_layout && !layout_path.is_file()) {
@@ -61,13 +61,18 @@ impl OcrEngine {
         let det = paths.det.to_string_lossy().into_owned();
         let rec = paths.rec.to_string_lossy().into_owned();
         let dict = paths.dict.to_string_lossy().into_owned();
-        // PaddleOCR's published PP-OCRv6 `DBPostProcess` values; oar-ocr's own defaults are the
-        // stricter PP-OCRv5 ones and shrink every frame to a 960-px long side.
+        // PaddleOCR's published `DBPostProcess` values per model family; oar-ocr's own defaults
+        // unclip wider and shrink every frame to a 960-px long side.
+        let (score_threshold, box_threshold, unclip_ratio, max_candidates) = match (config.model, config.model_tier) {
+            (OcrModel::V6, ModelTier::Tiny) => (0.2, 0.4, 1.4, 3000),
+            (OcrModel::V6, _) => (0.2, 0.45, 1.4, 3000),
+            _ => (0.3, 0.6, 1.5, 1000),
+        };
         let det_config = TextDetectionConfig {
-            score_threshold: 0.2,
-            box_threshold: if config.model_tier == ModelTier::Tiny { 0.4 } else { 0.45 },
-            unclip_ratio: 1.4,
-            max_candidates: 3000,
+            score_threshold,
+            box_threshold,
+            unclip_ratio,
+            max_candidates,
             // "No shrink" stops at oar-ocr's 4000-px out-of-memory guard.
             limit_side_len: Some(if config.det_max_side == 0 { 4000 } else { config.det_max_side }),
             limit_type: Some(LimitType::Max),
@@ -104,7 +109,7 @@ impl OcrEngine {
             dict = %paths.dict.display(),
             device = ?config.device,
             layout = use_layout,
-            "PP-OCRv6 engine loaded (oar-ocr / ONNX Runtime)"
+            "OCR engine loaded (oar-ocr / ONNX Runtime)"
         );
 
         Ok(Self {

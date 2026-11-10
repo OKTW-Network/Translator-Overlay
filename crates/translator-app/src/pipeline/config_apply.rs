@@ -73,8 +73,8 @@ impl Pipeline {
     pub(crate) async fn apply_config(&mut self, cfg: AppConfig) {
         // Threshold / filter / merge knobs change how raw blocks are derived.
         self.forget_raw_ocr();
-        let engine_reload = (self.ocr_tier, self.ocr_device, self.ocr_layout, self.ocr_det_max_side)
-            != (cfg.ocr.model_tier, cfg.ocr.device, cfg.ocr.uses_layout(), cfg.ocr.det_max_side);
+        let engine_reload = (self.ocr_tier, self.ocr_model, self.ocr_v5_det, self.ocr_device, self.ocr_layout, self.ocr_det_max_side)
+            != (cfg.ocr.model_tier, cfg.ocr.model, cfg.ocr.v5_det, cfg.ocr.device, cfg.ocr.uses_layout(), cfg.ocr.det_max_side);
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
         if self.session.set_min_interval(cfg.capture.frame_interval()) {
@@ -145,6 +145,8 @@ impl Pipeline {
 
         if engine_reload {
             self.ocr_tier = cfg.ocr.model_tier;
+            self.ocr_model = cfg.ocr.model;
+            self.ocr_v5_det = cfg.ocr.v5_det;
             self.ocr_device = cfg.ocr.device;
             self.ocr_layout = cfg.ocr.uses_layout();
             self.ocr_det_max_side = cfg.ocr.det_max_side;
@@ -190,14 +192,14 @@ impl Pipeline {
     pub(crate) fn start_model_load(&mut self) {
         let desired = self.state.read().config.ocr.clone();
         if let Some(job) = self.model_load.as_ref() {
-            if (job.tier, job.device, job.layout, job.det_max_side)
-                == (desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side)
+            if (job.tier, job.model, job.v5_det, job.device, job.layout, job.det_max_side)
+                == (desired.model_tier, desired.model, desired.v5_det, desired.device, desired.uses_layout(), desired.det_max_side)
             {
                 info!(tier = ?desired.model_tier, device = ?desired.device, layout = job.layout, "OCR model load already in progress");
             } else {
                 info!(
-                    in_flight = ?(job.tier, job.device, job.layout, job.det_max_side),
-                    desired = ?(desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side),
+                    in_flight = ?(job.tier, job.model, job.v5_det, job.device, job.layout, job.det_max_side),
+                    desired = ?(desired.model_tier, desired.model, desired.v5_det, desired.device, desired.uses_layout(), desired.det_max_side),
                     "OCR model load already in progress for another engine; will restart after it finishes"
                 );
             }
@@ -207,6 +209,8 @@ impl Pipeline {
 
         let task = OcrEngine::start_load(desired);
         self.ocr_tier = task.tier;
+        self.ocr_model = task.model;
+        self.ocr_v5_det = task.v5_det;
         self.ocr_device = task.device;
         self.ocr_layout = task.layout;
         self.ocr_det_max_side = task.det_max_side;
@@ -221,7 +225,8 @@ impl Pipeline {
             return;
         };
         let sender_gone = job.rx.has_changed().is_err();
-        let (tier, device, layout, det_max_side) = (job.tier, job.device, job.layout, job.det_max_side);
+        let (tier, model, v5_det, device, layout, det_max_side) =
+            (job.tier, job.model, job.v5_det, job.device, job.layout, job.det_max_side);
         let finished = match job.rx.borrow_and_update().clone() {
             ModelLoadUpdate::Progress(status) if !sender_gone => {
                 self.state.write().status = status;
@@ -233,10 +238,12 @@ impl Pipeline {
         // The job is done, or its task ended without a result.
         self.model_load = None;
         let desired = self.state.read().config.ocr.clone();
-        if (tier, device, layout, det_max_side) != (desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side) {
+        if (tier, model, v5_det, device, layout, det_max_side)
+            != (desired.model_tier, desired.model, desired.v5_det, desired.device, desired.uses_layout(), desired.det_max_side)
+        {
             info!(
-                finished = ?(tier, device, layout, det_max_side),
-                desired = ?(desired.model_tier, desired.device, desired.uses_layout(), desired.det_max_side),
+                finished = ?(tier, model, v5_det, device, layout, det_max_side),
+                desired = ?(desired.model_tier, desired.model, desired.v5_det, desired.device, desired.uses_layout(), desired.det_max_side),
                 "OCR load ended for a stale engine; starting the desired one"
             );
             self.start_model_load();

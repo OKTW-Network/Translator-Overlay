@@ -1,7 +1,7 @@
 //! OCR settings: model, timing, detection, and line merge.
 
 use rust_i18n::t;
-use translator_core::{LineJoin, LineMergeConfig, LineMergeMode, LineMergeOrder, ModelTier, OcrDevice};
+use translator_core::{LineJoin, LineMergeConfig, LineMergeMode, LineMergeOrder, ModelTier, OcrDevice, OcrModel, V5Det};
 use translator_ocr::memory_estimate;
 use translator_winui::{Border, HorizontalAlignment, InfoBar, Layout, Result, StackPanel, VerticalAlignment};
 
@@ -130,26 +130,91 @@ fn rules_only(m: &LineMergeConfig) -> bool {
 
 pub fn ocr_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     const TIERS: [ModelTier; 3] = [ModelTier::Tiny, ModelTier::Small, ModelTier::Medium];
+    const V5_DETS: [V5Det; 2] = [V5Det::Mobile, V5Det::Server];
     const DEVICES: [OcrDevice; 3] = [OcrDevice::Webgpu, OcrDevice::Directml, OcrDevice::Cpu];
     const DET_SIDES: [u32; 4] = [0, 1920, 1280, 960];
     const ORDERS: [LineMergeOrder; 2] = [LineMergeOrder::LeftToRightTopToBottom, LineMergeOrder::TopToBottomRightToLeft];
+
+    const MODELS: [(OcrModel, &str); 11] = [
+        (OcrModel::V6, "ocr.model_general"),
+        (OcrModel::V5English, "ocr.model_english"),
+        (OcrModel::V5Latin, "ocr.model_latin"),
+        (OcrModel::V5Korean, "ocr.model_korean"),
+        (OcrModel::V5Cyrillic, "ocr.model_cyrillic"),
+        (OcrModel::V5EastSlavic, "ocr.model_east_slavic"),
+        (OcrModel::V5Greek, "ocr.model_greek"),
+        (OcrModel::V5Devanagari, "ocr.model_devanagari"),
+        (OcrModel::V5Tamil, "ocr.model_tamil"),
+        (OcrModel::V5Telugu, "ocr.model_telugu"),
+        (OcrModel::V5Thai, "ocr.model_thai"),
+    ];
+    let mut model_combo = Combo::new("", {
+        let cx = cx.clone();
+        move |idx| {
+            let Some(&(model, _)) = idx.and_then(|i| MODELS.get(i)) else {
+                return;
+            };
+            cx.with_mut(|ui| {
+                if ui.draft.ocr.model != model {
+                    ui.draft.ocr.model = model;
+                    mark_dirty(ui);
+                }
+            });
+        }
+    })?;
+    model_combo.cb.width(200.0)?.valign(VerticalAlignment::Center)?;
+    let model_card = settings_card("ocr-model", &t!("ocr.model_pick"), Some(&t!("ocr.model_pick_desc")), &model_combo.cb)?;
+    b.add(move |ui, _| {
+        let labels = MODELS.iter().map(|(_, key)| t!(*key).into_owned()).collect();
+        let selected = MODELS.iter().position(|(model, _)| *model == ui.draft.ocr.model);
+        model_combo.set(labels, selected, true)
+    });
+
+    let tier_card = radio_card(
+        b,
+        cx,
+        ("ocr-tier", &t!("ocr.model_size"), &t!("ocr.model_size_desc")),
+        (
+            "ocr-model-tier",
+            &[
+                ("ocr.tiny", Some(64.0), None),
+                ("ocr.small", Some(72.0), None),
+                ("ocr.medium", Some(84.0), None),
+            ],
+            &TIERS,
+        ),
+        false,
+        |ui| (TIERS.iter().position(|&t| t == ui.draft.ocr.model_tier).unwrap_or(1), true),
+        |ui, v| ui.draft.ocr.model_tier = v,
+    )?;
+    let v5_det_card = radio_card(
+        b,
+        cx,
+        ("ocr-v5-det", &t!("ocr.model_size"), &t!("ocr.model_size_desc")),
+        ("ocr-v5-det", &[("ocr.v5_mobile", Some(84.0), None), ("ocr.v5_server", Some(84.0), None)], &V5_DETS),
+        false,
+        |ui| (V5_DETS.iter().position(|&d| d == ui.draft.ocr.v5_det).unwrap_or(0), true),
+        |ui, v| ui.draft.ocr.v5_det = v,
+    )?;
+    // Each model family has its own sizes.
+    let (tier_el, v5_det_el, mut is_v6) = (tier_card.clone(), v5_det_card.clone(), Prop::default());
+    b.add(move |ui, _| {
+        is_v6.set(ui.draft.ocr.model == OcrModel::V6, |&v6| {
+            tier_el.visible(v6)?;
+            v5_det_el.visible(!v6).map(drop)
+        })
+    });
 
     let model = column(4.0)?;
     children!(model;
         section_header(&t!("ocr.model"))?,
         memory_infobar(b, |ui| {
             let ocr = &ui.draft.ocr;
-            memory_estimate(ocr.model_tier, ocr.device, ocr.uses_layout(), ocr.det_max_side)
+            memory_estimate(ocr.model_tier, ocr.model, ocr.v5_det, ocr.device, ocr.uses_layout(), ocr.det_max_side)
         })?,
-        radio_card(
-            b,
-            cx,
-            ("ocr-tier", &t!("ocr.model_size"), &t!("ocr.model_size_desc")),
-            ("ocr-model-tier", &[("ocr.tiny", Some(64.0), None), ("ocr.small", Some(72.0), None), ("ocr.medium", Some(84.0), None)], &TIERS),
-            false,
-            |ui| (TIERS.iter().position(|&t| t == ui.draft.ocr.model_tier).unwrap_or(1), true),
-            |ui, v| ui.draft.ocr.model_tier = v,
-        )?,
+        model_card.root,
+        tier_card,
+        v5_det_card,
         radio_card(
             b,
             cx,

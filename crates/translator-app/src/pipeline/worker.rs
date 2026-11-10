@@ -13,7 +13,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use translator_capture::{CaptureSession, CapturedFrame};
-use translator_core::{AppState, HotkeyAction, ModelTier, OcrBlock, OcrDevice, PipelineStatus, Rect, TranslatedBlock, normalize_ocr_text};
+use translator_core::{
+    AppState, HotkeyAction, ModelTier, OcrBlock, OcrDevice, OcrModel, PipelineStatus, Rect, TranslatedBlock, V5Det, normalize_ocr_text,
+};
 use translator_ocr::{BlockPersistenceFilter, ModelLoadTask, OcrEngine, OcrError, StabilityGate};
 use translator_overlay::{OverlayCommand, OverlayController, OverlayEvent};
 use translator_translate::{Conversation, PageResult, TranslateClient, TranslationCache};
@@ -184,6 +186,8 @@ pub(crate) struct Pipeline {
     pub preload: Option<CancellationToken>,
     pub model_load: Option<ModelLoadTask>,
     pub ocr_tier: ModelTier,
+    pub ocr_model: OcrModel,
+    pub ocr_v5_det: V5Det,
     pub ocr_device: OcrDevice,
     pub ocr_layout: bool,
     pub ocr_det_max_side: u32,
@@ -257,6 +261,8 @@ impl Pipeline {
             preload: None,
             model_load: None,
             ocr_tier: ocr_cfg.model_tier,
+            ocr_model: ocr_cfg.model,
+            ocr_v5_det: ocr_cfg.v5_det,
             ocr_device: ocr_cfg.device,
             ocr_layout: ocr_cfg.uses_layout(),
             ocr_det_max_side: ocr_cfg.det_max_side,

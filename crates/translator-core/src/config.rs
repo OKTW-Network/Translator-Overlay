@@ -12,7 +12,7 @@ use crate::{
     hotkey::HotkeyConfig,
     paths::{PathError, resolve_under_exe},
     toml_file::{TomlFileError, parse_file, save_toml},
-    types::{ModelTier, OcrDevice},
+    types::{ModelTier, OcrDevice, OcrModel, V5Det},
 };
 
 /// Control-window language stored in `config.toml` as `en`, `zh-Hant`, or `zh-Hans`.
@@ -471,8 +471,13 @@ impl TranslationConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OcrConfig {
-    /// PP-OCRv6 tier: tiny | small | medium
+    /// `v6` (PP-OCRv6 general) or one PP-OCRv5 script model such as `v5_korean`.
+    /// Reloads the engine when changed.
+    pub model: OcrModel,
+    /// PP-OCRv6 tier: tiny | small | medium. PP-OCRv5 models ignore it.
     pub model_tier: ModelTier,
+    /// PP-OCRv5 detection model: mobile | server. PP-OCRv6 ignores it.
+    pub v5_det: V5Det,
     /// ONNX Runtime device. Reloads the engine when changed.
     pub device: OcrDevice,
     /// Detection shrinks a frame whose long side exceeds this many pixels; 0 = no shrink.
@@ -501,9 +506,11 @@ pub struct OcrConfig {
 impl Default for OcrConfig {
     fn default() -> Self {
         Self {
+            model: OcrModel::V6,
             model_tier: ModelTier::Small,
+            v5_det: V5Det::Mobile,
             device: OcrDevice::Webgpu,
-            det_max_side: 0,
+            det_max_side: 1280,
             models_dir: "models".to_string(),
             confidence_threshold: 0.8,
             settle_ms: 500,
@@ -811,7 +818,7 @@ start_pause = "f8"
         let omitted: AppConfig = toml::from_str("[api]\nmodel = \"x\"\n").unwrap();
         assert_eq!(omitted.ui.language, None);
         let dumped = toml::to_string(&AppConfig::default()).unwrap();
-        assert!(!dumped.contains("language"), "unset language must be omitted, got:\n{dumped}");
+        assert!(!dumped.contains("\nlanguage"), "unset language must be omitted, got:\n{dumped}");
 
         for (raw, lang) in [
             ("en", UiLanguage::En),

@@ -230,6 +230,34 @@ pub enum ModelTier {
     Medium,
 }
 
+/// OCR model: PP-OCRv6 general (sized by [`ModelTier`]), or PP-OCRv5 with a recognizer
+/// trained for one script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrModel {
+    #[default]
+    V6,
+    V5English,
+    V5Latin,
+    V5Korean,
+    V5Cyrillic,
+    V5EastSlavic,
+    V5Greek,
+    V5Devanagari,
+    V5Tamil,
+    V5Telugu,
+    V5Thai,
+}
+
+/// PP-OCRv5 detection model size (its recognizers come in one size).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum V5Det {
+    #[default]
+    Mobile,
+    Server,
+}
+
 /// ONNX Runtime device for the OCR session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
