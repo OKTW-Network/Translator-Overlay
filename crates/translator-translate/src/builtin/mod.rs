@@ -681,7 +681,10 @@ impl Loaded {
             }
             ids.push(next);
             text = self.tokenizer.decode(&ids[prompt_len..], true)?;
-            on_text(&text);
+            // A byte-level token can end mid-character, which decodes to U+FFFD until the next token completes it.
+            if !text.ends_with('\u{FFFD}') {
+                on_text(&text);
+            }
             if decoding.shape.as_ref().is_some_and(|s| s.done(shape_state)) {
                 break;
             }
