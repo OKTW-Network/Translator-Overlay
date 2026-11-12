@@ -109,9 +109,9 @@ Sources (each downloaded to its own subdirectory under `models/`):
 | Gemma 4 12B | q4 | 7.6 GB |
 | Gemma 4 26B A4B | q4f16 | 14.3 GB |
 | Gemma 4 26B A4B | q4 | 15.9 GB |
-| Hy-MT2 1.8B | q4f16 | 1.3 GB |
+| Hy-MT2 1.8B | q4f16 | 1.4 GB |
 | Hy-MT2 1.8B | fp16 | 3.6 GB |
-| Hy-MT2 7B | q4f16 | 4.7 GB |
+| Hy-MT2 7B | q4f16 | 5.0 GB |
 | Hy-MT2 7B | fp16 | 15.0 GB |
 | Hy-MT2 30B A3B | q4f16 | 16.3 GB |
 | Qwen3.8 27B | q4f16 | 15.2 GB |

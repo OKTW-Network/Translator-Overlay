@@ -259,8 +259,8 @@ impl BuiltinModelSpec {
             OcrDevice::Directml => (0, 0),
             // Each 32-weight 4-bit block is 16 bytes plus its scale, which ORT's CPU kernels keep as
             // fp32: q4f16's 2-byte scales grow it by 10/9.
-            // shortcut: 26B's QMoE keeps its FC3 scales fp16, so 26B q4f16 is ~0.5 GB high, and Hy-MT2
-            // (fp16 weights, or 4-bit blocks of 128) comes out 7–11% high; fine unless CPU estimates need
+            // shortcut: 26B's QMoE keeps its FC3 scales fp16, so 26B q4f16 is ~0.5 GB high, and Hy-MT2 fp16
+            // (and 30B, whose QMoE keeps blocks of 128) comes out 7–11% high; fine unless CPU estimates need
             // to be exact.
             OcrDevice::Cpu => (0, if e == 2 { weights * 10 / 9 } else { weights } + kv + ram),
         }
@@ -327,8 +327,8 @@ const GEMMA4_26B_SHAPE: ArchShape = ArchShape {
     gqa_512_layers: 5,
 };
 
-const HY_MT2_1_8B: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/4eba3702a3c289d4842b684161cfa4d0b9e8e3ff";
-const HY_MT2_1_8B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/4eba3702a3c289d4842b684161cfa4d0b9e8e3ff/onnx";
+const HY_MT2_1_8B: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/b9a81a759e3c5dd319d258ec446dede24724ada4";
+const HY_MT2_1_8B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/b9a81a759e3c5dd319d258ec446dede24724ada4/onnx";
 const HY_MT2_1_8B_TOKENIZER: ModelArtifact = art(HY_MT2_1_8B, "tokenizer.json", 9_527_287);
 const HY_MT2_1_8B_SHAPE: ArchShape = ArchShape {
     lm_head_bytes: 494_870_528,
@@ -339,8 +339,8 @@ const HY_MT2_1_8B_SHAPE: ArchShape = ArchShape {
     gqa_512_layers: 0,
 };
 
-const HY_MT2_7B: &str = "https://huggingface.co/james58899/Hy-MT2-7B-ONNX/resolve/a1390f8c0cfc1272e0b62d97289d75a7cd395e3b";
-const HY_MT2_7B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-7B-ONNX/resolve/a1390f8c0cfc1272e0b62d97289d75a7cd395e3b/onnx";
+const HY_MT2_7B: &str = "https://huggingface.co/james58899/Hy-MT2-7B-ONNX/resolve/b006db3cf76363334fb60b82a1c50ed5ac682ce1";
+const HY_MT2_7B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-7B-ONNX/resolve/b006db3cf76363334fb60b82a1c50ed5ac682ce1/onnx";
 const HY_MT2_7B_TOKENIZER: ModelArtifact = art(HY_MT2_7B, "tokenizer.json", 16_388_221);
 const HY_MT2_7B_SHAPE: ArchShape = ArchShape {
     lm_head_bytes: 1_049_944_064,
@@ -351,8 +351,8 @@ const HY_MT2_7B_SHAPE: ArchShape = ArchShape {
     gqa_512_layers: 0,
 };
 
-const HY_MT2_30B: &str = "https://huggingface.co/james58899/Hy-MT2-30B-A3B-ONNX/resolve/eb24537e937a4faa6be21d594ca62b19e4b94300";
-const HY_MT2_30B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-30B-A3B-ONNX/resolve/eb24537e937a4faa6be21d594ca62b19e4b94300/onnx";
+const HY_MT2_30B: &str = "https://huggingface.co/james58899/Hy-MT2-30B-A3B-ONNX/resolve/31dd1708b5909445b9a363b9b774e62c67959f2b";
+const HY_MT2_30B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-30B-A3B-ONNX/resolve/31dd1708b5909445b9a363b9b774e62c67959f2b/onnx";
 /// The untied `lm_head` sits in the decoder's own external data.
 const HY_MT2_30B_SHAPE: ArchShape = ArchShape {
     lm_head_bytes: 0,
@@ -525,7 +525,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     BuiltinModelSpec {
         id: "hy-mt2-1.8b-q4f16",
-        label: "Hy-MT2 1.8B · q4f16 (1.3 GB)",
+        label: "Hy-MT2 1.8B · q4f16 (1.4 GB)",
         arch: BuiltinArch::HyMt2Small,
         dir: "hy-mt2-1.8b",
         tokenizer: HY_MT2_1_8B_TOKENIZER,
@@ -534,8 +534,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx_data", 494_870_528),
         ],
         decoder: &[
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx", 239_026),
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx_data", 796_135_424),
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx", 238_998),
+            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx_data", 868_487_168),
         ],
 
         elem_bytes: 2,
@@ -566,7 +566,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     BuiltinModelSpec {
         id: "hy-mt2-7b-q4f16",
-        label: "Hy-MT2 7B · q4f16 (4.7 GB)",
+        label: "Hy-MT2 7B · q4f16 (5.0 GB)",
         arch: BuiltinArch::HyMt2Medium,
         dir: "hy-mt2-7b",
         tokenizer: HY_MT2_7B_TOKENIZER,
@@ -575,9 +575,9 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx_data", 1_049_944_064),
         ],
         decoder: &[
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx", 239_944),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_994_293_248),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_604_952_064),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx", 240_352),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_986_805_760),
+            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_939_595_264),
         ],
 
         elem_bytes: 2,
@@ -623,15 +623,15 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
             art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx_data", 494_927_872),
         ],
         decoder: &[
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx", 498_896),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_990_320_128),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_947_893_760),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_947_893_760),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_947_893_760),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_947_893_760),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_947_893_760),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_947_893_760),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 1_612_460_032),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx", 498_756),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_999_667_200),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_955_577_856),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_954_529_280),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_954_529_280),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_954_529_280),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_954_529_280),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_954_529_280),
+            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 1_617_104_896),
             art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_8", 494_927_872),
         ],
 
