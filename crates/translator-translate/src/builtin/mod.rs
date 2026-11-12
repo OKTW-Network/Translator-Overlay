@@ -1,7 +1,8 @@
 //! Built-in ONNX LLM: download, load, and generation with an on-device KV cache.
 //!
 //! Models follow the onnx-community layout: `embed_tokens` (ids → embeddings) feeding a merged
-//! decoder with `past_key_values.*` inputs and `present.*` outputs.
+//! decoder with `past_key_values.*` inputs and `present.*` outputs: attention KV that grows with the
+//! context, and fixed-size state (Qwen3.5's linear-attention layers).
 
 mod catalog;
 
@@ -205,10 +206,26 @@ struct Loaded {
 struct KvSlot {
     past: String,
     present: String,
-    heads: i64,
-    head_dim: i64,
+    /// The input's shape, dynamic dimensions negative: `[batch, heads, sequence, head_dim]` for
+    /// attention KV. A shape whose only dynamic dimension is the batch, or with none, is fixed-size state.
+    dims: Vec<i64>,
     /// See [`crate::builtin::catalog::BuiltinArch::kv_in_place`].
     in_place: bool,
+}
+
+impl KvSlot {
+    /// `dims` for batch 1 and a `sequence`-long sequence axis.
+    fn shape(&self, sequence: i64) -> Vec<i64> {
+        self.dims
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| match (i, d) {
+                (_, d) if d >= 0 => d,
+                (0, _) => 1,
+                _ => sequence,
+            })
+            .collect()
+    }
 }
 
 /// Device KV for `ids` (every token fed so far), reused when the next prompt extends it.
@@ -461,14 +478,10 @@ impl Loaded {
                 continue;
             };
             let dims = input.dtype().tensor_shape().ok_or_else(|| missing("KV shape"))?;
-            let &[_, heads, _, head_dim] = &dims[..] else {
-                return Err(ort::Error::new(format!("{}: expected a 4-D KV input", input.name())));
-            };
             kv.push(KvSlot {
                 past: input.name().to_string(),
                 present: format!("present.{layer}"),
-                heads,
-                head_dim,
+                dims: dims.to_vec(),
                 in_place: false,
             });
             kv_type = input.dtype().tensor_type().unwrap_or(kv_type);
@@ -476,11 +489,12 @@ impl Loaded {
         // `present.22.key` -> layer `22`.
         let layers: Vec<_> = kv
             .iter()
-            .map(|s| (s.present["present.".len()..].rsplit_once('.').map_or("", |(layer, _)| layer), s.head_dim))
+            .map(|s| (s.present["present.".len()..].rsplit_once('.').map_or("", |(layer, _)| layer), s.dims.last().copied().unwrap_or(0)))
             .collect();
         let in_place = spec.arch.kv_in_place(&layers, spec.kv_gqa_only);
         for (slot, in_place) in kv.iter_mut().zip(in_place) {
-            slot.in_place = in_place;
+            // Fixed-size state has no sequence axis to append along.
+            slot.in_place = in_place && slot.dims.iter().skip(1).any(|&d| d < 0);
         }
         let per_layer_inputs = decoder.inputs().iter().any(|i| i.name() == "per_layer_inputs");
         let kv_alloc = Allocator::new(&decoder, kv_memory(device)?)?;
@@ -508,7 +522,8 @@ impl Loaded {
         })
     }
 
-    /// The cache for a fresh prefill: in-place slots get a `context`-long buffer, the rest are empty.
+    /// The cache for a fresh prefill: in-place slots get a `context`-long buffer, the rest are empty
+    /// (fixed-size state: zeros).
     /// In-place buffers of `stale` (a dropped cache with the same `context`, or empty) are kept: the
     /// prefill overwrites them from position 0, and ORT frees a dropped buffer only after the next
     /// run, so new ones would briefly hold a second copy of the KV.
@@ -522,12 +537,13 @@ impl Loaded {
                     if let Some(old) = old {
                         return Ok(old);
                     }
-                    return Ok(DynTensor::new(&self.kv_alloc, self.kv_type, [1, s.heads, context as i64, s.head_dim])?.into_dyn());
+                    return Ok(DynTensor::new(&self.kv_alloc, self.kv_type, s.shape(context as i64))?.into_dyn());
                 }
-                let shape = [1, s.heads, 0, s.head_dim];
+                let shape = s.shape(0);
+                let len = shape.iter().product::<i64>() as usize;
                 Ok(match self.kv_type {
-                    TensorElementType::Float16 => Tensor::<f16>::from_array((shape, Vec::new()))?.into_dyn(),
-                    _ => Tensor::<f32>::from_array((shape, Vec::new()))?.into_dyn(),
+                    TensorElementType::Float16 => Tensor::from_array((shape, vec![f16::ZERO; len]))?.into_dyn(),
+                    _ => Tensor::from_array((shape, vec![0_f32; len]))?.into_dyn(),
                 })
             })
             .collect()
@@ -552,7 +568,8 @@ impl Loaded {
             }
             // In-place KV past the shared tokens just gets overwritten, so a retry, a request after a
             // cancelled one, or trimmed history still reuses what comes before.
-            // shortcut: out-of-place layers' KV cannot be cut, so those models re-prefill everything.
+            // shortcut: out-of-place layers' KV cannot be cut and fixed-size state cannot be rewound, so
+            // those models re-prefill everything; snapshot the state after the system prompt if that gets slow.
             Some(c) if self.kv.iter().all(|s| s.in_place) => {
                 let ids = self.tokenizer.encode(prompt, false)?.get_ids().to_vec();
                 // Feed at least one token for the logits.

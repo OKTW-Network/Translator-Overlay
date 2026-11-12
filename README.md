@@ -101,6 +101,7 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 
 - [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx)：皆由 Google 的 QAT 檢查點轉換。
 - [Hy-MT2 ONNX](https://huggingface.co/collections/james58899/hy-mt2-onnx)：fp16 由騰訊的原始權重轉換，q4f16 由 Intel 的 AutoRound int4 檢查點轉換。
+- [Qwen3.8 27B 3-bit GSQ ONNX](https://huggingface.co/james58899/Qwen3.8-27B-3Bit-GSQ-ONNX)：由 ISTA-DASLab 的 3-bit GSQ 檢查點轉換。
 
 | 模型 | 量化 | 下載大小 |
 | --- | --- | --- |
@@ -115,6 +116,7 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 | Hy-MT2 7B | q4f16 | 4.7 GB |
 | Hy-MT2 7B | fp16 | 15.0 GB |
 | Hy-MT2 30B A3B | q4f16 | 16.3 GB |
+| Qwen3.8 27B | q4f16 | 15.2 GB |
 
 裝置可選 WebGPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。
 

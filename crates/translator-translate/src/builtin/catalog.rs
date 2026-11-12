@@ -16,6 +16,8 @@ pub enum BuiltinArch {
     HyMt2Medium,
     /// Hy-MT2 30B-A3B.
     HyMt2Moe,
+    /// Qwen3.5 family (Qwen3.8 included): ChatML, linear-attention layers with fixed-size state.
+    Qwen3_5,
 }
 
 impl BuiltinArch {
@@ -74,6 +76,23 @@ impl BuiltinArch {
                 out.push_str("<｜hy_Assistant｜><think></think>");
                 out
             }
+            // Thinking stays off (`enable_thinking=false`): an empty think block opens every model turn.
+            // Earlier model turns keep their untrimmed reply (the official template trims it), like Gemma 4.
+            Self::Qwen3_5 => {
+                let mut out = String::new();
+                if let Some(system) = system.map(str::trim).filter(|s| !s.is_empty()) {
+                    out.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n"));
+                }
+                for m in turns {
+                    match m.role.as_str() {
+                        "user" => out.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", m.content.trim())),
+                        "assistant" => out.push_str(&format!("<|im_start|>assistant\n<think>\n\n</think>\n\n{}<|im_end|>\n", m.content)),
+                        _ => {}
+                    }
+                }
+                out.push_str("<|im_start|>assistant\n<think>\n\n</think>\n\n");
+                out
+            }
             // Thinking stays off: no `<|think|>` in the system turn.
             Self::Gemma4 => {
                 // Earlier model turns keep the empty thought channel and their untrimmed reply (the
@@ -104,6 +123,7 @@ impl BuiltinArch {
             Self::HyMt2Small => &[120020],
             Self::HyMt2Medium => &[127960, 127967],
             Self::HyMt2Moe => &[120025, 120026],
+            Self::Qwen3_5 => &[248046, 248044],
         }
     }
 
@@ -114,12 +134,14 @@ impl BuiltinArch {
             Self::Gemma4 => (1.0, 0.95, 64),
             Self::HyMt2Small | Self::HyMt2Medium => (0.7, 0.8, 20),
             Self::HyMt2Moe => (0.7, 1.0, 0),
+            Self::Qwen3_5 => (1.0, 0.95, 20),
         }
     }
 
     /// For KV inputs given as `(layer, head_dim)` in decoder input order: whether only
     /// `GroupQueryAttention` reads it, which appends into a preallocated
-    /// `[1, heads, context, head_dim]` buffer bound as both past and present.
+    /// `[1, heads, context, head_dim]` buffer bound as both past and present. The loader keeps
+    /// fixed-size state out of place whatever this returns.
     /// `gqa_only`: see [`BuiltinModelSpec::kv_gqa_only`].
     pub fn kv_in_place(self, inputs: &[(&str, i64)], gqa_only: bool) -> Vec<bool> {
         if gqa_only {
@@ -132,8 +154,8 @@ impl BuiltinArch {
                 let donor = |d| inputs.iter().rev().find(|&&(_, d2)| d2 == d).map(|&(layer, _)| layer);
                 inputs.iter().map(|&(layer, d)| Some(layer) != donor(d)).collect()
             }
-            // Every Hy-MT2 entry sets `kv_gqa_only`.
-            Self::HyMt2Small | Self::HyMt2Medium | Self::HyMt2Moe => vec![true; inputs.len()],
+            // Every Hy-MT2 and Qwen entry sets `kv_gqa_only`.
+            Self::HyMt2Small | Self::HyMt2Medium | Self::HyMt2Moe | Self::Qwen3_5 => vec![true; inputs.len()],
         }
     }
 }
@@ -337,6 +359,20 @@ const HY_MT2_30B_SHAPE: ArchShape = ArchShape {
     // 48 layers × K/V × 4 heads × 128.
     kv_elems_per_token: 48 * 2 * 4 * 128,
     heads: 32,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 0,
+};
+
+const QWEN3_8_27B: &str = "https://huggingface.co/james58899/Qwen3.8-27B-3Bit-GSQ-ONNX/resolve/8fb863e04e3f92f68cb853356a83a7ce47409f7d";
+const QWEN3_8_27B_ONNX: &str =
+    "https://huggingface.co/james58899/Qwen3.8-27B-3Bit-GSQ-ONNX/resolve/8fb863e04e3f92f68cb853356a83a7ce47409f7d/onnx";
+/// The untied `lm_head` sits in the decoder's own external data. The 48 linear-attention layers
+/// keep 78 MB of fixed-size state, left to the flat allowance.
+const QWEN3_8_27B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 0,
+    // 16 full-attention layers × K/V × 4 heads × 256.
+    kv_elems_per_token: 16 * 2 * 4 * 256,
+    heads: 24,
     matmul_attn_layers: 0,
     gqa_512_layers: 0,
 };
@@ -604,6 +640,36 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         kv_gqa_only: true,
         empty_thought: false,
     },
+    // ISTA-DASLab's 3-bit GSQ levels, stored losslessly in 4-bit blocks (ORT has no 3-bit kernel). Each
+    // 128-weight group is four blocks of 32 sharing its scale: ORT WebGPU's fast prefill path takes
+    // only block 32 (7× the prefill speed for 1.2 GB of repeated scales).
+    BuiltinModelSpec {
+        id: "qwen3.8-27b-q4f16",
+        label: "Qwen3.8 27B · q4f16 (15.2 GB)",
+        arch: BuiltinArch::Qwen3_5,
+        dir: "qwen3.8-27b",
+        tokenizer: art(QWEN3_8_27B, "tokenizer.json", 12_809_320),
+        embed: &[
+            art(QWEN3_8_27B_ONNX, "embed_tokens_q4f16.onnx", 717),
+            art(QWEN3_8_27B_ONNX, "embed_tokens_q4f16.onnx_data", 685_363_200),
+        ],
+        decoder: &[
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx", 616_490),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_999_589_376),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_983_737_856),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_976_776_704),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_983_758_336),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_999_568_896),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_976_776_704),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_817_501_696),
+            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 715_161_600),
+        ],
+
+        elem_bytes: 2,
+        shape: &QWEN3_8_27B_SHAPE,
+        kv_gqa_only: true,
+        empty_thought: false,
+    },
 ];
 
 #[cfg(test)]
@@ -695,6 +761,12 @@ mod tests {
         for (arch, expected) in cases {
             assert_eq!(arch.render_prompt(&messages, false), expected, "{arch:?}");
         }
+        // Qwen: `apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)`, but
+        // with the earlier reply untrimmed.
+        assert_eq!(
+            BuiltinArch::Qwen3_5.render_prompt(&messages, false),
+            "<|im_start|>system\nsys<|im_end|>\n<|im_start|>user\nu1<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\na1\n<|im_end|>\n<|im_start|>user\nu2<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
         // Without a system message, 7B's first user turn opens with `<|startoftext|>`.
         assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&messages[1..2], false), "<|startoftext|> u1<|extra_0|>");
     }

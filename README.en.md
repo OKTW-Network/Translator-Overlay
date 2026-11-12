@@ -99,6 +99,7 @@ Sources (each downloaded to its own subdirectory under `models/`):
 
 - [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx): all converted from Google's QAT checkpoints.
 - [Hy-MT2 ONNX](https://huggingface.co/collections/james58899/hy-mt2-onnx): fp16 converted from Tencent's original weights, q4f16 from Intel's AutoRound int4 checkpoints.
+- [Qwen3.8 27B 3-bit GSQ ONNX](https://huggingface.co/james58899/Qwen3.8-27B-3Bit-GSQ-ONNX): converted from ISTA-DASLab's 3-bit GSQ checkpoint.
 
 | Model | Quantization | Download size |
 | --- | --- | --- |
@@ -113,6 +114,7 @@ Sources (each downloaded to its own subdirectory under `models/`):
 | Hy-MT2 7B | q4f16 | 4.7 GB |
 | Hy-MT2 7B | fp16 | 15.0 GB |
 | Hy-MT2 30B A3B | q4f16 | 16.3 GB |
+| Qwen3.8 27B | q4f16 | 15.2 GB |
 
 The device is WebGPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
 
