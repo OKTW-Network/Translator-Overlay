@@ -3913,6 +3913,7 @@ version = "0.8.0"
 dependencies = [
  "bytes",
  "hf-xet",
+ "ort-sys",
  "reqwest",
  "serde",
  "thiserror",

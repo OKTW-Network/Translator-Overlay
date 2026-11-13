@@ -1,5 +1,8 @@
 //! Shared types, configuration, and path helpers for Translator Overlay.
 
+// Feature-only dependency (see build.rs); the import keeps cargo's unused-dependency lint quiet.
+use ort_sys as _;
+
 mod api_profiles;
 mod config;
 mod dictionaries;
