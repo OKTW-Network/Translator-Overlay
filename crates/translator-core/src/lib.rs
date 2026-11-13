@@ -1,14 +1,12 @@
 //! Shared types, configuration, and path helpers for Translator Overlay.
 
-// Feature-only dependency (see build.rs); the import keeps cargo's unused-dependency lint quiet.
-use ort_sys as _;
-
 mod api_profiles;
 mod config;
 mod dictionaries;
 mod download;
 mod hotkey;
 mod http;
+mod onnx;
 mod paths;
 mod region_presets;
 mod state;
@@ -22,6 +20,7 @@ pub use crate::{
     download::*,
     hotkey::{HotkeyAction, HotkeyChord, HotkeyConfig, is_modifier_vk, is_win_vk},
     http::http_client,
+    onnx::ort_environment,
     paths::*,
     region_presets::*,
     state::*,

@@ -72,7 +72,7 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 ```
 目標視窗
   → Windows Graphics Capture
-  → PP-OCRv6（oar-ocr / ONNX + WebGPU 或 DirectML，失敗回退 CPU）
+  → PP-OCRv6（ONNX + WebGPU 或 DirectML，失敗回退 CPU）
   → 信心過濾 / 單字元過濾 / 多行合併（規則或 PP-DocLayoutV3）/ block 持續追蹤
   → 穩定閘門
   → LLM 翻譯（session cache + 多輪上下文；內建模型與 HTTP 可串流）

@@ -14,9 +14,7 @@ use std::{
 
 use half::f16;
 use ort::{
-    environment::Environment,
     ep,
-    logging::LogLevel,
     memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType},
     session::Session,
     value::{DynTensor, DynValue, Tensor, TensorElementType},
@@ -245,7 +243,9 @@ fn session(device: OcrDevice, path: &Path) -> ort::Result<Session> {
         OcrDevice::Webgpu => vec![ep::WebGPU::default().build().error_on_failure(), ep::CPU::default().build()],
         OcrDevice::Cpu | OcrDevice::Directml => vec![ep::CPU::default().build()],
     };
-    Session::builder()?.with_execution_providers(eps)?.commit_from_file(path)
+    Session::builder(translator_core::ort_environment()?)?
+        .with_execution_providers(eps)?
+        .commit_from_file(path)
 }
 
 /// Where the KV cache lives. Build this rather than reading [`Allocator::memory_info`]: ort's
@@ -462,10 +462,6 @@ impl Sampling {
 
 impl Loaded {
     fn load(spec: &'static BuiltinModelSpec, device: OcrDevice, dir: &Path) -> ort::Result<Self> {
-        // Same default oar-ocr gives OCR (errors only); whichever loads first configures the shared environment.
-        if ort::init().commit() {
-            Environment::current()?.set_log_level(LogLevel::Error);
-        }
         let tokenizer = Tokenizer::from_file(dir.join(spec.tokenizer.file_name))?;
         // A table lookup: as fast on the CPU, and keeps the embedding tables out of VRAM.
         let embed = session(OcrDevice::Cpu, &dir.join(spec.embed[0].file_name))?;

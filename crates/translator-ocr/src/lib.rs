@@ -1,11 +1,15 @@
-//! PP-OCRv6 inference via `oar-ocr` (ONNX Runtime) and text stability gate.
+//! PP-OCR inference (PaddleOCR's pipeline on ONNX Runtime) and text stability gate.
 
 mod crop;
+mod det;
 mod download;
 mod engine;
 mod filter;
+mod layout;
 mod merge;
 mod models;
+mod raster;
+mod rec;
 mod stability;
 
 use thiserror::Error;

@@ -343,7 +343,7 @@ fn sort_blocks(blocks: Vec<OcrBlock>, cfg: &LineMergeConfig, frame: Frame) -> Ve
     order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
-/// Taller than wide by the same 1.5× oar-ocr uses to rotate a crop for recognition.
+/// Taller than wide by the same 1.5× PaddleOCR uses to rotate a crop for recognition.
 fn is_vertical(b: &OcrBlock) -> bool {
     b.bbox.height >= b.bbox.width * 1.5
 }

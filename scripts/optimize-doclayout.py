@@ -6,7 +6,7 @@
 
 Input: inference.onnx from https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx
 
-* Drop the mask outputs (fetch_name_1/2). oar-ocr reads only the box tensor,
+* Drop the mask outputs (fetch_name_1/2). The app reads only the box tensor,
   but ORT still computed the 300x200x200 masks and copied them off the GPU.
 * FP16 weights/activations, fp32 I/O. The box decode downstream of
   im_shape / scale_factor stays fp32: fp16 has 1 px steps above 1024.

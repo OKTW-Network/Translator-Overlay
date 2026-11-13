@@ -72,7 +72,7 @@ All settings and data live next to the exe (portable):
 ```
 Target window
   → Windows Graphics Capture
-  → PP-OCRv6 (oar-ocr / ONNX + WebGPU or DirectML, falls back to CPU)
+  → PP-OCRv6 (ONNX + WebGPU or DirectML, falls back to CPU)
   → confidence filter / single-char filter / line merge (rules or PP-DocLayoutV3) / block persistence
   → stability gate
   → LLM translation (session cache + multi-turn context; the built-in model and HTTP can stream)

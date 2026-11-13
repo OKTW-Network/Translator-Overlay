@@ -16,7 +16,7 @@ version = "0.8.0"
 
 [workspace.dependencies]
 bytes = "1.12.1"
-image = { version = "0.25.10", default-features = false }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["copy-dylibs", "std", "tracing", "webgpu"] }
 parking_lot = "0.13.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "native-tls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }

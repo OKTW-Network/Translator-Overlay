@@ -126,7 +126,7 @@ $packReadme = @"
 - Windows App Runtime 2.4 (framework-dependent)
   https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads
 - Microsoft Visual C++ Redistributable
-- Network for first-run OCR model download (oar-ocr) and translation API
+- Network for first-run OCR model download and translation API
 
 ## Run
 1. Extract this folder anywhere.

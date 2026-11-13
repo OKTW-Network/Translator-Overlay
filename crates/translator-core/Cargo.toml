@@ -6,8 +6,7 @@ edition = "2024"
 [dependencies]
 bytes = { workspace = true }
 hf-xet = { version = "1.8.0", default-features = false, features = ["native-tls", "no-default-cache"] }
-# Feature-only dependency: switches off ort-sys's build script, see build.rs.
-ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["disable-linking"] }
+ort = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
