@@ -122,7 +122,7 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 
 ## 從原始碼建置
 
-需要 Rust 1.95+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU）：
+需要 Rust 1.100+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU）：
 
 ```powershell
 .\scripts\build-onnxruntime.ps1

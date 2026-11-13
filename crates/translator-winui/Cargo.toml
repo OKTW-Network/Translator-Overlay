@@ -8,5 +8,4 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", 
 windows-collections = "0.100"
 windows-core = "0.100"
 windows-future = "0.100"
-windows-numerics = "0.100"
 windows-reference = "0.100"

@@ -431,6 +431,8 @@ fn target_focused(target: Option<isize>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     fn chord(token: &str) -> HotkeyChord {
@@ -488,7 +490,7 @@ mod tests {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.capturing = Some(HotkeyAction::Stop);
         inner.listen_gen = 4;
-        assert!(matches!(step(&mut inner, key(0x5B, true, false), false), Step::Swallow));
+        assert_matches!(step(&mut inner, key(0x5B, true, false), false), Step::Swallow);
         assert_eq!(inner.snap.capturing, Some(HotkeyAction::Stop));
         let f9 = 0x78;
         let stepped = step(&mut inner, key(f9, true, true), false);
@@ -510,9 +512,9 @@ mod tests {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.capturing = Some(HotkeyAction::Stop);
         // Left Ctrl, Shift, and Alt. Flags stay false: swallowing them skips the system key state.
-        assert!(matches!(step(&mut inner, key(0xA2, false, false), false), Step::Swallow));
-        assert!(matches!(step(&mut inner, key(0xA0, false, false), false), Step::Swallow));
-        assert!(matches!(step(&mut inner, key(0xA4, false, false), false), Step::Swallow));
+        assert_matches!(step(&mut inner, key(0xA2, false, false), false), Step::Swallow);
+        assert_matches!(step(&mut inner, key(0xA0, false, false), false), Step::Swallow);
+        assert_matches!(step(&mut inner, key(0xA4, false, false), false), Step::Swallow);
         match step(&mut inner, key(0x78, false, false), false) {
             Step::Bind { chord, .. } => assert_eq!(chord.to_token(), "ctrl+alt+shift+f9"),
             other => panic!("expected bind, got {other:?}"),
@@ -523,7 +525,7 @@ mod tests {
     fn binding_drops_a_modifier_after_keyup() {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.capturing = Some(HotkeyAction::Retry);
-        assert!(matches!(step(&mut inner, key(0xA2, false, false), false), Step::Swallow));
+        assert_matches!(step(&mut inner, key(0xA2, false, false), false), Step::Swallow);
         release(&mut inner, 0xA2);
         match step(&mut inner, key(0x78, false, false), false) {
             Step::Bind { chord, .. } => assert_eq!(chord.to_token(), "f9"),
@@ -535,8 +537,8 @@ mod tests {
     fn binding_ignores_mouse_and_modifiers() {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.capturing = Some(HotkeyAction::Retry);
-        assert!(matches!(step(&mut inner, key(0x01, false, false), false), Step::Swallow));
-        assert!(matches!(step(&mut inner, key(0xA2, false, true), false), Step::Swallow));
+        assert_matches!(step(&mut inner, key(0x01, false, false), false), Step::Swallow);
+        assert_matches!(step(&mut inner, key(0xA2, false, true), false), Step::Swallow);
         assert_eq!(inner.snap.capturing, Some(HotkeyAction::Retry));
     }
 
@@ -544,34 +546,34 @@ mod tests {
     fn live_win_combo_passes_the_other_key() {
         let mut inner = live("f9");
         let f9 = 0x78;
-        assert!(matches!(step(&mut inner, key(f9, true, false), true), Step::Pass));
+        assert_matches!(step(&mut inner, key(f9, true, false), true), Step::Pass);
         release(&mut inner, f9);
-        assert!(matches!(step(&mut inner, key(f9, false, false), true), Step::Fire(HotkeyAction::StartPause)));
+        assert_matches!(step(&mut inner, key(f9, false, false), true), Step::Fire(HotkeyAction::StartPause));
     }
 
     #[test]
     fn live_uses_tracked_modifiers_and_win() {
         let mut inner = live("ctrl+shift+f8");
-        assert!(matches!(step(&mut inner, key(0xA2, false, false), true), Step::Pass));
-        assert!(matches!(step(&mut inner, key(0xA0, false, false), true), Step::Pass));
-        assert!(matches!(step(&mut inner, key(0x77, false, false), true), Step::Fire(HotkeyAction::StartPause)));
+        assert_matches!(step(&mut inner, key(0xA2, false, false), true), Step::Pass);
+        assert_matches!(step(&mut inner, key(0xA0, false, false), true), Step::Pass);
+        assert_matches!(step(&mut inner, key(0x77, false, false), true), Step::Fire(HotkeyAction::StartPause));
 
         let mut win = live("f9");
-        assert!(matches!(step(&mut win, key(0x5B, false, false), true), Step::Pass));
-        assert!(matches!(step(&mut win, key(0x78, false, false), true), Step::Pass));
+        assert_matches!(step(&mut win, key(0x5B, false, false), true), Step::Pass);
+        assert_matches!(step(&mut win, key(0x78, false, false), true), Step::Pass);
     }
 
     #[test]
     fn live_respects_focus_and_the_master_switch() {
         let mut inner = live("f8");
         let f8 = 0x77;
-        assert!(matches!(step(&mut inner, key(f8, false, false), false), Step::Pass));
+        assert_matches!(step(&mut inner, key(f8, false, false), false), Step::Pass);
         release(&mut inner, f8);
         inner.snap.hotkeys.only_when_target_focused = false;
-        assert!(matches!(step(&mut inner, key(f8, false, false), false), Step::Fire(HotkeyAction::StartPause)));
+        assert_matches!(step(&mut inner, key(f8, false, false), false), Step::Fire(HotkeyAction::StartPause));
         let mut off = live("f8");
         off.snap.hotkeys.enabled = false;
-        assert!(matches!(step(&mut off, key(f8, false, false), true), Step::Pass));
+        assert_matches!(step(&mut off, key(f8, false, false), true), Step::Pass);
     }
 
     #[test]
@@ -579,11 +581,11 @@ mod tests {
         let mut inner = live("f9");
         inner.snap.can[HotkeyAction::StartPause as usize] = false;
         let f9 = 0x78;
-        assert!(matches!(step(&mut inner, key(f9, false, false), true), Step::Pass));
+        assert_matches!(step(&mut inner, key(f9, false, false), true), Step::Pass);
         release(&mut inner, f9);
         inner.snap.can[HotkeyAction::StartPause as usize] = true;
-        assert!(matches!(step(&mut inner, key(f9, false, false), true), Step::Fire(HotkeyAction::StartPause)));
-        assert!(matches!(step(&mut inner, key(f9, false, false), true), Step::Swallow));
+        assert_matches!(step(&mut inner, key(f9, false, false), true), Step::Fire(HotkeyAction::StartPause));
+        assert_matches!(step(&mut inner, key(f9, false, false), true), Step::Swallow);
     }
 
     #[test]
@@ -591,7 +593,7 @@ mod tests {
         let mut inner = live("a");
         inner.snap.hotkeys.set(HotkeyAction::Stop, Some(chord("a")));
         inner.snap.can[HotkeyAction::Stop as usize] = true;
-        assert!(matches!(step(&mut inner, key(u16::from(b'A'), false, false), true), Step::Fire(HotkeyAction::StartPause)));
+        assert_matches!(step(&mut inner, key(u16::from(b'A'), false, false), true), Step::Fire(HotkeyAction::StartPause));
     }
 
     #[test]
@@ -599,7 +601,7 @@ mod tests {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.capturing = Some(HotkeyAction::Retry);
         inner.listen_gen = 9;
-        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::CancelListen { generation: 9 }));
+        assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::CancelListen { generation: 9 });
         assert!(inner.snap.capturing.is_none());
     }
 
@@ -607,19 +609,19 @@ mod tests {
     fn escape_confirms_region_select_when_hotkeys_are_off() {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.region_select_active = true;
-        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::Fire(HotkeyAction::SelectRegion)));
+        assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::Fire(HotkeyAction::SelectRegion));
     }
 
     #[test]
     fn escape_passes_when_not_selecting() {
         let mut inner = inner_with(HotkeySnap::idle());
-        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), true), Step::Pass));
+        assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), true), Step::Pass);
     }
 
     #[test]
     fn escape_with_ctrl_does_not_confirm_select() {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.region_select_active = true;
-        assert!(matches!(step(&mut inner, key(VK_ESCAPE.0, false, true), true), Step::Pass));
+        assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, true), true), Step::Pass);
     }
 }

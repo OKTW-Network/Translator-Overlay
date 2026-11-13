@@ -788,7 +788,7 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
         if let Some(rest) = line.strip_prefix("event:") {
             event = Some(rest.trim().to_string());
         } else if let Some(rest) = line.strip_prefix("data:") {
-            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            let rest = rest.trim_prefix(' ');
             if !data.is_empty() {
                 data.push('\n');
             }
@@ -800,6 +800,8 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     #[test]
@@ -971,10 +973,10 @@ mod tests {
         let completion = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
         assert_eq!(completion.text, "hello");
         assert_eq!(completion.replay_items.len(), 1);
-        assert!(matches!(
+        assert_matches!(
             &completion.replay_items[0],
             ResponseItem::Message { role, content, reasoning_content } if role == "assistant" && content == "hello" && reasoning_content.is_none()
-        ));
+        );
     }
 
     #[test]
@@ -993,10 +995,10 @@ mod tests {
         let completion = completion_from_http_body(HttpApi::ChatCompletions, body).unwrap();
         assert_eq!(completion.text, "hello");
         assert_eq!(completion.replay_items.len(), 1);
-        assert!(matches!(
+        assert_matches!(
             &completion.replay_items[0],
             ResponseItem::Message { content, reasoning_content, .. } if content == "hello" && reasoning_content.is_none()
-        ));
+        );
     }
 
     #[test]

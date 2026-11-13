@@ -502,7 +502,7 @@ fn parse_u32_prefix(s: &str) -> Option<(u32, &str)> {
 
 /// JSON number token; `None` rest = still growing at end of buffer.
 fn parse_json_number_prefix(s: &str) -> Option<(String, Option<&str>)> {
-    let body = s.strip_prefix('-').unwrap_or(s);
+    let body = s.trim_prefix('-');
     let int_digits = body.bytes().take_while(u8::is_ascii_digit).count();
     if int_digits == 0 {
         return None;
@@ -1004,6 +1004,8 @@ pub fn blocks_to_translated_text(blocks: &[TranslatedBlock]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use tokio_util::sync::CancellationToken;
     use translator_core::{ApiConfig, DictionaryPair, ModelProvider, Rect, ServiceTier, TranslationConfig};
 
@@ -1186,10 +1188,10 @@ mod tests {
         let completion = extract_responses_completion(with).unwrap();
         assert_eq!(completion.text, "{\"b\":[]}");
         assert_eq!(completion.replay_items.len(), 2);
-        assert!(matches!(
+        assert_matches!(
             &completion.replay_items[0],
             ResponseItem::Output(v) if v.get("encrypted_content").and_then(serde_json::Value::as_str) == Some("encblob")
-        ));
+        );
 
         let without = r#"{
           "output": [
@@ -1203,7 +1205,7 @@ mod tests {
         let completion = extract_responses_completion(without).unwrap();
         assert_eq!(completion.text, "hello");
         assert_eq!(completion.replay_items.len(), 1);
-        assert!(matches!(&completion.replay_items[0], ResponseItem::Output(_)));
+        assert_matches!(&completion.replay_items[0], ResponseItem::Output(_));
     }
 
     #[test]
@@ -1690,7 +1692,7 @@ mod tests {
             .complete_cancellable(&conv, &CancellationToken::new(), &mut |_| {}, &mut |_| {})
             .await
             .unwrap_err();
-        assert!(matches!(err, TranslateError::MissingBaseUrl));
+        assert_matches!(err, TranslateError::MissingBaseUrl);
         assert_eq!(err.to_string(), "Base URL is empty");
     }
 
@@ -1755,7 +1757,7 @@ mod tests {
             max_retries,
             |request: Conversation, attempt| {
                 // The payload JSON is the first line of the last user message.
-                let payload = request.messages().last().map(|m| m.content.clone()).unwrap_or_default();
+                let payload = request.messages().last().map_or_default(|m| m.content.clone());
                 let json: serde_json::Value = serde_json::from_str(payload.lines().next().unwrap_or_default()).unwrap();
                 requests.push(
                     json["b"]
@@ -1792,7 +1794,7 @@ mod tests {
         let (result, requests, retries) = run_page(Conversation::empty(), &cfg, blocks, 1, replies).await;
         assert_eq!(requests, [vec![1, 2], vec![2]], "only the omitted block is resent");
         assert_eq!(retries, [1]);
-        assert!(matches!(result.error, Some(TranslateError::MissingBlocks(ref ids)) if ids == &[2]));
+        assert_matches!(result.error, Some(TranslateError::MissingBlocks(ref ids)) if ids == &[2]);
         assert_eq!(result.translated.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>(), ["T1"]);
         assert_eq!(result.conversation.turn_count(), 2, "both answered turns are kept");
     }
@@ -1805,7 +1807,7 @@ mod tests {
         let (result, requests, retries) = run_page(Conversation::empty(), &cfg, vec![page_block(1, "A")], 1, replies).await;
         assert_eq!(requests, [vec![1], vec![1]]);
         assert_eq!(retries, [1]);
-        assert!(matches!(result.error, Some(TranslateError::Parse(_))));
+        assert_matches!(result.error, Some(TranslateError::Parse(_)));
         assert_eq!(result.conversation.turn_count(), 0, "no unparsable turn is kept");
         assert!(!result.conversation.messages().iter().any(|m| m.role == "user"), "the failed user turn is rolled back");
     }
@@ -1828,7 +1830,7 @@ mod tests {
         let replies = vec![Err(TranslateError::ContextFull(4096)), Err(TranslateError::ContextFull(4096))];
         let (result, requests, _) = run_page(conv, &cfg, vec![page_block(1, "D")], 0, replies).await;
         assert_eq!(requests.len(), 2, "resent once with a trimmed history");
-        assert!(matches!(result.error, Some(TranslateError::ContextFull(_))), "a trimmed history that still overflows fails");
+        assert_matches!(result.error, Some(TranslateError::ContextFull(_)), "a trimmed history that still overflows fails");
         assert_eq!(result.conversation.turn_count(), 1, "the trim is kept");
     }
 }

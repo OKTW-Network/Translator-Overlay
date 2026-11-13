@@ -303,6 +303,8 @@ impl Pipeline {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use parking_lot::RwLock;
     use translator_core::{AppConfig, AppState, ModelProvider, Rect};
     use translator_ocr::{BlockPersistenceFilter, StabilityGate};
@@ -470,7 +472,7 @@ mod tests {
         p.tick().await;
         let s = p.state.read();
         assert!(!s.auto_running);
-        assert!(matches!(s.status, PipelineStatus::Error { .. }), "{:?}", s.status);
+        assert_matches!(s.status, PipelineStatus::Error { .. });
         assert!(p.next_tick.is_none(), "no more ticks");
     }
 

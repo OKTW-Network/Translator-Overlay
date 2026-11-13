@@ -172,8 +172,7 @@ fn apply_event(event: &Value, text: &mut String, saw_tool: &mut bool) -> TurnSte
             let detail = event
                 .get("errors")
                 .and_then(Value::as_array)
-                .map(|errs| errs.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
-                .unwrap_or_default();
+                .map_or_default(|errs| errs.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "));
             let message = [result.as_str(), detail.as_str(), subtype]
                 .into_iter()
                 .find(|s| !s.trim().is_empty())
@@ -297,7 +296,7 @@ impl ClaudeSession {
                 return Err(TranslateError::CliProtocol(format!("Claude Code initialize failed: {error}")));
             }
             // Only `models` is read; the rest of the response (account details) is ignored.
-            return Ok(event.pointer("/response/response").map(models_from_initialize).unwrap_or_default());
+            return Ok(event.pointer("/response/response").map_or_default(models_from_initialize));
         }
     }
 
@@ -364,7 +363,7 @@ pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Du
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, time::Instant};
+    use std::{assert_matches, path::Path, time::Instant};
 
     use super::*;
 
@@ -588,7 +587,7 @@ mod tests {
 
         messages.push(ChatMessage::assistant(&first));
         messages.push(ChatMessage::user(r#"{"b":[[2,"The traveler knocks again."]]}"#));
-        assert!(matches!(crate::cli::plan_turn(&backend.mirrored, &messages).unwrap(), crate::cli::SessionPlan::Append { .. }));
+        assert_matches!(crate::cli::plan_turn(&backend.mirrored, &messages).unwrap(), crate::cli::SessionPlan::Append { .. });
         let mut partials = 0usize;
         let t0 = Instant::now();
         let second = backend

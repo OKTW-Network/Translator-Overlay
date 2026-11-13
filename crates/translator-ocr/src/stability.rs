@@ -148,6 +148,8 @@ pub enum StabilityOutcome {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use translator_core::{OcrBlock, Rect};
 
     use super::*;
@@ -172,9 +174,9 @@ mod tests {
     fn cold_start_ready_after_two_hits() {
         let mut gate = StabilityGate::new(0);
         let fp = fingerprint("hello");
-        assert!(matches!(gate.observe(fp), StabilityOutcome::Waiting { .. }));
-        assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
-        assert!(matches!(gate.observe(fp), StabilityOutcome::AlreadyEmitted { .. }));
+        assert_matches!(gate.observe(fp), StabilityOutcome::Waiting { .. });
+        assert_matches!(gate.observe(fp), StabilityOutcome::Ready { .. });
+        assert_matches!(gate.observe(fp), StabilityOutcome::AlreadyEmitted { .. });
     }
 
     #[test]
@@ -183,11 +185,11 @@ mod tests {
         let mut gate = StabilityGate::new(0);
         let fp = fingerprint("page");
         let _ = gate.observe(fp);
-        assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
+        assert_matches!(gate.observe(fp), StabilityOutcome::Ready { .. });
 
         gate.reset_all();
-        assert!(matches!(gate.observe(fp), StabilityOutcome::Waiting { .. }));
-        assert!(matches!(gate.observe(fp), StabilityOutcome::Ready { .. }));
+        assert_matches!(gate.observe(fp), StabilityOutcome::Waiting { .. });
+        assert_matches!(gate.observe(fp), StabilityOutcome::Ready { .. });
     }
 
     #[test]
@@ -196,10 +198,10 @@ mod tests {
         let a = fingerprint("menu");
         let b = fingerprint("noise");
         let _ = gate.observe(a);
-        assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
+        assert_matches!(gate.observe(a), StabilityOutcome::Ready { .. });
         // One-off different reading — keep AlreadyEmitted on sticky "menu".
-        assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { fingerprint } if fingerprint == a));
-        assert!(matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. }));
+        assert_matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { fingerprint } if fingerprint == a);
+        assert_matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. });
     }
 
     #[test]
@@ -208,11 +210,11 @@ mod tests {
         let a = fingerprint("old");
         let b = fingerprint("new");
         let _ = gate.observe(a);
-        assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
+        assert_matches!(gate.observe(a), StabilityOutcome::Ready { .. });
         // First b is a blip — still old emitted.
-        assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
+        assert_matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. });
         // The second b confirms the switch.
-        assert!(matches!(gate.observe(b), StabilityOutcome::Ready { fingerprint, .. } if fingerprint == b));
+        assert_matches!(gate.observe(b), StabilityOutcome::Ready { fingerprint, .. } if fingerprint == b);
     }
 
     #[test]
@@ -222,18 +224,18 @@ mod tests {
         let a = fingerprint("alpha");
         let b = fingerprint("beta");
 
-        assert!(matches!(gate.observe(a), StabilityOutcome::Waiting { .. }));
+        assert_matches!(gate.observe(a), StabilityOutcome::Waiting { .. });
         std::thread::sleep(Duration::from_millis(40));
-        assert!(matches!(gate.observe(b), StabilityOutcome::Waiting { .. }));
+        assert_matches!(gate.observe(b), StabilityOutcome::Waiting { .. });
         std::thread::sleep(Duration::from_millis(50));
         // Total wait ≥ 80ms across switches → force translate latest.
-        assert!(matches!(
+        assert_matches!(
             gate.observe(a),
             StabilityOutcome::Ready {
                 fingerprint: fp,
                 ..
             } if fp == a
-        ));
+        );
     }
 
     #[test]
@@ -245,22 +247,22 @@ mod tests {
         let b = fingerprint("line-b");
 
         let _ = gate.observe(a);
-        assert!(matches!(gate.observe(a), StabilityOutcome::Ready { .. }));
+        assert_matches!(gate.observe(a), StabilityOutcome::Ready { .. });
         // Alternating blips: each is only one hit of the other fp.
-        assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
-        assert!(matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. }));
+        assert_matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. });
+        assert_matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. });
         std::thread::sleep(Duration::from_millis(50));
-        assert!(matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. }));
-        assert!(matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. }));
+        assert_matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. });
+        assert_matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. });
         std::thread::sleep(Duration::from_millis(50));
         // Wait clock must survive returns to A; force Ready with divergent B.
-        assert!(matches!(
+        assert_matches!(
             gate.observe(b),
             StabilityOutcome::Ready {
                 fingerprint: fp,
                 ..
             } if fp == b
-        ));
+        );
     }
 
     #[test]
@@ -307,6 +309,6 @@ mod tests {
     fn force_emit_bypasses_wait() {
         let mut gate = StabilityGate::new(10_000);
         let fp = fingerprint("now");
-        assert!(matches!(gate.force_emit(fp), StabilityOutcome::Ready { elapsed_ms: 0, .. }));
+        assert_matches!(gate.force_emit(fp), StabilityOutcome::Ready { elapsed_ms: 0, .. });
     }
 }

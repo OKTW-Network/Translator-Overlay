@@ -445,7 +445,7 @@ fn build_regions_pane(b: &mut Binds<UiShared>, d: &mut Binds<DashSnap>, cx: &UiC
                     return;
                 }
                 ui.pending_save_regions = regions;
-                ui.presets.name_draft = selected_preset(ui).map(|p| p.name.clone()).unwrap_or_default();
+                ui.presets.name_draft = selected_preset(ui).map_or_default(|p| p.name.clone());
                 ui.presets.dialog = NamedDialog::SaveName;
             });
         }

@@ -270,7 +270,7 @@ fn find_on_path(name: &str, path_var: &OsStr) -> Option<PathBuf> {
         vec![name.to_string()]
     };
     std::env::split_paths(path_var)
-        .filter(|dir| !dir.as_os_str().is_empty())
+        .filter(|dir| !dir.is_empty())
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|candidate| candidate.is_file())
 }

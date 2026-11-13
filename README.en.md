@@ -120,7 +120,7 @@ The device is WebGPU (default) or CPU, set separately from the OCR device. **Sto
 
 ## Building from source
 
-Requires Rust 1.95+ (edition 2024) and Visual Studio 2026. Build ONNX Runtime 1.31 (DirectML + WebGPU) once first:
+Requires Rust 1.100+ (edition 2024) and Visual Studio 2026. Build ONNX Runtime 1.31 (DirectML + WebGPU) once first:
 
 ```powershell
 .\scripts\build-onnxruntime.ps1

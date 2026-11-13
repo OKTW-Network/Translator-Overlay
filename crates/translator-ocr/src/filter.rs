@@ -251,7 +251,7 @@ impl BlockPersistenceFilter {
                         track.thrash_since = Some(now);
                     }
 
-                    let pending_key = track.pending_text.as_deref().map(normalize_ocr_text).unwrap_or_default();
+                    let pending_key = track.pending_text.as_deref().map_or_default(normalize_ocr_text);
                     let same_pending = same_reading(&pending_key, &text_key);
                     if !same_pending {
                         track.pending_since = Some(now);

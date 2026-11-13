@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn loop_needs_a_long_repeated_tail() {
-        let period = |p: u32, n: usize| (0..n).map(|i| i as u32 % p).collect::<Vec<_>>();
+        let period = |p: u32, n: usize| Vec::from_fn(n, |i| i as u32 % p);
         assert!(ends_in_loop(&period(1, LOOP_TOKENS)));
         assert!(!ends_in_loop(&period(1, LOOP_TOKENS - 1)));
         assert!(ends_in_loop(&[vec![99; 5], period(7, LOOP_TOKENS)].concat()));
@@ -788,7 +788,7 @@ mod tests {
     fn sampling_respects_top_k_and_top_p() {
         let logits = [0.0, 2.0, 1.9, -1.0, 1.8];
         let mut rng = fastrand::Rng::with_seed(7);
-        let pick = |s: Sampling, rng: &mut fastrand::Rng| (0..200).map(|_| s.pick(&logits, rng)).collect::<Vec<_>>();
+        let pick = |s: Sampling, rng: &mut fastrand::Rng| Vec::from_fn(200, |_| s.pick(&logits, rng));
         let s = Sampling {
             temperature: 1.0,
             top_p: 1.0,
