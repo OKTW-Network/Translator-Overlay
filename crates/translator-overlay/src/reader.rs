@@ -287,6 +287,7 @@ impl ReaderWindow {
             color: fg,
             vcenter: false,
             vertical: None,
+            line_gap: None,
         })?;
         self.present()
     }

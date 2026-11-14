@@ -202,16 +202,12 @@ pub fn glyph_box(rect: SurfaceRect) -> (i32, f32) {
     ((line_side + (w - line_side) * t).round() as i32, t)
 }
 
-/// Initial CreateFontW character-height estimate from the OCR line box.
+/// Em height (CreateFontW `-px`) of the source text in an OCR box.
 ///
-/// Conservative on purpose: GDI/Segoe UI glyphs read larger than the raw
-/// CreateFont height suggests, and vertical OCR boxes are often padded.
-/// The overlay host further shrinks with GetTextMetrics so the cell fits.
+/// The largest font whose em plus the label padding above and below fits the box side.
 pub fn font_height_for(rect: SurfaceRect) -> i32 {
-    let (char_box, vertical) = glyph_box(rect);
-    let fill = 0.68 - 0.10 * vertical;
-    let px = (char_box as f32 * fill).round();
-    px.clamp(8.0, 128.0) as i32
+    let side = glyph_box(rect).0;
+    (8..=side.min(128)).rev().find(|px| px + label_pad(*px) * 2 <= side).unwrap_or(8)
 }
 
 #[cfg(test)]
@@ -282,18 +278,18 @@ mod tests {
         // Small UI label (~12px OCR) must not jump to a fixed 16px floor.
         let small = SurfaceRect { x: 0, y: 0, w: 80, h: 12 };
         let small_px = font_height_for(small);
-        assert!((8..=10).contains(&small_px), "small line box → ~8px font, got {small_px}");
+        assert_eq!(small_px, 8, "small line box → 12 less 2px padding each side");
 
         // Typical body line — under box height so glyphs don't overflow ink.
         let body = SurfaceRect { x: 0, y: 0, w: 200, h: 28 };
         let body_px = font_height_for(body);
-        assert!((16..=22).contains(&body_px), "body line → ~19px font, got {body_px}");
+        assert!((22..=24).contains(&body_px), "body line → ~23px font, got {body_px}");
         assert!(body_px < 28, "font must stay under line box height");
 
         // Large title scales with box (not crushed to 20–28).
         let title = SurfaceRect { x: 0, y: 0, w: 300, h: 64 };
         let title_px = font_height_for(title);
-        assert!((40..=50).contains(&title_px), "title line → ~43px font, got {title_px}");
+        assert!((51..=55).contains(&title_px), "title line → ~53px font, got {title_px}");
     }
 
     #[test]
@@ -321,8 +317,7 @@ mod tests {
         // Tall thin column (vertical CJK / stacked UI): char size ≈ width, not height.
         let vertical = SurfaceRect { x: 0, y: 0, w: 24, h: 220 };
         let px = font_height_for(vertical);
-        // Vertical fill is more conservative (~0.58 of width).
-        assert!((12..=16).contains(&px), "vertical text should size from width (~14px), got {px}");
+        assert_eq!(px, 18, "vertical text should size from width less padding");
         // Must not treat full column height as font size.
         assert!(px < 40, "vertical text must not use full height, got {px}");
     }

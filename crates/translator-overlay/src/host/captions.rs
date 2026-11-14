@@ -3,8 +3,8 @@
 use windows::Win32::{
     Foundation::RECT,
     Graphics::Gdi::{
-        DT_CALCRECT, DT_EDITCONTROL, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_WORDBREAK, DeleteObject, DrawTextW, GetTextMetricsW,
-        HGDIOBJ, SelectObject, TEXTMETRICW,
+        DT_CALCRECT, DT_EDITCONTROL, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_WORDBREAK, DeleteObject, DrawTextW, HGDIOBJ,
+        SelectObject,
     },
 };
 
@@ -61,7 +61,7 @@ impl OverlayHost {
         pending.sort_by_key(|(base, ..)| (base.y, base.x));
         let sources: Vec<SurfaceRect> = pending.iter().map(|(base, ..)| *base).collect();
 
-        let mut labels: Vec<(SurfaceRect, String, i32, bool)> = Vec::with_capacity(pending.len());
+        let mut labels: Vec<(SurfaceRect, String, i32, bool, i32, i32)> = Vec::with_capacity(pending.len());
         for (i, (base, text, span)) in pending.into_iter().enumerate() {
             let obstacles: Vec<SurfaceRect> = sources
                 .iter()
@@ -71,69 +71,56 @@ impl OverlayHost {
                 .chain(labels.iter().map(|(rect, ..)| *rect))
                 .collect();
             let (expanded, font_px, vertical) = self.layout_label(base, &text, span, &obstacles, surface)?;
-            labels.push((expanded, text, font_px, vertical));
+            labels.push((expanded, text, font_px, vertical, span.lines, base.h));
         }
 
         self.surface.ensure(w, h)?;
-        {
-            let buf = self
-                .surface
-                .pixels()
-                .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
-            buf.fill(0);
-            for (rect, ..) in &labels {
-                draw::fill_rect_replace(buf, surface, *rect, bg);
-            }
-        }
+        let missing = || OverlayError::Other("paint bitmap missing".into());
+        self.surface.pixels().ok_or_else(missing)?.fill(0);
         let locale = self.locale.clone();
-        for (rect, text, font_px, vertical) in &labels {
-            self.paint_label(*rect, text, LabelStyle {
-                font_px: *font_px,
-                color: fg,
-                vcenter: false,
-                vertical: vertical.then_some(locale.as_str()),
-            })?;
+        let style = |font_px: i32, vertical: bool, line_gap: Option<(i32, i32)>| LabelStyle {
+            font_px,
+            color: fg,
+            vcenter: false,
+            vertical: vertical.then_some(locale.as_str()),
+            line_gap,
+        };
+
+        let buf = self.surface.pixels().ok_or_else(missing)?;
+        for (rect, ..) in &labels {
+            draw::fill_rect_replace(buf, surface, *rect, bg);
+        }
+        for (rect, text, font_px, vertical, lines, first_h) in &labels {
+            let mut at = *rect;
+            if *vertical {
+                self.paint_label(at, text, style(*font_px, true, None))?;
+                continue;
+            }
+            // A GDI line cell is taller than the source box a label matches, so centre each
+            // text line's cell on a source line: the first on the first, the rest at the
+            // source's line pitch. More text lines than source lines centre as one block.
+            let pad = label_pad(*font_px);
+            let text_h = self.measure_wrapped(text, *font_px, (rect.w - pad * 2).max(8))?.1;
+            let line_h = self.measure_single_line(text, *font_px)?.1;
+            let n = (text_h / line_h).max(1);
+            let first_h = if *lines > 1 { (*first_h).min(rect.h) } else { rect.h };
+            let extra = if *lines > 1 { (rect.h - first_h) / (lines - 1) - line_h } else { 0 };
+            // A font override too big for a source line would spill off the label from there.
+            let on_source_lines = n <= *lines && (n == 1 || extra > 0) && font_px + pad * 2 <= first_h;
+            let band = if on_source_lines { first_h } else { rect.h };
+            let gap = if on_source_lines { extra.max(0) } else { 0 };
+            at.h = text_h + (n - 1) * gap + pad * 2;
+            at.y = (rect.y + (band - (if on_source_lines { line_h } else { text_h })) / 2 - pad).max(0);
+            self.paint_label(at, text, style(*font_px, false, Some((line_h, gap))))?;
         }
         Ok(())
-    }
-
-    /// Pick CreateFont height so the GDI cell fits inside the OCR glyph box.
-    ///
-    /// Fixed ratios still overshoot (Segoe UI cell > requested height; vertical
-    /// OCR width is padded). Shrink until ascent+descent ≤ ~90% of the glyph side.
-    fn fit_font_to_source_box(&mut self, base: SurfaceRect) -> Result<i32, OverlayError> {
-        let target = draw::glyph_box(base).0.max(1);
-        // Leave a little air so ClearType stems don't look larger than source ink.
-        let max_cell = ((target as f32) * 0.90).round().max(8.0) as i32;
-        let mut px = draw::font_height_for(base);
-
-        for _ in 0..6 {
-            self.ensure_font(px)?;
-            let _ = unsafe { SelectObject(self.surface.hdc(), HGDIOBJ(self.hfont.0)) };
-            let mut tm = TEXTMETRICW::default();
-            let cell = if unsafe { GetTextMetricsW(self.surface.hdc(), &mut tm) }.as_bool() {
-                (tm.tmAscent + tm.tmDescent).max(1)
-            } else {
-                px
-            };
-            if cell <= max_cell {
-                break;
-            }
-            let next = ((px as f32) * (max_cell as f32) / (cell as f32)).floor().max(8.0) as i32;
-            if next >= px {
-                px = (px - 1).max(8);
-            } else {
-                px = next;
-            }
-        }
-        Ok(px)
     }
 
     /// Layout one overlay label.
     ///
     /// - Line source: start at the source-box font (or the user `font_px`
-    ///   override) and fit the source line count by first widening up to 1.75×,
-    ///   then shrinking the font to 70%; only then wrap onto extra lines,
+    ///   override) and fit the source line count by first shrinking the font to
+    ///   70%, then widening up to 1.75×; only then wrap onto extra lines,
     ///   shrinking further (down to 8px) while that would reach the next
     ///   obstacle below. Widening stops at the next obstacle on the right.
     ///   Obstacles are the other source boxes and the captions placed so far.
@@ -154,10 +141,7 @@ impl OverlayHost {
         let max_w = (surface.width - base.x).max(1);
         let source_w = span.w.max(base.w).clamp(1, max_w);
         let override_px = self.config.font_px_clamped();
-        let font_px = match override_px {
-            Some(px) => px,
-            None => self.fit_font_to_source_box(base)?,
-        };
+        let font_px = override_px.unwrap_or_else(|| draw::font_height_for(base));
         let min_h = span.h.max(base.h);
 
         if draw::glyph_box(base).1 >= 1.0 {
@@ -199,7 +183,12 @@ impl OverlayHost {
             .fold(surface.height, |b, o| b.min(o.y));
         let room_h = (bottom - base.y).max(min_h);
         let cap = (((source_w as f32) * 1.75).round() as i32).min(right - base.x).max(source_w);
-        let floor = (font_px * 7 / 10).max(8);
+        // A font the user set keeps its size: it widens and wraps instead of shrinking to fit.
+        let floor = if override_px.is_some() {
+            font_px
+        } else {
+            (font_px * 7 / 10).max(8)
+        };
 
         let mut px = font_px;
         loop {
@@ -207,13 +196,15 @@ impl OverlayHost {
             let line_h = self.measure_single_line(text, px)?.1;
             // Tight line spacing leaves `min_h` a few px short of N GDI lines; tilt inflates it past one.
             let source_text_h = (min_h - pad * 2).max(line_h * span.lines);
+            // Widen past the source only once shrinking the font has not made the text fit.
+            let widest = if px > floor { source_w } else { cap };
             let mut box_w = source_w;
             let (text_w, text_h) = loop {
                 let (text_w, text_h) = self.measure_wrapped(text, px, (box_w - pad * 2).max(8))?;
-                if text_h <= source_text_h || box_w >= cap {
+                if text_h <= source_text_h || box_w >= widest {
                     break (text_w, text_h);
                 }
-                box_w = (box_w + px * 2).min(cap);
+                box_w = (box_w + px * 2).min(widest);
             };
             // Extra lines only once the font is at its floor, and only down to the next obstacle.
             let limit = if px > floor {
@@ -223,7 +214,14 @@ impl OverlayHost {
             };
             if text_h <= limit || px <= 8 {
                 let box_w = (text_w + pad * 2).max(source_w).min(cap);
-                let box_h = (text_h + pad * 2).max(px + pad * 2).max(min_h);
+                // Text on the source's own lines keeps the source height; extra lines, or a
+                // font override larger than the source text, grow it.
+                let box_h = if text_h <= line_h * span.lines && px <= draw::font_height_for(base) {
+                    min_h
+                } else {
+                    // Pad the glyphs, not the taller GDI cells, as the source box does one line.
+                    (text_h - (line_h - px).max(0) + pad * 2).max(min_h)
+                };
                 return Ok((place_label(base, box_w, box_h, surface), px, false));
             }
             px = (px * 9 / 10).min(px - 1).max(8);

@@ -637,7 +637,61 @@ mod tests {
     }
 
     #[test]
-    fn long_translation_widens_then_shrinks_then_wraps() -> Result<(), String> {
+    fn wrapped_translation_follows_the_source_line_pitch() -> Result<(), String> {
+        use translator_core::{Rect, TranslatedBlock};
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        use crate::command::OverlayCommand;
+
+        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        // Two source lines spaced far wider than a GDI line cell.
+        host.handle(OverlayCommand::SetBlocks {
+            blocks: vec![TranslatedBlock {
+                id: 1,
+                source: "src".into(),
+                translation: "Please wait right here".into(),
+                confidence: 1.0,
+                bbox: Rect::new(20.0, 20.0, 200.0, 40.0),
+                source_lines: 2,
+                source_height: 140.0,
+                source_width: 200.0,
+            }],
+            locale: "zh-TW".into(),
+            content_width: 400,
+            content_height: 300,
+        });
+        host.apply_overlay(true);
+        let (w, _) = host.surface.size();
+        // Rows holding ink: a second colour besides the background fill.
+        let inked: Vec<usize> = host.surface.pixels().map_or(Vec::new(), |px| {
+            px.chunks(w as usize * 4)
+                .enumerate()
+                .filter(|(_, row)| {
+                    let mut colours = row.as_chunks::<4>().0.iter().filter(|p| p[3] != 0);
+                    colours.next().is_some_and(|first| colours.any(|p| p != first))
+                })
+                .map(|(y, _)| y)
+                .collect()
+        });
+
+        host.teardown();
+        let _ = unsafe { DestroyWindow(target) };
+
+        let (Some(top), Some(bottom)) = (inked.first(), inked.last()) else {
+            return Err("caption was not painted".into());
+        };
+        let gap = inked.windows(2).map(|p| p[1] - p[0]).max().unwrap_or(0);
+        if gap * 3 < bottom - top {
+            return Err(format!("text lines must sit on the source lines, got ink rows {top}..{bottom} with a {gap}px gap"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn long_translation_shrinks_then_widens_then_wraps() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
@@ -720,15 +774,15 @@ mod tests {
         let two_line_base = SurfaceRect {
             x: 20,
             y: 150,
-            w: 120,
+            w: 160,
             h: 28,
         };
-        let (rect_two, ..) = host
-            .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 120, h: 52, lines: 2 }, &[], surface)
+        let (rect_two, font_two, _) = host
+            .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 160, h: 52, lines: 2 }, &[], surface)
             .map_err(|e| e.to_string())?;
-        // Same ink span from one tilted line: widen instead of wrapping.
-        let (rect_tilt, ..) = host
-            .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 120, h: 52, lines: 1 }, &[], surface)
+        // Same ink span from one tilted line: shrink or widen instead of wrapping.
+        let (rect_tilt, font_tilt, _) = host
+            .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 160, h: 52, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
         let (_, font_short, _) = host
             .layout_label(
@@ -785,6 +839,7 @@ mod tests {
             color: draw::Rgba::from_argb(0xFFFF_FFFF),
             vcenter: false,
             vertical: Some("zh-TW"),
+            line_gap: None,
         })
         .map_err(|e| e.to_string())?;
         let buf = host.surface.pixels().ok_or("paint bitmap missing")?;
@@ -811,11 +866,11 @@ mod tests {
             return Err(format!("expected English over a column to widen, got {}", rect_v.w));
         }
 
-        if rect_two.w != 120 || rect_two.h < 52 {
+        if rect_two.w != 160 || rect_two.h < 52 {
             return Err(format!("two-line source must wrap onto its second line before widening, got {rect_two:?}"));
         }
-        if rect_tilt.w <= 120 {
-            return Err(format!("one tilted source line must widen before wrapping, got {rect_tilt:?}"));
+        if rect_tilt.w <= 160 && font_tilt >= font_two {
+            return Err(format!("one tilted source line must shrink or widen before wrapping, got {rect_tilt:?} at {font_tilt}px"));
         }
 
         // Too long for the 1.75× width cap: the font shrinks before wrapping.
@@ -832,8 +887,9 @@ mod tests {
         }
         // Never clipped: past the font floor the text wraps within the width
         // cap, so the box grows taller instead of ending in "…".
-        if rect_h.w != 70 {
-            return Err(format!("expected wrapped width at the 1.75× cap (70px), got {}", rect_h.w));
+        // The box hugs its widest wrapped line, which can stop a few px short of the cap.
+        if !(64..=70).contains(&rect_h.w) {
+            return Err(format!("expected wrapped width near the 1.75× cap (70px), got {}", rect_h.w));
         }
         if rect_h.h <= 28 {
             return Err(format!("expected wrapped height taller than the source line, got {}", rect_h.h));

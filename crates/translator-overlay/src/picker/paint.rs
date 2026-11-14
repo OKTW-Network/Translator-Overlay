@@ -68,6 +68,7 @@ impl OverlayHost {
                 color: text,
                 vcenter: false,
                 vertical: None,
+                line_gap: None,
             })?;
         }
         Ok(())

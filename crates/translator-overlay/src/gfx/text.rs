@@ -42,6 +42,9 @@ pub(crate) struct LabelStyle<'a> {
     /// Columns right to left in this BCP-47 locale (CJK captions over vertical source text).
     /// DirectWrite picks the vertical punctuation and CJK fallback font for the locale.
     pub vertical: Option<&'a str>,
+    /// `(line height, extra px)`: space wrapped lines that far apart, which GDI cannot do.
+    /// The label rect must be tall enough for the spread lines.
+    pub line_gap: Option<(i32, i32)>,
 }
 
 /// DirectWrite / Direct2D for column captions, made on first use on the painting thread.
@@ -255,23 +258,32 @@ pub(crate) fn draw_text_label(
     }
 
     let color = style.color;
-    for row in 0..rh {
-        let y = text_rect.top as usize + row;
-        if y >= surface.height as usize {
+    let cols = rw.min((surface.width as usize).saturating_sub(text_rect.left as usize));
+    let rows = rh.min((surface.height as usize).saturating_sub(text_rect.top as usize));
+    let at = |row: usize, col: usize| (text_rect.top as usize + row) * surface.stride + (text_rect.left as usize + col) * 4;
+    // Lift the coverage off the surface and put the background back before blending,
+    // so `line_gap` can blend a line onto rows the text was not drawn on.
+    let mut coverage = vec![0u8; rw * rh];
+    for row in 0..rows {
+        for col in 0..cols {
+            let idx = at(row, col);
+            coverage[row * rw + col] = buf[idx].max(buf[idx + 1]).max(buf[idx + 2]);
+            buf[idx..idx + 4].copy_from_slice(&bg_copy[(row * rw + col) * 4..][..4]);
+        }
+    }
+    for row in 0..rows {
+        let out = row
+            + style
+                .line_gap
+                .map_or(0, |(line_h, gap)| row / line_h.max(1) as usize * gap.max(0) as usize);
+        if out >= rows {
             break;
         }
-        for col in 0..rw {
-            let x = text_rect.left as usize + col;
-            if x >= surface.width as usize {
-                break;
-            }
-            let idx = y * surface.stride + x * 4;
-            let midx = row * rw * 4 + col * 4;
-            let coverage = buf[idx].max(buf[idx + 1]).max(buf[idx + 2]) as u32;
-            buf[idx..idx + 4].copy_from_slice(&bg_copy[midx..midx + 4]);
+        for col in 0..cols {
+            let coverage = coverage[row * rw + col] as u32;
             if coverage > 8 {
                 let fa = ((color.a as u32 * coverage) / 255) as u8;
-                blend_over(buf, idx, Rgba { a: fa, ..color });
+                blend_over(buf, at(out, col), Rgba { a: fa, ..color });
             }
         }
     }
@@ -306,6 +318,7 @@ mod tests {
             color: Rgba::from_argb(0xFFFF_FFFF),
             vcenter: false,
             vertical: Some("zh-TW"),
+            line_gap: None,
         };
         draw_text_label(hdc, font, buf, surface, rect, "!!!", style).unwrap();
         let ink_x: Vec<usize> = (0..160 * 80)
