@@ -45,7 +45,7 @@ Real-time translation overlay for the Windows desktop: pick a target window → 
 4. **Save**
 5. Pick a window on the **Dashboard** → **Start** at the bottom of the left navigation
 
-OCR and translation models load only after **Start**; missing ones are first downloaded into `models/` next to the exe (OCR from [oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0)), with progress in the status bar. **Stop** waits until the models are fully unloaded and their VRAM is freed.
+OCR and translation models load only after **Start**; missing ones are first downloaded into `models/` next to the exe (OCR from [PaddlePaddle's official Hugging Face repos](https://huggingface.co/PaddlePaddle)), with progress in the status bar. **Stop** waits until the models are fully unloaded and their VRAM is freed.
 
 ## Usage
 
@@ -81,13 +81,13 @@ Target window
 
 ## OCR models
 
-Source: [GreatV/oar-ocr v0.7.0](https://github.com/GreatV/oar-ocr/releases/tag/v0.7.0). Loading only checks that files exist; sizes are checked at download time.
+Source: the official ONNX exports (`<model>_onnx`) from [PaddlePaddle](https://huggingface.co/PaddlePaddle) on Hugging Face. Loading only checks that files exist; sizes are checked at download time.
 
 | Size | Detection | Recognition | Dictionary |
 | --- | --- | --- | --- |
-| tiny | `pp-ocrv6_tiny_det.onnx` | `pp-ocrv6_tiny_rec.onnx` | `ppocrv6_tiny_dict.txt` |
-| small (default) | `pp-ocrv6_small_det.onnx` | `pp-ocrv6_small_rec.onnx` | `ppocrv6_dict.txt` |
-| medium | `pp-ocrv6_medium_det.onnx` | `pp-ocrv6_medium_rec.onnx` | `ppocrv6_dict.txt` (shared with small) |
+| tiny | `PP-OCRv6_tiny_det.onnx` | `PP-OCRv6_tiny_rec.onnx` | `PP-OCRv6_tiny_rec.yml` |
+| small (default) | `PP-OCRv6_small_det.onnx` | `PP-OCRv6_small_rec.onnx` | `PP-OCRv6_small_rec.yml` |
+| medium | `PP-OCRv6_medium_det.onnx` | `PP-OCRv6_medium_rec.onnx` | `PP-OCRv6_medium_rec.yml` |
 
 Smaller is faster, larger is more accurate. Changing the size or device reloads on **Save**.
 

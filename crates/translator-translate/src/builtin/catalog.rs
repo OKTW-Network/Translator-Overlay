@@ -283,6 +283,7 @@ const fn art(release: &'static str, file_name: &'static str, expected_bytes: u64
     ModelArtifact {
         file_name,
         release,
+        remote_name: file_name,
         expected_bytes,
     }
 }

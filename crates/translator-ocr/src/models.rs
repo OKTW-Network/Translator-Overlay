@@ -1,4 +1,4 @@
-//! PP-OCRv6 / PP-OCRv5 ONNX artifacts (file names + GitHub release sizes/URLs).
+//! PP-OCRv6 / PP-OCRv5 ONNX artifacts (file names + Hugging Face sizes/URLs).
 //!
 //! Missing files are fetched by the app into `models_dir` (see [`crate::download`]).
 //! Load only checks that the files exist; download verifies byte length.
@@ -7,24 +7,24 @@ use std::path::{Path, PathBuf};
 
 use translator_core::{ModelArtifact, ModelTier, OcrDevice, OcrModel, V5Det};
 
-const OAR_V070: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.7.0";
-const OAR_V030: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0";
+/// `inference.<ext>` of the official `PaddlePaddle/<repo>_onnx` Hugging Face repo at commit
+/// `rev`, saved as `<repo>.<ext>`.
+macro_rules! hf {
+    ($repo:literal, $rev:literal, $ext:literal, $bytes:literal) => {
+        ModelArtifact {
+            file_name: concat!($repo, ".", $ext),
+            release: concat!("https://huggingface.co/PaddlePaddle/", $repo, "_onnx/resolve/", $rev),
+            remote_name: concat!("inference.", $ext),
+            expected_bytes: $bytes,
+        }
+    };
+}
 
-/// PP-OCRv5 mobile recognition model + dictionary for one script: `(prefix, rec bytes, dict bytes)`.
-macro_rules! v5 {
-    ($lang:literal, $rec:literal, $dict:literal) => {
-        &[
-            ModelArtifact {
-                file_name: concat!($lang, "_pp-ocrv5_mobile_rec.onnx"),
-                release: OAR_V030,
-                expected_bytes: $rec,
-            },
-            ModelArtifact {
-                file_name: concat!("ppocrv5_", $lang, "_dict.txt"),
-                release: OAR_V030,
-                expected_bytes: $dict,
-            },
-        ]
+/// A recognition model and the `inference.yml` that holds its dictionary:
+/// `(repo, rev, onnx bytes, yml bytes)`.
+macro_rules! rec {
+    ($repo:literal, $rev:literal, $onnx:literal, $yml:literal) => {
+        &[hf!($repo, $rev, "onnx", $onnx), hf!($repo, $rev, "yml", $yml)]
     };
 }
 
@@ -32,42 +32,30 @@ macro_rules! v5 {
 /// a PP-OCRv5 script recognizer pairs with PP-OCRv5 detection of size `v5_det` (PaddleOCR
 /// itself pairs it with server).
 pub fn artifacts(tier: ModelTier, model: OcrModel, v5_det: V5Det) -> [&'static ModelArtifact; 3] {
-    let [det, rec, dict] = match tier {
-        ModelTier::Tiny => &TINY,
-        ModelTier::Small => &SMALL,
-        ModelTier::Medium => &MEDIUM,
+    let det: &'static ModelArtifact = match (model, tier, v5_det) {
+        (OcrModel::V6, ModelTier::Tiny, _) => &hf!("PP-OCRv6_tiny_det", "2ba1506c0380b8f0b03dd142459aac66d4421f6c", "onnx", 1_780_590),
+        (OcrModel::V6, ModelTier::Small, _) => &hf!("PP-OCRv6_small_det", "28fe5895c24fd108c19eb3e8479f4ab385fbfc62", "onnx", 9_880_512),
+        (OcrModel::V6, ModelTier::Medium, _) => &hf!("PP-OCRv6_medium_det", "61323801669c338b7891481ec7bac61ce31b576a", "onnx", 62_032_837),
+        (_, _, V5Det::Mobile) => &hf!("PP-OCRv5_mobile_det", "e6f4fa85f00e168c862bc462aebca69eef9b3d3d", "onnx", 4_826_518),
+        (_, _, V5Det::Server) => &hf!("PP-OCRv5_server_det", "dcf248c4dcc064c6d030db241255f9e8fbc6733a", "onnx", 88_116_791),
     };
-    let [rec, dict]: &'static [ModelArtifact; 2] = match model {
-        OcrModel::V6 => return [det, rec, dict],
-        OcrModel::V5English => v5!("en", 7_876_014, 1_416),
-        OcrModel::V5Latin => v5!("latin", 8_069_614, 2_616),
-        OcrModel::V5Korean => v5!("korean", 13_446_374, 47_451),
-        OcrModel::V5Cyrillic => v5!("cyrillic", 8_076_390, 2_781),
-        OcrModel::V5EastSlavic => v5!("eslav", 7_915_218, 1_663),
-        OcrModel::V5Greek => v5!("el", 7_836_326, 1_103),
-        OcrModel::V5Devanagari => v5!("devanagari", 7_939_902, 1_943),
-        OcrModel::V5Tamil => v5!("ta", 7_913_282, 1_723),
-        OcrModel::V5Telugu => v5!("te", 7_926_350, 1_831),
-        OcrModel::V5Thai => v5!("th", 7_918_606, 1_767),
-    };
-    let det = match v5_det {
-        V5Det::Mobile => &V5_MOBILE_DET,
-        V5Det::Server => &V5_SERVER_DET,
+    let [rec, dict]: &'static [ModelArtifact; 2] = match (model, tier) {
+        (OcrModel::V6, ModelTier::Tiny) => rec!("PP-OCRv6_tiny_rec", "2612ab37152ae0a677521bae4e1e3d4fb4cf7c30", 4_462_639, 55_571),
+        (OcrModel::V6, ModelTier::Small) => rec!("PP-OCRv6_small_rec", "b8f84f0b80c529de40b4fbb3544b84fa7233a513", 21_159_378, 150_579),
+        (OcrModel::V6, ModelTier::Medium) => rec!("PP-OCRv6_medium_rec", "50c7eacafc52fa7bcf4194e8cd08e46f8558504b", 76_554_979, 150_580),
+        (OcrModel::V5English, _) => rec!("en_PP-OCRv5_mobile_rec", "3fafbc3b5dcf93dd72add9f48368be8a3a2cd33b", 7_848_423, 3_964),
+        (OcrModel::V5Latin, _) => rec!("latin_PP-OCRv5_mobile_rec", "89d3a50e2c27e2e7cceeab0e944c25c807d5db4f", 8_042_023, 6_817),
+        (OcrModel::V5Korean, _) => rec!("korean_PP-OCRv5_mobile_rec", "5c6f574b8e2230adf4287b33e736d71b9fabd28e", 13_418_787, 96_039),
+        (OcrModel::V5Cyrillic, _) => rec!("cyrillic_PP-OCRv5_mobile_rec", "2cef88145434beb8afa9dd82d77d799eb1ad7b29", 8_048_799, 6_991),
+        (OcrModel::V5EastSlavic, _) => rec!("eslav_PP-OCRv5_mobile_rec", "9a32171fc5718746875e1a261818884517975013", 7_887_627, 4_538),
+        (OcrModel::V5Greek, _) => rec!("el_PP-OCRv5_mobile_rec", "8152b89d2ee0e1d4c92decab75fe75e5e3d836b6", 7_808_735, 3_317),
+        (OcrModel::V5Devanagari, _) => rec!("devanagari_PP-OCRv5_mobile_rec", "251aec19e36739540d35e2cc943f6aa7503b98e5", 7_912_311, 5_027),
+        (OcrModel::V5Tamil, _) => rec!("ta_PP-OCRv5_mobile_rec", "0db89798af0d5218fad9ea7ace0557526e9077f1", 7_885_691, 4_579),
+        (OcrModel::V5Telugu, _) => rec!("te_PP-OCRv5_mobile_rec", "f1197c83430241c58c64b0952b3a80366d04eeba", 7_898_759, 4_795),
+        (OcrModel::V5Thai, _) => rec!("th_PP-OCRv5_mobile_rec", "1d4adbbafb1034a2fd6618498575b81ea7b69f69", 7_891_015, 4_667),
     };
     [det, rec, dict]
 }
-
-const V5_MOBILE_DET: ModelArtifact = ModelArtifact {
-    file_name: "pp-ocrv5_mobile_det.onnx",
-    release: OAR_V030,
-    expected_bytes: 4_826_518,
-};
-
-const V5_SERVER_DET: ModelArtifact = ModelArtifact {
-    file_name: "pp-ocrv5_server_det.onnx",
-    release: OAR_V030,
-    expected_bytes: 88_116_836,
-};
 
 /// Peak `(VRAM, RAM)` bytes with the layout model if `layout`, for a frame whose long side is
 /// `det_max_side` (0 = no shrink, costed as a 1920-px frame; a larger window takes more).
@@ -108,66 +96,12 @@ pub fn memory_estimate(tier: ModelTier, model: OcrModel, v5_det: V5Det, device: 
     }
 }
 
-const TINY: [ModelArtifact; 3] = [
-    ModelArtifact {
-        file_name: "pp-ocrv6_tiny_det.onnx",
-        release: OAR_V070,
-        expected_bytes: 1_780_590,
-    },
-    ModelArtifact {
-        file_name: "pp-ocrv6_tiny_rec.onnx",
-        release: OAR_V070,
-        expected_bytes: 4_462_639,
-    },
-    ModelArtifact {
-        file_name: "ppocrv6_tiny_dict.txt",
-        release: OAR_V070,
-        expected_bytes: 27_156,
-    },
-];
-
-const SMALL: [ModelArtifact; 3] = [
-    ModelArtifact {
-        file_name: "pp-ocrv6_small_det.onnx",
-        release: OAR_V070,
-        expected_bytes: 9_880_512,
-    },
-    ModelArtifact {
-        file_name: "pp-ocrv6_small_rec.onnx",
-        release: OAR_V070,
-        expected_bytes: 21_159_378,
-    },
-    ModelArtifact {
-        file_name: "ppocrv6_dict.txt",
-        release: OAR_V070,
-        expected_bytes: 74_947,
-    },
-];
-
-const MEDIUM: [ModelArtifact; 3] = [
-    ModelArtifact {
-        file_name: "pp-ocrv6_medium_det.onnx",
-        release: OAR_V070,
-        expected_bytes: 62_032_837,
-    },
-    ModelArtifact {
-        file_name: "pp-ocrv6_medium_rec.onnx",
-        release: OAR_V070,
-        expected_bytes: 76_554_979,
-    },
-    // Small and medium recognition share the same character dictionary.
-    ModelArtifact {
-        file_name: "ppocrv6_dict.txt",
-        release: OAR_V070,
-        expected_bytes: 74_947,
-    },
-];
-
 /// PP-DocLayoutV3 for [`translator_core::LineMergeMode::Layout`]: the official
 /// Hugging Face ONNX run through `scripts/optimize-doclayout.py` (fp16, box output only).
 pub const LAYOUT_ARTIFACT: ModelArtifact = ModelArtifact {
     file_name: "pp-doclayoutv3_fp16.onnx",
     release: "https://github.com/OKTW-Network/Translator-Overlay/releases/download/models-v1",
+    remote_name: "pp-doclayoutv3_fp16.onnx",
     expected_bytes: 65_090_091,
 };
 
@@ -205,21 +139,21 @@ mod tests {
 
     #[test]
     fn v5_model_pairs_with_v5_detection_at_any_tier() {
+        const HF: &str = "https://huggingface.co/PaddlePaddle";
         let [det, rec, dict] = artifacts(ModelTier::Tiny, OcrModel::V5Korean, V5Det::Server);
-        assert_eq!(det.download_url(), format!("{OAR_V030}/pp-ocrv5_server_det.onnx"));
-        assert_eq!(rec.download_url(), format!("{OAR_V030}/korean_pp-ocrv5_mobile_rec.onnx"));
-        assert_eq!(dict.download_url(), format!("{OAR_V030}/ppocrv5_korean_dict.txt"));
-    }
-
-    #[test]
-    fn medium_shares_dict_with_small() {
-        let small = ModelPaths::from_dir(Path::new("models"), ModelTier::Small, OcrModel::V6, V5Det::Mobile);
-        let medium = ModelPaths::from_dir(Path::new("models"), ModelTier::Medium, OcrModel::V6, V5Det::Mobile);
-        assert_eq!(small.dict.file_name(), medium.dict.file_name(), "small/medium share ppocrv6_dict.txt");
         assert_eq!(
-            artifacts(ModelTier::Small, OcrModel::V6, V5Det::Mobile)[2].expected_bytes,
-            artifacts(ModelTier::Medium, OcrModel::V6, V5Det::Mobile)[2].expected_bytes
+            det.download_url(),
+            format!("{HF}/PP-OCRv5_server_det_onnx/resolve/dcf248c4dcc064c6d030db241255f9e8fbc6733a/inference.onnx")
         );
+        assert_eq!(
+            rec.download_url(),
+            format!("{HF}/korean_PP-OCRv5_mobile_rec_onnx/resolve/5c6f574b8e2230adf4287b33e736d71b9fabd28e/inference.onnx")
+        );
+        assert_eq!(
+            dict.download_url(),
+            format!("{HF}/korean_PP-OCRv5_mobile_rec_onnx/resolve/5c6f574b8e2230adf4287b33e736d71b9fabd28e/inference.yml")
+        );
+        assert_eq!(dict.file_name, "korean_PP-OCRv5_mobile_rec.yml");
     }
 
     #[test]
@@ -228,10 +162,10 @@ mod tests {
             let [det, rec, dict] = artifacts(tier, OcrModel::V6, V5Det::Mobile);
             assert!(det.file_name.ends_with("_det.onnx"), "{tier:?} det");
             assert!(rec.file_name.ends_with("_rec.onnx"), "{tier:?} rec");
-            assert!(dict.file_name.ends_with(".txt"), "{tier:?} dict");
+            assert!(dict.file_name.ends_with("_rec.yml"), "{tier:?} dict");
             for a in artifacts(tier, OcrModel::V6, V5Det::Mobile) {
                 assert!(a.expected_bytes > 0, "{tier:?} {}", a.file_name);
-                assert!(a.download_url().starts_with(OAR_V070));
+                assert!(a.download_url().contains("/resolve/") && !a.download_url().contains("/resolve/main/"), "{}", a.download_url());
             }
             let paths = ModelPaths::from_dir(Path::new("m"), tier, OcrModel::V6, V5Det::Mobile);
             assert_eq!(paths.det, Path::new("m").join(det.file_name));

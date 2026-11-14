@@ -1,4 +1,4 @@
-//! PP-OCRv6 / PP-DocLayoutV3 model download (GitHub Releases → `models_dir`) and load orchestration.
+//! PP-OCRv6 / PP-DocLayoutV3 model download (Hugging Face / GitHub Releases → `models_dir`) and load orchestration.
 
 use std::path::Path;
 

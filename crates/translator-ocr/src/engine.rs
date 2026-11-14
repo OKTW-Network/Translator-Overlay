@@ -194,13 +194,24 @@ impl OcrEngine {
 
         let files = paths.clone();
         let models = tokio::task::spawn_blocking(move || {
-            let dict = std::fs::read_to_string(&files.dict).map_err(|e| OcrError::Other(format!("read {}: {e}", files.dict.display())))?;
+            let yml = std::fs::read_to_string(&files.dict).map_err(|e| OcrError::Other(format!("read {}: {e}", files.dict.display())))?;
+            // PaddleOCR's `inference.yml` lists the dictionary under `character_dict`, one `  - `
+            // item per entry, either plain or single-quoted with `''` for a quote.
+            let dict = yml
+                .lines()
+                .skip_while(|&line| line != "  character_dict:")
+                .skip(1)
+                .map_while(|line| line.strip_prefix("  - "))
+                .map(|item| match item.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+                    Some(quoted) => quoted.replace("''", "'"),
+                    None => item.to_owned(),
+                });
             let load = || -> ort::Result<Models> {
                 Ok(Models {
                     det: Mutex::new(session(device, &files.det)?),
                     rec: Mutex::new(session(device, &files.rec)?),
-                    // CTC classes: the blank, the dictionary's entries (one per line), then a space.
-                    classes: [""].into_iter().chain(dict.lines()).chain([" "]).map(str::to_owned).collect(),
+                    // CTC classes: the blank, the dictionary's entries, then a space.
+                    classes: [String::new()].into_iter().chain(dict).chain([" ".to_owned()]).collect(),
                     layout: use_layout.then(|| session(device, &layout_path)).transpose()?.map(Mutex::new),
                     db,
                     det_limit,

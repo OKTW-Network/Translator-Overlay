@@ -21,13 +21,15 @@ pub struct ModelArtifact {
     pub file_name: &'static str,
     /// Download prefix that hosts the file.
     pub release: &'static str,
+    /// The file's name under `release`.
+    pub remote_name: &'static str,
     /// Exact byte length of the hosted file.
     pub expected_bytes: u64,
 }
 
 impl ModelArtifact {
     pub fn download_url(&self) -> String {
-        format!("{}/{}", self.release, self.file_name)
+        format!("{}/{}", self.release, self.remote_name)
     }
 }
 
