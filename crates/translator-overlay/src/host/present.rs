@@ -647,7 +647,7 @@ mod tests {
         host.handle(OverlayCommand::Attach {
             target_hwnd: target.0 as isize,
         });
-        // Two source lines spaced far wider than a GDI line cell.
+        // Two source lines spaced far wider than the font's own line pitch.
         host.handle(OverlayCommand::SetBlocks {
             blocks: vec![TranslatedBlock {
                 id: 1,
@@ -688,6 +688,63 @@ mod tests {
             return Err(format!("text lines must sit on the source lines, got ink rows {top}..{bottom} with a {gap}px gap"));
         }
         Ok(())
+    }
+
+    #[test]
+    fn caption_ink_stays_on_its_background() -> Result<(), String> {
+        use translator_core::{Rect, TranslatedBlock};
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        use crate::{command::OverlayCommand, gfx::draw};
+
+        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        // Two lines merged with a much smaller third: the median line box sets a font taller
+        // than the average line pitch, so the text cannot sit on the source lines.
+        let text = "我完全了解，並會照著要求繼續處理這件事情，請你在這裡稍微等我一下就好。";
+        let mut failures = Vec::new();
+        for w in (200..=380).step_by(20) {
+            host.handle(OverlayCommand::SetBlocks {
+                blocks: vec![TranslatedBlock {
+                    id: 1,
+                    source: "src".into(),
+                    translation: text.into(),
+                    confidence: 1.0,
+                    bbox: Rect::new(10.0, 10.0, w as f32, 30.0),
+                    source_lines: 3,
+                    source_height: 72.0,
+                    source_width: w as f32,
+                }],
+                locale: "zh-TW".into(),
+                content_width: 400,
+                content_height: 300,
+            });
+            host.apply_overlay(true);
+            let (sw, sh) = host.surface.size();
+            let surface = draw::SurfaceSize::new(sw, sh);
+            let span = SourceSpan { w, h: 72, lines: 3 };
+            let (rect, px, _) = host
+                .layout_label(draw::SurfaceRect::new(10, 10, w, 30), text, span, &[], surface)
+                .map_err(|e| e.to_string())?;
+            let buf = host.surface.pixels().ok_or("paint bitmap missing")?;
+            let stray = (0..sh)
+                .flat_map(|y| (0..sw).map(move |x| (x, y)))
+                .filter(|&(x, y)| buf[y as usize * surface.stride + x as usize * 4 + 3] != 0)
+                .filter(|&(x, y)| x < rect.x || x >= rect.x + rect.w || y < rect.y || y >= rect.y + rect.h)
+                .count();
+            if stray > 0 {
+                failures.push(format!("w={w} px={px} rect={rect:?} stray={stray}"));
+            }
+        }
+        host.teardown();
+        let _ = unsafe { DestroyWindow(target) };
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("ink outside the caption background:\n{}", failures.join("\n")))
+        }
     }
 
     #[test]
@@ -770,7 +827,7 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
-        // Two tightly spaced source lines: 52px of ink is less than two GDI lines plus padding.
+        // Two tightly spaced source lines: 52px of ink is less than two lines plus padding.
         let two_line_base = SurfaceRect {
             x: 20,
             y: 150,
@@ -837,9 +894,9 @@ mod tests {
         host.paint_label(label, "我完全了解", LabelStyle {
             font_px: 16,
             color: draw::Rgba::from_argb(0xFFFF_FFFF),
-            vcenter: false,
-            vertical: Some("zh-TW"),
-            line_gap: None,
+            locale: "zh-TW",
+            vertical: true,
+            line_pitch: None,
         })
         .map_err(|e| e.to_string())?;
         let buf = host.surface.pixels().ok_or("paint bitmap missing")?;

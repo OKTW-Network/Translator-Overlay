@@ -1,13 +1,5 @@
 //! Translation labels painted onto the overlay DIB.
 
-use windows::Win32::{
-    Foundation::RECT,
-    Graphics::Gdi::{
-        DT_CALCRECT, DT_EDITCONTROL, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_TOP, DT_WORDBREAK, DeleteObject, DrawTextW, HGDIOBJ,
-        SelectObject,
-    },
-};
-
 use crate::{
     error::OverlayError,
     gfx::{
@@ -33,7 +25,6 @@ impl OverlayHost {
         let bg = draw::Rgba::from_argb(self.config.colors.background);
         let fg = draw::Rgba::from_argb(self.config.colors.text);
 
-        // Layout first (needs GDI measure / font) before borrowing DIB pixels.
         let content_w = self.content_w;
         let content_h = self.content_h;
         let mut pending: Vec<(SurfaceRect, String, SourceSpan)> = self
@@ -78,12 +69,12 @@ impl OverlayHost {
         let missing = || OverlayError::Other("paint bitmap missing".into());
         self.surface.pixels().ok_or_else(missing)?.fill(0);
         let locale = self.locale.clone();
-        let style = |font_px: i32, vertical: bool, line_gap: Option<(i32, i32)>| LabelStyle {
+        let style = |font_px: i32, vertical: bool, line_pitch: Option<i32>| LabelStyle {
             font_px,
             color: fg,
-            vcenter: false,
-            vertical: vertical.then_some(locale.as_str()),
-            line_gap,
+            locale: &locale,
+            vertical,
+            line_pitch,
         };
 
         let buf = self.surface.pixels().ok_or_else(missing)?;
@@ -91,27 +82,29 @@ impl OverlayHost {
             draw::fill_rect_replace(buf, surface, *rect, bg);
         }
         for (rect, text, font_px, vertical, lines, first_h) in &labels {
+            let (px, lines) = (*font_px, *lines);
             let mut at = *rect;
             if *vertical {
-                self.paint_label(at, text, style(*font_px, true, None))?;
+                self.paint_label(at, text, style(px, true, None))?;
                 continue;
             }
-            // A GDI line cell is taller than the source box a label matches, so centre each
-            // text line's cell on a source line: the first on the first, the rest at the
+            // Centre each text line on a source line: the first on the first, the rest at the
             // source's line pitch. More text lines than source lines centre as one block.
-            let pad = label_pad(*font_px);
-            let text_h = self.measure_wrapped(text, *font_px, (rect.w - pad * 2).max(8))?.1;
-            let line_h = self.measure_single_line(text, *font_px)?.1;
-            let n = (text_h / line_h).max(1);
-            let first_h = if *lines > 1 { (*first_h).min(rect.h) } else { rect.h };
-            let extra = if *lines > 1 { (rect.h - first_h) / (lines - 1) - line_h } else { 0 };
+            let pad = label_pad(px);
+            let n = (text::measure_lines(text, px, &locale, (rect.w - pad * 2).max(8))?.1 - px) / text::line_pitch(px) + 1;
+            let first_h = if lines > 1 { (*first_h).min(rect.h) } else { rect.h };
+            let source_pitch = if lines > 1 { (rect.h - first_h) / (lines - 1) } else { 0 };
             // A font override too big for a source line would spill off the label from there.
-            let on_source_lines = n <= *lines && (n == 1 || extra > 0) && font_px + pad * 2 <= first_h;
-            let band = if on_source_lines { first_h } else { rect.h };
-            let gap = if on_source_lines { extra.max(0) } else { 0 };
-            at.h = text_h + (n - 1) * gap + pad * 2;
-            at.y = (rect.y + (band - (if on_source_lines { line_h } else { text_h })) / 2 - pad).max(0);
-            self.paint_label(at, text, style(*font_px, false, Some((line_h, gap))))?;
+            let on_source_lines = n <= lines && px + pad * 2 <= first_h && (n == 1 || source_pitch >= px);
+            let (band, pitch) = if on_source_lines {
+                (first_h, source_pitch)
+            } else {
+                (rect.h, text::line_pitch(px))
+            };
+            let text_h = (n - 1) * pitch + px;
+            at.h = text_h + pad * 2;
+            at.y = (rect.y + (band - (if on_source_lines { px } else { text_h })) / 2 - pad).max(0);
+            self.paint_label(at, text, style(px, false, Some(pitch)))?;
         }
         Ok(())
     }
@@ -160,7 +153,7 @@ impl OverlayHost {
             }
             let mut box_w = source_w;
             let text_h = loop {
-                let text_h = self.measure_wrapped(text, font_px, (box_w - pad * 2).max(8))?.1 + pad * 2;
+                let text_h = text::measure_lines(text, font_px, &self.locale, (box_w - pad * 2).max(8))?.1 + pad * 2;
                 if text_h <= min_h || box_w >= surface.width {
                     break text_h;
                 }
@@ -193,14 +186,22 @@ impl OverlayHost {
         let mut px = font_px;
         loop {
             let pad = label_pad(px);
-            let line_h = self.measure_single_line(text, px)?.1;
-            // Tight line spacing leaves `min_h` a few px short of N GDI lines; tilt inflates it past one.
-            let source_text_h = (min_h - pad * 2).max(line_h * span.lines);
+            // The source's line count at this font's own pitch: text that short is painted on
+            // the source lines, so it fits `min_h` even where tight line spacing leaves that a
+            // few px short. Not when the source lines are closer than the font is tall (a
+            // small line merged in): then the text is one block and must fit as measured.
+            let lines_h = if span.lines == 1 || (min_h - base.h) / (span.lines - 1) >= px {
+                (span.lines - 1) * text::line_pitch(px) + px
+            } else {
+                0
+            };
+            // Tilt inflates `min_h` past one line.
+            let source_text_h = (min_h - pad * 2).max(lines_h);
             // Widen past the source only once shrinking the font has not made the text fit.
             let widest = if px > floor { source_w } else { cap };
             let mut box_w = source_w;
             let (text_w, text_h) = loop {
-                let (text_w, text_h) = self.measure_wrapped(text, px, (box_w - pad * 2).max(8))?;
+                let (text_w, text_h) = text::measure_lines(text, px, &self.locale, (box_w - pad * 2).max(8))?;
                 if text_h <= source_text_h || box_w >= widest {
                     break (text_w, text_h);
                 }
@@ -216,11 +217,10 @@ impl OverlayHost {
                 let box_w = (text_w + pad * 2).max(source_w).min(cap);
                 // Text on the source's own lines keeps the source height; extra lines, or a
                 // font override larger than the source text, grow it.
-                let box_h = if text_h <= line_h * span.lines && px <= draw::font_height_for(base) {
+                let box_h = if text_h <= lines_h && px <= draw::font_height_for(base) {
                     min_h
                 } else {
-                    // Pad the glyphs, not the taller GDI cells, as the source box does one line.
-                    (text_h - (line_h - px).max(0) + pad * 2).max(min_h)
+                    (text_h + pad * 2).max(min_h)
                 };
                 return Ok((place_label(base, box_w, box_h, surface), px, false));
             }
@@ -228,66 +228,14 @@ impl OverlayHost {
         }
     }
 
-    /// Unwrapped single-line extent (width, height) in pixels.
-    fn measure_single_line(&mut self, text: &str, font_px: i32) -> Result<(i32, i32), OverlayError> {
-        self.ensure_font(font_px)?;
-        let hdc = self.surface.hdc();
-        let _ = unsafe { SelectObject(hdc, HGDIOBJ(self.hfont.0)) };
-        let mut calc = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        let mut wide: Vec<u16> = text.encode_utf16().collect();
-        let flags = DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT;
-        let measured_h = unsafe { DrawTextW(hdc, &mut wide, &mut calc, flags) };
-        let w = (calc.right - calc.left).max(1);
-        let h = if measured_h > 0 { measured_h } else { font_px + 2 };
-        Ok((w, h))
-    }
-
-    /// Word-wrapped extent for a fixed text area width.
-    fn measure_wrapped(&mut self, text: &str, font_px: i32, text_area_w: i32) -> Result<(i32, i32), OverlayError> {
-        self.ensure_font(font_px)?;
-        let hdc = self.surface.hdc();
-        let _ = unsafe { SelectObject(hdc, HGDIOBJ(self.hfont.0)) };
-        let mut calc = RECT {
-            left: 0,
-            top: 0,
-            right: text_area_w.max(8),
-            bottom: 0,
-        };
-        let mut wide: Vec<u16> = text.encode_utf16().collect();
-        let flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT;
-        let measured_h = unsafe { DrawTextW(hdc, &mut wide, &mut calc, flags) };
-        let w = (calc.right - calc.left).max(1);
-        let h = if measured_h > 0 { measured_h } else { font_px + 2 };
-        Ok((w, h))
-    }
-
-    pub(crate) fn ensure_font(&mut self, font_px: i32) -> Result<(), OverlayError> {
-        if font_px == self.font_px && !self.hfont.is_invalid() {
-            return Ok(());
-        }
-        if !self.hfont.is_invalid() {
-            let _ = unsafe { DeleteObject(self.hfont.into()) };
-        }
-        self.hfont = text::create_segoe_font(font_px)?;
-        self.font_px = font_px;
-        Ok(())
-    }
-
     pub(crate) fn paint_label(&mut self, rect: SurfaceRect, text: &str, style: LabelStyle<'_>) -> Result<(), OverlayError> {
-        self.ensure_font(style.font_px)?;
         let hdc = self.surface.hdc();
-        let hfont = self.hfont;
         let (w, h) = self.surface.size();
         let surface = draw::SurfaceSize::new(w, h);
         let buf = self
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("paint bitmap missing".into()))?;
-        text::draw_text_label(hdc, hfont, buf, surface, rect, text, style)
+        text::draw_text_label(hdc, buf, surface, rect, text, style)
     }
 }

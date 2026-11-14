@@ -7,7 +7,7 @@ use translator_core::{OverlayConfig, TranslatedBlock};
 use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
-        Graphics::Gdi::{DeleteObject, HFONT, ScreenToClient},
+        Graphics::Gdi::ScreenToClient,
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
             CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_STYLE, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW,
@@ -60,9 +60,8 @@ pub(crate) struct ReaderWindow {
     class_atom: u16,
     config: OverlayConfig,
     surface: DibSurface,
-    hfont: HFONT,
-    font_px: i32,
     text: String,
+    locale: String,
     placeholder: String,
     dismissed: bool,
 }
@@ -110,24 +109,13 @@ impl ReaderWindow {
             }
         };
 
-        let font_px = config.reader_font_px_clamped();
-        let hfont = match text::create_segoe_font(font_px) {
-            Ok(font) => font,
-            Err(e) => {
-                drop(surface);
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(e);
-            }
-        };
-
         let mut reader = Box::new(Self {
             hwnd,
             class_atom: atom,
             config: config.clone(),
             surface,
-            hfont,
-            font_px,
             text: String::new(),
+            locale: String::new(),
             placeholder: DEFAULT_PLACEHOLDER.to_string(),
             dismissed: false,
         });
@@ -149,12 +137,14 @@ impl ReaderWindow {
         Ok(reader)
     }
 
-    pub(crate) fn set_text(&mut self, text: &str) {
+    /// `locale` is the BCP-47 tag of `text`, which picks its CJK font.
+    pub(crate) fn set_text(&mut self, text: &str, locale: &str) {
         self.restore_topmost_if_needed();
-        if text == self.text {
+        if text == self.text && locale == self.locale {
             return;
         }
         self.text = text.to_string();
+        self.locale = locale.to_string();
         if let Err(e) = self.repaint() {
             warn!(error = %e, "reader repaint failed");
         }
@@ -181,16 +171,6 @@ impl ReaderWindow {
 
     pub(crate) fn apply_config(&mut self, config: &OverlayConfig) {
         self.config = config.clone();
-        let font_px = config.reader_font_px_clamped();
-        if font_px != self.font_px
-            && let Ok(font) = text::create_segoe_font(font_px)
-        {
-            if !self.hfont.is_invalid() {
-                let _ = unsafe { DeleteObject(self.hfont.into()) };
-            }
-            self.hfont = font;
-            self.font_px = font_px;
-        }
         if let Err(e) = self.repaint() {
             warn!(error = %e, "reader config repaint failed");
         }
@@ -202,10 +182,6 @@ impl ReaderWindow {
             unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) };
             let _ = unsafe { DestroyWindow(self.hwnd) };
             self.hwnd = HWND::default();
-        }
-        if !self.hfont.is_invalid() {
-            let _ = unsafe { DeleteObject(self.hfont.into()) };
-            self.hfont = HFONT::default();
         }
         self.surface.teardown();
         if self.class_atom != 0 {
@@ -272,22 +248,23 @@ impl ReaderWindow {
         let inset = TEXT_INSET.min(w / 4).min(h / 4).max(0);
         let text_box = SurfaceRect::new(inset, inset, (w - inset * 2).max(1), (h - inset * 2).max(1));
         let hdc = self.surface.hdc();
-        let hfont = self.hfont;
-        let shown = if self.text.trim().is_empty() {
-            &self.placeholder
+        let font_px = self.config.reader_font_px_clamped();
+        // The placeholder is in the UI language, not the translation's.
+        let (shown, locale) = if self.text.trim().is_empty() {
+            (&self.placeholder, "")
         } else {
-            &self.text
+            (&self.text, self.locale.as_str())
         };
         let buf = self
             .surface
             .pixels()
             .ok_or_else(|| OverlayError::Other("reader paint bitmap missing".into()))?;
-        text::draw_text_label(hdc, hfont, buf, surface, text_box, shown, LabelStyle {
-            font_px: self.font_px,
+        text::draw_text_label(hdc, buf, surface, text_box, shown, LabelStyle {
+            font_px,
             color: fg,
-            vcenter: false,
-            vertical: None,
-            line_gap: None,
+            locale,
+            vertical: false,
+            line_pitch: None,
         })?;
         self.present()
     }
@@ -443,7 +420,7 @@ mod tests {
         .expect("reader create");
         let _ = unsafe { SetWindowPos(reader.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
         assert!(!crate::host::win32::window_is_topmost(reader.hwnd), "HWND_NOTOPMOST should drop WS_EX_TOPMOST");
-        reader.set_text("");
+        reader.set_text("", "");
         assert!(crate::host::win32::window_is_topmost(reader.hwnd), "set_text should restore topmost");
         reader.teardown();
     }

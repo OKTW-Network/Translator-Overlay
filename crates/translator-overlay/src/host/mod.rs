@@ -14,7 +14,6 @@ use tracing::{debug, warn};
 use translator_core::{OverlayConfig, TranslatedBlock};
 use windows::Win32::{
     Foundation::{HMODULE, HWND},
-    Graphics::Gdi::{DeleteObject, HFONT},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Accessibility::HWINEVENTHOOK,
@@ -30,7 +29,7 @@ pub(crate) use crate::host::follow::wake_overlay_thread;
 use crate::{
     command::{OverlayCommand, OverlayEvent},
     error::OverlayError,
-    gfx::{surface::DibSurface, text},
+    gfx::surface::DibSurface,
     host::{
         follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, uninstall_follow_hooks},
         win32::{ClientRect, set_overlay_owner},
@@ -56,8 +55,6 @@ pub(crate) struct OverlayHost {
     pub(crate) dirty: bool,
     pub(crate) surface: DibSurface,
     pub(crate) present: DibSurface,
-    pub(crate) hfont: HFONT,
-    pub(crate) font_px: i32,
     pub(crate) reader: Option<Box<ReaderWindow>>,
     pub(crate) picker: Option<RegionPicker>,
     /// Pause hides captions without dropping `blocks`.
@@ -91,14 +88,6 @@ impl OverlayHost {
         let atom = unsafe { RegisterClassExW(&wc) };
 
         let (hwnd, surface, present) = create_layer()?;
-        let font_px = 16;
-        let hfont = match text::create_segoe_font(font_px) {
-            Ok(font) => font,
-            Err(e) => {
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return Err(e);
-            }
-        };
 
         let mut host = Self {
             hwnd,
@@ -114,8 +103,6 @@ impl OverlayHost {
             dirty: true,
             surface,
             present,
-            hfont,
-            font_px,
             reader: None,
             picker: None,
             captions_hidden: false,
@@ -249,7 +236,7 @@ impl OverlayHost {
             format_reader_text(&self.blocks)
         };
         if let Some(reader) = self.reader.as_mut() {
-            reader.set_text(&text);
+            reader.set_text(&text, &self.locale);
         }
     }
 
@@ -354,10 +341,6 @@ impl OverlayHost {
             }
             let _ = unsafe { DestroyWindow(self.hwnd) };
             self.hwnd = HWND::default();
-        }
-        if !self.hfont.is_invalid() {
-            let _ = unsafe { DeleteObject(self.hfont.into()) };
-            self.hfont = HFONT::default();
         }
         self.surface.teardown();
         self.present.teardown();

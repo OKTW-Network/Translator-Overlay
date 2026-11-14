@@ -66,9 +66,9 @@ impl OverlayHost {
             self.paint_label(number_rect(pr), &(i + 1).to_string(), LabelStyle {
                 font_px: 13,
                 color: text,
-                vcenter: false,
-                vertical: None,
-                line_gap: None,
+                locale: "",
+                vertical: false,
+                line_pitch: None,
             })?;
         }
         Ok(())
