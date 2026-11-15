@@ -22,7 +22,16 @@ use parking_lot::RwLock;
 use tracing::{error, info};
 use translator_core::{AppConfig, AppState, UiLanguage, config_path, log_path, prev_log_path};
 use windows::{
-    Win32::System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW},
+    Win32::{
+        Foundation::HMODULE,
+        System::{
+            Diagnostics::Debug::{EXCEPTION_CONTINUE_SEARCH, EXCEPTION_POINTERS, SetUnhandledExceptionFilter},
+            LibraryLoader::{
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
+                GetModuleHandleExW, LoadLibraryW, SetDllDirectoryW,
+            },
+        },
+    },
     core::PCWSTR,
 };
 
@@ -113,14 +122,48 @@ fn init_tracing() {
         if bt.status() == std::backtrace::BacktraceStatus::Captured {
             msg.push_str(&format!("{bt}\n"));
         }
-        if let Ok(path) = log_path()
-            && let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path)
-        {
-            let _ = file.write_all(msg.as_bytes());
-            let _ = file.flush();
-        }
+        append_to_log(&msg);
         let _ = io::stderr().write_all(msg.as_bytes());
     }));
+    // SAFETY: the filter is a function, valid for the whole process.
+    unsafe { SetUnhandledExceptionFilter(Some(log_native_crash)) };
+}
+
+/// Write `msg` to the log file through its own handle: the tracing writer may be locked.
+fn append_to_log(msg: &str) {
+    if let Ok(path) = log_path()
+        && let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = file.write_all(msg.as_bytes());
+        let _ = file.flush();
+    }
+}
+
+/// Log an unhandled native exception (an access violation inside a DLL, ...) as module + offset.
+/// The panic hook never sees these, and Windows ends the process right after.
+unsafe extern "system" fn log_native_crash(info: *const EXCEPTION_POINTERS) -> i32 {
+    // SAFETY: Windows passes pointers that are valid for this call.
+    let record = unsafe { &*(*info).ExceptionRecord };
+    let address = record.ExceptionAddress;
+    let mut module = HMODULE::default();
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    // SAFETY: with FROM_ADDRESS the name is an address to look up, not a string; `module` is a valid out pointer.
+    let found = unsafe { GetModuleHandleExW(flags, PCWSTR(address.cast()), &mut module) }.is_ok();
+    let mut name = [0_u16; 260];
+    let len = if found {
+        // SAFETY: `module` is the loaded module found above; `name` is a writable buffer.
+        unsafe { GetModuleFileNameW(Some(module), &mut name) as usize }
+    } else {
+        0
+    };
+    // No module: the offset is the absolute address.
+    append_to_log(&format!(
+        "crash: exception {:#010x} at {} + {:#x}\n",
+        record.ExceptionCode.0,
+        String::from_utf16_lossy(&name[..len]),
+        address as usize - module.0 as usize
+    ));
+    EXCEPTION_CONTINUE_SEARCH
 }
 
 /// Load our ORT before WinUI maps Windows App Runtime's copy.
