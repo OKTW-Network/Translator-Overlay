@@ -188,7 +188,6 @@ struct Loaded {
     device: OcrDevice,
     tokenizer: Tokenizer,
     embed: Session,
-    decoder: Session,
     /// In decoder input order.
     kv: Vec<KvSlot>,
     kv_type: TensorElementType,
@@ -197,8 +196,11 @@ struct Loaded {
     rng: fastrand::Rng,
     /// Tokens holding a [`DRY_BREAKERS`] character.
     dry_breakers: HashSet<u32>,
-    /// Allocates the in-place KV buffers. Declared after `cache` so it outlives them.
+    /// Allocates the in-place KV buffers.
     kv_alloc: Allocator,
+    /// Declared last so it drops last: freeing a KV buffer or `kv_alloc` after the session that
+    /// owns their WebGPU context is an access violation inside ORT.
+    decoder: Session,
 }
 
 struct KvSlot {
@@ -507,7 +509,6 @@ impl Loaded {
             device,
             tokenizer,
             embed,
-            decoder,
             kv,
             kv_type,
             per_layer_inputs,
@@ -515,6 +516,7 @@ impl Loaded {
             rng: fastrand::Rng::new(),
             dry_breakers,
             kv_alloc,
+            decoder,
         })
     }
 
