@@ -1,10 +1,12 @@
-//! Built-in ONNX LLM: download, load, and generation with an on-device KV cache.
+//! Built-in LLM: download, load, and generation with an on-device KV cache.
 //!
-//! Models follow the onnx-community layout: `embed_tokens` (ids → embeddings) feeding a merged
+//! GGUF models run on llama.cpp ([`crate::builtin::llama`]); the rest of this file runs ONNX ones.
+//! Those follow the onnx-community layout: `embed_tokens` (ids → embeddings) feeding a merged
 //! decoder with `past_key_values.*` inputs and `present.*` outputs: attention KV that grows with the
 //! context, and fixed-size state (Qwen3.5's linear-attention layers).
 
 mod catalog;
+mod llama;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -26,7 +28,11 @@ use tracing::info;
 use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, download_artifacts, part_path};
 
 pub use crate::builtin::catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model};
-use crate::{TranslateError, http::ChatMessage};
+use crate::{
+    TranslateError,
+    builtin::catalog::{BuiltinFiles, OnnxFiles},
+    http::ChatMessage,
+};
 
 /// A reply whose last `LOOP_TOKENS` tokens (and at least three periods) repeat one span of up to
 /// `LOOP_TOKENS` tokens is stuck in a loop.
@@ -48,10 +54,21 @@ pub(crate) struct BuiltinBackend {
 }
 
 impl BuiltinBackend {
-    /// Drop the ONNX sessions (frees VRAM). The next request loads again.
+    /// Drop the model (frees VRAM). The next request loads again.
     pub(crate) fn unload(&mut self) {
         self.loaded = None;
     }
+}
+
+struct Loaded {
+    id: &'static str,
+    device: OcrDevice,
+    engine: Engine,
+}
+
+enum Engine {
+    Onnx(Box<OnnxModel>),
+    Llama(llama::Model),
 }
 
 /// Download / load the model selected in `api` unless it is already loaded. `on_status` gets
@@ -70,10 +87,10 @@ pub(crate) async fn ensure_loaded(
     let device = api.builtin_device;
     // DirectML's GroupQueryAttention ignores `local_window_size`: Gemma 4's sliding-window layers
     // then read the whole context and the reply turns to garbage past 512 tokens.
-    if device == OcrDevice::Directml {
+    if device == OcrDevice::Directml && matches!(spec.files, BuiltinFiles::Onnx(_)) {
         return Err(TranslateError::Other("built-in models do not support DirectML; use WebGPU or CPU".into()));
     }
-    if backend.loaded.as_ref().is_some_and(|l| l.spec.id == spec.id && l.device == device) {
+    if backend.loaded.as_ref().is_some_and(|l| l.id == spec.id && l.device == device) {
         return Ok(spec);
     }
     // A preload cancelled by Stop may only get the lock after Stop unloaded.
@@ -82,20 +99,30 @@ pub(crate) async fn ensure_loaded(
     }
     backend.unload();
     let dir = models_dir.join(spec.dir);
-    let loaded: Result<Loaded, TranslateError> = async {
+    let engine: Result<Engine, TranslateError> = async {
         download_missing(spec, &dir, cancel, on_status).await?;
         on_status(Some(PipelineStatus::LoadingModels {
             kind: ModelKind::Translation,
         }));
         let dir = dir.clone();
-        tokio::task::spawn_blocking(move || Loaded::load(spec, device, &dir))
-            .await
-            .map_err(|e| TranslateError::Other(format!("built-in model load task: {e}")))?
-            .map_err(|e| TranslateError::Other(format!("load {}: {e}", spec.id)))
+        tokio::task::spawn_blocking(move || match &spec.files {
+            BuiltinFiles::Onnx(onnx) => OnnxModel::load(spec, onnx, device, &dir).map(|m| Engine::Onnx(Box::new(m))),
+            // Vulkan for any GPU device.
+            BuiltinFiles::Gguf { file, .. } => {
+                llama::Model::load(spec.id, &dir.join(file.file_name), device != OcrDevice::Cpu).map(Engine::Llama)
+            }
+        })
+        .await
+        .map_err(|e| TranslateError::Other(format!("built-in model load task: {e}")))?
+        .map_err(|e| TranslateError::Other(format!("load {}: {e}", spec.id)))
     }
     .await;
     on_status(None);
-    backend.loaded = Some(loaded?);
+    backend.loaded = Some(Loaded {
+        id: spec.id,
+        device,
+        engine: engine?,
+    });
     info!(model = spec.id, ?device, "built-in model loaded");
     Ok(spec)
 }
@@ -143,8 +170,18 @@ pub(crate) async fn complete(
         let Some(loaded) = backend.loaded.as_mut() else {
             return Ok(Err(TranslateError::Cancelled));
         };
-        let max_tokens = ((output_ratio * loaded.tokenizer.encode(source, false)?.len() as f32).ceil() as usize).min(max_tokens_cap);
-        loaded.generate(&prompt, max_tokens, context, decoding, &cancel_job, |text| drop(tx.send(text.to_owned())))
+        let max_tokens = |source_tokens: usize| ((output_ratio * source_tokens as f32).ceil() as usize).min(max_tokens_cap);
+        let on_text = |text: &str| drop(tx.send(text.to_owned()));
+        match &mut loaded.engine {
+            Engine::Onnx(model) => {
+                let max_tokens = max_tokens(model.tokenizer.encode(source, false)?.len());
+                model.generate(&prompt, max_tokens, context, decoding, &cancel_job, on_text)
+            }
+            Engine::Llama(model) => {
+                let max_tokens = max_tokens(model.token_count(&source)?);
+                model.generate(&prompt, max_tokens, context, decoding, &cancel_job, on_text)
+            }
+        }
     });
     // Ends when the job drops its sender.
     while let Some(text) = rx.recv().await {
@@ -163,7 +200,7 @@ async fn download_missing(
     cancel: &CancellationToken,
     on_status: &mut impl FnMut(Option<PipelineStatus>),
 ) -> Result<(), TranslateError> {
-    let missing: Vec<_> = spec.artifacts().filter(|a| !dir.join(a.file_name).is_file()).collect();
+    let missing: Vec<_> = spec.artifacts().into_iter().filter(|a| !dir.join(a.file_name).is_file()).collect();
     if missing.is_empty() {
         return Ok(());
     }
@@ -183,8 +220,9 @@ async fn download_missing(
     }
 }
 
-struct Loaded {
+struct OnnxModel {
     spec: &'static BuiltinModelSpec,
+    onnx: &'static OnnxFiles,
     device: OcrDevice,
     tokenizer: Tokenizer,
     embed: Session,
@@ -309,7 +347,7 @@ fn apply_dry(logits: &mut [f32], reply: &[u32], breakers: &HashSet<u32>) {
     }
 }
 
-/// How [`Loaded::generate`] picks each token.
+/// How a reply's tokens get picked (see [`next_token`]).
 struct Decoding {
     /// `None` decodes greedily.
     sampling: Option<Sampling>,
@@ -462,12 +500,62 @@ impl Sampling {
     }
 }
 
-impl Loaded {
-    fn load(spec: &'static BuiltinModelSpec, device: OcrDevice, dir: &Path) -> ort::Result<Self> {
-        let tokenizer = Tokenizer::from_file(dir.join(spec.tokenizer.file_name))?;
+/// The reply's next token from `logits`: DRY, sampling, then the reply shape, whose state it advances.
+/// `piece` gives a token's text, or `None` for one that ends the reply. `None`: no token fits the shape.
+fn next_token(
+    decoding: &Decoding,
+    logits: &mut [f32],
+    reply: &[u32],
+    dry_breakers: &HashSet<u32>,
+    rng: &mut fastrand::Rng,
+    shape_state: &mut ShapeState,
+    piece: impl Fn(u32) -> ort::Result<Option<String>>,
+) -> ort::Result<Option<u32>> {
+    if decoding.dry {
+        apply_dry(logits, reply, dry_breakers);
+    }
+    let next = match &decoding.sampling {
+        Some(s) => s.pick(logits, rng),
+        None => argmax(logits),
+    };
+    let Some(shape) = &decoding.shape else {
+        return Ok(Some(next));
+    };
+    // The shape ends the reply itself, so no end token fits it.
+    let fits = |t: u32| -> ort::Result<Option<ShapeState>> { Ok(piece(t)?.and_then(|p| shape.feed(*shape_state, &p))) };
+    let fitted = match fits(next)? {
+        Some(s) => Some((next, s)),
+        // The model's best token that fits. Ending, or closing a text without `"`, means the
+        // text is done, so then the best one that closes it.
+        None => {
+            let closing = shape_state.in_text && piece(next)?.is_none_or(|p| p.starts_with([']', ',', '}']));
+            let mut order: Vec<u32> = (0..logits.len() as u32).collect();
+            order.sort_unstable_by(|&a, &b| logits[b as usize].total_cmp(&logits[a as usize]));
+            let mut found = None;
+            for t in order {
+                if let Some(s) = fits(t)?
+                    && (!closing || s.lit > shape_state.lit)
+                {
+                    found = Some((t, s));
+                    break;
+                }
+            }
+            found
+        }
+    };
+    let Some((next, state)) = fitted else {
+        return Ok(None);
+    };
+    *shape_state = state;
+    Ok(Some(next))
+}
+
+impl OnnxModel {
+    fn load(spec: &'static BuiltinModelSpec, onnx: &'static OnnxFiles, device: OcrDevice, dir: &Path) -> ort::Result<Self> {
+        let tokenizer = Tokenizer::from_file(dir.join(onnx.tokenizer.file_name))?;
         // A table lookup: as fast on the CPU, and keeps the embedding tables out of VRAM.
-        let embed = session(OcrDevice::Cpu, &dir.join(spec.embed[0].file_name))?;
-        let decoder = session(device, &dir.join(spec.decoder[0].file_name))?;
+        let embed = session(OcrDevice::Cpu, &dir.join(onnx.embed[0].file_name))?;
+        let decoder = session(device, &dir.join(onnx.decoder[0].file_name))?;
 
         let mut kv = Vec::new();
         let mut kv_type = TensorElementType::Float32;
@@ -489,7 +577,7 @@ impl Loaded {
             .iter()
             .map(|s| (s.present["present.".len()..].rsplit_once('.').map_or("", |(layer, _)| layer), s.dims.last().copied().unwrap_or(0)))
             .collect();
-        let in_place = spec.arch.kv_in_place(&layers, spec.kv_gqa_only);
+        let in_place = spec.arch.kv_in_place(&layers, onnx.kv_gqa_only);
         for (slot, in_place) in kv.iter_mut().zip(in_place) {
             // Fixed-size state has no sequence axis to append along.
             slot.in_place = in_place && slot.dims.iter().skip(1).any(|&d| d < 0);
@@ -506,6 +594,7 @@ impl Loaded {
         info!(model = spec.id, kv_inputs = kv.len(), in_place, ?kv_type, per_layer_inputs, "built-in model sessions ready");
         Ok(Self {
             spec,
+            onnx,
             device,
             tokenizer,
             embed,
@@ -600,7 +689,7 @@ impl Loaded {
         let mut logits_f32 = Vec::new();
         let mut looping = false;
         let mut shape_state = ShapeState::default();
-        let chunk = self.spec.prefill_chunk() as usize;
+        let chunk = self.onnx.prefill_chunk() as usize;
         loop {
             if cancel.is_cancelled() {
                 return Ok(Err(TranslateError::Cancelled));
@@ -649,48 +738,18 @@ impl Loaded {
                 Some(TensorElementType::Float16) => logits_f32.extend(logits.try_extract_tensor::<f16>()?.1.iter().map(|v| v.to_f32())),
                 _ => logits_f32.extend_from_slice(logits.try_extract_tensor::<f32>()?.1),
             }
-            if decoding.dry {
-                apply_dry(&mut logits_f32, &ids[prompt_len..], &self.dry_breakers);
-            }
-            let mut next = match &decoding.sampling {
-                Some(s) => s.pick(&logits_f32, &mut self.rng),
-                None => argmax(&logits_f32),
+            let piece = |t: u32| -> ort::Result<Option<String>> {
+                Ok(if eos.contains(&t) {
+                    None
+                } else {
+                    Some(self.tokenizer.decode(&[t], false)?)
+                })
             };
-            if let Some(shape) = &decoding.shape {
-                // The shape ends the reply itself, so no EOS fits it.
-                let fits = |t: u32| -> ort::Result<Option<ShapeState>> {
-                    Ok(if eos.contains(&t) {
-                        None
-                    } else {
-                        shape.feed(shape_state, &self.tokenizer.decode(&[t], false)?)
-                    })
-                };
-                let fitted = match fits(next)? {
-                    Some(s) => Some((next, s)),
-                    // The model's best token that fits. Ending, or closing a text without `"`, means the
-                    // text is done, so then the best one that closes it.
-                    None => {
-                        let closing = shape_state.in_text
-                            && (eos.contains(&next) || self.tokenizer.decode(&[next], false)?.starts_with([']', ',', '}']));
-                        let mut order: Vec<u32> = (0..logits_f32.len() as u32).collect();
-                        order.sort_unstable_by(|&a, &b| logits_f32[b as usize].total_cmp(&logits_f32[a as usize]));
-                        let mut found = None;
-                        for t in order {
-                            if let Some(s) = fits(t)?
-                                && (!closing || s.lit > shape_state.lit)
-                            {
-                                found = Some((t, s));
-                                break;
-                            }
-                        }
-                        found
-                    }
-                };
-                let Some((t, s)) = fitted else {
-                    return Ok(Err(TranslateError::Other("no token fits the reply JSON".into())));
-                };
-                (next, shape_state) = (t, s);
-            }
+            let reply = &ids[prompt_len..];
+            let Some(next) = next_token(&decoding, &mut logits_f32, reply, &self.dry_breakers, &mut self.rng, &mut shape_state, piece)?
+            else {
+                return Ok(Err(TranslateError::Other("no token fits the reply JSON".into())));
+            };
             if eos.contains(&next) {
                 break;
             }

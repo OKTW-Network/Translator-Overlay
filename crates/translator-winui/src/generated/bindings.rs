@@ -242,6 +242,11 @@ impl AutoSuggestBox {
         }
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -1001,6 +1006,11 @@ impl Button {
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -1231,6 +1241,11 @@ impl ButtonBase {
     {
         let this = &windows_core::Interface::cast::<IContentControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
@@ -1552,6 +1567,11 @@ impl ColorPicker {
             let _ = &derived__;
             windows_core::imp::Type::from_abi(result__)
         })
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
@@ -1957,6 +1977,11 @@ impl ComboBox {
         })
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -2199,6 +2224,250 @@ unsafe impl Send for ComboBox {}
 unsafe impl Sync for ComboBox {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComboBoxItem(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(ComboBoxItem, windows_core::IUnknown, windows_core::IInspectable);
+windows_core::imp::required_hierarchy!(ComboBoxItem, SelectorItem, ContentControl, Control, FrameworkElement, UIElement, DependencyObject);
+impl ComboBoxItem {
+    pub fn new() -> windows_core::Result<Self> {
+        Self::IComboBoxItemFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+
+    pub fn compose<T>(compose: T) -> windows_core::Result<Self>
+    where
+        T: windows_core::Compose,
+    {
+        Self::IComboBoxItemFactory(|this| unsafe {
+            let (derived__, base__) = windows_core::Compose::compose(compose);
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(&derived__),
+                base__ as *mut _ as _,
+                &mut result__,
+            )
+            .ok()?;
+            let _ = &derived__;
+            windows_core::imp::Type::from_abi(result__)
+        })
+    }
+
+    pub fn SetContent<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        let this = &windows_core::Interface::cast::<IContentControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetHorizontalContentAlignment(&self, value: HorizontalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetHorizontalContentAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetVerticalContentAlignment(&self, value: VerticalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetVerticalContentAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn ClearValue<P0>(&self, dp: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DependencyProperty>,
+    {
+        let this = &windows_core::Interface::cast::<IDependencyObject>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).ClearValue)(windows_core::Interface::as_raw(this), dp.param().abi()).ok() }
+    }
+
+    pub fn Tag(&self) -> windows_core::Result<windows_core::IInspectable> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Tag)(windows_core::Interface::as_raw(this), &mut result__)
+                .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+
+    pub fn SetTag<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetTag)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn ActualWidth(&self) -> windows_core::Result<f64> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).ActualWidth)(windows_core::Interface::as_raw(this), &mut result__).map(|| result__)
+        }
+    }
+
+    pub fn ActualHeight(&self) -> windows_core::Result<f64> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).ActualHeight)(windows_core::Interface::as_raw(this), &mut result__).map(|| result__)
+        }
+    }
+
+    pub fn SetWidth(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetWidth)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetHeight(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetHeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMinWidth(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMinWidth)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMaxWidth(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMaxWidth)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMinHeight(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMinHeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMaxHeight(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMaxHeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetHorizontalAlignment(&self, value: HorizontalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetHorizontalAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetVerticalAlignment(&self, value: VerticalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetVerticalAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMargin(&self, value: Thickness) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMargin)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetStyle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<Style>,
+    {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetStyle)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetRequestedTheme(&self, value: ElementTheme) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetRequestedTheme)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn Loaded<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<windows_core::IInspectable>, windows_core::Ref<RoutedEventArgs>) + Send + 'static,
+    {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        let handler = <RoutedEventHandler>::new(move |a0, a1| {
+            handler(a0, a1);
+            Ok(())
+        });
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(this).Loaded)(
+                windows_core::Interface::as_raw(this),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(this.clone(), token__, windows_core::Interface::vtable(this).RemoveLoaded))
+        }
+    }
+
+    pub fn SetOpacity(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetOpacity)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn Visibility(&self) -> windows_core::Result<Visibility> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Visibility)(windows_core::Interface::as_raw(this), &mut result__).map(|| result__)
+        }
+    }
+
+    pub fn SetVisibility(&self, value: Visibility) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetVisibility)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn XamlRoot(&self) -> windows_core::Result<XamlRoot> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).XamlRoot)(windows_core::Interface::as_raw(this), &mut result__)
+                .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+
+    pub fn SetXamlRoot<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<XamlRoot>,
+    {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetXamlRoot)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn UpdateLayout(&self) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).UpdateLayout)(windows_core::Interface::as_raw(this)).ok() }
+    }
+
+    fn IComboBoxItemFactory<R, F: FnOnce(&IComboBoxItemFactory) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<ComboBoxItem, IComboBoxItemFactory> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for ComboBoxItem {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, IComboBoxItem>();
+}
+unsafe impl windows_core::Interface for ComboBoxItem {
+    type Vtable = <IComboBoxItem as windows_core::Interface>::Vtable;
+
+    const IID: windows_core::GUID = <IComboBoxItem as windows_core::Interface>::IID;
+}
+impl windows_core::RuntimeName for ComboBoxItem {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ComboBoxItem";
+}
+unsafe impl Send for ComboBoxItem {}
+unsafe impl Sync for ComboBoxItem {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompositionBrush(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(CompositionBrush, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(CompositionBrush, CompositionObject);
@@ -2263,6 +2532,11 @@ impl ContentControl {
         P0: windows_core::Param<windows_core::IInspectable>,
     {
         unsafe { (windows_core::Interface::vtable(self).SetContent)(windows_core::Interface::as_raw(self), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
@@ -2578,6 +2852,11 @@ impl ContentDialog {
         })
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -2824,6 +3103,10 @@ pub struct Control(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(Control, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(Control, FrameworkElement, UIElement, DependencyObject);
 impl Control {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        unsafe { (windows_core::Interface::vtable(self).SetFontWeight)(windows_core::Interface::as_raw(self), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         unsafe { (windows_core::Interface::vtable(self).SetIsEnabled)(windows_core::Interface::as_raw(self), value).ok() }
     }
@@ -4923,6 +5206,31 @@ pub struct IComboBoxFactory_Vtbl {
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
 }
+windows_core::imp::define_interface!(IComboBoxItem, IComboBoxItem_Vtbl, 0xdf65f6f4_863f_558d_bc4e_82c12f28062f);
+impl windows_core::RuntimeType for IComboBoxItem {
+    const NAME: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.IComboBoxItem");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IComboBoxItem_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(IComboBoxItemFactory, IComboBoxItemFactory_Vtbl, 0x8540b906_c96b_592d_88d7_0c23a3386d93);
+impl windows_core::RuntimeType for IComboBoxItemFactory {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.IComboBoxItemFactory");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IComboBoxItemFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateInstance: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
 windows_core::imp::define_interface!(IComboBoxStatics, IComboBoxStatics_Vtbl, 0x7da7cd09_e256_5238_9fed_02b2f3afba25);
 impl windows_core::RuntimeType for IComboBoxStatics {
     const NAME: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.IComboBoxStatics");
@@ -5190,7 +5498,7 @@ pub struct IControl_Vtbl {
     FontFamily: usize,
     SetFontFamily: usize,
     FontWeight: usize,
-    SetFontWeight: usize,
+    pub SetFontWeight: unsafe extern "system" fn(*mut core::ffi::c_void, FontWeight) -> windows_core::HRESULT,
     FontStyle: usize,
     SetFontStyle: usize,
     FontStretch: usize,
@@ -6870,6 +7178,36 @@ pub struct ISelector_Vtbl {
     SetIsSynchronizedWithCurrentItem: usize,
     pub SelectionChanged: unsafe extern "system" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, *mut i64) -> windows_core::HRESULT,
     pub RemoveSelectionChanged: unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(ISelectorItem, ISelectorItem_Vtbl, 0x5772c4de_60ea_5492_8c5e_b3323d5a3ca6);
+impl windows_core::RuntimeType for ISelectorItem {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.ISelectorItem");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ISelectorItem_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(ISelectorItemFactory, ISelectorItemFactory_Vtbl, 0x078039f5_76ed_5299_9715_fc8c58173560);
+impl windows_core::RuntimeType for ISelectorItemFactory {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.ISelectorItemFactory");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ISelectorItemFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(ISelectorItemStatics, ISelectorItemStatics_Vtbl, 0x4b201a54_a414_5e79_9b6b_3da9de442a35);
+impl windows_core::RuntimeType for ISelectorItemStatics {
+    const NAME: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"Microsoft.UI.Xaml.Controls.Primitives.ISelectorItemStatics");
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ISelectorItemStatics_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(ISelectorStatics, ISelectorStatics_Vtbl, 0x569b2234_1ceb_516e_b64e_0d479452e279);
 impl windows_core::RuntimeType for ISelectorStatics {
@@ -8567,6 +8905,11 @@ pub struct InfoBar(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(InfoBar, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(InfoBar, Control, FrameworkElement, UIElement, DependencyObject);
 impl InfoBar {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -8890,6 +9233,11 @@ pub struct ItemsControl(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(ItemsControl, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(ItemsControl, Control, FrameworkElement, UIElement, DependencyObject);
 impl ItemsControl {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -9196,6 +9544,11 @@ impl NavigationView {
     {
         let this = &windows_core::Interface::cast::<IContentControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
@@ -9589,6 +9942,11 @@ impl NavigationViewItem {
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -9862,6 +10220,11 @@ impl NavigationViewItemBase {
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -10078,6 +10441,11 @@ impl NavigationViewItemHeader {
     {
         let this = &windows_core::Interface::cast::<IContentControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
@@ -10383,6 +10751,11 @@ pub struct NumberBox(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(NumberBox, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(NumberBox, Control, FrameworkElement, UIElement, DependencyObject);
 impl NumberBox {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -10971,6 +11344,11 @@ impl PasswordBox {
         SHARED.call(callback)
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -11245,6 +11623,11 @@ pub struct ProgressBar(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(ProgressBar, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(ProgressBar, RangeBase, Control, FrameworkElement, UIElement, DependencyObject);
 impl ProgressBar {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -11534,6 +11917,11 @@ pub struct ProgressRing(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(ProgressRing, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(ProgressRing, Control, FrameworkElement, UIElement, DependencyObject);
 impl ProgressRing {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -11814,6 +12202,11 @@ impl RadioButton {
     {
         let this = &windows_core::Interface::cast::<IContentControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
@@ -12102,6 +12495,11 @@ pub struct RangeBase(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(RangeBase, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(RangeBase, Control, FrameworkElement, UIElement, DependencyObject);
 impl RangeBase {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -12858,6 +13256,11 @@ impl ScrollViewer {
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -13165,6 +13568,11 @@ pub struct Selector(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(Selector, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(Selector, ItemsControl, Control, FrameworkElement, UIElement, DependencyObject);
 impl Selector {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -13397,6 +13805,223 @@ impl windows_core::RuntimeName for Selector {
 }
 unsafe impl Send for Selector {}
 unsafe impl Sync for Selector {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectorItem(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(SelectorItem, windows_core::IUnknown, windows_core::IInspectable);
+windows_core::imp::required_hierarchy!(SelectorItem, ContentControl, Control, FrameworkElement, UIElement, DependencyObject);
+impl SelectorItem {
+    pub fn SetContent<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        let this = &windows_core::Interface::cast::<IContentControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetHorizontalContentAlignment(&self, value: HorizontalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetHorizontalContentAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetVerticalContentAlignment(&self, value: VerticalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetVerticalContentAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn ClearValue<P0>(&self, dp: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DependencyProperty>,
+    {
+        let this = &windows_core::Interface::cast::<IDependencyObject>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).ClearValue)(windows_core::Interface::as_raw(this), dp.param().abi()).ok() }
+    }
+
+    pub fn Tag(&self) -> windows_core::Result<windows_core::IInspectable> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Tag)(windows_core::Interface::as_raw(this), &mut result__)
+                .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+
+    pub fn SetTag<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetTag)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn ActualWidth(&self) -> windows_core::Result<f64> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).ActualWidth)(windows_core::Interface::as_raw(this), &mut result__).map(|| result__)
+        }
+    }
+
+    pub fn ActualHeight(&self) -> windows_core::Result<f64> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).ActualHeight)(windows_core::Interface::as_raw(this), &mut result__).map(|| result__)
+        }
+    }
+
+    pub fn SetWidth(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetWidth)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetHeight(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetHeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMinWidth(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMinWidth)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMaxWidth(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMaxWidth)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMinHeight(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMinHeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMaxHeight(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMaxHeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetHorizontalAlignment(&self, value: HorizontalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetHorizontalAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetVerticalAlignment(&self, value: VerticalAlignment) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetVerticalAlignment)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetMargin(&self, value: Thickness) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetMargin)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn SetStyle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<Style>,
+    {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetStyle)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn SetRequestedTheme(&self, value: ElementTheme) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetRequestedTheme)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn Loaded<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<windows_core::IInspectable>, windows_core::Ref<RoutedEventArgs>) + Send + 'static,
+    {
+        let this = &windows_core::Interface::cast::<IFrameworkElement>(self)?;
+        let handler = <RoutedEventHandler>::new(move |a0, a1| {
+            handler(a0, a1);
+            Ok(())
+        });
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(this).Loaded)(
+                windows_core::Interface::as_raw(this),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(this.clone(), token__, windows_core::Interface::vtable(this).RemoveLoaded))
+        }
+    }
+
+    pub fn SetOpacity(&self, value: f64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetOpacity)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn Visibility(&self) -> windows_core::Result<Visibility> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Visibility)(windows_core::Interface::as_raw(this), &mut result__).map(|| result__)
+        }
+    }
+
+    pub fn SetVisibility(&self, value: Visibility) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetVisibility)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
+    pub fn XamlRoot(&self) -> windows_core::Result<XamlRoot> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).XamlRoot)(windows_core::Interface::as_raw(this), &mut result__)
+                .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+
+    pub fn SetXamlRoot<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<XamlRoot>,
+    {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetXamlRoot)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
+    }
+
+    pub fn UpdateLayout(&self) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IUIElement>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).UpdateLayout)(windows_core::Interface::as_raw(this)).ok() }
+    }
+
+    fn ISelectorItemFactory<R, F: FnOnce(&ISelectorItemFactory) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<SelectorItem, ISelectorItemFactory> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+
+    fn ISelectorItemStatics<R, F: FnOnce(&ISelectorItemStatics) -> windows_core::Result<R>>(callback: F) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<SelectorItem, ISelectorItemStatics> = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for SelectorItem {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<Self, ISelectorItem>();
+}
+unsafe impl windows_core::Interface for SelectorItem {
+    type Vtable = <ISelectorItem as windows_core::Interface>::Vtable;
+
+    const IID: windows_core::GUID = <ISelectorItem as windows_core::Interface>::IID;
+}
+impl windows_core::RuntimeName for SelectorItem {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.Primitives.SelectorItem";
+}
+unsafe impl Send for SelectorItem {}
+unsafe impl Sync for SelectorItem {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SizeInt32 {
@@ -13417,6 +14042,11 @@ pub struct Slider(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(Slider, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(Slider, RangeBase, Control, FrameworkElement, UIElement, DependencyObject);
 impl Slider {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -14787,6 +15417,11 @@ pub struct TextBox(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(TextBox, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(TextBox, Control, FrameworkElement, UIElement, DependencyObject);
 impl TextBox {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -15205,6 +15840,11 @@ pub struct TitleBar(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(TitleBar, windows_core::IUnknown, windows_core::IInspectable);
 windows_core::imp::required_hierarchy!(TitleBar, Control, FrameworkElement, UIElement, DependencyObject);
 impl TitleBar {
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -15563,6 +16203,11 @@ impl ToggleButton {
         unsafe { (windows_core::Interface::vtable(this).SetContent)(windows_core::Interface::as_raw(this), value.param().abi()).ok() }
     }
 
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
+    }
+
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
         let this = &windows_core::Interface::cast::<IControl>(self)?;
         unsafe { (windows_core::Interface::vtable(this).SetIsEnabled)(windows_core::Interface::as_raw(this), value).ok() }
@@ -15817,6 +16462,11 @@ impl ToggleSwitch {
         static SHARED: windows_core::imp::FactoryCache<ToggleSwitch, windows_core::imp::IGenericFactory> =
             windows_core::imp::FactoryCache::new();
         SHARED.call(callback)
+    }
+
+    pub fn SetFontWeight(&self, value: FontWeight) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IControl>(self)?;
+        unsafe { (windows_core::Interface::vtable(this).SetFontWeight)(windows_core::Interface::as_raw(this), value).ok() }
     }
 
     pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {

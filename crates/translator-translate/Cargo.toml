@@ -16,3 +16,4 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 translator-core = { path = "../translator-core" }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

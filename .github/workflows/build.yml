@@ -67,6 +67,11 @@ jobs:
           path: third_party/onnxruntime-win-x64
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # package-portable.ps1 runs fetch-llama.ps1, which skips the download when this is restored.
+      - uses: actions/cache@v6
+        with:
+          path: third_party/llama.cpp
+          key: llama-${{ hashFiles('scripts/fetch-llama.ps1') }}
       - name: Package portable zip
         shell: pwsh
         run: .\scripts\package-portable.ps1

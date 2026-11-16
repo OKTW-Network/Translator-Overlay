@@ -1,3 +1,5 @@
 [env]
 ORT_LIB_PATH = { value = "third_party/onnxruntime-win-x64", relative = true }
 ORT_PREFER_DYNAMIC_LINK = "1"
+# Where `cargo run` / `cargo test` find llama.dll (scripts/fetch-llama.ps1); a packaged app uses lib/llama.cpp/.
+LLAMA_LIB_DIR = { value = "third_party/llama.cpp", relative = true }

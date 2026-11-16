@@ -102,35 +102,34 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 - [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx)：皆由 Google 的 QAT 檢查點轉換。
 - [Hy-MT2 ONNX](https://huggingface.co/collections/james58899/hy-mt2-onnx)：fp16 由騰訊的原始權重轉換，q4f16 由 Intel 的 AutoRound int4 檢查點轉換。
 - [Qwen3.8 27B 3-bit GSQ ONNX](https://huggingface.co/james58899/Qwen3.8-27B-3Bit-GSQ-ONNX)：由 ISTA-DASLab 的 3-bit GSQ 檢查點轉換。
+- GGUF（以 llama.cpp 執行，通常較快）：[Unsloth](https://huggingface.co/unsloth) 的 Gemma 4 QAT 與 Qwen3.8 27B、[Tencent](https://huggingface.co/tencent) 的 Hy-MT2，皆為發布者提供的檔案。
 
-| 模型 | 量化 | 下載大小 |
+每個模型可選的版本，括號內為下載大小：
+
+| 模型 | GGUF | ONNX |
 | --- | --- | --- |
-| Gemma 4 E4B | q4f16 | 4.3 GB |
-| Gemma 4 E4B | q4（預設） | 4.8 GB |
-| Gemma 4 12B | q4f16 | 6.8 GB |
-| Gemma 4 12B | q4 | 7.6 GB |
-| Gemma 4 26B A4B | q4f16 | 14.3 GB |
-| Gemma 4 26B A4B | q4 | 15.9 GB |
-| Hy-MT2 1.8B | q4f16 | 1.4 GB |
-| Hy-MT2 1.8B | fp16 | 3.6 GB |
-| Hy-MT2 7B | q4f16 | 5.0 GB |
-| Hy-MT2 7B | fp16 | 15.0 GB |
-| Hy-MT2 30B A3B | q4f16 | 16.3 GB |
-| Qwen3.8 27B | q4f16 | 15.2 GB |
+| Gemma 4 E4B | Q4_K_XL (4.2 GB，預設) | q4f16 (4.3 GB)、q4 (4.8 GB) |
+| Gemma 4 12B | Q4_K_XL (6.7 GB) | q4f16 (6.8 GB)、q4 (7.6 GB) |
+| Gemma 4 26B A4B | Q4_K_XL (14.2 GB) | q4f16 (14.3 GB)、q4 (15.9 GB) |
+| Hy-MT2 1.8B | Q4_K_M (1.1 GB)、Q6_K (1.5 GB)、Q8_0 (1.9 GB) | q4f16 (1.4 GB)、fp16 (3.6 GB) |
+| Hy-MT2 7B | Q4_K_M (4.6 GB)、Q6_K (6.2 GB)、Q8_0 (8.0 GB) | q4f16 (5.0 GB)、fp16 (15.0 GB) |
+| Hy-MT2 30B A3B | Q4_K_M (18.2 GB)、Q8_0 (32.0 GB) | q4f16 (16.3 GB) |
+| Qwen3.8 27B | Q4_K_M (16.6 GB) | q4f16 (15.2 GB) |
 
-裝置可選 WebGPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。
+裝置可選 GPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。
 
 ## 從原始碼建置
 
-需要 Rust 1.100+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU）：
+需要 Rust 1.100+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU），並下載 llama.cpp 的預編譯 DLL：
 
 ```powershell
 .\scripts\build-onnxruntime.ps1
+.\scripts\fetch-llama.ps1
 cargo build --release -p translator-app
 .\scripts\package-portable.ps1
 ```
 
-產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（`translator-app.exe` 與 `lib/` 內的 `onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`）。目標機器仍需 Windows App Runtime 2.4。
+產物：`dist/TranslatorOverlay-<version>-win-x64.zip`（`translator-app.exe` 與 `lib/` 內的 `onnxruntime.dll`、`DirectML.dll`、`webgpu_dawn.dll`、`dxcompiler.dll`，以及 `lib/llama.cpp/` 內 llama.cpp 的 DLL）。目標機器仍需 Windows App Runtime 2.4。
 
 開發時格式與 lint：
 
@@ -148,7 +147,7 @@ crates/
   translator-core        # 設定、路徑、區域設定集、共用型別
   translator-ocr         # PP-OCRv6、下載、穩定閘門、過濾、合併
   translator-overlay     # 點擊可穿透的 Overlay、區域選取、翻譯視窗
-  translator-translate   # 內建 ONNX 模型 / HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code、session cache
+  translator-translate   # 內建模型（ONNX / GGUF）/ HTTP / Grok ACP / OpenCode ACP / Codex app-server / Claude Code、session cache
   translator-winui       # WinUI 3 bindings（winui-bindgen 產生）與啟動
   winui-bindgen          # 重新產生 translator-winui bindings 的工具
 ```

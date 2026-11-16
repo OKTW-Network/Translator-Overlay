@@ -168,7 +168,7 @@ impl SuggestField {
             self.asb.SetText(&hs(v))?;
         }
         let asb = &self.asb;
-        self.items.set(items, |items| asb.SetItemsSource(&string_items(items)?))
+        self.items.set(items, |items| asb.SetItemsSource(&string_items(items, &[])?))
     }
 }
 
@@ -243,6 +243,8 @@ impl Radio {
 
 pub struct Combo {
     pub cb: ComboBox,
+    /// Item indices shown as unselectable group titles; set before [`Combo::set`].
+    pub headers: Vec<usize>,
     last: Last<Option<usize>>,
     items: Prop<Vec<String>>,
     enabled: Prop<bool>,
@@ -267,6 +269,7 @@ impl Combo {
         }))?;
         Ok(Self {
             cb,
+            headers: Vec::new(),
             last,
             items: Prop::default(),
             enabled: Prop::default(),
@@ -276,10 +279,11 @@ impl Combo {
     pub fn set(&mut self, items: Vec<String>, selected: Option<usize>, enabled: bool) -> Result<()> {
         let cb = &self.cb;
         let last = &self.last;
+        let headers = &self.headers;
         // A new items source drops the selection, so reapply it.
         self.items.set(items, |items| {
             last.forget();
-            cb.SetItemsSource(&string_items(items)?)
+            cb.SetItemsSource(&string_items(items, headers)?)
         })?;
         if self.last.changed(&selected) {
             let i = selected.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1);

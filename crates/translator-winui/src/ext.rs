@@ -11,9 +11,10 @@ use windows_core::{Error, EventRevoker, HSTRING, IInspectable, IUnknown, IUnknow
 use windows_reference::IReference;
 
 use crate::generated::bindings::{
-    AutomationProperties, Color, ColumnDefinition, CornerRadius, DispatcherQueue, DispatcherQueueHandler, DispatcherQueuePriority,
-    FrameworkElement, Grid, GridLength, GridUnitType, HorizontalAlignment, PlacementMode, RowDefinition, SolidColorBrush, Style, TextBlock,
-    Thickness, ToolTipService, UIElement, VerticalAlignment, Visibility, Window, WriteableBitmap, XamlReader,
+    AutomationProperties, Color, ColumnDefinition, ComboBoxItem, CornerRadius, DispatcherQueue, DispatcherQueueHandler,
+    DispatcherQueuePriority, FontWeight, FrameworkElement, Grid, GridLength, GridUnitType, HorizontalAlignment, PlacementMode,
+    RowDefinition, SolidColorBrush, Style, TextBlock, Thickness, ToolTipService, UIElement, VerticalAlignment, Visibility, Window,
+    WriteableBitmap, XamlReader,
 };
 
 const E_INVALIDARG: windows_core::HRESULT = windows_core::HRESULT(0x8007_0057_u32 as i32);
@@ -186,8 +187,21 @@ pub fn unboxed(v: &IInspectable) -> Option<String> {
 }
 
 /// `ItemsSource` value holding one boxed string per item.
-pub fn string_items(items: &[String]) -> Result<IInspectable> {
-    let values: Vec<Option<IInspectable>> = items.iter().map(|item| Some(boxed(item))).collect();
+///
+/// The `headers` indices become disabled `ComboBoxItem` group titles.
+pub fn string_items(items: &[String], headers: &[usize]) -> Result<IInspectable> {
+    let mut values = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        values.push(Some(if headers.contains(&i) {
+            let header = ComboBoxItem::new()?;
+            header.SetContent(&boxed(item))?;
+            header.SetIsEnabled(false)?;
+            header.SetFontWeight(FontWeight { Weight: 600 })?;
+            header.cast()?
+        } else {
+            boxed(item)
+        }));
+    }
     windows_collections::IVector::<IInspectable>::from(values).cast()
 }
 

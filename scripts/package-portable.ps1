@@ -11,6 +11,7 @@
     - lib/DirectML.dll          (DirectML EP)
     - lib/webgpu_dawn.dll       (WebGPU EP / Dawn)
     - lib/dxcompiler.dll        (Dawn D3D12 shader compiler)
+    - lib/llama.cpp/            (llama.cpp DLLs and the OpenMP license, fetched by fetch-llama.ps1)
 
   translator-winui adds the Windows App Runtime package dependency itself (no Bootstrap.dll):
   the OS API on Windows 11, the framework's Microsoft.WindowsAppRuntime.dll on Windows 10.
@@ -103,6 +104,11 @@ foreach ($name in $SidecarDlls) {
     }
 }
 
+# llama.cpp's prebuilt DLLs, for the built-in GGUF models.
+& (Join-Path $PSScriptRoot "fetch-llama.ps1")
+$LlamaFiles = Get-ChildItem -LiteralPath (Join-Path $Root "third_party\llama.cpp") -File |
+    Where-Object { $_.Name -match '\.dll$|^LICENSE' }
+
 # Clean stage
 if (Test-Path -LiteralPath $StageDir) {
     Remove-Item -LiteralPath $StageDir -Recurse -Force
@@ -117,6 +123,9 @@ New-Item -ItemType Directory -Force -Path $LibDir | Out-Null
 foreach ($name in $SidecarDlls) {
     Copy-Item -LiteralPath (Join-Path $OrtDir $name) -Destination (Join-Path $LibDir $name)
 }
+$LlamaDir = Join-Path $LibDir "llama.cpp"
+New-Item -ItemType Directory -Force -Path $LlamaDir | Out-Null
+$LlamaFiles | Copy-Item -Destination $LlamaDir
 
 $packReadme = @"
 # Translator Overlay $Version (portable)

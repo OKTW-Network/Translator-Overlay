@@ -1703,6 +1703,9 @@ mod tests {
         if let Ok(id) = std::env::var("TRANSLATOR_BUILTIN_MODEL") {
             api.builtin_model = id;
         }
+        if std::env::var("TRANSLATOR_BUILTIN_DEVICE").as_deref() == Ok("cpu") {
+            api.builtin_device = translator_core::OcrDevice::Cpu;
+        }
         let mut client = TranslateClient::new(api);
         let models_dir = std::env::var_os("TRANSLATOR_MODELS_DIR")
             .map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/release/models"), PathBuf::from);
@@ -1716,13 +1719,19 @@ mod tests {
             source_height: 1.0,
             source_width: 1.0,
         }];
-        let conv = Conversation::empty().begin_translate_request(&TranslationConfig::default(), &source, &[]);
-        let completion = client
-            .complete_cancellable(&conv, &CancellationToken::new(), &mut |_| {}, &mut |_| {})
-            .await
-            .unwrap();
-        let out = merge_translations(&source, &completion.text).unwrap();
-        assert!(!out[0].translation.trim().is_empty(), "{}", completion.text);
+        let mut conv = Conversation::empty();
+        // The second turn extends the first one's cached KV.
+        for _ in 0..2 {
+            let request = conv.begin_translate_request(&TranslationConfig::default(), &source, &[]);
+            let completion = client
+                .complete_cancellable(&request, &CancellationToken::new(), &mut |_| {}, &mut |_| {})
+                .await
+                .unwrap();
+            let out = merge_translations(&source, &completion.text).unwrap();
+            assert!(!out[0].translation.trim().is_empty(), "{}", completion.text);
+            println!("{}", completion.text);
+            conv.commit_completion(&completion);
+        }
     }
 
     fn page_block(id: u32, text: &str) -> OcrBlock {

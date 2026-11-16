@@ -298,3 +298,8 @@ Microsoft::UI::Xaml::Controls::Primitives::FlyoutPlacementMode
 Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBaseFactory::{}
 Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBaseStatics::{}
 Microsoft::UI::Xaml::Controls::Primitives::IFlyoutBaseStatics2::{}
+Microsoft::UI::Xaml::Controls::ComboBoxItem::CreateInstance
+Microsoft::UI::Xaml::Controls::ComboBoxItem
+Microsoft::UI::Xaml::Controls::IControl::put_FontWeight
+Microsoft::UI::Xaml::Controls::Primitives::ISelectorItemFactory::{}
+Microsoft::UI::Xaml::Controls::Primitives::ISelectorItemStatics::{}

@@ -169,7 +169,7 @@ fn remove_by_path(root: &mut toml::Table, path: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelProvider {
-    /// Built-in ONNX model run in-process ([`ApiConfig::builtin_model`]).
+    /// Built-in ONNX or GGUF model run in-process ([`ApiConfig::builtin_model`]).
     #[default]
     Builtin,
     /// OpenAI-compatible HTTP chat completions or Responses API.
@@ -304,7 +304,8 @@ pub struct ApiConfig {
     /// Built-in model catalog id. Empty = the first catalog entry. Only for [`ModelProvider::Builtin`].
     #[serde(skip_serializing_if = "String::is_empty")]
     pub builtin_model: String,
-    /// ONNX Runtime device for the built-in model. Only for [`ModelProvider::Builtin`].
+    /// Device for the built-in model; a GGUF model runs on Vulkan for either GPU choice.
+    /// Only for [`ModelProvider::Builtin`].
     #[serde(skip_serializing_if = "is_default")]
     pub builtin_device: OcrDevice,
     /// Prompt + reply token limit of the built-in model; sizes its preallocated KV cache.

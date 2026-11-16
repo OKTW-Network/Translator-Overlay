@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use rust_i18n::t;
 use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ServiceTier};
-use translator_translate::{BUILTIN_MODELS, find_builtin_model};
+use translator_translate::{BUILTIN_MODELS, BuiltinModelSpec, find_builtin_model};
 use translator_winui::{
     Border, Flyout, FlyoutPlacementMode, HorizontalAlignment, InfoBar, Interface, Layout, Result, StackPanel, Style, TextWrapping,
     UIElement, VerticalAlignment, XamlReader,
@@ -52,26 +52,96 @@ const PROVIDERS: [ModelProvider; 6] = [
 ];
 
 fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, Border, InfoBar)> {
-    let mut model = Combo::new("", {
+    /// Catalog order, each family once.
+    fn families() -> Vec<&'static str> {
+        let mut families: Vec<_> = BUILTIN_MODELS.iter().map(|m| m.family_variant().0).collect();
+        families.dedup();
+        families
+    }
+    fn is_gguf(m: &BuiltinModelSpec) -> bool {
+        m.family_variant().1.starts_with("GGUF")
+    }
+    /// The draft's model, then its family's menu rows: a format title (no model) ahead of that format's models.
+    fn variants(ui: &UiShared) -> (Option<&'static BuiltinModelSpec>, Vec<(&'static str, Option<&'static BuiltinModelSpec>)>) {
+        let current = find_builtin_model(&ui.draft.api.builtin_model);
+        let family = current.map(|s| s.family_variant().0);
+        let mut rows = Vec::new();
+        for (title, gguf) in [("GGUF", true), ("ONNX", false)] {
+            let models: Vec<_> = BUILTIN_MODELS
+                .iter()
+                .filter(|m| Some(m.family_variant().0) == family && is_gguf(m) == gguf)
+                .collect();
+            if !models.is_empty() {
+                rows.push((title, None));
+                rows.extend(models.into_iter().map(|m| (m.family_variant().1, Some(m))));
+            }
+        }
+        (current, rows)
+    }
+    let select = |cx: &UiCx, pick: fn(&UiShared, usize) -> Option<&'static str>| {
         let cx = cx.clone();
-        move |idx| {
-            let Some(spec) = idx.and_then(|i| BUILTIN_MODELS.get(i)) else {
-                return;
-            };
+        move |idx: Option<usize>| {
             cx.with_mut(|ui| {
-                if ui.draft.api.builtin_model != spec.id {
-                    ui.draft.api.builtin_model = spec.id.to_string();
+                if let Some(id) = idx.and_then(|i| pick(ui, i))
+                    && ui.draft.api.builtin_model != id
+                {
+                    ui.draft.api.builtin_model = id.to_string();
                     mark_dirty(ui);
                 }
             });
         }
-    })?;
-    model.cb.width(280.0)?.valign(VerticalAlignment::Center)?;
-    let model_card = settings_card("api-builtin-model", &t!("api.builtin_model"), Some(&t!("api.builtin_model_desc")), &model.cb)?;
+    };
+    // Another family starts at its first menu row (GGUF ahead of ONNX).
+    let mut family = Combo::new(
+        "",
+        select(cx, |ui, i| {
+            let picked = *families().get(i)?;
+            let (current, _) = variants(ui);
+            if current.is_some_and(|s| s.family_variant().0 == picked) {
+                return None;
+            }
+            BUILTIN_MODELS
+                .iter()
+                .filter(|m| m.family_variant().0 == picked)
+                .min_by_key(|m| !is_gguf(m))
+                .map(|m| m.id)
+        }),
+    )?;
+    family.cb.width(170.0)?.valign(VerticalAlignment::Center)?;
+    let mut variant = Combo::new("", select(cx, |ui, i| variants(ui).1.get(i)?.1.map(|m| m.id)))?;
+    variant.cb.width(210.0)?.valign(VerticalAlignment::Center)?;
+    let hint_title = text(&t!("api.builtin_hint_title"))?;
+    hint_title.SetFontWeight(SEMI_BOLD)?;
+    let hint_body = text(&t!("api.builtin_hint"))?;
+    hint_body.SetTextWrapping(TextWrapping::Wrap)?;
+    hint_body.max_width(320.0)?;
+    let hint = column(8.0)?;
+    children!(hint; hint_title, hint_body);
+    let flyout = Flyout::new()?;
+    flyout.SetContent(&hint)?;
+    // The default ThemeShadow paints as a solid block over Mica. A presenter style replaces the
+    // default one, so inherit it to keep corners, padding and colours.
+    let no_shadow = "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='FlyoutPresenter' \
+                     BasedOn='{StaticResource DefaultFlyoutPresenterStyle}'>\
+                     <Setter Property='IsDefaultShadowEnabled' Value='False'/></Style>";
+    flyout.SetPlacement(FlyoutPlacementMode::Left)?;
+    flyout.SetFlyoutPresenterStyle(&XamlReader::Load(&hs(no_shadow))?.cast::<Style>()?)?;
+    // The button's Flyout opens on click and light-dismisses on its own.
+    let info = icon_button("\u{E946}", || {})?;
+    info.tooltip(&t!("api.builtin_hint_title"))?;
+    info.SetFlyout(&flyout)?;
+    let model_row = row(8.0)?;
+    model_row.valign(VerticalAlignment::Center)?;
+    children!(model_row; info, family.cb, variant.cb);
+    let model_card = settings_card("api-builtin-model", &t!("api.builtin_model"), Some(&t!("api.builtin_model_desc")), &model_row)?;
     b.add(move |ui, _| {
-        let items = BUILTIN_MODELS.iter().map(|m| m.label.to_string()).collect();
-        let selected = find_builtin_model(&ui.draft.api.builtin_model).and_then(|s| BUILTIN_MODELS.iter().position(|m| m.id == s.id));
-        model.set(items, selected, true)
+        let (current, rows) = variants(ui);
+        let names = families();
+        let selected = current.and_then(|s| names.iter().position(|&f| f == s.family_variant().0));
+        family.set(names.into_iter().map(str::to_string).collect(), selected, true)?;
+        let selected = current.and_then(|s| rows.iter().position(|row| row.1.is_some_and(|m| m.id == s.id)));
+        variant.headers = rows.iter().enumerate().filter(|(_, row)| row.1.is_none()).map(|(i, _)| i).collect();
+        variant.set(rows.iter().map(|row| row.0.to_string()).collect(), selected, true)
     });
     // No DirectML: its attention kernel breaks Gemma 4 (see translator-translate's builtin module).
     const DEVICES: [OcrDevice; 2] = [OcrDevice::Webgpu, OcrDevice::Cpu];
@@ -80,7 +150,7 @@ fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, 
         cx,
         ("api-builtin-device", &t!("api.builtin_device"), &t!("api.builtin_device_desc")),
         // The OCR tooltips talk about OCR, so these radios go without.
-        ("api-builtin-device", &[("ocr.webgpu", Some(84.0), None), ("ocr.cpu", Some(64.0), None)], &DEVICES),
+        ("api-builtin-device", &[("api.builtin_gpu", Some(64.0), None), ("ocr.cpu", Some(64.0), None)], &DEVICES),
         false,
         |ui| (DEVICES.iter().position(|&d| d == ui.draft.api.builtin_device).unwrap_or(0), true),
         |ui, v| ui.draft.api.builtin_device = v,
@@ -169,35 +239,10 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         }
     })?;
     provider.cb.width(200.0)?.valign(VerticalAlignment::Center)?;
-    let hint_title = text(&t!("api.builtin_hint_title"))?;
-    hint_title.SetFontWeight(SEMI_BOLD)?;
-    let hint_body = text(&t!("api.builtin_hint"))?;
-    hint_body.SetTextWrapping(TextWrapping::Wrap)?;
-    hint_body.max_width(320.0)?;
-    let hint = column(8.0)?;
-    children!(hint; hint_title, hint_body);
-    let flyout = Flyout::new()?;
-    flyout.SetContent(&hint)?;
-    // The default ThemeShadow paints as a solid block over Mica. A presenter style replaces the
-    // default one, so inherit it to keep corners, padding and colours.
-    let no_shadow = "<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='FlyoutPresenter' \
-                     BasedOn='{StaticResource DefaultFlyoutPresenterStyle}'>\
-                     <Setter Property='IsDefaultShadowEnabled' Value='False'/></Style>";
-    flyout.SetPlacement(FlyoutPlacementMode::Left)?;
-    flyout.SetFlyoutPresenterStyle(&XamlReader::Load(&hs(no_shadow))?.cast::<Style>()?)?;
-    // The button's Flyout opens on click and light-dismisses on its own.
-    let info = icon_button("\u{E946}", || {})?;
-    info.tooltip(&t!("api.builtin_hint_title"))?;
-    info.SetFlyout(&flyout)?;
-    let provider_row = row(4.0)?;
-    provider_row.valign(VerticalAlignment::Center)?;
-    children!(provider_row; info, provider.cb);
-    let provider_card = settings_card("api-provider", &t!("api.provider"), Some(&t!("api.provider_desc")), &provider_row)?;
-    let mut info_shown = Prop::default();
+    let provider_card = settings_card("api-provider", &t!("api.provider"), Some(&t!("api.provider_desc")), &provider.cb)?;
     b.add(move |ui, _| {
         let items = PROVIDERS.iter().map(|&p| provider_label(p).to_string()).collect();
-        provider.set(items, PROVIDERS.iter().position(|&p| p == ui.draft.api.provider), true)?;
-        info_shown.set(ui.draft.api.provider == ModelProvider::Builtin, |&v| info.visible(v).map(drop))
+        provider.set(items, PROVIDERS.iter().position(|&p| p == ui.draft.api.provider), true)
     });
 
     let pick = |choice: HttpApi| {

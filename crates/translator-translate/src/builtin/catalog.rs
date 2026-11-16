@@ -1,4 +1,4 @@
-//! Built-in ONNX model catalog. A new model is one more [`BuiltinModelSpec`] entry.
+//! Built-in model catalog (ONNX and GGUF). A new model is one more [`BuiltinModelSpec`] entry.
 //!
 //! Each repo's files are pinned to a commit and checked by exact byte length on download.
 
@@ -187,6 +187,34 @@ pub struct BuiltinModelSpec {
     /// Subdirectory under `models_dir`. External data must sit next to its `.onnx`, and
     /// tokenizers differ per repo, so each repo gets its own flat directory.
     pub dir: &'static str,
+    pub files: BuiltinFiles,
+    /// The model's chat template opens the model turn with an empty thought channel when thinking
+    /// is off (Gemma 4 12B and up), so it answers without thinking.
+    pub empty_thought: bool,
+}
+
+/// What a model downloads, which picks the runtime.
+#[derive(Debug)]
+pub enum BuiltinFiles {
+    /// Run on ONNX Runtime.
+    Onnx(OnnxFiles),
+    /// Run on llama.cpp.
+    Gguf { file: ModelArtifact, mem: GgufMem },
+}
+
+/// What a GGUF model's memory takes besides its file size.
+#[derive(Debug)]
+pub struct GgufMem {
+    /// See [`ArchShape::kv_elems_per_token`].
+    pub kv_elems_per_token: u64,
+    /// The token embedding tables, which llama.cpp keeps in RAM on any device.
+    pub embed_bytes: u64,
+    /// The part of `embed_bytes` tied to the output head, which the GPU holds a copy of.
+    pub tied_bytes: u64,
+}
+
+#[derive(Debug)]
+pub struct OnnxFiles {
     pub tokenizer: ModelArtifact,
     /// `.onnx` first, then its `.onnx_data*` files.
     pub embed: &'static [ModelArtifact],
@@ -198,16 +226,9 @@ pub struct BuiltinModelSpec {
     /// Every layer's attention is `GroupQueryAttention` and none shares another layer's KV (our own
     /// exports), so every KV input goes in place.
     pub kv_gqa_only: bool,
-    /// The model's chat template opens the model turn with an empty thought channel when thinking
-    /// is off (Gemma 4 12B and up), so it answers without thinking.
-    pub empty_thought: bool,
 }
 
-impl BuiltinModelSpec {
-    pub fn artifacts(&self) -> impl Iterator<Item = &ModelArtifact> {
-        std::iter::once(&self.tokenizer).chain(self.embed).chain(self.decoder)
-    }
-
+impl OnnxFiles {
     /// Tokens per prefill run. A WebGPU run holds the buffers ORT's cache drops until the GPU
     /// finishes it, so each fed token costs VRAM until the run ends (see `memory_estimate`).
     /// fp32 (q4) holds several MB per token (12B: +13 GB at 1500 tokens), and 256-token runs cap it
@@ -215,6 +236,20 @@ impl BuiltinModelSpec {
     /// prefill, where smaller ones slow it much more.
     pub fn prefill_chunk(&self) -> u64 {
         if self.elem_bytes == 4 { 256 } else { 512 }
+    }
+}
+
+impl BuiltinModelSpec {
+    /// `label` as `(family, variant)`: `("Gemma 4 E4B", "q4f16 (4.3 GB)")`.
+    pub fn family_variant(&self) -> (&'static str, &'static str) {
+        self.label.split_once(" · ").unwrap_or((self.label, ""))
+    }
+
+    pub fn artifacts(&self) -> Vec<&ModelArtifact> {
+        match &self.files {
+            BuiltinFiles::Onnx(onnx) => std::iter::once(&onnx.tokenizer).chain(onnx.embed).chain(onnx.decoder).collect(),
+            BuiltinFiles::Gguf { file, .. } => vec![file],
+        }
     }
 
     /// `(VRAM, RAM)` bytes after a prefill that fills `context`, from the decoder's weights, KV, and
@@ -227,16 +262,40 @@ impl BuiltinModelSpec {
         /// Tokenizer, ORT, and Dawn.
         const HOST: u64 = 512 << 20;
         let ctx = u64::from(context);
-        let (s, e) = (self.shape, self.elem_bytes);
+        let onnx = match &self.files {
+            BuiltinFiles::Onnx(onnx) => onnx,
+            // Measured on Hy-MT2 1.8B and Gemma 4 E4B (Vulkan and CPU, 4k–32k context), within ~5%.
+            BuiltinFiles::Gguf { file, mem } => {
+                /// Compute buffers plus Vulkan's or the CPU backend's own, and in RAM the vocab.
+                const LLAMA: u64 = 256 << 20;
+                // llama.cpp's KV is fp16 and sized for the whole context up front.
+                let kv = mem.kv_elems_per_token * 2 * ctx;
+                return match device {
+                    // The CPU backend repacks Q4_0 weights (Gemma's tied table) into a second copy.
+                    OcrDevice::Cpu => {
+                        let repacked = if matches!(self.arch, BuiltinArch::Gemma4) {
+                            mem.tied_bytes
+                        } else {
+                            0
+                        };
+                        (0, file.expected_bytes + repacked + kv + LLAMA)
+                    }
+                    OcrDevice::Webgpu | OcrDevice::Directml => {
+                        (file.expected_bytes - mem.embed_bytes + mem.tied_bytes + kv + LLAMA, mem.embed_bytes + LLAMA)
+                    }
+                };
+            }
+        };
+        let (s, e) = (onnx.shape, onnx.elem_bytes);
         let kv = s.kv_elems_per_token * e * ctx;
         // ORT WebGPU uploads initializers at their own size, outside the buffer-cache buckets.
-        let weights = self.decoder.iter().map(|a| a.expected_bytes).sum::<u64>() + s.lm_head_bytes;
+        let weights = onnx.decoder.iter().map(|a| a.expected_bytes).sum::<u64>() + s.lm_head_bytes;
         // The embedding session always runs on the CPU, straight from its mmapped external data: a
         // row stays resident once a token reads it, and over time every row can.
-        let ram = self.embed.iter().map(|a| a.expected_bytes).sum::<u64>() + HOST;
+        let ram = onnx.embed.iter().map(|a| a.expected_bytes).sum::<u64>() + HOST;
         match device {
             OcrDevice::Webgpu => {
-                let chunk = self.prefill_chunk();
+                let chunk = onnx.prefill_chunk();
                 let mut held = 0;
                 // `MatMul` attention: scores (`e` bytes) → fp32 Cast → Where. Softmax and the second
                 // Cast reuse the first two buffers (ORT's allocation planner).
@@ -268,7 +327,7 @@ impl BuiltinModelSpec {
 }
 
 /// Model used when the config leaves `builtin_model` empty.
-const DEFAULT_ID: &str = "gemma-4-e4b-it-qat-q4";
+const DEFAULT_ID: &str = "gemma-4-e4b-it-qat-gguf-q4_k_xl";
 
 /// Empty `id` selects `DEFAULT_ID`.
 pub fn find(id: &str) -> Option<&'static BuiltinModelSpec> {
@@ -378,27 +437,90 @@ const QWEN3_8_27B_SHAPE: ArchShape = ArchShape {
     gqa_512_layers: 0,
 };
 
+/// Unsloth's and Tencent's GGUF files.
+const GEMMA4_E4B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF/resolve/8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265";
+const GEMMA4_12B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF/resolve/980b060c40a8539ac159e0501a3e0f66a6365af3";
+const GEMMA4_26B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/7b92b5b28818151e8669af2e45e88d6086f490dd";
+const HY_MT2_1_8B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/a0c709d9fac510f2c807aa3af52872340dc37a4a";
+const HY_MT2_7B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/ab8472660ac61fac25f1af43fac2599d52a8a775";
+const HY_MT2_30B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-30B-A3B-GGUF/resolve/fd3dcbb6b31e9e03923ef4f9f42500f74c3851c3";
+const QWEN3_8_27B_GGUF: &str = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4af51b3542f775b0a8e4b310bfb3f17e01c306c9";
+
+/// GGUF token embedding tables. Q4_0 packs 32 weights into 18 bytes and Q8_0 into 34; Q4_K packs
+/// 256 into 144 and Q6_K into 210.
+const GEMMA4_E4B_EMBD: u64 = 262_144 * 2560 * 18 / 32;
+/// E4B's per-layer table: 42 layers × 256.
+const GEMMA4_E4B_LAYER_EMBD: u64 = 262_144 * 42 * 256 * 18 / 32;
+const GEMMA4_12B_EMBD: u64 = 262_144 * 3840 * 18 / 32;
+const GEMMA4_26B_EMBD: u64 = 262_144 * 2816 * 18 / 32;
+/// Q4_K_M keeps the table Q6_K too.
+const HY_MT2_1_8B_EMBD_Q6_K: u64 = 120_818 * 2048 * 210 / 256;
+const HY_MT2_1_8B_EMBD_Q8_0: u64 = 120_818 * 2048 * 34 / 32;
+const HY_MT2_7B_EMBD_Q6_K: u64 = 128_167 * 4096 * 210 / 256;
+const HY_MT2_7B_EMBD_Q8_0: u64 = 128_167 * 4096 * 34 / 32;
+const HY_MT2_30B_EMBD_Q4_K: u64 = 120_832 * 2048 * 144 / 256;
+const HY_MT2_30B_EMBD_Q8_0: u64 = 120_832 * 2048 * 34 / 32;
+const QWEN3_8_27B_EMBD_Q4_K: u64 = 248_320 * 5120 * 144 / 256;
+
+const fn mem(shape: &ArchShape, embed_bytes: u64, tied_bytes: u64) -> GgufMem {
+    GgufMem {
+        kv_elems_per_token: shape.kv_elems_per_token,
+        embed_bytes,
+        tied_bytes,
+    }
+}
+
+const fn gguf(
+    id: &'static str,
+    label: &'static str,
+    arch: BuiltinArch,
+    dir: &'static str,
+    file: ModelArtifact,
+    mem: GgufMem,
+    empty_thought: bool,
+) -> BuiltinModelSpec {
+    BuiltinModelSpec {
+        id,
+        label,
+        arch,
+        dir,
+        files: BuiltinFiles::Gguf { file, mem },
+        empty_thought,
+    }
+}
+
 /// Grouped by family, each sorted by download size.
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
+    gguf(
+        "gemma-4-e4b-it-qat-gguf-q4_k_xl",
+        "Gemma 4 E4B · GGUF Q4_K_XL (4.2 GB)",
+        BuiltinArch::Gemma4,
+        "gemma-4-e4b-it-qat",
+        art(GEMMA4_E4B_GGUF, "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", 4_215_695_776),
+        mem(&GEMMA4_E4B_SHAPE, GEMMA4_E4B_EMBD + GEMMA4_E4B_LAYER_EMBD, GEMMA4_E4B_EMBD),
+        false,
+    ),
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-qat-q4f16",
         label: "Gemma 4 E4B · q4f16 (4.3 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-e4b-it-qat",
-        tokenizer: GEMMA4_E4B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx", 1_283),
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx_data", 1_962_934_272),
-        ],
-        decoder: &[
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx", 425_326),
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_981_871_104),
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 296_493_056),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: GEMMA4_E4B_TOKENIZER,
+            embed: &[
+                art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx", 1_283),
+                art(GEMMA4_E4B_ONNX, "embed_tokens_q4f16.onnx_data", 1_962_934_272),
+            ],
+            decoder: &[
+                art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx", 425_326),
+                art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_981_871_104),
+                art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 296_493_056),
+            ],
 
-        elem_bytes: 2,
-        shape: &GEMMA4_E4B_SHAPE,
-        kv_gqa_only: false,
+            elem_bytes: 2,
+            shape: &GEMMA4_E4B_SHAPE,
+            kv_gqa_only: false,
+        }),
         empty_thought: false,
     },
     BuiltinModelSpec {
@@ -406,44 +528,57 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Gemma 4 E4B · q4 (4.8 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-e4b-it-qat",
-        tokenizer: GEMMA4_E4B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx", 1_263),
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx_data", 1_828_716_544),
-            art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx_data_1", 352_321_536),
-        ],
-        decoder: &[
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx", 477_484),
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data", 1_995_997_184),
-            art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 573_476_864),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: GEMMA4_E4B_TOKENIZER,
+            embed: &[
+                art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx", 1_263),
+                art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx_data", 1_828_716_544),
+                art(GEMMA4_E4B_ONNX, "embed_tokens_q4.onnx_data_1", 352_321_536),
+            ],
+            decoder: &[
+                art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx", 477_484),
+                art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data", 1_995_997_184),
+                art(GEMMA4_E4B_ONNX, "decoder_model_merged_q4.onnx_data_1", 573_476_864),
+            ],
 
-        elem_bytes: 4,
-        shape: &GEMMA4_E4B_SHAPE,
-        kv_gqa_only: false,
+            elem_bytes: 4,
+            shape: &GEMMA4_E4B_SHAPE,
+            kv_gqa_only: false,
+        }),
         empty_thought: false,
     },
+    gguf(
+        "gemma-4-12b-it-qat-gguf-q4_k_xl",
+        "Gemma 4 12B · GGUF Q4_K_XL (6.7 GB)",
+        BuiltinArch::Gemma4,
+        "gemma-4-12b-it-qat",
+        art(GEMMA4_12B_GGUF, "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", 6_716_356_800),
+        mem(&GEMMA4_12B_SHAPE, GEMMA4_12B_EMBD, GEMMA4_12B_EMBD),
+        true,
+    ),
     BuiltinModelSpec {
         id: "gemma-4-12b-it-qat-q4f16",
         label: "Gemma 4 12B · q4f16 (6.8 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-12b-it-qat",
-        tokenizer: GEMMA4_12B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_12B_ONNX, "embed_tokens_q4f16.onnx", 585),
-            art(GEMMA4_12B_ONNX, "embed_tokens_q4f16.onnx_data", 566_231_040),
-        ],
-        decoder: &[
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx", 455_338),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_997_070_336),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_988_599_296),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_977_876_480),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 232_169_472),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: GEMMA4_12B_TOKENIZER,
+            embed: &[
+                art(GEMMA4_12B_ONNX, "embed_tokens_q4f16.onnx", 585),
+                art(GEMMA4_12B_ONNX, "embed_tokens_q4f16.onnx_data", 566_231_040),
+            ],
+            decoder: &[
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx", 455_338),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_997_070_336),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_988_599_296),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_977_876_480),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 232_169_472),
+            ],
 
-        elem_bytes: 2,
-        shape: &GEMMA4_12B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &GEMMA4_12B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: true,
     },
     BuiltinModelSpec {
@@ -451,49 +586,62 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Gemma 4 12B · q4 (7.6 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-12b-it-qat",
-        tokenizer: GEMMA4_12B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_12B_ONNX, "embed_tokens_q4.onnx", 580),
-            art(GEMMA4_12B_ONNX, "embed_tokens_q4.onnx_data", 629_145_600),
-        ],
-        decoder: &[
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx", 539_467),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data", 1_998_962_688),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_998_978_048),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_2", 1_995_258_880),
-            art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_3", 948_256_768),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: GEMMA4_12B_TOKENIZER,
+            embed: &[
+                art(GEMMA4_12B_ONNX, "embed_tokens_q4.onnx", 580),
+                art(GEMMA4_12B_ONNX, "embed_tokens_q4.onnx_data", 629_145_600),
+            ],
+            decoder: &[
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx", 539_467),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data", 1_998_962_688),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_998_978_048),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_2", 1_995_258_880),
+                art(GEMMA4_12B_ONNX, "decoder_model_merged_q4.onnx_data_3", 948_256_768),
+            ],
 
-        elem_bytes: 4,
-        shape: &GEMMA4_12B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 4,
+            shape: &GEMMA4_12B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: true,
     },
+    gguf(
+        "gemma-4-26b-a4b-it-qat-gguf-q4_k_xl",
+        "Gemma 4 26B A4B · GGUF Q4_K_XL (14.2 GB)",
+        BuiltinArch::Gemma4,
+        "gemma-4-26b-a4b-it-qat",
+        art(GEMMA4_26B_GGUF, "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf", 14_249_047_104),
+        mem(&GEMMA4_26B_SHAPE, GEMMA4_26B_EMBD, GEMMA4_26B_EMBD),
+        true,
+    ),
     BuiltinModelSpec {
         id: "gemma-4-26b-a4b-it-qat-q4f16",
         label: "Gemma 4 26B A4B · q4f16 (14.3 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-26b-a4b-it-qat",
-        tokenizer: GEMMA4_26B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_26B_ONNX, "embed_tokens_q4f16.onnx", 585),
-            art(GEMMA4_26B_ONNX, "embed_tokens_q4f16.onnx_data", 415_236_096),
-        ],
-        decoder: &[
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx", 381_035),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_991_159_808),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_984_856_064),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_984_856_064),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_888_265_728),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_976_745_984),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_984_856_064),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_984_878_080),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 46_137_344),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: GEMMA4_26B_TOKENIZER,
+            embed: &[
+                art(GEMMA4_26B_ONNX, "embed_tokens_q4f16.onnx", 585),
+                art(GEMMA4_26B_ONNX, "embed_tokens_q4f16.onnx_data", 415_236_096),
+            ],
+            decoder: &[
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx", 381_035),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_991_159_808),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_984_856_064),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_984_856_064),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_888_265_728),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_976_745_984),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_984_856_064),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_984_878_080),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 46_137_344),
+            ],
 
-        elem_bytes: 2,
-        shape: &GEMMA4_26B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &GEMMA4_26B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: true,
     },
     BuiltinModelSpec {
@@ -501,116 +649,181 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Gemma 4 26B A4B · q4 (15.9 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-26b-a4b-it-qat",
-        tokenizer: GEMMA4_26B_TOKENIZER,
-        embed: &[
-            art(GEMMA4_26B_ONNX, "embed_tokens_q4.onnx", 579),
-            art(GEMMA4_26B_ONNX, "embed_tokens_q4.onnx_data", 461_373_440),
-        ],
-        decoder: &[
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx", 432_798),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data", 1_881_825_280),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_890_861_056),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_2", 1_890_860_032),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_3", 1_974_407_168),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_4", 1_922_580_480),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_5", 1_881_849_856),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_6", 1_890_860_032),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_7", 1_983_418_368),
-            art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_8", 124_030_976),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: GEMMA4_26B_TOKENIZER,
+            embed: &[
+                art(GEMMA4_26B_ONNX, "embed_tokens_q4.onnx", 579),
+                art(GEMMA4_26B_ONNX, "embed_tokens_q4.onnx_data", 461_373_440),
+            ],
+            decoder: &[
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx", 432_798),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data", 1_881_825_280),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_1", 1_890_861_056),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_2", 1_890_860_032),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_3", 1_974_407_168),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_4", 1_922_580_480),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_5", 1_881_849_856),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_6", 1_890_860_032),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_7", 1_983_418_368),
+                art(GEMMA4_26B_ONNX, "decoder_model_merged_q4.onnx_data_8", 124_030_976),
+            ],
 
-        elem_bytes: 4,
-        shape: &GEMMA4_26B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 4,
+            shape: &GEMMA4_26B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: true,
     },
+    gguf(
+        "hy-mt2-1.8b-gguf-q4_k_m",
+        "Hy-MT2 1.8B · GGUF Q4_K_M (1.1 GB)",
+        BuiltinArch::HyMt2Small,
+        "hy-mt2-1.8b",
+        art(HY_MT2_1_8B_GGUF, "Hy-MT2-1.8B-Q4_K_M.gguf", 1_133_080_448),
+        mem(&HY_MT2_1_8B_SHAPE, HY_MT2_1_8B_EMBD_Q6_K, HY_MT2_1_8B_EMBD_Q6_K),
+        false,
+    ),
     BuiltinModelSpec {
         id: "hy-mt2-1.8b-q4f16",
         label: "Hy-MT2 1.8B · q4f16 (1.4 GB)",
         arch: BuiltinArch::HyMt2Small,
         dir: "hy-mt2-1.8b",
-        tokenizer: HY_MT2_1_8B_TOKENIZER,
-        embed: &[
-            art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx", 355),
-            art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx_data", 494_870_528),
-        ],
-        decoder: &[
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx", 238_998),
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx_data", 868_487_168),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: HY_MT2_1_8B_TOKENIZER,
+            embed: &[
+                art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx", 355),
+                art(HY_MT2_1_8B_ONNX, "embed_tokens_q4f16.onnx_data", 494_870_528),
+            ],
+            decoder: &[
+                art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx", 238_998),
+                art(HY_MT2_1_8B_ONNX, "decoder_model_merged_q4f16.onnx_data", 868_487_168),
+            ],
 
-        elem_bytes: 2,
-        shape: &HY_MT2_1_8B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &HY_MT2_1_8B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: false,
     },
+    gguf(
+        "hy-mt2-1.8b-gguf-q6_k",
+        "Hy-MT2 1.8B · GGUF Q6_K (1.5 GB)",
+        BuiltinArch::HyMt2Small,
+        "hy-mt2-1.8b",
+        art(HY_MT2_1_8B_GGUF, "Hy-MT2-1.8B-Q6_K.gguf", 1_474_785_120),
+        mem(&HY_MT2_1_8B_SHAPE, HY_MT2_1_8B_EMBD_Q6_K, HY_MT2_1_8B_EMBD_Q6_K),
+        false,
+    ),
+    gguf(
+        "hy-mt2-1.8b-gguf-q8_0",
+        "Hy-MT2 1.8B · GGUF Q8_0 (1.9 GB)",
+        BuiltinArch::HyMt2Small,
+        "hy-mt2-1.8b",
+        art(HY_MT2_1_8B_GGUF, "Hy-MT2-1.8B-Q8_0.gguf", 1_908_528_192),
+        mem(&HY_MT2_1_8B_SHAPE, HY_MT2_1_8B_EMBD_Q8_0, HY_MT2_1_8B_EMBD_Q8_0),
+        false,
+    ),
     BuiltinModelSpec {
         id: "hy-mt2-1.8b-fp16",
         label: "Hy-MT2 1.8B · fp16 (3.6 GB)",
         arch: BuiltinArch::HyMt2Small,
         dir: "hy-mt2-1.8b",
-        tokenizer: HY_MT2_1_8B_TOKENIZER,
-        embed: &[
-            art(HY_MT2_1_8B_ONNX, "embed_tokens_fp16.onnx", 354),
-            art(HY_MT2_1_8B_ONNX, "embed_tokens_fp16.onnx_data", 494_870_528),
-        ],
-        decoder: &[
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx", 189_471),
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx_data", 1_950_523_392),
-            art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx_data_1", 1_136_750_592),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: HY_MT2_1_8B_TOKENIZER,
+            embed: &[
+                art(HY_MT2_1_8B_ONNX, "embed_tokens_fp16.onnx", 354),
+                art(HY_MT2_1_8B_ONNX, "embed_tokens_fp16.onnx_data", 494_870_528),
+            ],
+            decoder: &[
+                art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx", 189_471),
+                art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx_data", 1_950_523_392),
+                art(HY_MT2_1_8B_ONNX, "decoder_model_merged_fp16.onnx_data_1", 1_136_750_592),
+            ],
 
-        elem_bytes: 2,
-        shape: &HY_MT2_1_8B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &HY_MT2_1_8B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: false,
     },
+    gguf(
+        "hy-mt2-7b-gguf-q4_k_m",
+        "Hy-MT2 7B · GGUF Q4_K_M (4.6 GB)",
+        BuiltinArch::HyMt2Medium,
+        "hy-mt2-7b",
+        art(HY_MT2_7B_GGUF, "Hy-MT2-7B-Q4_K_M.gguf", 4_624_648_896),
+        mem(&HY_MT2_7B_SHAPE, HY_MT2_7B_EMBD_Q6_K, HY_MT2_7B_EMBD_Q6_K),
+        false,
+    ),
     BuiltinModelSpec {
         id: "hy-mt2-7b-q4f16",
         label: "Hy-MT2 7B · q4f16 (5.0 GB)",
         arch: BuiltinArch::HyMt2Medium,
         dir: "hy-mt2-7b",
-        tokenizer: HY_MT2_7B_TOKENIZER,
-        embed: &[
-            art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx", 356),
-            art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx_data", 1_049_944_064),
-        ],
-        decoder: &[
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx", 240_352),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_986_805_760),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_939_595_264),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: HY_MT2_7B_TOKENIZER,
+            embed: &[
+                art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx", 356),
+                art(HY_MT2_7B_ONNX, "embed_tokens_q4f16.onnx_data", 1_049_944_064),
+            ],
+            decoder: &[
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx", 240_352),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_986_805_760),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_939_595_264),
+            ],
 
-        elem_bytes: 2,
-        shape: &HY_MT2_7B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &HY_MT2_7B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: false,
     },
+    // Tencent names these two files `HY-`.
+    gguf(
+        "hy-mt2-7b-gguf-q6_k",
+        "Hy-MT2 7B · GGUF Q6_K (6.2 GB)",
+        BuiltinArch::HyMt2Medium,
+        "hy-mt2-7b",
+        art(HY_MT2_7B_GGUF, "HY-MT2-7B-Q6_K.gguf", 6_164_482_720),
+        mem(&HY_MT2_7B_SHAPE, HY_MT2_7B_EMBD_Q6_K, HY_MT2_7B_EMBD_Q6_K),
+        false,
+    ),
+    gguf(
+        "hy-mt2-7b-gguf-q8_0",
+        "Hy-MT2 7B · GGUF Q8_0 (8.0 GB)",
+        BuiltinArch::HyMt2Medium,
+        "hy-mt2-7b",
+        art(HY_MT2_7B_GGUF, "HY-MT2-7B-Q8_0.gguf", 7_981_928_896),
+        mem(&HY_MT2_7B_SHAPE, HY_MT2_7B_EMBD_Q8_0, HY_MT2_7B_EMBD_Q8_0),
+        false,
+    ),
     BuiltinModelSpec {
         id: "hy-mt2-7b-fp16",
         label: "Hy-MT2 7B · fp16 (15.0 GB)",
         arch: BuiltinArch::HyMt2Medium,
         dir: "hy-mt2-7b",
-        tokenizer: HY_MT2_7B_TOKENIZER,
-        embed: &[
-            art(HY_MT2_7B_ONNX, "embed_tokens_fp16.onnx", 355),
-            art(HY_MT2_7B_ONNX, "embed_tokens_fp16.onnx_data", 1_049_944_064),
-        ],
-        decoder: &[
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx", 189_886),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data", 1_828_798_464),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_1", 1_979_777_024),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_2", 1_946_238_976),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_3", 1_979_777_024),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_4", 1_946_238_976),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_5", 1_979_777_024),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_6", 1_946_238_976),
-            art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_7", 352_329_728),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: HY_MT2_7B_TOKENIZER,
+            embed: &[
+                art(HY_MT2_7B_ONNX, "embed_tokens_fp16.onnx", 355),
+                art(HY_MT2_7B_ONNX, "embed_tokens_fp16.onnx_data", 1_049_944_064),
+            ],
+            decoder: &[
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx", 189_886),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data", 1_828_798_464),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_1", 1_979_777_024),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_2", 1_946_238_976),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_3", 1_979_777_024),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_4", 1_946_238_976),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_5", 1_979_777_024),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_6", 1_946_238_976),
+                art(HY_MT2_7B_ONNX, "decoder_model_merged_fp16.onnx_data_7", 352_329_728),
+            ],
 
-        elem_bytes: 2,
-        shape: &HY_MT2_7B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &HY_MT2_7B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: false,
     },
     BuiltinModelSpec {
@@ -618,29 +831,49 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Hy-MT2 30B A3B · q4f16 (16.3 GB)",
         arch: BuiltinArch::HyMt2Moe,
         dir: "hy-mt2-30b-a3b",
-        tokenizer: art(HY_MT2_30B, "tokenizer.json", 9_527_108),
-        embed: &[
-            art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx", 355),
-            art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx_data", 494_927_872),
-        ],
-        decoder: &[
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx", 498_756),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_999_667_200),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_955_577_856),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_954_529_280),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_954_529_280),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_954_529_280),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_954_529_280),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_954_529_280),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 1_617_104_896),
-            art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_8", 494_927_872),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: art(HY_MT2_30B, "tokenizer.json", 9_527_108),
+            embed: &[
+                art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx", 355),
+                art(HY_MT2_30B_ONNX, "embed_tokens_q4f16.onnx_data", 494_927_872),
+            ],
+            decoder: &[
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx", 498_756),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_999_667_200),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_955_577_856),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_954_529_280),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_954_529_280),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_954_529_280),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_954_529_280),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_954_529_280),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 1_617_104_896),
+                art(HY_MT2_30B_ONNX, "decoder_model_merged_q4f16.onnx_data_8", 494_927_872),
+            ],
 
-        elem_bytes: 2,
-        shape: &HY_MT2_30B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &HY_MT2_30B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: false,
     },
+    gguf(
+        "hy-mt2-30b-a3b-gguf-q4_k_m",
+        "Hy-MT2 30B A3B · GGUF Q4_K_M (18.2 GB)",
+        BuiltinArch::HyMt2Moe,
+        "hy-mt2-30b-a3b",
+        art(HY_MT2_30B_GGUF, "Hy-MT2-30B-A3B-Q4_K_M.gguf", 18_236_702_880),
+        mem(&HY_MT2_30B_SHAPE, HY_MT2_30B_EMBD_Q4_K, 0),
+        false,
+    ),
+    gguf(
+        "hy-mt2-30b-a3b-gguf-q8_0",
+        "Hy-MT2 30B A3B · GGUF Q8_0 (32.0 GB)",
+        BuiltinArch::HyMt2Moe,
+        "hy-mt2-30b-a3b",
+        art(HY_MT2_30B_GGUF, "Hy-MT2-30B-A3B-Q8_0.gguf", 31_985_729_376),
+        mem(&HY_MT2_30B_SHAPE, HY_MT2_30B_EMBD_Q8_0, 0),
+        false,
+    ),
     // ISTA-DASLab's 3-bit GSQ levels, stored losslessly in 4-bit blocks (ORT has no 3-bit kernel). Each
     // 128-weight group is four blocks of 32 sharing its scale: ORT WebGPU's fast prefill path takes
     // only block 32 (7× the prefill speed for 1.2 GB of repeated scales).
@@ -649,28 +882,39 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         label: "Qwen3.8 27B · q4f16 (15.2 GB)",
         arch: BuiltinArch::Qwen3_5,
         dir: "qwen3.8-27b",
-        tokenizer: art(QWEN3_8_27B, "tokenizer.json", 12_809_320),
-        embed: &[
-            art(QWEN3_8_27B_ONNX, "embed_tokens_q4f16.onnx", 717),
-            art(QWEN3_8_27B_ONNX, "embed_tokens_q4f16.onnx_data", 685_363_200),
-        ],
-        decoder: &[
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx", 616_490),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_999_589_376),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_983_737_856),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_976_776_704),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_983_758_336),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_999_568_896),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_976_776_704),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_817_501_696),
-            art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 715_161_600),
-        ],
+        files: BuiltinFiles::Onnx(OnnxFiles {
+            tokenizer: art(QWEN3_8_27B, "tokenizer.json", 12_809_320),
+            embed: &[
+                art(QWEN3_8_27B_ONNX, "embed_tokens_q4f16.onnx", 717),
+                art(QWEN3_8_27B_ONNX, "embed_tokens_q4f16.onnx_data", 685_363_200),
+            ],
+            decoder: &[
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx", 616_490),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data", 1_999_589_376),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_1", 1_983_737_856),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_2", 1_976_776_704),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_3", 1_983_758_336),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_4", 1_999_568_896),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_5", 1_976_776_704),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_6", 1_817_501_696),
+                art(QWEN3_8_27B_ONNX, "decoder_model_merged_q4f16.onnx_data_7", 715_161_600),
+            ],
 
-        elem_bytes: 2,
-        shape: &QWEN3_8_27B_SHAPE,
-        kv_gqa_only: true,
+            elem_bytes: 2,
+            shape: &QWEN3_8_27B_SHAPE,
+            kv_gqa_only: true,
+        }),
         empty_thought: false,
     },
+    gguf(
+        "qwen3.8-27b-gguf-q4_k_m",
+        "Qwen3.8 27B · GGUF Q4_K_M (16.6 GB)",
+        BuiltinArch::Qwen3_5,
+        "qwen3.8-27b",
+        art(QWEN3_8_27B_GGUF, "Qwen3.8-27B-UD-Q4_K_M.gguf", 16_564_259_744),
+        mem(&QWEN3_8_27B_SHAPE, QWEN3_8_27B_EMBD_Q4_K, 0),
+        false,
+    ),
 ];
 
 #[cfg(test)]
@@ -681,10 +925,19 @@ mod tests {
     fn catalog_entries_are_complete_and_pinned() {
         for (i, m) in BUILTIN_MODELS.iter().enumerate() {
             assert!(BUILTIN_MODELS[..i].iter().all(|o| o.id != m.id), "duplicate id {}", m.id);
-            assert_eq!(m.tokenizer.file_name, "tokenizer.json", "{}", m.id);
-            assert!(m.embed[0].file_name.ends_with(".onnx") && m.decoder[0].file_name.ends_with(".onnx"), "{}", m.id);
-            assert!(m.shape.kv_elems_per_token > 0, "{}", m.id);
-            assert!(m.shape.lm_head_bytes <= m.embed[1].expected_bytes, "{}", m.id);
+            assert!(m.label.contains(" · ") && BUILTIN_MODELS[..i].iter().all(|o| o.label != m.label), "{}", m.label);
+            match &m.files {
+                BuiltinFiles::Onnx(o) => {
+                    assert_eq!(o.tokenizer.file_name, "tokenizer.json", "{}", m.id);
+                    assert!(o.embed[0].file_name.ends_with(".onnx") && o.decoder[0].file_name.ends_with(".onnx"), "{}", m.id);
+                    assert!(o.shape.kv_elems_per_token > 0, "{}", m.id);
+                    assert!(o.shape.lm_head_bytes <= o.embed[1].expected_bytes, "{}", m.id);
+                }
+                BuiltinFiles::Gguf { file, mem } => {
+                    assert!(file.file_name.ends_with(".gguf") && mem.kv_elems_per_token > 0, "{}", m.id);
+                    assert!(mem.tied_bytes <= mem.embed_bytes && mem.embed_bytes < file.expected_bytes, "{}", m.id);
+                }
+            }
             for a in m.artifacts() {
                 assert!(a.expected_bytes > 0, "{} {}", m.id, a.file_name);
                 assert!(a.download_url().contains("/resolve/") && !a.download_url().contains("/resolve/main/"), "{}", a.download_url());
