@@ -109,6 +109,7 @@ Versions of each model, with the download size in parentheses:
 | Gemma 4 E4B | Q4_K_XL (4.2 GB, default) | q4f16 (4.3 GB), q4 (4.8 GB) |
 | Gemma 4 12B | Q4_K_XL (6.7 GB) | q4f16 (6.8 GB), q4 (7.6 GB) |
 | Gemma 4 26B A4B | Q4_K_XL (14.2 GB) | q4f16 (14.3 GB), q4 (15.9 GB) |
+| Gemma 4 31B | Q4_K_XL (17.3 GB) | — |
 | Hy-MT2 1.8B | Q4_K_M (1.1 GB), Q6_K (1.5 GB), Q8_0 (1.9 GB) | q4f16 (1.4 GB), fp16 (3.6 GB) |
 | Hy-MT2 7B | Q4_K_M (4.6 GB), Q6_K (6.2 GB), Q8_0 (8.0 GB) | q4f16 (5.0 GB), fp16 (15.0 GB) |
 | Hy-MT2 30B A3B | Q4_K_M (18.2 GB), Q8_0 (32.0 GB) | q4f16 (16.3 GB) |

@@ -387,6 +387,16 @@ const GEMMA4_26B_SHAPE: ArchShape = ArchShape {
     gqa_512_layers: 5,
 };
 
+/// GGUF only.
+const GEMMA4_31B_SHAPE: ArchShape = ArchShape {
+    lm_head_bytes: 704_643_072,
+    // 60 layers × K/V: 50 sliding with 16 heads × 256, 10 global with 4 heads × 512.
+    kv_elems_per_token: 2 * (50 * 16 * 256 + 10 * 4 * 512),
+    heads: 32,
+    matmul_attn_layers: 0,
+    gqa_512_layers: 10,
+};
+
 const HY_MT2_1_8B: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/b9a81a759e3c5dd319d258ec446dede24724ada4";
 const HY_MT2_1_8B_ONNX: &str = "https://huggingface.co/james58899/Hy-MT2-1.8B-ONNX/resolve/b9a81a759e3c5dd319d258ec446dede24724ada4/onnx";
 const HY_MT2_1_8B_TOKENIZER: ModelArtifact = art(HY_MT2_1_8B, "tokenizer.json", 9_527_287);
@@ -441,6 +451,7 @@ const QWEN3_8_27B_SHAPE: ArchShape = ArchShape {
 const GEMMA4_E4B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF/resolve/8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265";
 const GEMMA4_12B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF/resolve/980b060c40a8539ac159e0501a3e0f66a6365af3";
 const GEMMA4_26B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/7b92b5b28818151e8669af2e45e88d6086f490dd";
+const GEMMA4_31B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF/resolve/43cc1aeb31adf47ec06a854507ce552cd9862e6f";
 const HY_MT2_1_8B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/a0c709d9fac510f2c807aa3af52872340dc37a4a";
 const HY_MT2_7B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/ab8472660ac61fac25f1af43fac2599d52a8a775";
 const HY_MT2_30B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-30B-A3B-GGUF/resolve/fd3dcbb6b31e9e03923ef4f9f42500f74c3851c3";
@@ -453,6 +464,7 @@ const GEMMA4_E4B_EMBD: u64 = 262_144 * 2560 * 18 / 32;
 const GEMMA4_E4B_LAYER_EMBD: u64 = 262_144 * 42 * 256 * 18 / 32;
 const GEMMA4_12B_EMBD: u64 = 262_144 * 3840 * 18 / 32;
 const GEMMA4_26B_EMBD: u64 = 262_144 * 2816 * 18 / 32;
+const GEMMA4_31B_EMBD: u64 = 262_144 * 5376 * 18 / 32;
 /// Q4_K_M keeps the table Q6_K too.
 const HY_MT2_1_8B_EMBD_Q6_K: u64 = 120_818 * 2048 * 210 / 256;
 const HY_MT2_1_8B_EMBD_Q8_0: u64 = 120_818 * 2048 * 34 / 32;
@@ -674,6 +686,15 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         }),
         empty_thought: true,
     },
+    gguf(
+        "gemma-4-31b-it-qat-gguf-q4_k_xl",
+        "Gemma 4 31B · GGUF Q4_K_XL (17.3 GB)",
+        BuiltinArch::Gemma4,
+        "gemma-4-31b-it-qat",
+        art(GEMMA4_31B_GGUF, "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf", 17_287_670_048),
+        mem(&GEMMA4_31B_SHAPE, GEMMA4_31B_EMBD, GEMMA4_31B_EMBD),
+        true,
+    ),
     gguf(
         "hy-mt2-1.8b-gguf-q4_k_m",
         "Hy-MT2 1.8B · GGUF Q4_K_M (1.1 GB)",
