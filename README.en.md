@@ -117,6 +117,16 @@ Versions of each model, with the download size in parentheses:
 
 The device is GPU (default) or CPU, set separately from the OCR device. **Stop** frees the VRAM.
 
+### Custom GGUF
+
+You can also use a GGUF model you downloaded yourself, beyond the table above:
+
+1. Put the `.gguf` file in `models/custom/` next to the exe (created on first launch)
+2. On the **API** page, pick **Custom GGUF** as the built-in model, press the refresh button on the right, then pick the file in the list next to it
+3. **Save**
+
+The GGUF file must include a chat template (most published GGUF files do); the app builds the prompt with it. Sampling settings left unset use llama.cpp's defaults.
+
 ## Building from source
 
 Requires Rust 1.100+ (edition 2024) and Visual Studio 2026. Build ONNX Runtime 1.31 (DirectML + WebGPU) and download llama.cpp's prebuilt DLLs once first:

@@ -14,6 +14,7 @@ use std::{
     time::Instant,
 };
 
+use minijinja::{Environment, ErrorKind, Value, context, syntax::SyntaxConfig};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use windows::{
@@ -24,6 +25,7 @@ use windows::{
 use crate::{
     TranslateError,
     builtin::{DRY_BREAKERS, Decoding, ShapeState, ends_in_loop, next_token},
+    http::ChatMessage,
 };
 
 /// Tokens per `llama_decode` call, so a cancel waits for one chunk at most.
@@ -138,6 +140,12 @@ unsafe extern "C" {
         parse_special: bool,
     ) -> i32;
     fn llama_token_to_piece(vocab: *const c_void, token: u32, buf: *mut c_char, length: i32, lstrip: i32, special: bool) -> i32;
+    /// Negative when the vocab has none.
+    fn llama_vocab_bos(vocab: *const c_void) -> i32;
+    /// Negative when the vocab has none.
+    fn llama_vocab_eos(vocab: *const c_void) -> i32;
+    fn llama_vocab_get_add_bos(vocab: *const c_void) -> bool;
+    fn llama_model_chat_template(model: *const c_void, name: *const c_char) -> *const c_char;
 }
 
 #[link(name = "ggml", kind = "raw-dylib")]
@@ -229,7 +237,7 @@ fn piece(vocab: *const c_void, token: u32, special: bool) -> Vec<u8> {
 
 /// A loaded GGUF model and its context.
 pub(crate) struct Model {
-    id: &'static str,
+    id: String,
     model: *mut c_void,
     vocab: *const c_void,
     n_vocab: usize,
@@ -263,7 +271,7 @@ impl Drop for Model {
 
 impl Model {
     /// `gpu` offloads every layer to the GPU (Vulkan); otherwise llama.cpp gets no GPU device at all.
-    pub(crate) fn load(id: &'static str, path: &Path, gpu: bool) -> ort::Result<Self> {
+    pub(crate) fn load(id: String, path: &Path, gpu: bool) -> ort::Result<Self> {
         init()?;
         let c_path = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| ort::Error::new(e.to_string()))?;
         // SAFETY: no preconditions.
@@ -306,6 +314,59 @@ impl Model {
 
     pub(crate) fn token_count(&self, text: &str) -> ort::Result<usize> {
         Ok(tokenize(self.vocab, text)?.len())
+    }
+
+    /// `messages` through the file's own Jinja chat template with thinking off, ending with an open
+    /// model turn, set up like Hugging Face's `apply_chat_template`.
+    pub(crate) fn chat_prompt(&self, messages: &[ChatMessage]) -> ort::Result<String> {
+        // SAFETY: `model` is loaded; a null name asks for the default template, which lives as long as the model.
+        let template = unsafe { llama_model_chat_template(self.model, ptr::null()) };
+        if template.is_null() {
+            return Err(ort::Error::new("the GGUF file has no chat template"));
+        }
+        // SAFETY: `template` is the model's NUL-terminated string, which lives as long as the model.
+        let template = unsafe { CStr::from_ptr(template) }.to_string_lossy();
+        // A negative id means the vocab has no such token.
+        let token = |id: i32| {
+            u32::try_from(id).map_or_else(|_| String::new(), |t| String::from_utf8_lossy(&piece(self.vocab, t, true)).into_owned())
+        };
+        // SAFETY: `vocab` is the loaded model's.
+        let bos = token(unsafe { llama_vocab_bos(self.vocab) });
+        // SAFETY: `vocab` is the loaded model's.
+        let eos = token(unsafe { llama_vocab_eos(self.vocab) });
+        // Python's string and dict methods, `raise_exception`, and HF's `trim_blocks` and `lstrip_blocks`.
+        let mut env = Environment::new();
+        let syntax = SyntaxConfig::builder().trim_blocks(true).lstrip_blocks(true).build();
+        env.set_syntax(syntax.map_err(|e| ort::Error::new(e.to_string()))?);
+        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        env.add_function("raise_exception", |message: String| -> Result<Value, minijinja::Error> {
+            Err(minijinja::Error::new(ErrorKind::InvalidOperation, message))
+        });
+        let render = |messages: Vec<Value>| {
+            let vars = context! { messages, add_generation_prompt => true, enable_thinking => false, bos_token => &bos, eos_token => &eos };
+            env.render_str(&template, vars)
+        };
+        let message = |m: &ChatMessage| context! { role => &m.role, content => &m.content };
+        let mut prompt = render(messages.iter().map(message).collect());
+        // Templates with no system role (Gemma 2, Mistral v0.1) raise on one; like llama-server, fold it
+        // into the first user turn.
+        if let (Err(_), [system, user, rest @ ..]) = (&prompt, messages)
+            && system.role == "system"
+            && user.role == "user"
+        {
+            let content = format!("{}\n\n{}", system.content, user.content);
+            let first = context! { role => "user", content };
+            prompt = render(std::iter::once(first).chain(rest.iter().map(message)).collect());
+        }
+        let prompt = prompt.map_err(|e| ort::Error::new(format!("GGUF chat template: {e:#}")))?;
+        // [`tokenize`] adds no special tokens, so a BOS the template leaves to the tokenizer goes in as text.
+        // SAFETY: `vocab` is the loaded model's.
+        let add_bos = unsafe { llama_vocab_get_add_bos(self.vocab) };
+        Ok(if add_bos && !prompt.starts_with(&bos) {
+            format!("{bos}{prompt}")
+        } else {
+            prompt
+        })
     }
 
     /// A fresh `context`-token context in place of the current one.
@@ -468,7 +529,7 @@ impl Model {
         let prefill = prefill.unwrap_or_default();
         let decode = start.elapsed() - prefill;
         info!(
-            model = self.id,
+            model = self.id.as_str(),
             prompt_tokens = prompt_len,
             reused,
             output_tokens = ids.len() - prompt_len,

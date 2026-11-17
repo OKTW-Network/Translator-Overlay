@@ -6,6 +6,7 @@
 //! context, and fixed-size state (Qwen3.5's linear-attention layers).
 
 mod catalog;
+mod custom;
 mod llama;
 
 use std::{
@@ -27,10 +28,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, download_artifacts, part_path};
 
-pub use crate::builtin::catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model};
+pub use crate::builtin::{
+    catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model},
+    custom::{CUSTOM_ID, custom_models},
+};
 use crate::{
     TranslateError,
-    builtin::catalog::{BuiltinFiles, OnnxFiles},
+    builtin::{
+        catalog::{BuiltinFiles, OnnxFiles},
+        custom::{CUSTOM_DIR, SAMPLING_DEFAULTS},
+    },
     http::ChatMessage,
 };
 
@@ -61,7 +68,7 @@ impl BuiltinBackend {
 }
 
 struct Loaded {
-    id: &'static str,
+    id: String,
     device: OcrDevice,
     engine: Engine,
 }
@@ -71,26 +78,38 @@ enum Engine {
     Llama(llama::Model),
 }
 
-/// Download / load the model selected in `api` unless it is already loaded. `on_status` gets
-/// each download / load phase, then `None` once loading ends (either way).
+/// Download / load the model selected in `api` unless it is already loaded: its catalog spec, or
+/// `None` for the user's own GGUF. `on_status` gets each download / load phase, then `None` once
+/// loading ends (either way).
 pub(crate) async fn ensure_loaded(
     backend: &mut BuiltinBackend,
     api: &ApiConfig,
     models_dir: &Path,
     cancel: &CancellationToken,
     on_status: &mut impl FnMut(Option<PipelineStatus>),
-) -> Result<&'static BuiltinModelSpec, TranslateError> {
-    let spec = find_builtin_model(&api.builtin_model).ok_or_else(|| {
-        let ids: Vec<_> = BUILTIN_MODELS.iter().map(|m| m.id).collect();
-        TranslateError::Other(format!("unknown built-in model {:?} (available: {})", api.builtin_model, ids.join(", ")))
-    })?;
+) -> Result<Option<&'static BuiltinModelSpec>, TranslateError> {
+    let picked = api.builtin_model.trim();
+    let spec = match picked.strip_prefix(CUSTOM_ID) {
+        Some("") => return Err(TranslateError::Other("no custom GGUF file picked".into())),
+        // A bare file name, so the path stays in the folder.
+        Some(file) if file.contains(['/', '\\', ':']) => {
+            return Err(TranslateError::Other(format!("invalid custom GGUF file name {file:?}")));
+        }
+        Some(_) => None,
+        None => Some(find_builtin_model(picked).ok_or_else(|| {
+            let ids: Vec<_> = BUILTIN_MODELS.iter().map(|m| m.id).collect();
+            TranslateError::Other(format!("unknown built-in model {picked:?} (available: {})", ids.join(", ")))
+        })?),
+    };
+    // The catalog's id when `picked` is empty.
+    let id = spec.map_or(picked, |s| s.id);
     let device = api.builtin_device;
     // DirectML's GroupQueryAttention ignores `local_window_size`: Gemma 4's sliding-window layers
     // then read the whole context and the reply turns to garbage past 512 tokens.
-    if device == OcrDevice::Directml && matches!(spec.files, BuiltinFiles::Onnx(_)) {
+    if device == OcrDevice::Directml && spec.is_some_and(|s| matches!(s.files, BuiltinFiles::Onnx(_))) {
         return Err(TranslateError::Other("built-in models do not support DirectML; use WebGPU or CPU".into()));
     }
-    if backend.loaded.as_ref().is_some_and(|l| l.id == spec.id && l.device == device) {
+    if backend.loaded.as_ref().is_some_and(|l| l.id == id && l.device == device) {
         return Ok(spec);
     }
     // A preload cancelled by Stop may only get the lock after Stop unloaded.
@@ -98,32 +117,44 @@ pub(crate) async fn ensure_loaded(
         return Err(TranslateError::Cancelled);
     }
     backend.unload();
-    let dir = models_dir.join(spec.dir);
     let engine: Result<Engine, TranslateError> = async {
-        download_missing(spec, &dir, cancel, on_status).await?;
-        on_status(Some(PipelineStatus::LoadingModels {
+        let loading = PipelineStatus::LoadingModels {
             kind: ModelKind::Translation,
-        }));
-        let dir = dir.clone();
-        tokio::task::spawn_blocking(move || match &spec.files {
-            BuiltinFiles::Onnx(onnx) => OnnxModel::load(spec, onnx, device, &dir).map(|m| Engine::Onnx(Box::new(m))),
-            // Vulkan for any GPU device.
-            BuiltinFiles::Gguf { file, .. } => {
-                llama::Model::load(spec.id, &dir.join(file.file_name), device != OcrDevice::Cpu).map(Engine::Llama)
+        };
+        // Vulkan for any GPU device.
+        let gpu = device != OcrDevice::Cpu;
+        let model_id = id.to_owned();
+        let job = match spec {
+            Some(spec) => {
+                let dir = models_dir.join(spec.dir);
+                download_missing(spec, &dir, cancel, on_status).await?;
+                on_status(Some(loading));
+                tokio::task::spawn_blocking(move || match &spec.files {
+                    BuiltinFiles::Onnx(onnx) => OnnxModel::load(spec, onnx, device, &dir).map(|m| Engine::Onnx(Box::new(m))),
+                    BuiltinFiles::Gguf { file, .. } => llama::Model::load(model_id, &dir.join(file.file_name), gpu).map(Engine::Llama),
+                })
             }
-        })
-        .await
-        .map_err(|e| TranslateError::Other(format!("built-in model load task: {e}")))?
-        .map_err(|e| TranslateError::Other(format!("load {}: {e}", spec.id)))
+            None => {
+                let path = models_dir.join(CUSTOM_DIR).join(&id[CUSTOM_ID.len()..]);
+                if !tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_file()) {
+                    return Err(TranslateError::Other(format!("{} not found", path.display())));
+                }
+                on_status(Some(loading));
+                tokio::task::spawn_blocking(move || llama::Model::load(model_id, &path, gpu).map(Engine::Llama))
+            }
+        };
+        job.await
+            .map_err(|e| TranslateError::Other(format!("built-in model load task: {e}")))?
+            .map_err(|e| TranslateError::Other(format!("load {id}: {e}")))
     }
     .await;
     on_status(None);
     backend.loaded = Some(Loaded {
-        id: spec.id,
+        id: id.to_owned(),
         device,
         engine: engine?,
     });
-    info!(model = spec.id, ?device, "built-in model loaded");
+    info!(model = id, ?device, "built-in model loaded");
     Ok(spec)
 }
 
@@ -139,14 +170,16 @@ pub(crate) async fn complete(
 ) -> Result<String, TranslateError> {
     let spec = ensure_loaded(&mut backend, api, models_dir, cancel, on_status).await?;
 
-    let prompt = spec.arch.render_prompt(messages, spec.empty_thought);
+    // `None` for the user's own GGUF, which the loaded model renders.
+    let prompt = spec.map(|s| s.arch.render_prompt(messages, s.empty_thought));
+    let chat = if prompt.is_none() { messages.to_vec() } else { Vec::new() };
     // The last message is the source payload, and the reply mirrors its JSON.
     let source = messages.last().map_or_else(String::new, |m| m.content.clone());
     let output_ratio = api.builtin_output_ratio;
     let max_tokens_cap = api.max_tokens.map_or(usize::MAX, |n| n as usize);
     let context = api.builtin_context_tokens as usize;
     // Unset knobs take the model's recommended values; temperature 0 is greedy.
-    let (temperature, top_p, top_k) = spec.arch.sampling_defaults();
+    let (temperature, top_p, top_k) = spec.map_or(SAMPLING_DEFAULTS, |s| s.arch.sampling_defaults());
     let decoding = Decoding {
         sampling: Some(Sampling {
             temperature: api.temperature.unwrap_or(temperature),
@@ -175,10 +208,15 @@ pub(crate) async fn complete(
         match &mut loaded.engine {
             Engine::Onnx(model) => {
                 let max_tokens = max_tokens(model.tokenizer.encode(source, false)?.len());
-                model.generate(&prompt, max_tokens, context, decoding, &cancel_job, on_text)
+                // Every ONNX model is a catalog one, so it has a prompt.
+                model.generate(&prompt.unwrap_or_default(), max_tokens, context, decoding, &cancel_job, on_text)
             }
             Engine::Llama(model) => {
                 let max_tokens = max_tokens(model.token_count(&source)?);
+                let prompt = match prompt {
+                    Some(prompt) => prompt,
+                    None => model.chat_prompt(&chat)?,
+                };
                 model.generate(&prompt, max_tokens, context, decoding, &cancel_job, on_text)
             }
         }
@@ -189,7 +227,7 @@ pub(crate) async fn complete(
     }
     match job.await {
         Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(TranslateError::Other(format!("{}: {e}", spec.id))),
+        Ok(Err(e)) => Err(TranslateError::Other(format!("{}: {e}", spec.map_or(api.builtin_model.trim(), |s| s.id)))),
         Err(e) => Err(TranslateError::Other(format!("built-in model task: {e}"))),
     }
 }

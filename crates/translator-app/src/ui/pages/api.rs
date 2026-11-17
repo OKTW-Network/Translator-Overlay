@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use rust_i18n::t;
 use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ServiceTier};
-use translator_translate::{BUILTIN_MODELS, BuiltinModelSpec, find_builtin_model};
+use translator_translate::{BUILTIN_MODELS, CUSTOM_ID, find_builtin_model};
 use translator_winui::{
     Border, Flyout, FlyoutPlacementMode, HorizontalAlignment, InfoBar, Interface, Layout, Result, StackPanel, Style, TextWrapping,
     UIElement, VerticalAlignment, XamlReader,
@@ -13,6 +13,7 @@ use translator_winui::{
 use crate::{
     children,
     ui::{
+        app::scan_custom_models,
         pages::ocr::{memory_infobar, radio_card},
         state::{API_PROFILES, NamedDialog, UiCx, UiShared, load_api_profile, mark_dirty, request_model_list, selected_api_profile},
         widgets::{
@@ -52,63 +53,77 @@ const PROVIDERS: [ModelProvider; 6] = [
 ];
 
 fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, Border, InfoBar)> {
-    /// Catalog order, each family once.
+    /// Catalog order, each family once. The family menu lists the custom option after them.
     fn families() -> Vec<&'static str> {
-        let mut families: Vec<_> = BUILTIN_MODELS.iter().map(|m| m.family_variant().0).collect();
+        let mut families: Vec<_> = BUILTIN_MODELS.iter().map(|m| m.family).collect();
         families.dedup();
         families
     }
-    fn is_gguf(m: &BuiltinModelSpec) -> bool {
-        m.family_variant().1.starts_with("GGUF")
-    }
-    /// The draft's model, then its family's menu rows: a format title (no model) ahead of that format's models.
-    fn variants(ui: &UiShared) -> (Option<&'static BuiltinModelSpec>, Vec<(&'static str, Option<&'static BuiltinModelSpec>)>) {
-        let current = find_builtin_model(&ui.draft.api.builtin_model);
-        let family = current.map(|s| s.family_variant().0);
+    /// A variant menu row: its text and the id it picks (none for a format title).
+    type Row = (String, Option<String>);
+    /// The draft's family menu row, its variant menu rows (a format title ahead of that format's
+    /// models, or the custom folder's files), and the draft's variant row.
+    fn variants(ui: &UiShared) -> (Option<usize>, Vec<Row>, Option<usize>) {
+        let id = ui.draft.api.builtin_model.trim();
+        let families = families();
         let mut rows = Vec::new();
-        for (title, gguf) in [("GGUF", true), ("ONNX", false)] {
-            let models: Vec<_> = BUILTIN_MODELS
-                .iter()
-                .filter(|m| Some(m.family_variant().0) == family && is_gguf(m) == gguf)
-                .collect();
-            if !models.is_empty() {
-                rows.push((title, None));
-                rows.extend(models.into_iter().map(|m| (m.family_variant().1, Some(m))));
+        let (family, id) = if id.starts_with(CUSTOM_ID) {
+            rows.extend(ui.custom_models.iter().map(|f| (f.clone(), Some(format!("{CUSTOM_ID}{f}")))));
+            (Some(families.len()), id)
+        } else {
+            let Some(current) = find_builtin_model(id) else {
+                return (None, rows, None);
+            };
+            for (title, gguf) in [("GGUF", true), ("ONNX", false)] {
+                let models: Vec<_> = BUILTIN_MODELS
+                    .iter()
+                    .filter(|m| m.family == current.family && m.is_gguf() == gguf)
+                    .collect();
+                if !models.is_empty() {
+                    rows.push((title.to_string(), None));
+                    rows.extend(models.into_iter().map(|m| (m.variant.to_string(), Some(m.id.to_string()))));
+                }
             }
-        }
-        (current, rows)
+            // An empty id is the catalog's default model.
+            (families.iter().position(|&f| f == current.family), current.id)
+        };
+        let selected = rows.iter().position(|row| row.1.as_deref() == Some(id));
+        (family, rows, selected)
     }
-    let select = |cx: &UiCx, pick: fn(&UiShared, usize) -> Option<&'static str>| {
+    let select = |cx: &UiCx, pick: fn(&UiShared, usize) -> Option<String>| {
         let cx = cx.clone();
         move |idx: Option<usize>| {
             cx.with_mut(|ui| {
                 if let Some(id) = idx.and_then(|i| pick(ui, i))
                     && ui.draft.api.builtin_model != id
                 {
-                    ui.draft.api.builtin_model = id.to_string();
+                    ui.draft.api.builtin_model = id;
                     mark_dirty(ui);
                 }
             });
         }
     };
-    // Another family starts at its first menu row (GGUF ahead of ONNX).
+    // Another family starts at its first menu row (GGUF ahead of ONNX); the custom option at the
+    // folder's first file, or the bare custom id when it has none.
     let mut family = Combo::new(
         "",
         select(cx, |ui, i| {
-            let picked = *families().get(i)?;
-            let (current, _) = variants(ui);
-            if current.is_some_and(|s| s.family_variant().0 == picked) {
+            if variants(ui).0 == Some(i) {
                 return None;
             }
-            BUILTIN_MODELS
-                .iter()
-                .filter(|m| m.family_variant().0 == picked)
-                .min_by_key(|m| !is_gguf(m))
-                .map(|m| m.id)
+            let families = families();
+            match families.get(i) {
+                Some(&picked) => BUILTIN_MODELS
+                    .iter()
+                    .filter(|m| m.family == picked)
+                    .min_by_key(|m| !m.is_gguf())
+                    .map(|m| m.id.to_string()),
+                None => (i == families.len()).then(|| format!("{CUSTOM_ID}{}", ui.custom_models.first().map_or("", String::as_str))),
+            }
         }),
     )?;
     family.cb.width(170.0)?.valign(VerticalAlignment::Center)?;
-    let mut variant = Combo::new("", select(cx, |ui, i| variants(ui).1.get(i)?.1.map(|m| m.id)))?;
+    let mut variant = Combo::new("", select(cx, |ui, i| variants(ui).1.into_iter().nth(i)?.1))?;
     variant.cb.width(210.0)?.valign(VerticalAlignment::Center)?;
     let hint_title = text(&t!("api.builtin_hint_title"))?;
     hint_title.SetFontWeight(SEMI_BOLD)?;
@@ -130,18 +145,21 @@ fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, 
     let info = icon_button("\u{E946}", || {})?;
     info.tooltip(&t!("api.builtin_hint_title"))?;
     info.SetFlyout(&flyout)?;
+    let rescan = icon_button("\u{E72C}", scan_custom_models)?;
+    rescan.tooltip(&t!("api.builtin_rescan"))?;
     let model_row = row(8.0)?;
     model_row.valign(VerticalAlignment::Center)?;
-    children!(model_row; info, family.cb, variant.cb);
+    children!(model_row; info, family.cb, variant.cb, rescan.clone());
     let model_card = settings_card("api-builtin-model", &t!("api.builtin_model"), Some(&t!("api.builtin_model_desc")), &model_row)?;
+    let mut rescan_shown = Prop::default();
     b.add(move |ui, _| {
-        let (current, rows) = variants(ui);
-        let names = families();
-        let selected = current.and_then(|s| names.iter().position(|&f| f == s.family_variant().0));
-        family.set(names.into_iter().map(str::to_string).collect(), selected, true)?;
-        let selected = current.and_then(|s| rows.iter().position(|row| row.1.is_some_and(|m| m.id == s.id)));
+        let (current_family, rows, selected) = variants(ui);
+        let mut names: Vec<_> = families().into_iter().map(str::to_string).collect();
+        rescan_shown.set(current_family == Some(names.len()), |&v| rescan.visible(v).map(drop))?;
+        names.push(t!("api.builtin_custom").into_owned());
+        family.set(names, current_family, true)?;
         variant.headers = rows.iter().enumerate().filter(|(_, row)| row.1.is_none()).map(|(i, _)| i).collect();
-        variant.set(rows.iter().map(|row| row.0.to_string()).collect(), selected, true)
+        variant.set(rows.into_iter().map(|row| row.0).collect(), selected, true)
     });
     // No DirectML: its attention kernel breaks Gemma 4 (see translator-translate's builtin module).
     const DEVICES: [OcrDevice; 2] = [OcrDevice::Webgpu, OcrDevice::Cpu];
@@ -172,6 +190,15 @@ fn builtin_section(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<(Card, Border, 
         let api = &ui.draft.api;
         find_builtin_model(&api.builtin_model).map_or((0, 0), |s| s.memory_estimate(api.builtin_device, api.builtin_context_tokens))
     })?;
+    // Collapsed, not just closed, so the page's spacing skips it: also hidden for the user's own
+    // GGUF, whose layer shapes the app does not know.
+    let mut memory_shown = Prop::default();
+    let bar = memory.clone();
+    b.add(move |ui, _| {
+        let api = &ui.draft.api;
+        let shown = api.provider == ModelProvider::Builtin && find_builtin_model(&api.builtin_model).is_some();
+        memory_shown.set(shown, |&v| bar.visible(v).map(drop))
+    });
     Ok((model_card, device_card, context_card.root, memory))
 }
 
@@ -387,7 +414,8 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
     children!(connection;
         section_header(&t!("api.connection"))?,
         provider_card.root,
-        shown_for(b, &builtin_memory, builtin)?,
+        // Shown by `builtin_section`, which also checks the model.
+        builtin_memory,
         shown_for(b, &http_api_card.root, http)?,
         shown_for(b, &cli_path, ModelProvider::is_cli)?,
         shown_for(b, &base_url, http)?,

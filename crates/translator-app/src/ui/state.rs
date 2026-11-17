@@ -397,6 +397,8 @@ pub struct UiShared {
     pub model_list_loading: bool,
     pub model_list_fp: String,
     pub model_list_gen: u64,
+    /// File names of the user's own GGUF models as of the last `scan_custom_models`.
+    pub custom_models: Vec<String>,
     /// Row waiting for one key. `hotkey_listen_gen` must match the hook before a chord is kept.
     pub hotkey_listen: Option<HotkeyAction>,
     pub hotkey_listen_gen: u64,
@@ -449,6 +451,7 @@ pub fn make_shared() -> Arc<Mutex<UiShared>> {
         model_list_loading: false,
         model_list_fp: String::new(),
         model_list_gen: 0,
+        custom_models: Vec::new(),
         hotkey_listen: None,
         hotkey_listen_gen: 0,
         hotkey_error: None,

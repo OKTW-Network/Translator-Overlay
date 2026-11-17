@@ -119,6 +119,16 @@ OCR 與翻譯模型都在 Start 後才載入，缺少時會先下載到 exe 同�
 
 裝置可選 GPU（預設）或 CPU，與 OCR 的裝置分開設定。Stop 後會釋放 VRAM。
 
+### 自訂 GGUF
+
+也可以用上表以外、自己下載的 GGUF 模型：
+
+1. 把 `.gguf` 檔放進 exe 同目錄的 `models/custom/`（第一次啟動後會自動建立）
+2. **API** 頁的內建模型選 **自訂 GGUF**，按右側的重新整理按鈕，再從旁邊的清單選檔案
+3. **Save**
+
+GGUF 檔必須內含 chat template（大多數發布的 GGUF 都有），程式會照它組成提示詞。取樣參數未設定時使用 llama.cpp 的預設值。
+
 ## 從原始碼建置
 
 需要 Rust 1.100+（edition 2024）與 Visual Studio 2026。第一次先自建 ONNX Runtime 1.31（DirectML + WebGPU），並下載 llama.cpp 的預編譯 DLL：

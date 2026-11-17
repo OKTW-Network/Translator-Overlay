@@ -182,7 +182,10 @@ pub struct ArchShape {
 pub struct BuiltinModelSpec {
     /// Stored in [`translator_core::ApiConfig::builtin_model`].
     pub id: &'static str,
-    pub label: &'static str,
+    /// The model menu's first level: `"Gemma 4 E4B"`.
+    pub family: &'static str,
+    /// Its row under the family: `"q4f16 (4.3 GB)"`.
+    pub variant: &'static str,
     pub arch: BuiltinArch,
     /// Subdirectory under `models_dir`. External data must sit next to its `.onnx`, and
     /// tokenizers differ per repo, so each repo gets its own flat directory.
@@ -240,9 +243,8 @@ impl OnnxFiles {
 }
 
 impl BuiltinModelSpec {
-    /// `label` as `(family, variant)`: `("Gemma 4 E4B", "q4f16 (4.3 GB)")`.
-    pub fn family_variant(&self) -> (&'static str, &'static str) {
-        self.label.split_once(" · ").unwrap_or((self.label, ""))
+    pub fn is_gguf(&self) -> bool {
+        matches!(self.files, BuiltinFiles::Gguf { .. })
     }
 
     pub fn artifacts(&self) -> Vec<&ModelArtifact> {
@@ -484,7 +486,7 @@ const fn mem(shape: &ArchShape, embed_bytes: u64, tied_bytes: u64) -> GgufMem {
 
 const fn gguf(
     id: &'static str,
-    label: &'static str,
+    (family, variant): (&'static str, &'static str),
     arch: BuiltinArch,
     dir: &'static str,
     file: ModelArtifact,
@@ -493,7 +495,8 @@ const fn gguf(
 ) -> BuiltinModelSpec {
     BuiltinModelSpec {
         id,
-        label,
+        family,
+        variant,
         arch,
         dir,
         files: BuiltinFiles::Gguf { file, mem },
@@ -505,7 +508,7 @@ const fn gguf(
 pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     gguf(
         "gemma-4-e4b-it-qat-gguf-q4_k_xl",
-        "Gemma 4 E4B · GGUF Q4_K_XL (4.2 GB)",
+        ("Gemma 4 E4B", "Q4_K_XL (4.2 GB)"),
         BuiltinArch::Gemma4,
         "gemma-4-e4b-it-qat",
         art(GEMMA4_E4B_GGUF, "gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf", 4_215_695_776),
@@ -514,7 +517,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-qat-q4f16",
-        label: "Gemma 4 E4B · q4f16 (4.3 GB)",
+        family: "Gemma 4 E4B",
+        variant: "q4f16 (4.3 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-e4b-it-qat",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -537,7 +541,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     BuiltinModelSpec {
         id: "gemma-4-e4b-it-qat-q4",
-        label: "Gemma 4 E4B · q4 (4.8 GB)",
+        family: "Gemma 4 E4B",
+        variant: "q4 (4.8 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-e4b-it-qat",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -561,7 +566,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "gemma-4-12b-it-qat-gguf-q4_k_xl",
-        "Gemma 4 12B · GGUF Q4_K_XL (6.7 GB)",
+        ("Gemma 4 12B", "Q4_K_XL (6.7 GB)"),
         BuiltinArch::Gemma4,
         "gemma-4-12b-it-qat",
         art(GEMMA4_12B_GGUF, "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf", 6_716_356_800),
@@ -570,7 +575,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "gemma-4-12b-it-qat-q4f16",
-        label: "Gemma 4 12B · q4f16 (6.8 GB)",
+        family: "Gemma 4 12B",
+        variant: "q4f16 (6.8 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-12b-it-qat",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -595,7 +601,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     BuiltinModelSpec {
         id: "gemma-4-12b-it-qat-q4",
-        label: "Gemma 4 12B · q4 (7.6 GB)",
+        family: "Gemma 4 12B",
+        variant: "q4 (7.6 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-12b-it-qat",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -620,7 +627,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "gemma-4-26b-a4b-it-qat-gguf-q4_k_xl",
-        "Gemma 4 26B A4B · GGUF Q4_K_XL (14.2 GB)",
+        ("Gemma 4 26B A4B", "Q4_K_XL (14.2 GB)"),
         BuiltinArch::Gemma4,
         "gemma-4-26b-a4b-it-qat",
         art(GEMMA4_26B_GGUF, "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf", 14_249_047_104),
@@ -629,7 +636,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "gemma-4-26b-a4b-it-qat-q4f16",
-        label: "Gemma 4 26B A4B · q4f16 (14.3 GB)",
+        family: "Gemma 4 26B A4B",
+        variant: "q4f16 (14.3 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-26b-a4b-it-qat",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -658,7 +666,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     BuiltinModelSpec {
         id: "gemma-4-26b-a4b-it-qat-q4",
-        label: "Gemma 4 26B A4B · q4 (15.9 GB)",
+        family: "Gemma 4 26B A4B",
+        variant: "q4 (15.9 GB)",
         arch: BuiltinArch::Gemma4,
         dir: "gemma-4-26b-a4b-it-qat",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -688,7 +697,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "gemma-4-31b-it-qat-gguf-q4_k_xl",
-        "Gemma 4 31B · GGUF Q4_K_XL (17.3 GB)",
+        ("Gemma 4 31B", "Q4_K_XL (17.3 GB)"),
         BuiltinArch::Gemma4,
         "gemma-4-31b-it-qat",
         art(GEMMA4_31B_GGUF, "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf", 17_287_670_048),
@@ -697,7 +706,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     gguf(
         "hy-mt2-1.8b-gguf-q4_k_m",
-        "Hy-MT2 1.8B · GGUF Q4_K_M (1.1 GB)",
+        ("Hy-MT2 1.8B", "Q4_K_M (1.1 GB)"),
         BuiltinArch::HyMt2Small,
         "hy-mt2-1.8b",
         art(HY_MT2_1_8B_GGUF, "Hy-MT2-1.8B-Q4_K_M.gguf", 1_133_080_448),
@@ -706,7 +715,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "hy-mt2-1.8b-q4f16",
-        label: "Hy-MT2 1.8B · q4f16 (1.4 GB)",
+        family: "Hy-MT2 1.8B",
+        variant: "q4f16 (1.4 GB)",
         arch: BuiltinArch::HyMt2Small,
         dir: "hy-mt2-1.8b",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -728,7 +738,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "hy-mt2-1.8b-gguf-q6_k",
-        "Hy-MT2 1.8B · GGUF Q6_K (1.5 GB)",
+        ("Hy-MT2 1.8B", "Q6_K (1.5 GB)"),
         BuiltinArch::HyMt2Small,
         "hy-mt2-1.8b",
         art(HY_MT2_1_8B_GGUF, "Hy-MT2-1.8B-Q6_K.gguf", 1_474_785_120),
@@ -737,7 +747,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     gguf(
         "hy-mt2-1.8b-gguf-q8_0",
-        "Hy-MT2 1.8B · GGUF Q8_0 (1.9 GB)",
+        ("Hy-MT2 1.8B", "Q8_0 (1.9 GB)"),
         BuiltinArch::HyMt2Small,
         "hy-mt2-1.8b",
         art(HY_MT2_1_8B_GGUF, "Hy-MT2-1.8B-Q8_0.gguf", 1_908_528_192),
@@ -746,7 +756,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "hy-mt2-1.8b-fp16",
-        label: "Hy-MT2 1.8B · fp16 (3.6 GB)",
+        family: "Hy-MT2 1.8B",
+        variant: "fp16 (3.6 GB)",
         arch: BuiltinArch::HyMt2Small,
         dir: "hy-mt2-1.8b",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -769,7 +780,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "hy-mt2-7b-gguf-q4_k_m",
-        "Hy-MT2 7B · GGUF Q4_K_M (4.6 GB)",
+        ("Hy-MT2 7B", "Q4_K_M (4.6 GB)"),
         BuiltinArch::HyMt2Medium,
         "hy-mt2-7b",
         art(HY_MT2_7B_GGUF, "Hy-MT2-7B-Q4_K_M.gguf", 4_624_648_896),
@@ -778,7 +789,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "hy-mt2-7b-q4f16",
-        label: "Hy-MT2 7B · q4f16 (5.0 GB)",
+        family: "Hy-MT2 7B",
+        variant: "q4f16 (5.0 GB)",
         arch: BuiltinArch::HyMt2Medium,
         dir: "hy-mt2-7b",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -802,7 +814,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     // Tencent names these two files `HY-`.
     gguf(
         "hy-mt2-7b-gguf-q6_k",
-        "Hy-MT2 7B · GGUF Q6_K (6.2 GB)",
+        ("Hy-MT2 7B", "Q6_K (6.2 GB)"),
         BuiltinArch::HyMt2Medium,
         "hy-mt2-7b",
         art(HY_MT2_7B_GGUF, "HY-MT2-7B-Q6_K.gguf", 6_164_482_720),
@@ -811,7 +823,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     gguf(
         "hy-mt2-7b-gguf-q8_0",
-        "Hy-MT2 7B · GGUF Q8_0 (8.0 GB)",
+        ("Hy-MT2 7B", "Q8_0 (8.0 GB)"),
         BuiltinArch::HyMt2Medium,
         "hy-mt2-7b",
         art(HY_MT2_7B_GGUF, "HY-MT2-7B-Q8_0.gguf", 7_981_928_896),
@@ -820,7 +832,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     BuiltinModelSpec {
         id: "hy-mt2-7b-fp16",
-        label: "Hy-MT2 7B · fp16 (15.0 GB)",
+        family: "Hy-MT2 7B",
+        variant: "fp16 (15.0 GB)",
         arch: BuiltinArch::HyMt2Medium,
         dir: "hy-mt2-7b",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -849,7 +862,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     BuiltinModelSpec {
         id: "hy-mt2-30b-a3b-q4f16",
-        label: "Hy-MT2 30B A3B · q4f16 (16.3 GB)",
+        family: "Hy-MT2 30B A3B",
+        variant: "q4f16 (16.3 GB)",
         arch: BuiltinArch::HyMt2Moe,
         dir: "hy-mt2-30b-a3b",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -879,7 +893,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "hy-mt2-30b-a3b-gguf-q4_k_m",
-        "Hy-MT2 30B A3B · GGUF Q4_K_M (18.2 GB)",
+        ("Hy-MT2 30B A3B", "Q4_K_M (18.2 GB)"),
         BuiltinArch::HyMt2Moe,
         "hy-mt2-30b-a3b",
         art(HY_MT2_30B_GGUF, "Hy-MT2-30B-A3B-Q4_K_M.gguf", 18_236_702_880),
@@ -888,7 +902,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     ),
     gguf(
         "hy-mt2-30b-a3b-gguf-q8_0",
-        "Hy-MT2 30B A3B · GGUF Q8_0 (32.0 GB)",
+        ("Hy-MT2 30B A3B", "Q8_0 (32.0 GB)"),
         BuiltinArch::HyMt2Moe,
         "hy-mt2-30b-a3b",
         art(HY_MT2_30B_GGUF, "Hy-MT2-30B-A3B-Q8_0.gguf", 31_985_729_376),
@@ -900,7 +914,8 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     // only block 32 (7× the prefill speed for 1.2 GB of repeated scales).
     BuiltinModelSpec {
         id: "qwen3.8-27b-q4f16",
-        label: "Qwen3.8 27B · q4f16 (15.2 GB)",
+        family: "Qwen3.8 27B",
+        variant: "q4f16 (15.2 GB)",
         arch: BuiltinArch::Qwen3_5,
         dir: "qwen3.8-27b",
         files: BuiltinFiles::Onnx(OnnxFiles {
@@ -929,7 +944,7 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
     },
     gguf(
         "qwen3.8-27b-gguf-q4_k_m",
-        "Qwen3.8 27B · GGUF Q4_K_M (16.6 GB)",
+        ("Qwen3.8 27B", "Q4_K_M (16.6 GB)"),
         BuiltinArch::Qwen3_5,
         "qwen3.8-27b",
         art(QWEN3_8_27B_GGUF, "Qwen3.8-27B-UD-Q4_K_M.gguf", 16_564_259_744),
@@ -946,7 +961,10 @@ mod tests {
     fn catalog_entries_are_complete_and_pinned() {
         for (i, m) in BUILTIN_MODELS.iter().enumerate() {
             assert!(BUILTIN_MODELS[..i].iter().all(|o| o.id != m.id), "duplicate id {}", m.id);
-            assert!(m.label.contains(" · ") && BUILTIN_MODELS[..i].iter().all(|o| o.label != m.label), "{}", m.label);
+            let earlier = &BUILTIN_MODELS[..i];
+            assert!(earlier.iter().all(|o| (o.family, o.variant) != (m.family, m.variant)), "{}", m.id);
+            // The family menu lists each family once, so its models sit together.
+            assert!(earlier.last().is_none_or(|o| o.family == m.family) || earlier.iter().all(|o| o.family != m.family), "{}", m.id);
             match &m.files {
                 BuiltinFiles::Onnx(o) => {
                     assert_eq!(o.tokenizer.file_name, "tokenizer.json", "{}", m.id);

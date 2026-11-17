@@ -28,7 +28,7 @@ use crate::{
     http::{chat_completion_body, list_http_models, responses_request_body},
 };
 pub use crate::{
-    builtin::{BUILTIN_MODELS, BuiltinModelSpec, find_builtin_model},
+    builtin::{BUILTIN_MODELS, BuiltinModelSpec, CUSTOM_ID, custom_models, find_builtin_model},
     cache::{CacheResolve, TranslationCache},
     http::{ChatMessage, ResponseItem},
 };

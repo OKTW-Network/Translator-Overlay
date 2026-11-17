@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use rust_i18n::t;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use translator_translate::list_models;
+use translator_translate::{custom_models, list_models};
 use translator_winui::{
     AppWindowTitleBar, Application, Border, Color, Grid, HSTRING, IInspectable, ImageIconSource, Interface, Layout, MicaBackdrop, MicaKind,
     NavigationView, NavigationViewBackButtonVisible, NavigationViewItem, NavigationViewItemHeader, NavigationViewPaneDisplayMode, Ref,
@@ -149,6 +149,25 @@ pub fn fetch_model_list(generation: u64, debounce: bool) {
     });
 }
 
+/// Rereads the models folder's `custom` subfolder into [`UiShared::custom_models`]: at startup and
+/// from the model card's refresh button.
+pub fn scan_custom_models() {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async {
+        let Some(shared) = SHARED.get() else {
+            return;
+        };
+        let Ok(dir) = shared.lock().draft.ocr.models_dir_path() else {
+            return;
+        };
+        let models = custom_models(&dir).await;
+        shared.lock().custom_models = models;
+        refresh();
+    });
+}
+
 fn sync_root() {
     PENDING.store(false, Ordering::Release);
     ROOT.with(|root| {
@@ -216,6 +235,7 @@ impl Root {
     fn new() -> Result<Self> {
         let shared = make_shared();
         let _ = SHARED.set(shared.clone());
+        scan_custom_models();
         let cx = UiCx::new(&shared);
         restore_taskbar_zorder();
 
