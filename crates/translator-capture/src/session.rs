@@ -1,10 +1,11 @@
 //! Free-threaded capture session that publishes the latest frame.
 
 use std::{
-    sync::{Arc, Mutex, MutexGuard, PoisonError, atomic::Ordering},
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
+use parking_lot::Mutex;
 use tracing::{info, warn};
 use windows::{
     Win32::Graphics::Direct3D11::{
@@ -94,10 +95,6 @@ impl Slot {
 
 type LatestFrame = Arc<Mutex<Slot>>;
 
-fn lock(latest: &LatestFrame) -> MutexGuard<'_, Slot> {
-    latest.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 struct FrameHandler {
     latest: LatestFrame,
 }
@@ -123,7 +120,7 @@ impl GraphicsCaptureApiHandler for FrameHandler {
             return Ok(());
         }
 
-        let mut slot = lock(&self.latest);
+        let mut slot = self.latest.lock();
         if slot.gpu.as_ref().is_none_or(|g| g.desc.Width != width || g.desc.Height != height) {
             let context = frame.device_context().clone();
             // The pipeline thread reads back on this same immediate context.
@@ -221,7 +218,7 @@ impl CaptureSession {
     ///
     /// Lets callers detect "no new frame" before paying for client-area crop.
     pub fn latest_sequence(&self) -> Option<u64> {
-        let sequence = lock(&self.stream.as_ref()?.latest).sequence;
+        let sequence = self.stream.as_ref()?.latest.lock().sequence;
         (sequence > 0).then_some(sequence)
     }
 
@@ -360,7 +357,7 @@ impl CaptureSession {
         if self.in_movesize() {
             return None;
         }
-        let frame = match lock(&self.stream.as_ref()?.latest).read() {
+        let frame = match self.stream.as_ref()?.latest.lock().read() {
             Ok(frame) => frame?,
             Err(e) => {
                 warn!(error = %e, "capture frame readback failed");

@@ -5,10 +5,11 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex, PoisonError},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
+use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -544,7 +545,7 @@ pub struct StderrTail(Arc<Mutex<VecDeque<String>>>);
 
 impl StderrTail {
     fn push(&self, line: String) {
-        let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut lines = self.0.lock();
         if lines.len() == STDERR_TAIL_LINES {
             lines.pop_front();
         }
@@ -552,7 +553,7 @@ impl StderrTail {
     }
 
     pub fn joined(&self) -> String {
-        let lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let lines = self.0.lock();
         lines.iter().map(String::as_str).collect::<Vec<_>>().join(" | ")
     }
 }

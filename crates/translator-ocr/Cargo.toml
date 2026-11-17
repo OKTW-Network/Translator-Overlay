@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ort = { workspace = true, features = ["directml"] }
+parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

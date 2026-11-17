@@ -1,12 +1,8 @@
 //! Small helpers over the generated projection: layout setters, values, styles, UI-thread posting.
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    ffi::c_void,
-    sync::{Mutex, OnceLock},
-};
+use std::{cell::RefCell, collections::HashMap, ffi::c_void, sync::OnceLock};
 
+use parking_lot::Mutex;
 use windows_core::{Error, EventRevoker, HSTRING, IInspectable, IUnknown, IUnknown_Vtbl, Interface, Result, imp::CanInto};
 use windows_reference::IReference;
 
@@ -299,7 +295,7 @@ pub fn post(f: impl FnOnce() + Send + 'static) -> bool {
     };
     let once = Mutex::new(Some(f));
     let handler = DispatcherQueueHandler::new(move || {
-        if let Some(f) = once.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(f) = once.lock().take() {
             f();
         }
         Ok(())

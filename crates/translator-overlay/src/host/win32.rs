@@ -418,10 +418,9 @@ pub(crate) fn lparam_point(lparam: LPARAM) -> (i32, i32) {
 
 /// cargo test is multi-threaded; USER32 window state is process-global.
 #[cfg(test)]
-pub(crate) fn lock_hwnd_tests() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A failed smoke test poisons the lock; later tests still need exclusive USER32 state.
-    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+pub(crate) fn lock_hwnd_tests() -> parking_lot::MutexGuard<'static, ()> {
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    LOCK.lock()
 }
 
 #[cfg(test)]
@@ -499,7 +498,7 @@ mod tests {
         target: HWND,
         overlay: HWND,
         other: HWND,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: parking_lot::MutexGuard<'static, ()>,
     }
 
     impl Drop for ZOrderWindows {

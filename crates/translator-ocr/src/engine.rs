@@ -1,12 +1,10 @@
 //! PP-OCRv6 / PP-OCRv5 (+ optional PP-DocLayoutV3) engine: PaddleOCR's pipeline on ONNX Runtime
 //! (WebGPU / DirectML / CPU).
 
-use std::{
-    path::Path,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
-};
+use std::{path::Path, sync::Arc};
 
 use ort::{ep, logging::LogLevel, session::Session, value::Tensor};
+use parking_lot::Mutex;
 use tracing::info;
 use translator_core::{LineMergeConfig, LineMergeMode, ModelTier, OcrBlock, OcrConfig, OcrDevice, OcrModel, Rect};
 
@@ -48,11 +46,6 @@ struct Models {
     det_limit: usize,
 }
 
-/// `Session::run` takes `&mut self`; a panic mid-run leaves nothing half-written to guard.
-fn lock(session: &Mutex<Session>) -> MutexGuard<'_, Session> {
-    session.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn session(device: OcrDevice, path: &Path) -> ort::Result<Session> {
     // A GPU provider that fails to register leaves the session on the CPU.
     let gpu = match device {
@@ -71,7 +64,7 @@ impl Models {
     /// Text boxes of `image`.
     fn detect(&self, image: &Rgb8) -> ort::Result<Vec<Quad>> {
         let (tensor, width, height) = det::preprocess(image, self.det_limit);
-        let mut det = lock(&self.det);
+        let mut det = self.det.lock();
         let outputs = det.run(ort::inputs![Tensor::from_array(([1, 3, height, width], tensor))?])?;
         let (shape, pred) = outputs[0].try_extract_tensor::<f32>()?;
         let &[_, _, map_height, map_width] = &shape[..] else {
@@ -90,7 +83,7 @@ impl Models {
         image
             .resize(layout::SIDE, layout::SIDE, Interp::Cubic)
             .write_chw([0, 1, 2], [1.0 / 255.0; 3], [0.0; 3], &mut tensor, layout::SIDE);
-        let mut layout_session = lock(layout);
+        let mut layout_session = layout.lock();
         // The model maps its boxes back to the image through `scale_factor` (height, width).
         let outputs = layout_session.run(ort::inputs![
             "image" => Tensor::from_array(([1, 3, layout::SIDE, layout::SIDE], tensor))?,
@@ -126,7 +119,7 @@ impl Models {
         // Crops from every image share batches, narrow to wide, so a batch pads little.
         crops.sort_by(|a, b| (a.3.width as f32 / a.3.height as f32).total_cmp(&(b.3.width as f32 / b.3.height as f32)));
         let mut lines = Vec::with_capacity(crops.len());
-        let mut rec = lock(&self.rec);
+        let mut rec = self.rec.lock();
         for chunk in crops.chunks(REC_BATCH) {
             let (tensor, width) = rec::batch(&chunk.iter().map(|(.., crop)| crop).collect::<Vec<_>>());
             let outputs = rec.run(ort::inputs![Tensor::from_array(([chunk.len(), 3, rec::HEIGHT, width], tensor))?])?;

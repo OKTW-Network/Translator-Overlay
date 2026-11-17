@@ -412,7 +412,7 @@ mod tests {
         WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32)
     }
 
-    fn spawn_overlay_and_target() -> Result<(crate::host::OverlayHost, HWND, std::sync::MutexGuard<'static, ()>), String> {
+    fn spawn_overlay_and_target() -> Result<(crate::host::OverlayHost, HWND, parking_lot::MutexGuard<'static, ()>), String> {
         use tokio::sync::mpsc;
         use translator_core::OverlayConfig;
         use windows::{

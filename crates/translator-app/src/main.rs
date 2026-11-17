@@ -15,7 +15,7 @@ use std::{
     io::{self, Write},
     os::windows::ffi::OsStrExt,
     process,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, OnceLock},
 };
 
 use parking_lot::RwLock;
@@ -113,7 +113,7 @@ fn init_tracing() {
     });
     let subscriber = tracing_subscriber::fmt().with_env_filter(env_filter).with_ansi(false);
     match file {
-        Some(file) => subscriber.with_writer(Mutex::new(file)).init(),
+        Some(file) => subscriber.with_writer(file).init(),
         None => subscriber.init(),
     }
     std::panic::set_hook(Box::new(|info| {
