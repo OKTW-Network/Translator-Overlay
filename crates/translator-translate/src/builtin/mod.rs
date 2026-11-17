@@ -53,6 +53,9 @@ const DRY_BASE: f32 = 1.75;
 const DRY_ALLOWED_LENGTH: usize = 4;
 /// A repeat match stops at a token holding one of these, so JSON quoting never counts as a repeat.
 const DRY_BREAKERS: [char; 4] = ['\n', ':', '"', '*'];
+/// Gemma 4's thought channel markers. Thinking is always off, so no reply may hold one; sampled
+/// anyway (after the answer, at temperature 1), they would show as text and teach the history to repeat them.
+const THOUGHT_TOKENS: [&str; 2] = ["<|channel>", "<channel|>"];
 
 /// The loaded model, if any. Lives behind a mutex on [`crate::TranslateClient`].
 #[derive(Default)]
@@ -273,6 +276,8 @@ struct OnnxModel {
     rng: fastrand::Rng,
     /// Tokens holding a [`DRY_BREAKERS`] character.
     dry_breakers: HashSet<u32>,
+    /// The vocab's [`THOUGHT_TOKENS`], never sampled.
+    thought_tokens: Vec<u32>,
     /// Allocates the in-place KV buffers.
     kv_alloc: Allocator,
     /// Declared last so it drops last: freeing a KV buffer or `kv_alloc` after the session that
@@ -629,6 +634,7 @@ impl OnnxModel {
             .filter(|(t, _)| t.contains(DRY_BREAKERS))
             .map(|(_, id)| id)
             .collect();
+        let thought_tokens = THOUGHT_TOKENS.iter().filter_map(|t| tokenizer.token_to_id(t)).collect();
         let in_place = kv.iter().filter(|s| s.in_place).count();
         info!(model = spec.id, kv_inputs = kv.len(), in_place, ?kv_type, per_layer_inputs, "built-in model sessions ready");
         Ok(Self {
@@ -643,6 +649,7 @@ impl OnnxModel {
             cache: None,
             rng: fastrand::Rng::new(),
             dry_breakers,
+            thought_tokens,
             kv_alloc,
             decoder,
         })
@@ -784,6 +791,9 @@ impl OnnxModel {
                     Some(self.tokenizer.decode(&[t], false)?)
                 })
             };
+            for &t in &self.thought_tokens {
+                logits_f32[t as usize] = f32::NEG_INFINITY;
+            }
             let reply = &ids[prompt_len..];
             let Some(next) = next_token(&decoding, &mut logits_f32, reply, &self.dry_breakers, &mut self.rng, &mut shape_state, piece)?
             else {

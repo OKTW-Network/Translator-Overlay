@@ -24,7 +24,7 @@ use windows::{
 
 use crate::{
     TranslateError,
-    builtin::{DRY_BREAKERS, Decoding, ShapeState, ends_in_loop, next_token},
+    builtin::{DRY_BREAKERS, Decoding, ShapeState, THOUGHT_TOKENS, ends_in_loop, next_token},
     http::ChatMessage,
 };
 
@@ -252,6 +252,8 @@ pub(crate) struct Model {
     rng: fastrand::Rng,
     /// Tokens holding a [`DRY_BREAKERS`] character.
     dry_breakers: HashSet<u32>,
+    /// The vocab's [`THOUGHT_TOKENS`], never sampled.
+    thought_tokens: Vec<u32>,
 }
 
 // SAFETY: llama.cpp models and contexts are not tied to a thread, and the backend mutex gives one
@@ -298,6 +300,13 @@ impl Model {
         let dry_breakers = (0..n_vocab as u32)
             .filter(|&t| String::from_utf8_lossy(&piece(vocab, t, true)).contains(DRY_BREAKERS))
             .collect();
+        // A marker the vocab lacks tokenizes into several plain pieces, which stay allowed.
+        let mut thought_tokens = Vec::new();
+        for t in THOUGHT_TOKENS {
+            if let [id] = tokenize(vocab, t)?[..] {
+                thought_tokens.push(id);
+            }
+        }
         Ok(Self {
             id,
             model,
@@ -309,6 +318,7 @@ impl Model {
             text: String::new(),
             rng: fastrand::Rng::new(),
             dry_breakers,
+            thought_tokens,
         })
     }
 
@@ -492,6 +502,9 @@ impl Model {
             logits.clear();
             // SAFETY: the row holds one logit per vocab token and lives until the next decode.
             logits.extend_from_slice(unsafe { slice::from_raw_parts(last, self.n_vocab) });
+            for &t in &self.thought_tokens {
+                logits[t as usize] = f32::NEG_INFINITY;
+            }
             // SAFETY: `vocab` is the loaded model's.
             let is_end = |t: u32| unsafe { llama_vocab_is_eog(vocab, t) };
             let Some(next) =
