@@ -77,6 +77,11 @@ impl Pipeline {
             != (cfg.ocr.model_tier, cfg.ocr.model, cfg.ocr.v5_det, cfg.ocr.device, cfg.ocr.uses_layout(), cfg.ocr.det_max_side);
         self.gate = StabilityGate::from_config(&cfg.ocr);
         self.persist = BlockPersistenceFilter::from_config(&cfg.ocr);
+        // A page left without captions (its translate failed) emits again under the new
+        // settings; kept, it would count as already sent and wait for good.
+        if self.captions.is_empty() && self.inflight.is_none() {
+            self.last_page = None;
+        }
         if self.session.set_min_interval(cfg.capture.frame_interval()) {
             self.absorb_preview_sequence();
         }

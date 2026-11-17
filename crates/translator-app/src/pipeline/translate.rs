@@ -383,6 +383,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_page_translates_again_after_a_config_change() {
+        // apply_config saves to `config_path()`, which this override points at a real config.
+        if std::env::var_os("TRANSLATOR_OVERLAY_ROOT").is_some() {
+            return;
+        }
+        let mut p = pipeline();
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        let x = vec![block(1, "X")];
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        let job = p.take_inflight().expect("page translates");
+        let result = PageResult {
+            conversation: p.conversation.clone(),
+            translated: Vec::new(),
+            error: Some(TranslateError::ContextFull(4096)),
+        };
+        p.finish_translate(job, result);
+
+        // E.g. a larger context length.
+        let cfg = p.state.read().config.clone();
+        p.apply_config(cfg).await;
+        p.persist = BlockPersistenceFilter::new(0, 750, 0);
+        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr(x, 100, 100);
+        assert!(p.inflight.is_some(), "the failed page is sent again");
+    }
+
+    #[tokio::test]
     async fn history_matches_the_trimmed_model_context() {
         let mut p = pipeline();
         let tcfg = p.state.read().config.translation.clone();
