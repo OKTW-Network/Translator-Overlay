@@ -85,9 +85,9 @@ impl Pipeline {
     /// Translate `miss_blocks` on a copy of the conversation; progress arrives as
     /// [`TranslateJobMsg`]s and [`Self::finish_translate`] adopts the result.
     fn launch_translate_job(&mut self, page: PendingPage, cached_hits: Vec<Option<String>>, miss_blocks: Vec<OcrBlock>) {
-        let (tcfg, glossary, max_retries) = {
+        let (tcfg, glossary, api) = {
             let s = self.state.read();
-            (s.config.translation.clone(), s.dictionary_pairs.clone(), s.config.api.max_retries)
+            (s.config.translation.clone(), s.dictionary_pairs.clone(), s.config.api.clone())
         };
         let cancel = CancellationToken::new();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -114,7 +114,7 @@ impl Pipeline {
         let client = self.client.clone();
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
-            let complete = |request: Conversation, attempt: u32| {
+            let complete = |request: Conversation, attempt: u32, plain_block: Option<u32>| {
                 let (client, cancel, state) = (client.clone(), cancel.clone(), Arc::clone(&state));
                 let (tx_retry, tx_text) = (tx.clone(), tx.clone());
                 async move {
@@ -128,7 +128,6 @@ impl Pipeline {
                                     attempt,
                                     max_retries,
                                     message: error.to_string(),
-                                    kept: None,
                                 });
                             },
                             &mut move |load| {
@@ -136,7 +135,11 @@ impl Pipeline {
                                 ping_ui();
                             },
                             &mut move |text| {
-                                let pairs = peek_translation_pairs(text);
+                                let pairs = match plain_block {
+                                    Some(id) if !text.trim().is_empty() => vec![(id, text.trim().to_owned())],
+                                    Some(_) => Vec::new(),
+                                    None => peek_translation_pairs(text),
+                                };
                                 if !pairs.is_empty() {
                                     let _ = tx_text.send(TranslateJobMsg::Partial(pairs));
                                 }
@@ -145,16 +148,17 @@ impl Pipeline {
                         .await
                 }
             };
-            let result =
-                translate_page(conversation, &tcfg, &glossary, miss_blocks, max_retries, complete, |attempt, error, translated| {
+            let result = translate_page(conversation, &tcfg, &api, &glossary, miss_blocks, complete, |translated, retry| {
+                let _ = tx.send(TranslateJobMsg::Kept(translated.to_vec()));
+                if let Some((attempt, error)) = retry {
                     let _ = tx.send(TranslateJobMsg::Retrying {
                         attempt,
-                        max_retries,
+                        max_retries: api.max_retries,
                         message: error.to_string(),
-                        kept: Some(translated.to_vec()),
                     });
-                })
-                .await;
+                }
+            })
+            .await;
             let _ = tx.send(TranslateJobMsg::Done(result));
         });
 
@@ -164,15 +168,17 @@ impl Pipeline {
     pub(crate) fn on_translate_msg(&mut self, msg: Option<TranslateJobMsg>) {
         match msg {
             Some(TranslateJobMsg::Partial(pairs)) => self.apply_stream_preview(&pairs),
+            Some(TranslateJobMsg::Kept(kept)) => {
+                if let Some(job) = self.inflight.as_mut() {
+                    job.kept = kept;
+                }
+                self.apply_stream_preview(&[]);
+            }
             Some(TranslateJobMsg::Retrying {
                 attempt,
                 max_retries,
                 message,
-                kept,
             }) => {
-                if let (Some(job), Some(kept)) = (self.inflight.as_mut(), kept) {
-                    job.kept = kept;
-                }
                 // Drop the half-streamed reply; keep what earlier passes translated.
                 self.apply_stream_preview(&[]);
                 let mut s = self.state.write();
@@ -306,7 +312,7 @@ mod tests {
     use std::assert_matches;
 
     use parking_lot::RwLock;
-    use translator_core::{AppConfig, AppState, ModelProvider, Rect};
+    use translator_core::{ApiConfig, AppConfig, AppState, ModelProvider, Rect};
     use translator_ocr::{BlockPersistenceFilter, StabilityGate};
     use translator_translate::{Completion, merge_translations};
 
@@ -385,7 +391,9 @@ mod tests {
             replay_items: Vec::new(),
         };
         for i in 0..tcfg.conversation_max_turns {
-            let _ = p.conversation.begin_translate_request(&tcfg, &[block(1, &i.to_string())], &[]);
+            let _ = p
+                .conversation
+                .begin_translate_request(&tcfg, &ApiConfig::default(), &[block(1, &i.to_string())], &[], false);
             p.conversation.commit_completion(&answer);
             p.state.write().push_history(i.to_string(), "T".into(), tcfg.conversation_max_turns);
         }
@@ -394,7 +402,7 @@ mod tests {
         let job = p.take_inflight().expect("job");
         // The request trims the context to history_max_items turns, then adds this reply.
         let mut answered = p.conversation.clone();
-        let _ = answered.begin_translate_request(&tcfg, &job.page.blocks, &[]);
+        let _ = answered.begin_translate_request(&tcfg, &ApiConfig::default(), &job.page.blocks, &[], false);
         answered.commit_completion(&answer);
         let result = PageResult {
             translated: merge_translations(&job.page.blocks, &answer.text).unwrap(),
@@ -482,7 +490,7 @@ mod tests {
         p.start_translate(page(vec![block(1, "A")]), false);
         let job = p.take_inflight().expect("job");
         let mut answered = p.conversation.clone();
-        let _ = answered.begin_translate_request(&p.state.read().config.translation, &job.page.blocks, &[]);
+        let _ = answered.begin_translate_request(&p.state.read().config.translation, &ApiConfig::default(), &job.page.blocks, &[], false);
         answered.commit_completion(&Completion {
             text: r#"{"b":[[1,"T"]]}"#.into(),
             replay_items: Vec::new(),

@@ -26,7 +26,7 @@ use tokenizers::Tokenizer;
 use tokio::sync::{OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
-use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, download_artifacts, part_path};
+use translator_core::{ApiConfig, ModelKind, OcrDevice, PipelineStatus, ReplyMode, download_artifacts, part_path};
 
 pub use crate::builtin::{
     catalog::{BUILTIN_MODELS, BuiltinModelSpec, find as find_builtin_model},
@@ -173,7 +173,7 @@ pub(crate) async fn complete(
     // `None` for the user's own GGUF, which the loaded model renders.
     let prompt = spec.map(|s| s.arch.render_prompt(messages, s.empty_thought));
     let chat = if prompt.is_none() { messages.to_vec() } else { Vec::new() };
-    // The last message is the source payload, and the reply mirrors its JSON.
+    // The last message is the source payload, and a structured reply mirrors its JSON.
     let source = messages.last().map_or_else(String::new, |m| m.content.clone());
     let output_ratio = api.builtin_output_ratio;
     let max_tokens_cap = api.max_tokens.map_or(usize::MAX, |n| n as usize);
@@ -195,7 +195,7 @@ pub(crate) async fn complete(
         shape: Some(ReplyShape {
             ids: crate::peek_translation_pairs(&source).into_iter().map(|(id, _)| id).collect(),
         })
-        .filter(|s| !s.ids.is_empty()),
+        .filter(|s| !s.ids.is_empty() && api.reply_mode == ReplyMode::Structured),
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let cancel_job = cancel.clone();
@@ -203,7 +203,8 @@ pub(crate) async fn complete(
         let Some(loaded) = backend.loaded.as_mut() else {
             return Ok(Err(TranslateError::Cancelled));
         };
-        let max_tokens = |source_tokens: usize| ((output_ratio * source_tokens as f32).ceil() as usize).min(max_tokens_cap);
+        // A bare plain-text source can be a token or two; the floor leaves its reply room.
+        let max_tokens = |source_tokens: usize| ((output_ratio * source_tokens as f32).ceil() as usize).max(16).min(max_tokens_cap);
         let on_text = |text: &str| drop(tx.send(text.to_owned()));
         match &mut loaded.engine {
             Engine::Onnx(model) => {

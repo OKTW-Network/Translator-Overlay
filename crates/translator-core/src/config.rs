@@ -194,6 +194,17 @@ pub enum HttpApi {
     Responses,
 }
 
+/// How the model replies to a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyMode {
+    /// One JSON object holding every block of the page.
+    #[default]
+    Structured,
+    /// One turn per block, answered with the bare translation.
+    PlainText,
+}
+
 /// Preferred processing tier when the selected provider supports one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -334,8 +345,10 @@ pub struct ApiConfig {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub reply_mode: ReplyMode,
     /// Request JSON Schema Structured Outputs on HTTP OpenAI-compatible APIs.
-    /// Ignored for CLI providers. Turn off if the endpoint rejects `json_schema`.
+    /// Ignored for CLI providers and [`ReplyMode::PlainText`]. Turn off if the endpoint rejects `json_schema`.
     #[serde(skip_serializing_if = "is_true")]
     pub structured_outputs: bool,
     /// Request SSE streaming on HTTP OpenAI-compatible APIs.
@@ -374,6 +387,7 @@ impl Default for ApiConfig {
             top_k: None,
             max_tokens: None,
             reasoning_effort: None,
+            reply_mode: ReplyMode::Structured,
             structured_outputs: true,
             stream: true,
             send_reasoning_content: true,

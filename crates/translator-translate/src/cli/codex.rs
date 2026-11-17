@@ -5,7 +5,7 @@ use std::{collections::HashSet, path::Path, time::Duration};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use translator_core::ServiceTier;
+use translator_core::{ApiConfig, ReplyMode, ServiceTier};
 
 use crate::{
     TranslateError,
@@ -168,13 +168,15 @@ fn thread_start_params(model: &str, cwd: &Path, system: &str, service_tier: Serv
     })
 }
 
-fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>) -> Value {
+fn turn_start_params(thread_id: &str, user: &str, effort: Option<&str>, output_schema: bool) -> Value {
     let mut params = serde_json::json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": user }],
-        "outputSchema": translation_json_schema(),
         "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
     });
+    if output_schema {
+        params["outputSchema"] = translation_json_schema();
+    }
     if let Some(effort) = effort.map(str::trim).filter(|s| !s.is_empty()) {
         params["effort"] = Value::from(effort);
     }
@@ -185,25 +187,28 @@ pub struct CodexSession {
     rpc: JsonRpcChild,
     thread_id: String,
     turn_id: Option<String>,
+    /// Send the translation JSON Schema with each turn ([`ReplyMode::Structured`]).
+    output_schema: bool,
 }
 
 impl CodexSession {
     pub async fn connect(
         program: &Path,
-        model: &str,
-        service_tier: ServiceTier,
+        api: &ApiConfig,
         cwd: &Path,
         system: &str,
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<Self, TranslateError> {
         let rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd, &[], false)?;
-        Self::from_rpc(rpc, thread_start_params(model, cwd, system, service_tier), cancel, timeout).await
+        let params = thread_start_params(&api.model, cwd, system, api.service_tier);
+        Self::from_rpc(rpc, params, api.reply_mode == ReplyMode::Structured, cancel, timeout).await
     }
 
     async fn from_rpc(
         mut rpc: JsonRpcChild,
         mut params: Value,
+        output_schema: bool,
         cancel: &CancellationToken,
         timeout: Duration,
     ) -> Result<Self, TranslateError> {
@@ -279,6 +284,7 @@ impl CodexSession {
             rpc,
             thread_id,
             turn_id: None,
+            output_schema,
         })
     }
 
@@ -299,9 +305,10 @@ impl CodexSession {
                 on_text(&output.text);
             }
         };
+        let params = turn_start_params(thread_id, user, effort, self.output_schema);
         let started = self
             .rpc
-            .request_with_notes("turn/start", turn_start_params(thread_id, user, effort), cancel, timeout, &mut on_note)
+            .request_with_notes("turn/start", params, cancel, timeout, &mut on_note)
             .await?;
         let started_id = started
             .pointer("/turn/id")

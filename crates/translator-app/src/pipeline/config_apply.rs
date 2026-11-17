@@ -84,7 +84,9 @@ impl Pipeline {
         let builtin_changed = prev.provider != cfg.api.provider
             || prev.builtin_model != cfg.api.builtin_model
             || prev.builtin_device != cfg.api.builtin_device;
-        let identity_changed = builtin_changed || prev.model != cfg.api.model || prev.http_api != cfg.api.http_api;
+        // A new reply mode also drops the history, whose turns are in the old format.
+        let identity_changed =
+            builtin_changed || prev.model != cfg.api.model || prev.http_api != cfg.api.http_api || prev.reply_mode != cfg.api.reply_mode;
         // ORT's WebGPU EP frees dropped weights only when a Conv PrePack (an OCR load) flushes them,
         // or with the context both models share. A new OCR engine cleans up after itself; a new
         // built-in model does not, so drop both and let the loads below start a fresh context.

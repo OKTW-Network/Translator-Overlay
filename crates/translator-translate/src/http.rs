@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, HttpApi, http_client};
+use translator_core::{ApiConfig, HttpApi, ReplyMode, http_client};
 
 use crate::{Completion, TranslateError};
 
@@ -34,6 +34,11 @@ pub fn translation_json_schema() -> serde_json::Value {
         "required": ["b"],
         "additionalProperties": false
     })
+}
+
+/// Plain-text replies are not JSON, so they never get the schema.
+fn wants_schema(api: &ApiConfig) -> bool {
+    api.structured_outputs && api.reply_mode == ReplyMode::Structured
 }
 
 /// Error when a Chat Completions reply has no usable text.
@@ -116,7 +121,7 @@ pub fn chat_completion_body<'a>(api: &'a ApiConfig, messages: &'a [ChatMessage],
         top_k: api.top_k,
         max_tokens: api.max_tokens,
         reasoning_effort: api.reasoning_effort.as_deref(),
-        response_format: api.structured_outputs.then(|| {
+        response_format: wants_schema(api).then(|| {
             serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
@@ -146,7 +151,7 @@ pub fn responses_request_body<'a>(api: &'a ApiConfig, items: &[ResponseItem], se
             .reasoning_effort
             .as_deref()
             .map(|effort| serde_json::json!({ "effort": effort })),
-        text: api.structured_outputs.then(|| {
+        text: wants_schema(api).then(|| {
             serde_json::json!({
                 "format": {
                     "type": "json_schema",
@@ -965,6 +970,24 @@ mod tests {
         };
         let off = serde_json::to_value(responses_request_body(&off_api, &items, "sess-1")).unwrap();
         assert!(off.get("text").is_none());
+
+        let plain = ApiConfig {
+            reply_mode: ReplyMode::PlainText,
+            ..ApiConfig::default()
+        };
+        assert!(
+            serde_json::to_value(responses_request_body(&plain, &items, "sess-1"))
+                .unwrap()
+                .get("text")
+                .is_none()
+        );
+        let messages = [ChatMessage::user("hi")];
+        assert!(
+            serde_json::to_value(chat_completion_body(&plain, &messages, "sess-1"))
+                .unwrap()
+                .get("response_format")
+                .is_none()
+        );
     }
 
     #[test]

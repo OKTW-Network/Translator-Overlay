@@ -238,7 +238,8 @@ async fn codex_protocol_regression() {
             continue;
         }
         let session =
-            CodexSession::from_rpc(rpc, thread_start_params("model", cwd.path(), "sys", ServiceTier::Standard), &cancel, timeout).await;
+            CodexSession::from_rpc(rpc, thread_start_params("model", cwd.path(), "sys", ServiceTier::Standard), true, &cancel, timeout)
+                .await;
         if matches!(scenario, "old" | "agents" | "mixed_sources" | "missing_sources" | "writable" | "persistent" | "active_mcp") {
             assert!(session.is_err(), "{scenario}");
             assert!(!std::fs::read_to_string(&log).unwrap().contains("turn/start"), "OCR sent: {scenario}");
@@ -464,6 +465,7 @@ command = {}
             let result = CodexSession::from_rpc(
                 rpc,
                 thread_start_params("gpt-5.4", &nested, "TRANSLATION_ONLY", ServiceTier::Standard),
+                true,
                 &cancel,
                 timeout,
             )
@@ -484,6 +486,7 @@ command = {}
         let mut session = CodexSession::from_rpc(
             rpc,
             thread_start_params("gpt-5.4", &nested, "TRANSLATION_ONLY: return translation JSON.", ServiceTier::Standard),
+            true,
             &cancel,
             timeout,
         )

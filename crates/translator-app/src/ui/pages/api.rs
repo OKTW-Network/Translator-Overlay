@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 
 use rust_i18n::t;
-use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ServiceTier};
+use translator_core::{ApiConfig, HttpApi, ModelProvider, OcrDevice, ReplyMode, ServiceTier};
 use translator_translate::{BUILTIN_MODELS, CUSTOM_ID, find_builtin_model};
 use translator_winui::{
     Border, Flyout, FlyoutPlacementMode, HorizontalAlignment, InfoBar, Interface, Layout, Result, StackPanel, Style, TextWrapping,
@@ -287,6 +287,17 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         responses.set(ui.draft.api.http_api == HttpApi::Responses, true)
     });
 
+    const REPLY_MODES: [ReplyMode; 2] = [ReplyMode::Structured, ReplyMode::PlainText];
+    let reply_mode_card = radio_card(
+        b,
+        cx,
+        ("api-reply-mode", &t!("api.reply_mode"), &t!("api.reply_mode_desc")),
+        ("api-reply-mode", &[("api.reply_structured", Some(104.0), None), ("api.reply_plain", Some(96.0), None)], &REPLY_MODES),
+        false,
+        |ui| (REPLY_MODES.iter().position(|&m| m == ui.draft.api.reply_mode).unwrap_or(0), true),
+        |ui, v| ui.draft.api.reply_mode = v,
+    )?;
+
     let model_card = card_model_suggest(
         b,
         ModelSuggestParams {
@@ -427,6 +438,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
         shown_for(b, &builtin_context, builtin)?,
         shown_for(b, &output_ratio.root, builtin)?,
         shown_for(b, &dry, builtin)?,
+        reply_mode_card,
         shown_for(b, &structured, http)?,
         shown_for(b, &stream, http)?,
         shown_for(b, &send_reasoning, http)?,

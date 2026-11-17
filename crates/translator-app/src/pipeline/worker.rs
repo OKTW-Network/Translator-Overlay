@@ -32,13 +32,13 @@ pub type CmdTx = mpsc::UnboundedSender<PipelineCommand>;
 pub(crate) enum TranslateJobMsg {
     /// Pairs streaming in for the request in flight.
     Partial(Vec<(u32, String)>),
-    /// About to resend. `kept` is set when the page itself is resent (omitted blocks / bad
-    /// JSON): the model translations so far. `None` = a transport retry of the same request.
+    /// The model translations so far, sent before each further request of the page.
+    Kept(Vec<TranslatedBlock>),
+    /// About to resend, for a transport error or a reply that left blocks out or garbled them.
     Retrying {
         attempt: u32,
         max_retries: u32,
         message: String,
-        kept: Option<Vec<TranslatedBlock>>,
     },
     Done(PageResult),
 }
