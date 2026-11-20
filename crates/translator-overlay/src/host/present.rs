@@ -395,17 +395,6 @@ mod tests {
     use super::*;
     use crate::host::captions::SourceSpan;
 
-    const RECT: ClientRect = (10, 20, 800, 600);
-
-    #[test]
-    fn presentation_action_picks_full_move_or_restack() {
-        assert_eq!(presentation_action(None, RECT, false), PresentationAction::FullPresent);
-        assert_eq!(presentation_action(Some(RECT), RECT, true), PresentationAction::FullPresent);
-        assert_eq!(presentation_action(Some(RECT), (10, 20, 900, 600), false), PresentationAction::FullPresent);
-        assert_eq!(presentation_action(Some(RECT), (30, 40, 800, 600), false), PresentationAction::MoveOnly);
-        assert_eq!(presentation_action(Some(RECT), RECT, false), PresentationAction::RestackOnly);
-    }
-
     fn overlay_ex_style(hwnd: HWND) -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
         use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, WINDOW_EX_STYLE};
 

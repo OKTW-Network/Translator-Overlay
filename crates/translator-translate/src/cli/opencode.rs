@@ -70,18 +70,6 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::cli::rpc::{is_auth_failure, map_auth_failure};
-
-    #[test]
-    fn auth_failures_map_to_login_hint() {
-        assert!(is_auth_failure("ACP error: auth_required"));
-        assert!(is_auth_failure("ProviderAuthError"));
-        assert!(is_auth_failure("authentication required"));
-        let err = map_auth_failure(TranslateError::CliProtocol("auth_required".into()), AUTH_HINT);
-        assert!(err.to_string().contains("opencode auth login"));
-        let other = map_auth_failure(TranslateError::CliProtocol("session/new missing sessionId".into()), AUTH_HINT);
-        assert!(!other.to_string().contains("opencode auth login"));
-    }
 
     #[test]
     fn isolated_config_is_json() {

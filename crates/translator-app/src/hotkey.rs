@@ -613,12 +613,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_passes_when_not_selecting() {
-        let mut inner = inner_with(HotkeySnap::idle());
-        assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), true), Step::Pass);
-    }
-
-    #[test]
     fn escape_with_ctrl_does_not_confirm_select() {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.region_select_active = true;

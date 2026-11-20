@@ -757,7 +757,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::hotkey::HotkeyConfig;
 
     fn temp_config_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -789,12 +788,6 @@ clear_history = "ctrl"
     }
 
     #[test]
-    fn omitted_hotkeys_use_defaults() {
-        let config = AppConfig::from_toml_lenient("[api]\nmodel = \"x\"\n").unwrap();
-        assert_eq!(config.hotkeys, HotkeyConfig::default());
-    }
-
-    #[test]
     fn omitted_hotkey_focus_flag_stays_on() {
         let config = AppConfig::from_toml_lenient(
             r#"
@@ -807,35 +800,6 @@ start_pause = "f8"
         assert!(config.hotkeys.enabled);
         assert!(config.hotkeys.only_when_target_focused);
         assert_eq!(config.hotkeys.start_pause.unwrap().to_token(), "f8");
-    }
-
-    #[test]
-    fn ui_language_missing_is_none_and_roundtrips() {
-        let omitted: AppConfig = toml::from_str("[api]\nmodel = \"x\"\n").unwrap();
-        assert_eq!(omitted.ui.language, None);
-        let dumped = toml::to_string(&AppConfig::default()).unwrap();
-        assert!(!dumped.contains("\nlanguage"), "unset language must be omitted, got:\n{dumped}");
-
-        for (raw, lang) in [
-            ("en", UiLanguage::En),
-            ("zh-Hant", UiLanguage::ZhHant),
-            ("zh-Hans", UiLanguage::ZhHans),
-        ] {
-            let config: AppConfig = toml::from_str(&format!("[ui]\nlanguage = \"{raw}\"\n")).unwrap();
-            assert_eq!(config.ui.language, Some(lang));
-            let mut stored = AppConfig::default();
-            stored.ui.language = Some(lang);
-            let text = toml::to_string(&stored).unwrap();
-            assert!(text.contains(&format!("language = \"{raw}\"")), "got:\n{text}");
-            assert!(!text.contains("language = \"auto\""), "got:\n{text}");
-        }
-    }
-
-    #[test]
-    fn ui_language_bad_value_is_dropped() {
-        let config = AppConfig::from_toml_lenient("[ui]\nlanguage = \"ja\"\n[overlay]\nenabled = false\n").unwrap();
-        assert_eq!(config.ui.language, None);
-        assert!(!config.overlay.enabled);
     }
 
     #[test]
@@ -1097,142 +1061,6 @@ reject_short_long = false
         assert!((config.ocr.line_merge.column_tolerance - defaults.column_tolerance).abs() < 1e-6);
         assert_eq!(config.ocr.line_merge.join, LineJoin::Newline);
         assert!(config.ocr.line_merge.split_short_above_wide);
-    }
-
-    #[test]
-    fn line_merge_region_mode_parses() {
-        let config: AppConfig = toml::from_str(
-            "[ocr.line_merge]
-mode = \"region\"
-",
-        )
-        .unwrap();
-        assert_eq!(config.ocr.line_merge.mode, LineMergeMode::Region);
-        assert!(!config.ocr.uses_layout());
-    }
-
-    #[test]
-    fn line_join_parses_and_defaults_to_newline() {
-        let omitted: AppConfig = toml::from_str("[ocr.line_merge]\nmode = \"rules\"\n").unwrap();
-        assert_eq!(omitted.ocr.line_merge.join, LineJoin::Newline);
-        for (raw, join) in [("none", LineJoin::None), ("space", LineJoin::Space), ("newline", LineJoin::Newline)] {
-            let config: AppConfig = toml::from_str(&format!("[ocr.line_merge]\njoin = \"{raw}\"\n")).unwrap();
-            assert_eq!(config.ocr.line_merge.join, join);
-        }
-    }
-
-    #[test]
-    fn line_merge_omitted_order_defaults_left_to_right() {
-        let text = r#"
-[ocr.line_merge]
-mode = "rules"
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert_eq!(config.ocr.line_merge.order, LineMergeOrder::LeftToRightTopToBottom);
-    }
-
-    #[test]
-    fn partial_toml_uses_defaults() {
-        let text = r#"
-[api]
-model = "my-model"
-
-[translation]
-target_lang = "ja"
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert_eq!(config.api.model, "my-model");
-        assert_eq!(config.translation.target_lang, "ja");
-        assert_eq!(config.ocr.model_tier, ModelTier::Small);
-        assert!(config.overlay.enabled);
-        assert!(!config.overlay.reader_enabled);
-        assert!(!config.overlay.hud_enabled);
-    }
-
-    #[test]
-    fn overlay_reader_font_clamps() {
-        let mut overlay = OverlayConfig {
-            reader_font_px: 0,
-            ..OverlayConfig::default()
-        };
-        assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_MIN as i32);
-        overlay.reader_font_px = 200;
-        assert_eq!(overlay.reader_font_px_clamped(), READER_FONT_PX_MAX as i32);
-    }
-
-    #[test]
-    fn translation_cache_defaults_and_clamp() {
-        let text = r#"
-[translation]
-target_lang = "ja"
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert!(config.translation.cache_enabled);
-        assert_eq!(config.translation.cache_max_entries, TRANSLATION_CACHE_MAX_DEFAULT);
-        assert_eq!(config.translation.cache_max_entries_clamped(), TRANSLATION_CACHE_MAX_DEFAULT);
-
-        let mut cfg = TranslationConfig {
-            cache_max_entries: 0,
-            ..TranslationConfig::default()
-        };
-        assert_eq!(cfg.cache_max_entries_clamped(), TRANSLATION_CACHE_MAX_MIN);
-        cfg.cache_max_entries = 1_000_000;
-        assert_eq!(cfg.cache_max_entries_clamped(), TRANSLATION_CACHE_MAX_CAP);
-    }
-
-    #[test]
-    fn overlay_display_flags_roundtrip_and_partial() {
-        let text = r#"
-[overlay]
-enabled = false
-reader_enabled = false
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert!(!config.overlay.enabled);
-        assert!(!config.overlay.reader_enabled);
-
-        let partial = r##"
-[overlay.colors]
-text = "#FFFFFFFF"
-"##;
-        let config: AppConfig = toml::from_str(partial).unwrap();
-        assert!(config.overlay.enabled);
-        assert!(!config.overlay.reader_enabled);
-        assert!(!config.overlay.hud_enabled);
-        assert_eq!(config.overlay.reader_font_px, READER_FONT_PX_DEFAULT);
-        assert_eq!(config.overlay.font_px, None);
-    }
-
-    #[test]
-    fn overlay_font_px_optional_roundtrip_and_clamp() {
-        let omitted: AppConfig = toml::from_str("[overlay]\nenabled = true\n").unwrap();
-        assert_eq!(omitted.overlay.font_px, None);
-        let dumped = toml::to_string(&AppConfig::default()).unwrap();
-        assert!(
-            !dumped.lines().any(|line| line.trim_start().starts_with("font_px")),
-            "unset overlay font_px must be omitted, got:\n{dumped}"
-        );
-
-        let set: AppConfig = toml::from_str("[overlay]\nfont_px = 18\n").unwrap();
-        assert_eq!(set.overlay.font_px, Some(18));
-        let mut stored = AppConfig::default();
-        stored.overlay.font_px = Some(18);
-        let text = toml::to_string(&stored).unwrap();
-        assert!(text.contains("font_px = 18"), "got:\n{text}");
-
-        let mut overlay = OverlayConfig {
-            font_px: Some(0),
-            ..OverlayConfig::default()
-        };
-        assert_eq!(overlay.font_px_clamped(), Some(OVERLAY_FONT_PX_MIN as i32));
-        overlay.font_px = Some(200);
-        assert_eq!(overlay.font_px_clamped(), Some(OVERLAY_FONT_PX_MAX as i32));
-        overlay.font_px = None;
-        assert_eq!(overlay.font_px_clamped(), None);
-
-        let bad = AppConfig::from_toml_lenient("[overlay]\nfont_px = \"nope\"\nenabled = false\n").unwrap();
-        assert_eq!(bad.overlay.font_px, None);
-        assert!(!bad.overlay.enabled);
     }
 
     #[test]

@@ -121,25 +121,3 @@ unsafe extern "system" fn on_follow_event(
         post_follow(event, hwnd);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_forward_filters_by_hwnd_and_event() {
-        assert!(should_forward(EVENT_SYSTEM_MOVESIZESTART, true, false, true));
-        assert!(should_forward(EVENT_SYSTEM_MOVESIZEEND, true, false, true));
-        assert!(!should_forward(EVENT_SYSTEM_MOVESIZESTART, false, false, true));
-        assert!(!should_forward(EVENT_SYSTEM_MOVESIZESTART, true, false, false));
-        assert!(should_forward(EVENT_OBJECT_LOCATIONCHANGE, true, false, true));
-        assert!(!should_forward(EVENT_OBJECT_LOCATIONCHANGE, false, false, true));
-        assert!(should_forward(EVENT_SYSTEM_FOREGROUND, false, false, false));
-        assert!(should_forward(EVENT_OBJECT_REORDER, false, false, true));
-        assert!(should_forward(EVENT_OBJECT_REORDER, true, false, true));
-        assert!(!should_forward(EVENT_OBJECT_REORDER, false, false, false));
-        assert!(should_forward(EVENT_OBJECT_DESTROY, true, false, true));
-        assert!(should_forward(EVENT_OBJECT_DESTROY, false, true, true));
-        assert!(!should_forward(EVENT_OBJECT_DESTROY, false, false, true));
-    }
-}

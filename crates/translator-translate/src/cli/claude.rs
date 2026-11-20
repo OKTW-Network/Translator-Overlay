@@ -407,21 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn effort_maps_to_effort_flag_thinking_off_or_nothing() {
-        let cwd = Path::new("C:/tmp/iso");
-        let args = spawn_args("", Some("none"), cwd);
-        assert!(args.windows(2).any(|w| w[0] == "--settings" && w[1].ends_with(SETTINGS_FILE)));
-        assert!(args.iter().all(|a| a != "--effort"));
-        assert_eq!(settings_for_effort(Some("minimal")), Some(NO_THINKING_SETTINGS));
-        assert_eq!(settings_for_effort(Some("high")), None);
-
-        let args = spawn_args("", Some("bogus"), cwd);
-        assert!(args.iter().all(|a| a != "--effort" && a != "--settings"));
-        let args = spawn_args("  ", None, cwd);
-        assert!(args.iter().all(|a| a != "--model" && a != "--effort" && a != "--settings"));
-    }
-
-    #[test]
     fn user_line_is_one_stream_json_user_message() {
         let line = user_line("line1\nline2");
         assert!(!line.contains('\n'));

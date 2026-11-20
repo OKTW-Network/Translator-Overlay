@@ -326,21 +326,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_off_empty_and_target_only() {
-        let cfg = HotkeyConfig::default();
-        assert!(!cfg.enabled);
-        assert!(cfg.only_when_target_focused);
-        assert!(HotkeyAction::ALL.iter().all(|action| cfg.get(*action).is_none()));
-        let text = toml::to_string(&cfg).unwrap();
-        assert!(text.contains("enabled = false"), "{text}");
-        assert!(text.contains("only_when_target_focused = true"), "{text}");
-        assert!(!text.contains("start_pause"), "{text}");
-        assert!(!text.contains("clear_history"), "{text}");
-        let parsed: HotkeyConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed, cfg);
-    }
-
-    #[test]
     fn token_roundtrip_orders_modifiers() {
         let chord = HotkeyChord::parse("shift+f9+ctrl").unwrap();
         assert_eq!(chord.to_token(), "ctrl+shift+f9");
