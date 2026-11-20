@@ -1,5 +1,7 @@
 //! Config apply and OCR engine load wiring.
 
+use std::path::Path;
+
 use rust_i18n::t;
 use tracing::{error, info};
 use translator_core::{AppConfig, AppState, ModelProvider, OcrDevice, UiLanguage, config_path, load_active_dictionary};
@@ -18,11 +20,13 @@ pub(crate) fn apply_dictionary_profile(state: &mut AppState) {
     }
 }
 
-/// Write `cfg` to `config.toml`. Returns the error message on failure.
-fn save_config(cfg: &AppConfig) -> Option<String> {
-    let result = config_path()
-        .map_err(|e| e.to_string())
-        .and_then(|path| cfg.save(&path).map_err(|e| e.to_string()));
+/// Write `cfg` to `path` (or `config_path()` when `None`). Returns the error message on failure.
+fn save_config(path: Option<&Path>, cfg: &AppConfig) -> Option<String> {
+    let target = match path {
+        Some(p) => Ok(p.to_path_buf()),
+        None => config_path().map_err(|e| e.to_string()),
+    };
+    let result = target.and_then(|p| cfg.save(&p).map_err(|e| e.to_string()));
     if let Err(e) = &result {
         error!(error = %e, "failed to save config");
     }
@@ -63,7 +67,7 @@ impl Pipeline {
 
     fn persist_live_config(&mut self) -> bool {
         let live = self.state.read().config.clone();
-        let Some(e) = save_config(&live) else {
+        let Some(e) = save_config(self.config_path.as_deref(), &live) else {
             return true;
         };
         self.state.write().set_error(t!("err.save_config", error = e));
@@ -126,7 +130,7 @@ impl Pipeline {
         let prompt_changed = self.state.read().config.translation.system_prompt != cfg.translation.system_prompt;
         self.state.write().config = cfg.clone();
         // The live config already holds `cfg`, so the rest applies even when the save fails.
-        let save_error = save_config(&cfg);
+        let save_error = save_config(self.config_path.as_deref(), &cfg);
 
         let old_pairs = self.state.read().dictionary_pairs.clone();
         let glossary_changed = {

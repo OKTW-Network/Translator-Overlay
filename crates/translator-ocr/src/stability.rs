@@ -77,8 +77,11 @@ impl StabilityGate {
 
     /// Feed a new fingerprint from the latest OCR (after block filters).
     pub fn observe(&mut self, fp: OcrFingerprint) -> StabilityOutcome {
-        let now = Instant::now();
+        self.observe_at(fp, Instant::now())
+    }
 
+    /// Deterministic-clock variant of [`Self::observe`].
+    pub fn observe_at(&mut self, fp: OcrFingerprint, now: Instant) -> StabilityOutcome {
         if self.last_emitted == Some(fp) {
             self.pending = None;
             self.pending_hits = 0;

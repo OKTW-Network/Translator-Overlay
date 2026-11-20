@@ -1,6 +1,6 @@
 //! Pipeline worker: owns capture / OCR / translate state and the command loop.
 
-use std::{sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use parking_lot::RwLock;
@@ -209,6 +209,8 @@ pub(crate) struct Pipeline {
     /// settle wait by `max_wait` and feeds the waiting status.
     pub change_since: Option<Instant>,
     pub overlay: Option<OverlayController>,
+    /// Override target for `save_config` (tests use an isolated temp path).
+    pub config_path: Option<PathBuf>,
 }
 
 pub fn spawn_pipeline(state: SharedState) -> (CmdTx, tokio::task::JoinHandle<()>) {
@@ -275,6 +277,7 @@ impl Pipeline {
             raw_empty_since: None,
             change_since: None,
             overlay: None,
+            config_path: None,
         }
     }
 

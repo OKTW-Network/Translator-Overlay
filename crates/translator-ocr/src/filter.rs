@@ -163,11 +163,15 @@ impl BlockPersistenceFilter {
     ///
     /// When disabled (`settle_ms == 0`), returns `blocks` unchanged.
     pub fn filter(&mut self, blocks: Vec<OcrBlock>) -> Vec<OcrBlock> {
+        self.filter_at(blocks, Instant::now())
+    }
+
+    /// Deterministic-clock variant of [`Self::filter`].
+    pub fn filter_at(&mut self, blocks: Vec<OcrBlock>, now: Instant) -> Vec<OcrBlock> {
         if self.settle.is_zero() {
             return blocks;
         }
 
-        let now = Instant::now();
         let settle = self.settle;
         let max_wait = self.max_wait;
         // One OCR box per track per frame. Stacked unmerged lines sit inside the

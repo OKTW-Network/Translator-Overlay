@@ -240,10 +240,17 @@ impl OcrEngine {
     }
 
     /// Threshold / filter / merge one OCR page into blocks.
-    fn blocks_from_page(&self, (lines, layout): Page, frame_h: u32, merge_all: bool) -> Vec<OcrBlock> {
+    fn blocks_from_page(
+        (lines, layout): Page,
+        frame_h: u32,
+        merge_all: bool,
+        confidence_threshold: f32,
+        filter_single_char: bool,
+        line_merge: &LineMergeConfig,
+    ) -> Vec<OcrBlock> {
         let mut blocks = Vec::new();
         for (i, (quad, text, confidence)) in lines.into_iter().enumerate() {
-            if confidence < self.confidence_threshold {
+            if confidence < confidence_threshold {
                 continue;
             }
             let text = text.trim().to_string();
@@ -251,7 +258,7 @@ impl OcrEngine {
                 continue;
             }
             // Drop single Latin letter/digit noise before merge (icons → "V"/"0").
-            if self.filter_single_char && is_single_latin_or_digit(&text) {
+            if filter_single_char && is_single_latin_or_digit(&text) {
                 continue;
             }
             let (bbox, cover_h, cover_w) = region_box(&quad);
@@ -267,10 +274,10 @@ impl OcrEngine {
         }
 
         // Reading order + merge lines by geometry rules or layout boxes.
-        let blocks = merge_line_blocks_with(blocks, &self.line_merge, frame_h, merge_all, &layout);
+        let blocks = merge_line_blocks_with(blocks, line_merge, frame_h, merge_all, &layout);
 
         // Re-apply after merge in case a merge edge case left a single token.
-        if self.filter_single_char {
+        if filter_single_char {
             filter_single_char_blocks(blocks)
         } else {
             reindex(blocks)
@@ -318,7 +325,8 @@ impl OcrEngine {
 
         let mut all = Vec::new();
         for ((ox, oy), page) in origins.into_iter().zip(results) {
-            let mut blocks = self.blocks_from_page(page, height, merge_all);
+            let mut blocks =
+                Self::blocks_from_page(page, height, merge_all, self.confidence_threshold, self.filter_single_char, &self.line_merge);
             for block in &mut blocks {
                 block.bbox.x += ox as f32;
                 block.bbox.y += oy as f32;

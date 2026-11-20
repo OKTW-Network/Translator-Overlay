@@ -69,10 +69,14 @@ impl Pipeline {
 
     /// Expire captions after raw OCR went empty, even when capture stops producing frames.
     pub(crate) fn maybe_expire_raw_empty(&mut self) {
+        self.maybe_expire_raw_empty_at(Instant::now());
+    }
+
+    pub(crate) fn maybe_expire_raw_empty_at(&mut self, now: Instant) {
         let Some(since) = self.raw_empty_since else {
             return;
         };
-        if since.elapsed() < self.raw_empty_grace() {
+        if now.saturating_duration_since(since) < self.raw_empty_grace() {
             return;
         }
         self.raw_empty_since = None;
@@ -164,6 +168,10 @@ impl Pipeline {
     /// Status guard + persist / stability gate / remap. Runs on every capture
     /// tick, including cache hits (`raw` / dims taken from the cache).
     pub(crate) fn consume_raw_ocr(&mut self, raw: Vec<OcrBlock>, frame_w: u32, frame_h: u32) {
+        self.consume_raw_ocr_at(raw, frame_w, frame_h, Instant::now());
+    }
+
+    pub(crate) fn consume_raw_ocr_at(&mut self, raw: Vec<OcrBlock>, frame_w: u32, frame_h: u32, now: Instant) {
         // A pending translation runs the caption rules below but leaves status and the
         // stability gate alone; show_captions maps its paints onto ocr_blocks.
         let translating = self.inflight.is_some();
@@ -188,13 +196,13 @@ impl Pipeline {
         // useful for the stability gate, but must NOT keep ghost text "alive" for the
         // gate after the screen is actually blank — otherwise captions stick forever
         // when capture stops sending frames on a static empty view.
-        let durable = self.persist.filter(raw.clone());
+        let durable = self.persist.filter_at(raw.clone(), now);
 
         if raw.is_empty() {
             self.change_since = None;
             let grace = self.raw_empty_grace();
-            let since = *self.raw_empty_since.get_or_insert_with(Instant::now);
-            if durable.is_empty() || since.elapsed() >= grace {
+            let since = *self.raw_empty_since.get_or_insert(now);
+            if durable.is_empty() || now.saturating_duration_since(since) >= grace {
                 self.raw_empty_since = None;
                 // Full reset including persistence tracks — screen is blank.
                 self.clear_stale_overlay("raw OCR empty");
@@ -223,10 +231,10 @@ impl Pipeline {
                 self.gate.reset_all();
                 self.last_page = None;
             }
-            let since = *self.change_since.get_or_insert_with(Instant::now);
+            let since = *self.change_since.get_or_insert(now);
             if !translating {
                 self.state.write().status = PipelineStatus::WaitingForStable {
-                    elapsed_ms: since.elapsed().as_millis() as u64,
+                    elapsed_ms: now.saturating_duration_since(since).as_millis() as u64,
                 };
             }
             return;
@@ -258,19 +266,22 @@ impl Pipeline {
         } else {
             // Counted from the change, not per unsettled stretch: a thrashing track that
             // persist force-adopts settles for one frame each time and would restart it.
-            let since = *self.change_since.get_or_insert_with(Instant::now);
+            let since = *self.change_since.get_or_insert(now);
             let (wait_all, max_wait) = {
                 let ocr = &self.state.read().config.ocr;
                 (ocr.wait_all_settled, ocr.max_wait_ms)
             };
             // max_wait 0 waits as long as it takes.
-            if wait_all && !self.persist.settled() && (max_wait == 0 || since.elapsed() < Duration::from_millis(max_wait)) {
+            if wait_all
+                && !self.persist.settled()
+                && (max_wait == 0 || now.saturating_duration_since(since) < Duration::from_millis(max_wait))
+            {
                 // Text still settling or held over: emitting now would mix old and new lines.
                 StabilityOutcome::Waiting {
-                    elapsed_ms: since.elapsed().as_millis() as u64,
+                    elapsed_ms: now.saturating_duration_since(since).as_millis() as u64,
                 }
             } else {
-                self.gate.observe(fp)
+                self.gate.observe_at(fp, now)
             }
         };
 
