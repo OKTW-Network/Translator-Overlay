@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     TranslateError,
     cli::{
-        TempCwd,
+        make_isolated_cwd,
         rpc::{AcpSession, JsonRpcChild, acp_open, models_after_connect},
     },
 };
@@ -66,7 +66,7 @@ pub async fn connect(
 }
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
-    let cwd = TempCwd::create()?;
+    let cwd = make_isolated_cwd()?;
     let (session, created) = connect(program, "", None, cwd.path(), "You are a translation engine.", cancel, timeout).await?;
     models_after_connect(session, created).await
 }

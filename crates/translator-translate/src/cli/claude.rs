@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     TranslateError,
     cli::{
-        TempCwd,
+        make_isolated_cwd,
         rpc::{StderrTail, StdioChild, forward_json_lines, kill_blocking, map_auth_failure, spawn_stdio, wait_or_kill},
     },
 };
@@ -349,7 +349,7 @@ impl ClaudeSession {
 }
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
-    let cwd = TempCwd::create()?;
+    let cwd = make_isolated_cwd()?;
     let mut session = ClaudeSession::connect(program, "", None, cwd.path(), "You are a translation engine.")?;
     let result = session.models(cancel, timeout).await;
     session.close().await;

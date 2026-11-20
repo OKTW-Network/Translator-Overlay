@@ -10,7 +10,7 @@ use translator_core::{ApiConfig, ReplyMode, ServiceTier};
 use crate::{
     TranslateError,
     cli::{
-        TempCwd,
+        make_isolated_cwd,
         rpc::{JsonRpcChild, kill_and_wait},
     },
     http::translation_json_schema,
@@ -123,7 +123,7 @@ async fn read_list(
 }
 
 pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Duration) -> Result<Vec<String>, TranslateError> {
-    let cwd = TempCwd::create()?;
+    let cwd = make_isolated_cwd()?;
     let mut rpc = JsonRpcChild::spawn(program, &spawn_args(), cwd.path(), &[], false)?;
     let result = async {
         initialize_app_server(&mut rpc, cancel, timeout).await?;

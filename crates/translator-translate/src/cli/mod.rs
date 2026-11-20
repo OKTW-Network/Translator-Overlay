@@ -6,12 +6,9 @@ mod grok;
 mod opencode;
 mod rpc;
 
-use std::{
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 
+use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use translator_core::{ApiConfig, ModelProvider, ReplyMode, resolve_cli_binary};
 
@@ -180,7 +177,7 @@ impl LiveSession {
 pub struct CliBackend {
     live: Option<LiveSession>,
     mirrored: Vec<ChatMessage>,
-    isolated_cwd: Option<PathBuf>,
+    isolated_cwd: Option<TempDir>,
     session_epoch: u64,
     /// Threads started by [`Self::shutdown`]. `TranslateClient::close_session` joins them so
     /// app exit does not cut a kill or an OpenCode session delete short.
@@ -216,7 +213,7 @@ impl CliBackend {
                 live.kill();
             }
             if let Some(dir) = cwd {
-                remove_isolated_cwd(&dir);
+                remove_isolated_cwd(dir);
             }
         }));
     }
@@ -227,7 +224,7 @@ impl CliBackend {
         }
         self.mirrored.clear();
         if let Some(dir) = self.isolated_cwd.take() {
-            remove_isolated_cwd(&dir);
+            remove_isolated_cwd(dir);
         }
     }
 
@@ -299,8 +296,9 @@ impl CliBackend {
         timeout: Duration,
     ) -> Result<(), TranslateError> {
         self.close().await;
-        let cwd = make_isolated_cwd()?;
-        self.isolated_cwd = Some(cwd.clone());
+        let dir = make_isolated_cwd()?;
+        let cwd = dir.path().to_path_buf();
+        self.isolated_cwd = Some(dir);
         let program = resolve_program(api)?;
         let system = cli_system_prompt(system, api.reply_mode);
         let live = match api.provider {
@@ -328,45 +326,22 @@ impl CliBackend {
     }
 }
 
-/// Best-effort recursive delete. A missing directory counts as removed.
-fn remove_isolated_cwd(dir: &Path) {
-    match std::fs::remove_dir_all(dir) {
+/// Delete with a logged failure; a missing directory counts as removed.
+fn remove_isolated_cwd(dir: TempDir) {
+    let path = dir.path().to_path_buf();
+    match dir.close() {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(path = %dir.display(), error = %e, "failed to remove isolated CLI cwd"),
+        Err(e) => tracing::warn!(path = %path.display(), error = %e, "failed to remove isolated CLI cwd"),
     }
 }
 
-pub(crate) struct TempCwd(PathBuf);
-
-impl TempCwd {
-    pub(crate) fn create() -> Result<Self, TranslateError> {
-        Ok(Self(make_isolated_cwd()?))
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempCwd {
-    fn drop(&mut self) {
-        remove_isolated_cwd(&self.0);
-    }
-}
-
-fn make_isolated_cwd() -> Result<PathBuf, TranslateError> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join("translator-overlay-cli")
-        .join(format!("{}-{nanos}-{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| TranslateError::CliProtocol(format!("create isolated cwd: {e}")))?;
-    Ok(dir)
+/// Empty temp directory a CLI runs in; removed on drop.
+pub(crate) fn make_isolated_cwd() -> Result<TempDir, TranslateError> {
+    tempfile::Builder::new()
+        .prefix("translator-overlay-cli-")
+        .tempdir()
+        .map_err(|e| TranslateError::CliProtocol(format!("create isolated cwd: {e}")))
 }
 
 #[cfg(test)]

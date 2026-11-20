@@ -11,7 +11,7 @@ use translator_core::{ApiConfig, ModelProvider, ServiceTier};
 use crate::{
     ChatMessage, TranslateError,
     cli::{
-        CliBackend, LiveSession, TempCwd,
+        CliBackend, LiveSession,
         codex::{CodexSession, TurnOutput, list_models, read_list, spawn_args, thread_start_params},
         resolve_program,
         rpc::{JsonRpcChild, kill_and_wait},
@@ -191,7 +191,7 @@ fn codex_rpc_fixture() {
 #[tokio::test]
 async fn codex_protocol_regression() {
     let timeout = Duration::from_secs(5);
-    let cwd = TempCwd::create().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
     let log = cwd.path().join("rpc.log");
     for scenario in [
         "old",
@@ -370,7 +370,7 @@ async fn codex_context_isolation() {
     };
     let program = resolve_program(&api).unwrap();
     for allow_override in [false, true] {
-        let fixture = TempCwd::create().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
         let home = fixture.path().join("home");
         let project = fixture.path().join("project");
         let nested = project.join("nested");
