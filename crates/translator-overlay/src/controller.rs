@@ -94,3 +94,36 @@ impl Drop for OverlayController {
         let _ = self.join.take();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_picker_cancel_and_shutdown_lifecycle() {
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio rt");
+        rt.block_on(async {
+            let mut ctrl = OverlayController::spawn(OverlayConfig {
+                reader_enabled: false,
+                ..OverlayConfig::default()
+            })
+            .await
+            .expect("spawn overlay controller");
+
+            ctrl.send(OverlayCommand::BeginRegionSelect { regions: Vec::new() })
+                .expect("send BeginRegionSelect");
+            ctrl.send(OverlayCommand::CancelRegionSelect).expect("send CancelRegionSelect");
+
+            let ev = ctrl.recv_event().await;
+            assert!(matches!(ev, Some(OverlayEvent::RegionSelectCancelled)));
+
+            ctrl.shutdown().await;
+            let err = ctrl.send(OverlayCommand::Clear).unwrap_err();
+            assert!(matches!(err, OverlayError::NotRunning));
+        });
+    }
+}

@@ -569,6 +569,8 @@ mod tests {
         b.source_width = 30.0;
         let merged = merge_line_blocks(vec![a, b]);
         assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "上 下");
+        assert_eq!(merged[0].source_lines, 1);
         assert!((merged[0].bbox.width - 20.0).abs() < 0.5, "glyph box must stay the short side, got {}", merged[0].bbox.width);
         assert!((merged[0].source_width - 30.0).abs() < 0.5, "cover must keep AABB width, got {}", merged[0].source_width);
     }
@@ -600,9 +602,22 @@ mod tests {
             mode: LineMergeMode::Off,
             ..Default::default()
         };
-        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
+        let blocks = vec![line(5, "Hello", 10.0, 10.0, 100.0, 18.0), line(9, "world", 12.0, 32.0, 90.0, 18.0)];
         let merged = merge_with(blocks, cfg, false);
         assert_eq!(merged.len(), 2);
+        assert_eq!((merged[0].id, merged[1].id), (0, 1));
+    }
+
+    #[test]
+    fn empty_and_single_block_and_zero_frame_guards() {
+        assert!(merge_line_blocks(Vec::new()).is_empty());
+        let single = merge_line_blocks(vec![line(42, "Solo", 10.0, 10.0, 80.0, 18.0)]);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].id, 0);
+
+        let blocks = vec![line(0, "Hello", 10.0, 10.0, 100.0, 18.0), line(1, "world", 12.0, 32.0, 90.0, 18.0)];
+        let zero_frame = merge_line_blocks_with(blocks, &LineMergeConfig::default(), 0, false, &[]);
+        assert_eq!(zero_frame.len(), 2);
     }
 
     #[test]
@@ -862,10 +877,7 @@ mod tests {
             line(3, "R2", 200.0, 30.0, 60.0, 16.0),
         ];
         let merged = merge_line_blocks(blocks);
-        assert_eq!(merged.len(), 2);
-        let texts: Vec<_> = merged.iter().map(|b| b.text.as_str()).collect();
-        assert!(texts.contains(&"L1\nL2"));
-        assert!(texts.contains(&"R1\nR2"));
+        assert_eq!(merged.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), ["L1\nL2", "R1\nR2"]);
     }
 
     #[test]
@@ -889,10 +901,19 @@ mod tests {
     }
 
     #[test]
-    fn unaligned_column_does_not_merge() {
-        let blocks = vec![line(0, "A", 10.0, 10.0, 80.0, 18.0), line(1, "B", 120.0, 32.0, 80.0, 18.0)];
-        let merged = merge_line_blocks(blocks);
-        assert_eq!(merged.len(), 2);
+    fn unaligned_column_and_center_aligned_lines() {
+        let unaligned = vec![line(0, "A", 10.0, 10.0, 80.0, 18.0), line(1, "B", 120.0, 32.0, 80.0, 18.0)];
+        assert_eq!(merge_line_blocks(unaligned).len(), 2);
+
+        // Centered lines whose left edges are 40px apart (> column_tolerance ~16px),
+        // but horizontal centers align at x = 110.
+        let centered = vec![
+            line(0, "Title line", 10.0, 10.0, 200.0, 18.0),
+            line(1, "Sub", 60.0, 32.0, 100.0, 18.0),
+        ];
+        let merged = merge_line_blocks(centered);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Title line\nSub");
     }
 
     #[test]
@@ -938,6 +959,29 @@ mod tests {
             "{:?}",
             merged.iter().map(|b| &b.text).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn has_intervening_blocks_merge_on_both_axes() {
+        // Horizontal gap within word_gap, but an incompatible tiny-height badge sits in between.
+        let horiz = vec![
+            line(0, "Left", 10.0, 10.0, 40.0, 18.0),
+            line(1, "1", 53.0, 14.0, 10.0, 8.0),
+            line(2, "Right", 66.0, 10.0, 40.0, 18.0),
+        ];
+        assert_eq!(merge_line_blocks(horiz).len(), 3);
+
+        // Vertical gap within line_gap, but an incompatible taller line sits in between.
+        let vert = vec![
+            line(0, "Top", 10.0, 10.0, 100.0, 18.0),
+            line(1, "MID", 10.0, 29.0, 100.0, 40.0),
+            line(2, "Bot", 10.0, 70.0, 100.0, 18.0),
+        ];
+        let cfg = LineMergeConfig {
+            line_gap: 0.08,
+            ..Default::default()
+        };
+        assert_eq!(merge_with(vert, cfg, false).len(), 3);
     }
 
     #[test]
@@ -1073,12 +1117,18 @@ mod tests {
         ];
         let merged = merge_line_blocks_with(blocks, &cfg, DEFAULT_FRAME_H, false, &layout);
         let texts: Vec<&str> = merged.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(texts, [
-            "A1
-A2", "B1
-B2", "lone"
-        ]);
+        assert_eq!(texts, ["A1\nA2", "B1\nB2", "lone"]);
         assert_eq!(merged[0].source_lines, 2);
+
+        // Empty layout leaves blocks sorted and single.
+        let single = merge_line_blocks_with(
+            vec![line(0, "Lower", 10.0, 50.0, 80.0, 18.0), line(1, "Upper", 10.0, 10.0, 80.0, 18.0)],
+            &cfg,
+            DEFAULT_FRAME_H,
+            false,
+            &[],
+        );
+        assert_eq!(single.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), ["Upper", "Lower"]);
     }
 
     #[test]
@@ -1115,16 +1165,12 @@ B2", "lone"
     }
 
     #[test]
-    fn columns_join_right_to_left_with_line_join() {
+    fn columns_join_right_to_left_and_anchor_one_column_wide() {
         let merged = merge_line_blocks(columns());
         assert_eq!(merged.len(), 1, "short last column must still join");
-        assert_eq!(merged[0].text, "右\n中\n左");
-        assert_eq!(merged[0].source_lines, 3);
-    }
-
-    #[test]
-    fn merged_columns_anchor_one_column_wide() {
-        let b = &merge_line_blocks(columns())[0];
+        let b = &merged[0];
+        assert_eq!(b.text, "右\n中\n左");
+        assert_eq!(b.source_lines, 3);
         assert!((b.bbox.x - 100.0).abs() < 0.5, "x={}", b.bbox.x);
         assert!((b.bbox.width - 24.0).abs() < 0.5, "glyph box must be one column wide, got {}", b.bbox.width);
         assert!((b.bbox.height - 240.0).abs() < 0.5, "h={}", b.bbox.height);
@@ -1151,6 +1197,29 @@ B2", "lone"
     fn whole_region_reads_columns_right_to_left() {
         let merged = merge_with(columns(), LineMergeConfig::default(), true);
         assert_eq!(merged[0].text, "右\n中\n左");
+    }
+
+    #[test]
+    fn whole_region_and_layout_read_stacked_vertical_fragments_without_extra_line() {
+        let stacked_cols = vec![
+            line(0, "右", 168.0, 100.0, 24.0, 180.0),
+            line(1, "左上", 100.0, 100.0, 24.0, 80.0),
+            line(2, "左下", 100.0, 190.0, 24.0, 80.0),
+        ];
+        let all = merge_with(stacked_cols.clone(), LineMergeConfig::default(), true);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].text, "右\n左上 左下");
+        assert_eq!(all[0].source_lines, 2);
+
+        let layout_cfg = LineMergeConfig {
+            mode: LineMergeMode::Layout,
+            ..LineMergeConfig::default()
+        };
+        let layout = [(Rect::new(90.0, 90.0, 120.0, 200.0), true)];
+        let by_layout = merge_line_blocks_with(stacked_cols, &layout_cfg, DEFAULT_FRAME_H, false, &layout);
+        assert_eq!(by_layout.len(), 1);
+        assert_eq!(by_layout[0].text, "右\n左上 左下");
+        assert_eq!(by_layout[0].source_lines, 2);
     }
 
     #[test]

@@ -347,10 +347,14 @@ mod tests {
         p.on_move(80, 110);
         assert_eq!(p.rubber_band(), Some(SurfaceRect::from_points((20, 50), (80, 110))));
         assert!(p.on_left_up());
+        assert_eq!(p.selected, Some(0));
+        assert!(p.rubber_band().is_none());
         assert_eq!(p.regions.len(), 1);
         let r = p.regions[0];
-        assert!(r.x > 0.05 && r.x < 0.15);
-        assert!(r.width > 0.25);
+        assert!((r.x - 0.1).abs() < 1e-6);
+        assert!((r.y - 0.25).abs() < 1e-6);
+        assert!((r.width - 0.3).abs() < 1e-6);
+        assert!((r.height - 0.3).abs() < 1e-6);
     }
 
     #[test]
@@ -374,17 +378,6 @@ mod tests {
         assert!(p.on_right_up(hit.x + 4, hit.y + 4));
         assert_eq!(p.regions.len(), 1);
         assert!((p.regions[0].x - b.x).abs() < 1e-5);
-    }
-
-    #[test]
-    fn resize_east_grows_width() {
-        let n = NormRect::new(0.2, 0.2, 0.2, 0.2);
-        let mut p = picker_with(&[n]);
-        let pr = SurfaceRect::from_norm(n, 200, 200);
-        p.on_left_down(pr.x + pr.w, pr.y + pr.h / 2);
-        p.on_move(pr.x + pr.w + 20, pr.y + pr.h / 2);
-        let _ = p.on_left_up();
-        assert!(p.regions[0].width > n.width + 0.05);
     }
 
     #[test]
@@ -447,11 +440,94 @@ mod tests {
     }
 
     #[test]
-    fn create_works_at_top_of_client() {
-        let mut p = picker_with(&[]);
-        p.on_left_down(10, 4);
-        p.on_move(80, 40);
+    fn move_drag_translates_and_clamps_to_all_edges() {
+        let n = NormRect::new(0.2, 0.2, 0.2, 0.2); // 40..80 in 200x200 (40x40)
+        let mut p = picker_with(&[n]);
+        p.on_left_down(60, 60);
+        assert_eq!(p.selected, Some(0));
+
+        // Top-left clamp
+        p.on_move(-500, -500);
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(0, 0, 40, 40));
+
+        // Bottom-right clamp
+        p.on_move(500, 500);
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(160, 160, 40, 40));
         assert!(p.on_left_up());
+    }
+
+    #[test]
+    fn resize_handles_n_nw_ne_sw_se_and_min_size_clamping() {
+        // Box at 40..100, 40..100 (60x60) in 200x200
+        let n = NormRect::new(0.2, 0.2, 0.3, 0.3);
+        let pr = SurfaceRect::from_norm(n, 200, 200);
+
+        let mut p = picker_with(&[n]);
+        p.on_left_down(pr.x + pr.w / 2, pr.y); // N handle
+        p.on_move(pr.x + pr.w / 2, -20);
+        assert!(p.on_left_up());
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(40, 0, 60, 100));
+
+        let mut p = picker_with(&[n]);
+        p.on_left_down(pr.x, pr.y); // NW handle
+        p.on_move(20, 10);
+        assert!(p.on_left_up());
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(20, 10, 80, 90));
+
+        let mut p = picker_with(&[n]);
+        p.on_left_down(pr.x + pr.w, pr.y); // NE handle dragged past bottom-left min-size
+        p.on_move(0, 190);
+        assert!(p.on_left_up());
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(40, 100 - MIN_PX, MIN_PX, MIN_PX));
+
+        let mut p = picker_with(&[n]);
+        p.on_left_down(pr.x, pr.y + pr.h); // SW handle
+        p.on_move(10, 150);
+        assert!(p.on_left_up());
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(10, 40, 90, 110));
+
+        let mut p = picker_with(&[n]);
+        p.on_left_down(pr.x + pr.w, pr.y + pr.h); // SE handle
+        p.on_move(150, 160);
+        assert!(p.on_left_up());
+        assert_eq!(SurfaceRect::from_norm(p.regions[0], 200, 200), SurfaceRect::new(40, 40, 110, 120));
+    }
+
+    #[test]
+    fn hit_test_prefers_topmost_region_and_handle_over_body() {
+        let bottom = NormRect::new(0.1, 0.1, 0.5, 0.5); // 20..120
+        let top = NormRect::new(0.2, 0.2, 0.4, 0.4); // 40..120
+        let p = picker_with(&[bottom, top]);
+
+        // Inside overlap -> topmost (index 1) wins.
+        assert_eq!(p.hit_test(60, 60), Hit::Body { index: 1 });
+        // Corner of `top` (40, 40) lies inside `bottom`'s body -> Handle on index 1 wins over Body.
+        assert_eq!(p.hit_test(40, 40), Hit::Handle {
+            index: 1,
+            handle: Handle::NW
+        });
+        // Only in `bottom` (30, 30), outside `top`'s handle apron (>= 32) and > EDGE_HIT from `bottom`'s (20, 20) edge -> Body { index: 0 }.
+        assert_eq!(p.hit_test(30, 30), Hit::Body { index: 0 });
+    }
+
+    #[test]
+    fn reverse_drag_right_click_mid_drag_and_sanitization() {
+        let dirty = vec![
+            NormRect::new(0.5, 0.5, -0.2, 0.2),     // negative size -> flips via sanitize
+            NormRect::new(f32::NAN, 0.0, 0.2, 0.2), // dropped by sanitize
+        ];
+        let mut p = RegionPicker::new(dirty, 200, 200);
         assert_eq!(p.regions.len(), 1);
+        assert!((p.regions[0].x - 0.3).abs() < 1e-6);
+
+        // Reverse create drag: bottom-right to top-left
+        p.on_left_down(180, 180);
+        p.on_move(140, 140);
+        // Right-click while dragging must be ignored
+        assert!(!p.on_right_up(60, 60));
+        assert!(p.on_left_up());
+        assert_eq!(p.regions.len(), 2);
+        let created = SurfaceRect::from_norm(p.regions[1], 200, 200);
+        assert_eq!(created, SurfaceRect::new(140, 140, 40, 40));
     }
 }

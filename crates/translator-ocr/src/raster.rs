@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn linear_resize_matches_opencv() {
+    fn linear_and_cubic_resize_cover_vertical_overshoot_and_parallel_bands() {
         // cv2.resize(np.array([[0, 100, 200, 250]], np.uint8), (2, 1)) == [[50, 225]]
         let src = Rgb8 {
             width: 4,
@@ -193,18 +193,72 @@ mod tests {
         };
         assert_eq!(src.resize(2, 1, Interp::Linear).data, [50, 50, 50, 225, 225, 225]);
         // Upscaling repeats the edge: cv2.resize(np.array([[0, 100]], np.uint8), (4, 1)) == [[0, 25, 75, 100]]
-        let src = Rgb8 {
+        let up_src = Rgb8 {
             width: 2,
             height: 1,
             data: vec![0, 0, 0, 100, 100, 100],
         };
-        let up = src.resize(4, 1, Interp::Linear);
+        let up = up_src.resize(4, 1, Interp::Linear);
         assert_eq!(up.data.as_chunks::<3>().0.iter().map(|px| px[0]).collect::<Vec<_>>(), [0, 25, 75, 100]);
+        // Vertical resize (height > 1): 1×4 column down to 1×2.
+        let vsrc = Rgb8 {
+            width: 1,
+            height: 4,
+            data: vec![0, 0, 0, 100, 100, 100, 200, 200, 200, 250, 250, 250],
+        };
+        assert_eq!(vsrc.resize(1, 2, Interp::Linear).data, [50, 50, 50, 225, 225, 225]);
+
+        // Cubic step overshoot clamps to [0, 255] inside the transition and sharpens the slope vs Linear.
+        let step = Rgb8 {
+            width: 4,
+            height: 2,
+            data: [0, 0, 255, 255, 0, 0, 255, 255].iter().flat_map(|&v| [v; 3]).collect(),
+        };
+        let cubic = step.resize(16, 4, Interp::Cubic);
+        let linear = step.resize(16, 4, Interp::Linear);
+        assert_eq!(cubic.data.len(), 16 * 4 * 3);
+        let cubic_row: Vec<u8> = cubic.data.as_chunks::<3>().0[..16].iter().map(|px| px[0]).collect();
+        let linear_row: Vec<u8> = linear.data.as_chunks::<3>().0[..16].iter().map(|px| px[0]).collect();
+        assert!(cubic_row[0..=5].iter().all(|&v| v == 0), "undershoot must clamp to 0: {cubic_row:?}");
+        assert!(cubic_row[10..=15].iter().all(|&v| v == 255), "overshoot must clamp to 255: {cubic_row:?}");
+        assert!(
+            cubic_row[6] > 0
+                && cubic_row[6] < cubic_row[7]
+                && cubic_row[7] < cubic_row[8]
+                && cubic_row[8] < cubic_row[9]
+                && cubic_row[9] < 255,
+            "expected strictly increasing interior transition: {cubic_row:?}"
+        );
+        assert!(
+            cubic_row[7] < linear_row[7] && cubic_row[8] > linear_row[8],
+            "expected steeper cubic S-curve vs linear: cubic={cubic_row:?} linear={linear_row:?}"
+        );
+
+        // height > 64 triggers multi-threaded `par_rows`.
+        let big = Rgb8 {
+            width: 4,
+            height: 160,
+            data: (0..4 * 160).flat_map(|i| [(i / 4) as u8, ((i / 4) / 2) as u8, 10]).collect(),
+        };
+        let shrunk = big.resize(2, 80, Interp::Linear);
+        assert_eq!((shrunk.width, shrunk.height), (2, 80));
+        // Row 0 averages source rows 0 and 1 -> 0.5 rounds to 1 (`+ 0.5 as u8`); row 79 averages 158 and 159 -> 159.
+        assert_eq!(shrunk.pixel(0, 0)[0], 1);
+        assert_eq!(shrunk.pixel(0, 79)[0], 159);
     }
 
     #[test]
     fn cubic_weights_interpolate_and_sum_to_one() {
         assert_eq!(cubic_weights(0.0), [0.0, 1.0, 0.0, 0.0]);
+        for t in [0.0, 0.25, 0.5, 0.75] {
+            let w = cubic_weights(t);
+            let sum: f32 = w.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-6, "t={t} sum={sum} w={w:?}");
+        }
+        // Asymmetric t = 0.25 puts more weight on tap 0 (w[1]) than tap 1 (w[2]), with negative lobes.
+        let w25 = cubic_weights(0.25);
+        assert!(w25[1] > w25[2] && w25[2] > 0.0);
+        assert!(w25[0] < 0.0 && w25[3] < 0.0);
         // OpenCV's table for t = 0.5.
         let w = cubic_weights(0.5);
         for (got, want) in w.iter().zip([-0.09375, 0.59375, 0.59375, -0.09375]) {
@@ -228,23 +282,37 @@ mod tests {
     }
 
     #[test]
-    fn tilted_crop_follows_the_quad() {
+    fn tilted_crop_follows_the_quad_and_exercises_bicubic() {
         // A 4×2 box turned 90° clockwise: its top edge runs down the image.
         let crop = ramp(8, 8).crop_quad(&[[4.0, 1.0], [4.0, 5.0], [2.0, 5.0], [2.0, 1.0]]).unwrap();
         assert_eq!((crop.width, crop.height), (4, 2));
         assert_eq!(crop.data.as_chunks::<3>().0.iter().map(|px| px[0]).collect::<Vec<_>>(), [14, 24, 34, 44, 13, 23, 33, 43]);
+
+        // Non-90° fractional quad hitting bicubic interpolation and edge-clamping past x=0.
+        let slanted = ramp(16, 16)
+            .crop_quad(&[[-0.5, 2.25], [7.5, 4.25], [7.0, 6.25], [-1.0, 4.25]])
+            .unwrap();
+        assert_eq!((slanted.width, slanted.height), (8, 2));
+        let reds: Vec<u8> = slanted.data.as_chunks::<3>().0.iter().map(|px| px[0]).collect();
+        // Top-left at (-0.5, 2.25) repeats edge x=0 and interpolates between y=2 (20) and y=3 (30).
+        assert!((21..=25).contains(&reds[0]), "reds={reds:?}");
+        // Bottom-right moves further right & down, monotonically higher than top-left.
+        assert!(reds[15] > reds[0], "reds={reds:?}");
+
         assert!(ramp(8, 8).crop_quad(&[[1.0, 1.0], [1.5, 1.0], [1.5, 4.0], [1.0, 4.0]]).is_none(), "under a pixel wide");
     }
 
     #[test]
     fn chw_planes_pick_channels_and_leave_padding() {
         let src = Rgb8 {
-            width: 1,
-            height: 1,
-            data: vec![10, 20, 30],
+            width: 2,
+            height: 2,
+            data: vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120],
         };
-        let mut out = [9.0; 6];
-        src.write_chw([2, 1, 0], [1.0, 2.0, 3.0], [0.5; 3], &mut out, 2);
-        assert_eq!(out, [30.5, 9.0, 40.5, 9.0, 30.5, 9.0]);
+        let mut out = [9.0; 3 * 2 * 3];
+        src.write_chw([2, 1, 0], [1.0, 2.0, 3.0], [0.5; 3], &mut out, 3);
+        assert_eq!(out, [
+            30.5, 60.5, 9.0, 90.5, 120.5, 9.0, 40.5, 100.5, 9.0, 160.5, 220.5, 9.0, 30.5, 120.5, 9.0, 210.5, 300.5, 9.0,
+        ]);
     }
 }

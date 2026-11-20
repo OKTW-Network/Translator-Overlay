@@ -751,17 +751,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
+
+    use tempfile::tempdir;
 
     use super::*;
-
-    fn temp_config_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        std::env::temp_dir().join(format!("translator_overlay_{name}_{nanos}.toml"))
-    }
 
     #[test]
     fn hotkey_bad_chord_is_dropped_and_the_rest_kept() {
@@ -806,11 +800,14 @@ start_pause = "f8"
     fn ui_language_from_locale_name() {
         assert_eq!(UiLanguage::from_locale_name("zh-TW"), UiLanguage::ZhHant);
         assert_eq!(UiLanguage::from_locale_name("zh-HK"), UiLanguage::ZhHant);
+        assert_eq!(UiLanguage::from_locale_name("zh_TW"), UiLanguage::ZhHant);
+        assert_eq!(UiLanguage::from_locale_name(" ZH-HK "), UiLanguage::ZhHant);
         assert_eq!(UiLanguage::from_locale_name("zh-MO"), UiLanguage::ZhHant);
         assert_eq!(UiLanguage::from_locale_name("zh-Hant-TW"), UiLanguage::ZhHant);
         assert_eq!(UiLanguage::from_locale_name("zh-CN"), UiLanguage::ZhHans);
         assert_eq!(UiLanguage::from_locale_name("zh-SG"), UiLanguage::ZhHans);
         assert_eq!(UiLanguage::from_locale_name("zh-Hans-CN"), UiLanguage::ZhHans);
+        assert_eq!(UiLanguage::from_locale_name("zh_Hans_CN"), UiLanguage::ZhHans);
         assert_eq!(UiLanguage::from_locale_name("en-US"), UiLanguage::En);
         assert_eq!(UiLanguage::from_locale_name("ja-JP"), UiLanguage::En);
         assert_eq!(UiLanguage::from_locale_name("zh"), UiLanguage::En);
@@ -834,6 +831,10 @@ start_pause = "f8"
         assert_eq!(parse_argb_hex("#AABBCCDD"), Some(0xAABB_CCDD));
         assert_eq!(parse_argb_hex("#aabbccdd"), Some(0xAABB_CCDD));
         assert_eq!(parse_argb_hex("  #C8000000  "), Some(0xC800_0000));
+        assert_eq!(parse_argb_hex("#+1234567"), None);
+        assert_eq!(parse_argb_hex("#-1234567"), None);
+        assert_eq!(parse_argb_hex("#GGGGGGGG"), None);
+        assert_eq!(parse_argb_hex("#123456789"), None);
         assert_eq!(parse_argb_hex("0xC8000000"), None);
         assert_eq!(parse_argb_hex("#AABBCC"), None);
         assert_eq!(parse_argb_hex("FFFFFFFF"), None);
@@ -865,125 +866,75 @@ background = "#c8000011"
     }
 
     #[test]
-    fn load_or_create_writes_default() {
-        let path = temp_config_path("create");
-        let _ = fs::remove_file(&path);
+    fn load_or_create_writes_and_preserves_existing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
         let config = AppConfig::load_or_create(&path).unwrap();
         assert!(path.exists());
-        assert_eq!(config.translation.target_lang, "zh-TW");
-        assert_eq!(config.ocr.model_tier, ModelTier::Small);
-        assert_eq!(config.ocr.device, OcrDevice::Webgpu);
-        let _ = fs::remove_file(&path);
+        assert_eq!(config, AppConfig::default());
+
+        // Re-read the written file from disk to verify valid serialization.
+        let disk = AppConfig::load(&path).unwrap();
+        assert_eq!(disk, AppConfig::default());
+
+        // Existing file is loaded, not overwritten with defaults.
+        let mut custom = AppConfig::default();
+        custom.translation.target_lang = "ja".into();
+        custom.save(&path).unwrap();
+        let reloaded = AppConfig::load_or_create(&path).unwrap();
+        assert_eq!(reloaded.translation.target_lang, "ja");
     }
 
     #[test]
-    fn ocr_device_defaults_webgpu_and_roundtrips() {
-        let omitted: AppConfig = toml::from_str("[ocr]\nmodel_tier = \"small\"\n").unwrap();
-        assert_eq!(omitted.ocr.device, OcrDevice::Webgpu);
-
-        let mut config = AppConfig::default();
-        config.ocr.device = OcrDevice::Cpu;
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("device = \"cpu\""), "got:\n{text}");
-        assert!(!text.contains("cpu_only"), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.ocr.device, OcrDevice::Cpu);
-
-        config.ocr.device = OcrDevice::Directml;
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("device = \"directml\""), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.ocr.device, OcrDevice::Directml);
-    }
-
-    #[test]
-    fn provider_defaults_to_builtin() {
-        let text = r#"
-[api]
-model = "my-model"
-"#;
-        let config: AppConfig = toml::from_str(text).unwrap();
-        assert_eq!(config.api.provider, ModelProvider::Builtin);
-        assert_eq!(config.api.http_api, HttpApi::ChatCompletions);
-        assert!(config.api.cli_path.is_empty());
-        assert!(!config.api.provider.is_cli());
-    }
-
-    #[test]
-    fn http_api_responses_roundtrip() {
-        let mut config = AppConfig::default();
-        config.api.http_api = HttpApi::Responses;
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("http_api = \"responses\""), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.api.http_api, HttpApi::Responses);
-    }
-
-    #[test]
-    fn provider_cli_roundtrip() {
-        for (provider, cli_path, model, key) in [
-            (ModelProvider::GrokCli, r"C:\tools\grok.exe", "grok-4.5", "grok_cli"),
-            (ModelProvider::OpenCodeCli, r"C:\tools\opencode.exe", "opencode/gpt-5", "opencode_cli"),
-            (ModelProvider::ClaudeCli, "", "sonnet", "claude_cli"),
-        ] {
-            let mut config = AppConfig::default();
-            config.api.provider = provider;
-            config.api.cli_path = cli_path.into();
-            config.api.model = model.into();
-            let text = toml::to_string_pretty(&config).unwrap();
-            assert!(text.contains(&format!("provider = \"{key}\"")), "got:\n{text}");
-            let parsed: AppConfig = toml::from_str(&text).unwrap();
-            assert_eq!(parsed.api.provider, provider);
-            assert_eq!(parsed.api.cli_path, cli_path);
-            assert_eq!(parsed.api.model, model);
-            assert!(parsed.api.provider.is_cli());
-        }
-        assert_eq!(ModelProvider::ClaudeCli.default_bin(), "claude");
-    }
-
-    #[test]
-    fn builtin_roundtrip_and_blanking() {
+    fn blank_inapplicable_resets_fields_per_provider() {
         let mut config = AppConfig::default();
         config.api.provider = ModelProvider::Builtin;
         config.api.builtin_model = "gemma-4-e4b-it-qat-q4f16".into();
         config.api.builtin_device = OcrDevice::Directml;
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert!(text.contains("provider = \"builtin\""), "got:\n{text}");
-        assert!(text.contains("builtin_device = \"directml\""), "got:\n{text}");
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.api, config.api);
-        assert!(!parsed.api.provider.is_cli() && !parsed.api.provider.is_http());
+        config.api.builtin_dry = false;
 
         let mut api = config.api.clone();
         api.base_url = "https://example/v1".into();
+        api.api_key = "sk".into();
+        api.http_api = HttpApi::Responses;
+        api.structured_outputs = false;
+        api.stream = false;
+        api.send_reasoning_content = false;
         api.cli_path = "grok".into();
+        api.service_tier = ServiceTier::Priority;
         api.model = "leftover".into();
         api.blank_inapplicable();
-        assert!(api.base_url.is_empty() && api.cli_path.is_empty() && api.model.is_empty());
+        assert!(api.base_url.is_empty() && api.api_key.is_empty() && api.cli_path.is_empty() && api.model.is_empty());
+        assert_eq!(api.http_api, HttpApi::ChatCompletions);
+        assert!(api.structured_outputs && api.stream && api.send_reasoning_content);
+        assert_eq!(api.service_tier, ServiceTier::Standard);
         assert_eq!(api.builtin_device, OcrDevice::Directml);
+        assert!(!api.builtin_dry);
 
         api.provider = ModelProvider::OpenaiCompatible;
+        api.builtin_context_tokens = 8192;
+        api.builtin_output_ratio = 2.0;
         api.blank_inapplicable();
         assert!(api.builtin_model.is_empty());
         assert_eq!(api.builtin_device, OcrDevice::default());
+        assert_eq!(api.builtin_context_tokens, 4096);
+        assert!((api.builtin_output_ratio - 4.0).abs() < f32::EPSILON);
+        assert!(api.builtin_dry);
     }
 
     #[test]
-    fn priority_service_tier_roundtrip() {
-        let mut config = AppConfig::default();
-        config.api.provider = ModelProvider::CodexCli;
-        config.api.service_tier = ServiceTier::Priority;
+    fn resolve_cli_guards_and_existing_files() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("tool.exe");
+        fs::write(&file, "").unwrap();
+        let file_str = file.to_string_lossy();
 
-        let text = toml::to_string(&config).unwrap();
-        assert!(text.contains("service_tier = \"priority\""), "got:\n{text}");
+        // Non-CLI providers ignore even a real file on disk; directories are rejected.
+        assert!(resolve_cli_binary(ModelProvider::OpenaiCompatible, &file_str).is_none());
+        assert!(resolve_cli_binary(ModelProvider::Builtin, &file_str).is_none());
+        assert!(resolve_cli_binary(ModelProvider::GrokCli, &dir.path().to_string_lossy()).is_none());
+        assert_eq!(resolve_cli_binary(ModelProvider::GrokCli, &format!(" {file_str} ")), Some(file));
 
-        let parsed: AppConfig = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.api.service_tier, ServiceTier::Priority);
-    }
-
-    #[test]
-    fn resolve_cli_missing_path_is_none() {
-        assert!(resolve_cli_binary(ModelProvider::OpenaiCompatible, "").is_none());
         assert!(resolve_cli_binary(ModelProvider::GrokCli, r"C:\definitely-missing\grok.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::CodexCli, r"Z:\no-such-codex.exe").is_none());
         assert!(resolve_cli_binary(ModelProvider::OpenCodeCli, r"Z:\no-such-opencode.exe").is_none());
@@ -993,9 +944,9 @@ model = "my-model"
     #[cfg(windows)]
     #[test]
     fn find_on_path_skips_extensionless_npm_shim() {
-        let root = temp_config_path("path_lookup").with_extension("");
-        let npm = root.join("npm");
-        let bin = root.join("bin");
+        let root = tempdir().unwrap();
+        let npm = root.path().join("npm");
+        let bin = root.path().join("bin");
         fs::create_dir_all(&npm).unwrap();
         fs::create_dir_all(&bin).unwrap();
         // npm writes `tool` (sh), `tool.cmd`, and `tool.ps1` side by side.
@@ -1012,7 +963,6 @@ model = "my-model"
         assert_eq!(find_on_path("tool.ps1", &path_var), Some(npm.join("tool.ps1")));
         assert_eq!(find_on_path("missing", &path_var), None);
         assert_eq!(find_on_path("tool", OsStr::new("")), None);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1070,6 +1020,9 @@ reject_short_long = false
 model = "keep-me"
 provider = "not_a_real_provider"
 
+[ui]
+language = "ja"
+
 [overlay]
 enabled = false
 
@@ -1084,11 +1037,42 @@ history_max_items = "nope"
         let config = AppConfig::from_toml_lenient(text).unwrap();
         assert_eq!(config.api.model, "keep-me");
         assert_eq!(config.api.provider, ModelProvider::Builtin);
+        assert_eq!(config.ui.language, None);
         assert!(!config.overlay.enabled);
         assert_eq!(config.overlay.colors.text, WindowColors::default().text);
         assert_eq!(config.overlay.colors.background, 0xC800_0011);
         assert_eq!(config.translation.target_lang, "ja");
         assert_eq!(config.translation.history_max_items, TranslationConfig::default().history_max_items);
+    }
+
+    #[test]
+    fn lenient_handles_wrong_table_for_scalar_and_dotted_keys() {
+        // Wrong sub-table where a scalar belongs must not leave an empty `api.model = {}` that
+        // breaks every subsequent field.
+        let table_as_scalar = r#"
+[api]
+provider = "openai_compatible"
+[api.model]
+x = 1
+[overlay]
+enabled = false
+"#;
+        let config = AppConfig::from_toml_lenient(table_as_scalar).unwrap();
+        assert_eq!(config.api.provider, ModelProvider::OpenaiCompatible);
+        assert!(config.api.model.is_empty());
+        assert!(!config.overlay.enabled);
+
+        // Wrong scalar where a table belongs must not wipe siblings.
+        let scalar_as_table = "api = \"bad\"\n[overlay]\nenabled = false\n";
+        let config = AppConfig::from_toml_lenient(scalar_as_table).unwrap();
+        assert_eq!(config.api, ApiConfig::default());
+        assert!(!config.overlay.enabled);
+
+        // Quoted TOML key with a literal dot stays one path segment (must not populate `api.model`).
+        let dotted = "\"api.model\" = \"wrong\"\n[overlay]\nenabled = false\n";
+        let config = AppConfig::from_toml_lenient(dotted).unwrap();
+        assert!(config.api.model.is_empty());
+        assert!(!config.overlay.enabled);
     }
 
     #[test]
@@ -1112,12 +1096,11 @@ join_with_space = false
 
     #[test]
     fn load_skips_invalid_field_and_keeps_the_rest() {
-        let path = temp_config_path("lenient");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
         fs::write(&path, "[api]\nmodel = \"keep-me\"\nprovider = \"nope\"\n").unwrap();
         let config = AppConfig::load(&path).unwrap();
         assert_eq!(config.api.model, "keep-me");
         assert_eq!(config.api.provider, ModelProvider::Builtin);
-        let _ = fs::remove_file(&path);
     }
 }

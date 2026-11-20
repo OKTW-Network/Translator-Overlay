@@ -127,18 +127,61 @@ impl ModelPaths {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
-    fn detection_memory_grows_with_input_side() {
-        let at = |side| memory_estimate(ModelTier::Small, OcrModel::V6, V5Det::Mobile, OcrDevice::Webgpu, false, side).0 >> 20;
-        assert_eq!(at(960), 119 + 498, "the table is measured at a 960-px long side");
-        assert_eq!(at(1920), 9 + 110 * 4 + 498);
-        assert_eq!(at(0), at(1920));
+    fn memory_estimate_covers_devices_layout_and_v5_variants() {
+        let at = |side, device, layout| memory_estimate(ModelTier::Small, OcrModel::V6, V5Det::Mobile, device, layout, side);
+        assert!(at(1920, OcrDevice::Webgpu, false).0 > at(960, OcrDevice::Webgpu, false).0, "larger input needs more VRAM");
+        assert_eq!(at(0, OcrDevice::Webgpu, false), at(1920, OcrDevice::Webgpu, false));
+
+        let no_layout = at(960, OcrDevice::Webgpu, false);
+        assert!(at(960, OcrDevice::Webgpu, true).0 > no_layout.0, "layout model adds VRAM");
+        assert_eq!(at(960, OcrDevice::Directml, false), no_layout);
+
+        let cpu = at(960, OcrDevice::Cpu, true);
+        assert_eq!(cpu.0, 0);
+        assert!(cpu.1 > at(960, OcrDevice::Cpu, false).1, "layout model adds RAM on CPU");
+
+        let en = memory_estimate(ModelTier::Small, OcrModel::V5English, V5Det::Mobile, OcrDevice::Webgpu, false, 960);
+        let ko = memory_estimate(ModelTier::Small, OcrModel::V5Korean, V5Det::Mobile, OcrDevice::Webgpu, false, 960);
+        let server = memory_estimate(ModelTier::Small, OcrModel::V5Korean, V5Det::Server, OcrDevice::Webgpu, false, 960);
+        assert!(ko.0 > en.0);
+        assert!(server.0 > ko.0);
     }
 
     #[test]
-    fn v5_model_pairs_with_v5_detection_at_any_tier() {
+    fn v5_models_pair_with_v5_detection_across_all_tiers() {
+        let v5_models = [
+            OcrModel::V5English,
+            OcrModel::V5Latin,
+            OcrModel::V5Korean,
+            OcrModel::V5Cyrillic,
+            OcrModel::V5EastSlavic,
+            OcrModel::V5Greek,
+            OcrModel::V5Devanagari,
+            OcrModel::V5Tamil,
+            OcrModel::V5Telugu,
+            OcrModel::V5Thai,
+        ];
+        for model in v5_models {
+            for v5_det in [V5Det::Mobile, V5Det::Server] {
+                let tiny = artifacts(ModelTier::Tiny, model, v5_det);
+                for tier in [ModelTier::Small, ModelTier::Medium] {
+                    assert_eq!(artifacts(tier, model, v5_det), tiny, "{model:?} must ignore tier {tier:?}");
+                }
+                let expected_det = match v5_det {
+                    V5Det::Mobile => "PP-OCRv5_mobile_det.onnx",
+                    V5Det::Server => "PP-OCRv5_server_det.onnx",
+                };
+                assert_eq!(tiny[0].file_name, expected_det);
+                assert!(tiny.iter().all(|a| a.expected_bytes > 0 && a.download_url().contains("/resolve/")));
+            }
+        }
+
+        // Exact pinned HuggingFace revision URLs for Korean + V5Det::Server.
         const HF: &str = "https://huggingface.co/PaddlePaddle";
         let [det, rec, dict] = artifacts(ModelTier::Tiny, OcrModel::V5Korean, V5Det::Server);
         assert_eq!(
@@ -169,26 +212,28 @@ mod tests {
             }
             let paths = ModelPaths::from_dir(Path::new("m"), tier, OcrModel::V6, V5Det::Mobile);
             assert_eq!(paths.det, Path::new("m").join(det.file_name));
+            assert_eq!(paths.rec, Path::new("m").join(rec.file_name));
             assert_eq!(paths.dict, Path::new("m").join(dict.file_name));
         }
     }
 
     #[test]
-    fn missing_file_is_not_present() {
-        let paths = ModelPaths::from_dir(Path::new("definitely-missing-models-dir"), ModelTier::Tiny, OcrModel::V6, V5Det::Mobile);
-        assert!(!paths.all_present());
-    }
+    fn all_present_requires_all_three_regular_files() {
+        let missing = ModelPaths::from_dir(Path::new("definitely-missing-models-dir"), ModelTier::Tiny, OcrModel::V6, V5Det::Mobile);
+        assert!(!missing.all_present());
 
-    #[test]
-    fn existing_files_count_as_present_regardless_of_size() {
-        let dir = std::env::temp_dir().join(format!("translator-ocr-present-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths = ModelPaths::from_dir(&dir, ModelTier::Tiny, OcrModel::V6, V5Det::Mobile);
-        for p in [&paths.det, &paths.rec, &paths.dict] {
-            std::fs::write(p, b"x").unwrap();
-        }
+        let dir = tempdir().unwrap();
+        let paths = ModelPaths::from_dir(dir.path(), ModelTier::Tiny, OcrModel::V6, V5Det::Mobile);
+        std::fs::write(&paths.det, b"x").unwrap();
+        std::fs::write(&paths.rec, b"x").unwrap();
+        assert!(!paths.all_present(), "2 of 3 files must not pass");
+
+        // Directory with the artifact's name must not count as a regular file.
+        std::fs::create_dir_all(&paths.dict).unwrap();
+        assert!(!paths.all_present());
+        std::fs::remove_dir_all(&paths.dict).unwrap();
+
+        std::fs::write(&paths.dict, b"x").unwrap();
         assert!(paths.all_present());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

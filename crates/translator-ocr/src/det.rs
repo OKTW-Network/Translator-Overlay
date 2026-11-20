@@ -284,6 +284,8 @@ mod tests {
         assert_eq!((width, height), (1280, 704));
         let (tensor, width, height) = preprocess(&image(1920, 1080), 960);
         assert_eq!((width, height, tensor.len()), (960, 544, 3 * 960 * 544));
+        let (_, width, height) = preprocess(&image(720, 1280), 960);
+        assert_eq!((width, height), (544, 960));
         let (_, width, height) = preprocess(&image(20, 10), 960);
         assert_eq!((width, height), (32, 32), "tiny images are stretched");
     }
@@ -293,18 +295,22 @@ mod tests {
         let image = Rgb8 {
             width: 32,
             height: 32,
-            data: [255, 0, 0].repeat(32 * 32),
+            data: [255, 128, 0].repeat(32 * 32),
         };
         let (tensor, ..) = preprocess(&image, 960);
         let plane = 32 * 32;
-        // Blue and green are 0, red is 255.
+        // Blue is 0, green is 128, red is 255.
         assert!((tensor[0] - (-0.485 / 0.229)).abs() < 1e-5);
-        assert!((tensor[plane] - (-0.456 / 0.224)).abs() < 1e-5);
+        assert!((tensor[plane] - (128.0 / 255.0 - 0.456) / 0.224).abs() < 1e-5);
         assert!((tensor[2 * plane] - (1.0 - 0.406) / 0.225).abs() < 1e-5);
     }
 
     #[test]
     fn min_rect_of_upright_and_tilted_points() {
+        assert!(MinRect::of(&[]).is_none());
+        assert!(MinRect::of(&[[1.0, 2.0]]).is_none());
+        assert!(MinRect::of(&[[1.0, 2.0], [3.0, 4.0]]).is_none());
+
         let rect = MinRect::of(&[[2.0, 3.0], [12.0, 3.0], [12.0, 8.0], [2.0, 8.0], [7.0, 5.0]]).unwrap();
         assert_eq!(rect.corners(), [[2.0, 3.0], [12.0, 3.0], [12.0, 8.0], [2.0, 8.0]]);
         assert_eq!(rect.short_side(), 5.0);
@@ -317,6 +323,30 @@ mod tests {
         }
 
         assert!(MinRect::of(&[[0.0, 0.0], [5.0, 0.0], [9.0, 0.0]]).is_none(), "a line has no area");
+    }
+
+    #[test]
+    fn hollow_ring_is_one_region_and_tilted_box_score_scans_edges() {
+        // 20x20 outer square with a 12x12 hole inside: one connected component, low mean score.
+        let mut pred = map(48, 48, &[[10, 10, 29, 29]]);
+        for y in 14..26 {
+            pred[y * 48 + 14..y * 48 + 26].fill(0.0);
+        }
+        assert!(boxes_from_map(&pred, 48, 48, 48, 48, &PARAMS).is_empty(), "hole drags mean below 0.6");
+        let lenient = DbParams { box_thresh: 0.2, ..PARAMS };
+        assert_eq!(boxes_from_map(&pred, 48, 48, 48, 48, &lenient).len(), 1, "hollow ring emits once");
+
+        // Diagonal diamond filled with 0.9; score must average the rotated polygon interior.
+        let mut diamond = vec![0.0_f32; 32 * 32];
+        for y in 4..=26usize {
+            for x in 4..=26usize {
+                if (x as isize - 15).abs() + (y as isize - 15).abs() <= 10 {
+                    diamond[y * 32 + x] = 0.9;
+                }
+            }
+        }
+        let tilted_quad = [[15.0, 5.0], [25.0, 15.0], [15.0, 25.0], [5.0, 15.0]];
+        assert!(box_score(&diamond, 32, 32, &tilted_quad) > 0.7);
     }
 
     #[test]

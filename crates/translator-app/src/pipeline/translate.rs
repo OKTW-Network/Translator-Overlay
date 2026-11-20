@@ -309,9 +309,13 @@ impl Pipeline {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
+    use std::{
+        assert_matches,
+        time::{Duration, Instant},
+    };
 
     use parking_lot::RwLock;
+    use tempfile::tempdir;
     use translator_core::{ApiConfig, AppConfig, AppState, ModelProvider, Rect};
     use translator_ocr::{BlockPersistenceFilter, StabilityGate};
     use translator_translate::{Completion, merge_translations};
@@ -384,11 +388,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_page_translates_again_after_a_config_change() {
-        // apply_config saves to `config_path()`, which this override points at a real config.
-        if std::env::var_os("TRANSLATOR_OVERLAY_ROOT").is_some() {
-            return;
-        }
+        let tmp = tempdir().unwrap();
         let mut p = pipeline();
+        p.config_path = Some(tmp.path().join("config.toml"));
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
         let x = vec![block(1, "X")];
         p.consume_raw_ocr(x.clone(), 100, 100);
@@ -404,6 +406,7 @@ mod tests {
         // E.g. a larger context length.
         let cfg = p.state.read().config.clone();
         p.apply_config(cfg).await;
+        assert!(p.state.read().last_error.is_none());
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
         p.consume_raw_ocr(x.clone(), 100, 100);
         p.consume_raw_ocr(x, 100, 100);
@@ -610,21 +613,21 @@ mod tests {
         p.state.write().config.ocr.hold_ms = 20;
         p.persist = BlockPersistenceFilter::new(20, 20, 0);
         p.gate = StabilityGate::new(0);
-        let settle = || std::thread::sleep(std::time::Duration::from_millis(30));
+        let t0 = Instant::now();
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        settle();
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x, 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t0);
+        let t1 = t0 + Duration::from_millis(30);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t1);
+        p.consume_raw_ocr_at(x, 100, 100, t1);
         assert!(p.inflight.is_some(), "page translates");
         // The settle filter renumbers block ids from 0.
         p.apply_stream_preview(&[(0, "TX".into())]);
         assert_eq!(p.captions.len(), 1);
 
-        p.consume_raw_ocr(Vec::new(), 100, 100);
+        p.consume_raw_ocr_at(Vec::new(), 100, 100, t1);
         assert_eq!(p.captions.len(), 1, "held for hold_ms");
-        settle();
-        p.consume_raw_ocr(Vec::new(), 100, 100);
+        let t2 = t1 + Duration::from_millis(30);
+        p.consume_raw_ocr_at(Vec::new(), 100, 100, t2);
         assert!(p.captions.is_empty(), "cleared once the hold elapses");
         assert_eq!(p.state.read().status, PipelineStatus::Translating, "the blank reset keeps the translating status");
     }
@@ -635,27 +638,26 @@ mod tests {
         // Settle longer than hold: the new line is still settling when the hold runs out.
         p.persist = BlockPersistenceFilter::new(60, 30, 0);
         p.gate = StabilityGate::new(0);
-        let sleep = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        let t0 = Instant::now();
         let x = vec![block(1, "アオイ")];
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        sleep(70);
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x, 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t0);
+        let t1 = t0 + Duration::from_millis(70);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t1);
+        p.consume_raw_ocr_at(x, 100, 100, t1);
         // The settle filter renumbers block ids from 0.
         finish(&mut p, r#"{"b":[[0,"Aoi"]]}"#);
         assert_eq!(p.captions.len(), 1);
 
         let y = vec![block(1, "ハル")];
-        p.consume_raw_ocr(y.clone(), 100, 100);
+        p.consume_raw_ocr_at(y.clone(), 100, 100, t1);
         assert_eq!(p.captions.len(), 1, "held for hold");
-        sleep(40);
-        p.consume_raw_ocr(y, 100, 100);
+        let t2 = t1 + Duration::from_millis(40);
+        p.consume_raw_ocr_at(y, 100, 100, t2);
         assert!(p.captions.is_empty(), "the replaced line's caption expires after hold");
     }
 
     #[tokio::test]
     async fn unsettled_text_still_translates_after_max_wait() {
-        use std::time::{Duration, Instant};
         let mut p = pipeline();
         {
             // Persist shares max_wait, so it force-adopts the counter's readings too.
@@ -672,26 +674,26 @@ mod tests {
                 ..block(2, &format!("n{n}"))
             }]
         };
-        let start = Instant::now();
-        let mut n = 0;
-        while start.elapsed() < Duration::from_millis(30) {
-            p.consume_raw_ocr(frame(n), 100, 100);
+        let t0 = Instant::now();
+        let mut t = t0;
+        let mut n = 0usize;
+        while t.duration_since(t0) < Duration::from_millis(30) {
+            p.consume_raw_ocr_at(frame(n), 100, 100, t);
             n += 1;
-            std::thread::sleep(Duration::from_millis(5));
+            t += Duration::from_millis(5);
         }
         assert!(p.inflight.is_none(), "waits while the counter flickers");
 
-        while p.inflight.is_none() && start.elapsed() < Duration::from_millis(400) {
-            p.consume_raw_ocr(frame(n), 100, 100);
+        while p.inflight.is_none() && t.duration_since(t0) < Duration::from_millis(400) {
+            p.consume_raw_ocr_at(frame(n), 100, 100, t);
             n += 1;
-            std::thread::sleep(Duration::from_millis(5));
+            t += Duration::from_millis(5);
         }
         assert!(p.inflight.is_some(), "max_wait sends the settled text anyway");
     }
 
     #[tokio::test]
     async fn wait_all_settled_off_translates_settled_text_without_max_wait() {
-        use std::time::{Duration, Instant};
         for wait_all in [true, false] {
             let mut p = pipeline();
             {
@@ -708,12 +710,13 @@ mod tests {
                     ..block(2, &format!("n{n}"))
                 }]
             };
-            let start = Instant::now();
-            let mut n = 0;
-            while p.inflight.is_none() && start.elapsed() < Duration::from_millis(150) {
-                p.consume_raw_ocr(frame(n), 100, 100);
+            let t0 = Instant::now();
+            let mut t = t0;
+            let mut n = 0usize;
+            while p.inflight.is_none() && t.duration_since(t0) < Duration::from_millis(150) {
+                p.consume_raw_ocr_at(frame(n), 100, 100, t);
                 n += 1;
-                std::thread::sleep(Duration::from_millis(5));
+                t += Duration::from_millis(5);
             }
             assert_eq!(p.inflight.is_some(), !wait_all, "wait_all_settled = {wait_all}");
             if !wait_all {
@@ -725,7 +728,6 @@ mod tests {
 
     #[tokio::test]
     async fn cached_settled_line_shows_while_the_page_waits() {
-        use std::time::Duration;
         let mut p = pipeline();
         {
             let mut s = p.state.write();
@@ -743,9 +745,10 @@ mod tests {
                 ..block(2, &format!("n{n}"))
             }]
         };
+        let mut t = Instant::now();
         for n in 0..12 {
-            p.consume_raw_ocr(frame(n), 100, 100);
-            std::thread::sleep(Duration::from_millis(5));
+            p.consume_raw_ocr_at(frame(n), 100, 100, t);
+            t += Duration::from_millis(5);
         }
         assert!(p.inflight.is_none(), "the page still waits");
         let shown: Vec<_> = p.captions.iter().map(|c| c.translation.as_str()).collect();
@@ -758,34 +761,34 @@ mod tests {
         p.state.write().config.ocr.max_wait_ms = 50;
         p.persist = BlockPersistenceFilter::new(20, 60, 0);
         p.gate = StabilityGate::new(0);
-        let sleep = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
         let at = |text: &str, y: f32| {
             vec![OcrBlock {
                 bbox: Rect::new(0.0, y, 10.0, 10.0),
                 ..block(1, text)
             }]
         };
+        let mut t = Instant::now();
         let a = at("A", 0.0);
-        p.consume_raw_ocr(a.clone(), 100, 100);
-        sleep(30);
-        p.consume_raw_ocr(a.clone(), 100, 100);
-        p.consume_raw_ocr(a.clone(), 100, 100);
+        p.consume_raw_ocr_at(a.clone(), 100, 100, t);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(a.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(a.clone(), 100, 100, t);
         finish(&mut p, r#"{"b":[[0,"TA"]]}"#);
         // A stays up past max_wait: max_wait counts from the change, not from the last page.
-        sleep(55);
-        p.consume_raw_ocr(a, 100, 100);
+        t += Duration::from_millis(55);
+        p.consume_raw_ocr_at(a, 100, 100, t);
 
         // A leaves and B shows up elsewhere: B settles while A is still held by hysteresis.
         let b = at("B", 80.0);
-        p.consume_raw_ocr(b.clone(), 100, 100);
-        sleep(30);
-        p.consume_raw_ocr(b.clone(), 100, 100);
-        p.consume_raw_ocr(b.clone(), 100, 100);
+        p.consume_raw_ocr_at(b.clone(), 100, 100, t);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(b.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(b.clone(), 100, 100, t);
         assert!(p.inflight.is_none(), "no page while A is still held");
 
-        sleep(40);
-        p.consume_raw_ocr(b.clone(), 100, 100);
-        p.consume_raw_ocr(b, 100, 100);
+        t += Duration::from_millis(40);
+        p.consume_raw_ocr_at(b.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(b, 100, 100, t);
         assert!(p.inflight.is_some(), "B translates once A expired");
         let texts: Vec<_> = p.last_page.as_ref().expect("page").blocks.iter().map(|b| b.text.as_str()).collect();
         assert_eq!(texts, ["B"]);
@@ -795,26 +798,30 @@ mod tests {
     async fn result_lands_in_the_resized_pixel_space() {
         let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(0, 750, 0);
-        let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x, 100, 100);
-        assert!(p.inflight.is_some(), "page translates");
-
-        // The window doubles in size before the reply.
-        let big = OcrBlock {
-            bbox: Rect::new(0.0, 0.0, 20.0, 20.0),
+        let prev = OcrBlock {
+            bbox: Rect::new(10.0, 10.0, 40.0, 40.0),
             ..block(1, "X")
         };
+        let scaled = OcrBlock {
+            bbox: Rect::new(11.0, 11.0, 44.0, 44.0),
+            ..block(1, "X")
+        };
+        assert!(!scaled.bbox.shifted_from(prev.bbox), "small resize relies on (w, h) mismatch rather than shifted_from");
+        p.consume_raw_ocr(vec![prev.clone()], 100, 100);
+        p.consume_raw_ocr(vec![prev], 100, 100);
+        assert!(p.inflight.is_some(), "page translates");
+
         p.last_raw_ocr = Some(LastRawOcr {
             sequence: 0,
-            width: 200,
-            height: 200,
+            width: 110,
+            height: 110,
             scope: Vec::new(),
             blocks: Vec::new(),
         });
-        p.consume_raw_ocr(vec![big.clone()], 200, 200);
+        p.consume_raw_ocr(vec![scaled.clone()], 110, 110);
         finish(&mut p, r#"{"b":[[1,"TX"]]}"#);
-        assert_eq!(p.captions[0].bbox, big.bbox);
+        assert_eq!(p.captions[0].bbox, scaled.bbox);
+        assert_eq!(p.painted_size, (110, 110));
     }
 
     #[tokio::test]
@@ -822,28 +829,29 @@ mod tests {
         let mut p = pipeline();
         p.persist = BlockPersistenceFilter::new(20, 20, 0);
         p.gate = StabilityGate::new(0);
+        let mut t = Instant::now();
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
         assert!(p.inflight.is_some(), "page translates");
 
         // A manual capture resets persist: nothing is settled while the request runs.
         p.persist.reset();
-        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
         // The settle filter renumbers block ids from 0.
         p.apply_stream_preview(&[(0, "TX".into())]);
         assert_eq!(p.captions.len(), 1, "stream preview still paints");
-        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
         assert_eq!(p.captions.len(), 1, "a reset persist does not drop the preview");
 
         finish(&mut p, r#"{"b":[[0,"TX"]]}"#);
-        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
         assert_eq!(p.captions.len(), 1, "nor the result");
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x, 100, 100);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(x, 100, 100, t);
         assert!(p.inflight.is_none(), "the page is not translated again once it settles");
     }
 
@@ -853,12 +861,12 @@ mod tests {
         p.state.write().config.ocr.hold_ms = 20;
         p.persist = BlockPersistenceFilter::new(20, 20, 0);
         p.gate = StabilityGate::new(0);
-        let settle = || std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut t = Instant::now();
         let x = vec![block(1, "X")];
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        settle();
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x.clone(), 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
         // The settle filter renumbers block ids from 0.
         finish(&mut p, r#"{"b":[[0,"TX"]]}"#);
         assert_eq!(p.captions.len(), 1);
@@ -870,16 +878,146 @@ mod tests {
                 ..block(1, text)
             }]
         };
-        settle();
-        p.consume_raw_ocr(noise("n1"), 100, 100);
-        settle();
-        p.consume_raw_ocr(noise("n2"), 100, 100);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(noise("n1"), 100, 100, t);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(noise("n2"), 100, 100, t);
         assert!(p.captions.is_empty());
 
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        settle();
-        p.consume_raw_ocr(x.clone(), 100, 100);
-        p.consume_raw_ocr(x, 100, 100);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        t += Duration::from_millis(30);
+        p.consume_raw_ocr_at(x.clone(), 100, 100, t);
+        p.consume_raw_ocr_at(x, 100, 100, t);
         assert_eq!(p.captions.len(), 1, "same page is translated again");
+    }
+
+    #[tokio::test]
+    async fn on_translate_msg_covers_partial_kept_retrying_done_and_drop() {
+        let mut p = pipeline();
+        let blocks = vec![block(1, "A"), block(2, "B")];
+        p.set_ocr_blocks(blocks.clone());
+        let (_tx, rx) = mpsc::unbounded_channel();
+        p.set_inflight(InflightTranslate {
+            cancel: CancellationToken::new(),
+            rx,
+            page: PendingPage {
+                blocks: blocks.clone(),
+                content_width: 100,
+                content_height: 100,
+            },
+            cached_hits: vec![Some("TA".into()), None],
+            kept: Vec::new(),
+        });
+
+        p.on_translate_msg(Some(TranslateJobMsg::Partial(vec![(2, "part".into())])));
+        assert_eq!(p.captions.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>(), ["TA", "part"]);
+
+        p.on_translate_msg(Some(TranslateJobMsg::Kept(vec![TranslatedBlock {
+            id: 2,
+            source: "B".into(),
+            translation: "TB".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }])));
+        assert_eq!(p.captions.iter().map(|b| b.translation.as_str()).collect::<Vec<_>>(), ["TA", "TB"]);
+
+        p.on_translate_msg(Some(TranslateJobMsg::Retrying {
+            attempt: 1,
+            max_retries: 2,
+            message: "503 busy".into(),
+        }));
+        assert_matches!(p.state.read().status, PipelineStatus::RetryingTranslate {
+            attempt: 1,
+            max_retries: 2,
+            ..
+        });
+        assert_eq!(p.state.read().last_error.as_deref(), Some("503 busy"));
+
+        // Done finishes inflight
+        p.on_translate_msg(Some(TranslateJobMsg::Done(PageResult {
+            conversation: p.conversation.clone(),
+            translated: Vec::new(),
+            error: Some(TranslateError::Cancelled),
+        })));
+        assert!(p.inflight.is_none());
+        assert_eq!(p.state.read().status, PipelineStatus::Cancelled);
+
+        // Channel dropped (None) synthesizes translate task dropped error
+        let (_tx, rx2) = mpsc::unbounded_channel();
+        p.set_inflight(InflightTranslate {
+            cancel: CancellationToken::new(),
+            rx: rx2,
+            page: PendingPage {
+                blocks,
+                content_width: 100,
+                content_height: 100,
+            },
+            cached_hits: vec![None, None],
+            kept: Vec::new(),
+        });
+        p.on_translate_msg(None);
+        assert!(p.inflight.is_none());
+        assert_matches!(p.state.read().status, PipelineStatus::Error { .. });
+    }
+
+    #[tokio::test]
+    async fn start_and_finish_translate_cover_empty_cache_hit_and_parse_error() {
+        let mut p = pipeline();
+        // Whitespace-only page clears captions and last_page without spawning inflight.
+        p.set_captions(vec![TranslatedBlock {
+            id: 0,
+            source: "X".into(),
+            translation: "TX".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }]);
+        p.last_page = Some(page(vec![block(0, "X")]));
+        p.start_translate(page(vec![block(0, "   \t ")]), false);
+        assert!(p.inflight.is_none());
+        assert!(p.captions.is_empty());
+        assert!(p.last_page.is_none());
+
+        // Cache hit skips API call and populates captions synchronously.
+        let tcfg = p.state.read().config.translation.clone();
+        p.translation_cache.insert("Hi", &tcfg.source_lang, &tcfg.target_lang, "嗨");
+        let blocks = vec![block(1, "Hi")];
+        p.set_ocr_blocks(blocks.clone());
+        p.start_translate(page(blocks), false);
+        assert!(p.inflight.is_none(), "all cache hits skip API");
+        assert_eq!(p.captions[0].translation, "嗨");
+
+        // Parse error sets parse-specific message (distinct from generic err.translate).
+        let mut p = pipeline();
+        p.start_translate(page(vec![block(1, "A")]), false);
+        let job = p.take_inflight().unwrap();
+        let parse_err = TranslateError::Parse("bad json".into());
+        let expected_parse = rust_i18n::t!("err.translate_parse", error = parse_err.to_string()).into_owned();
+        let generic_msg = rust_i18n::t!("err.translate", error = parse_err.to_string()).into_owned();
+        assert_ne!(expected_parse, generic_msg);
+        p.finish_translate(job, PageResult {
+            conversation: p.conversation.clone(),
+            translated: Vec::new(),
+            error: Some(parse_err),
+        });
+        assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
+        assert_eq!(p.state.read().last_error.as_deref(), Some(expected_parse.as_str()));
+
+        // Non-parse error uses generic err.translate message.
+        p.start_translate(page(vec![block(1, "B")]), false);
+        let job = p.take_inflight().unwrap();
+        let other_err = TranslateError::Other("net".into());
+        let expected_other = rust_i18n::t!("err.translate", error = other_err.to_string()).into_owned();
+        p.finish_translate(job, PageResult {
+            conversation: p.conversation.clone(),
+            translated: Vec::new(),
+            error: Some(other_err),
+        });
+        assert_eq!(p.state.read().last_error.as_deref(), Some(expected_other.as_str()));
     }
 }

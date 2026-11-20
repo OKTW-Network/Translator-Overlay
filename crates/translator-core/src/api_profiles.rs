@@ -50,19 +50,12 @@ impl ApiProfileFile {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
+
+    use tempfile::tempdir;
 
     use super::*;
     use crate::config::{HttpApi, ModelProvider, ServiceTier};
-
-    fn temp_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        std::env::temp_dir().join(format!("translator_overlay_api_profiles_{name}_{nanos}.toml"))
-    }
 
     fn sample_http() -> ApiConfig {
         ApiConfig {
@@ -90,8 +83,8 @@ mod tests {
 
     #[test]
     fn flatten_roundtrip_http_and_cli() {
-        let path = temp_path("roundtrip");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-profiles.toml");
         let mut http = sample_http();
         http.cli_path = r"C:\tools\leftover.exe".into();
         http.service_tier = ServiceTier::Priority;
@@ -103,6 +96,15 @@ mod tests {
         cli.stream = false;
         cli.send_reasoning_content = false;
         cli.temperature = Some(0.2);
+        let expected_codex = ApiConfig {
+            provider: ModelProvider::CodexCli,
+            cli_path: r"C:\tools\codex.exe".into(),
+            model: "gpt-5.6".into(),
+            service_tier: ServiceTier::Priority,
+            ..ApiConfig::default()
+        };
+        let mut codex = expected_codex.clone();
+        codex.base_url = "https://should-not-stick.example/v1".into();
         let mut file = ApiProfileFile {
             profiles: vec![
                 ApiProfile {
@@ -115,14 +117,7 @@ mod tests {
                 },
                 ApiProfile {
                     name: "Codex".into(),
-                    api: ApiConfig {
-                        provider: ModelProvider::CodexCli,
-                        cli_path: r"C:\tools\codex.exe".into(),
-                        model: "gpt-5.6".into(),
-                        service_tier: ServiceTier::Priority,
-                        base_url: "https://should-not-stick.example/v1".into(),
-                        ..ApiConfig::default()
-                    },
+                    api: codex,
                 },
             ],
         };
@@ -159,18 +154,25 @@ mod tests {
         assert_eq!(loaded.profiles.len(), 3);
         assert_eq!(loaded.profiles[0].name, "OpenAI");
         assert_eq!(loaded.profiles[0].api, sample_http());
-        let mut expected_cli = sample_cli();
-        expected_cli.blank_inapplicable();
-        expected_cli.temperature = Some(0.2);
+        let expected_cli = ApiConfig {
+            provider: ModelProvider::GrokCli,
+            cli_path: r"C:\tools\grok.exe".into(),
+            model: "grok-4.5".into(),
+            service_tier: ServiceTier::Standard,
+            reasoning_effort: Some("high".into()),
+            temperature: Some(0.2),
+            ..ApiConfig::default()
+        };
         assert_eq!(loaded.profiles[1].name, "Grok");
         assert_eq!(loaded.profiles[1].api, expected_cli);
-        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.profiles[2].name, "Codex");
+        assert_eq!(loaded.profiles[2].api, expected_codex);
     }
 
     #[test]
     fn load_blanks_legacy_cli_url_and_key() {
-        let path = temp_path("legacy");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-profiles.toml");
         fs::write(
             &path,
             r#"
@@ -191,13 +193,12 @@ cli_path = "C:\\tools\\grok.exe"
         assert!(loaded.profiles[0].api.api_key.is_empty());
         assert_eq!(loaded.profiles[0].api.model, "grok-4.5");
         assert_eq!(loaded.profiles[0].api.cli_path, r"C:\tools\grok.exe");
-        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn missing_file_is_empty_and_does_not_create() {
-        let path = temp_path("missing");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-profiles.toml");
         let loaded = ApiProfileFile::load_or_empty_at(&path).unwrap();
         assert!(loaded.profiles.is_empty());
         assert!(!path.exists());

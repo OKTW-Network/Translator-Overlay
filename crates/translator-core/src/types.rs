@@ -280,6 +280,8 @@ mod tests {
         let line = Rect::new(100.0, 200.0, 160.0, 20.0);
         // Trailing glyph widens the box: only the right edge moves.
         assert!(!Rect::new(100.0, 200.0, 180.0, 20.0).shifted_from(line));
+        // Symmetric horizontal widening: d0 and d1 have opposite signs.
+        assert!(!Rect::new(80.0, 200.0, 200.0, 20.0).shifted_from(line));
         // Detector jitter.
         assert!(!Rect::new(102.0, 198.0, 158.0, 21.0).shifted_from(line));
         // Scrolled up by more than half a line.
@@ -290,19 +292,35 @@ mod tests {
         assert!(Rect::new(80.0, 190.0, 200.0, 40.0).shifted_from(line));
         // Font shrink anchored at the top-left corner.
         assert!(Rect::new(100.0, 200.0, 96.0, 12.0).shifted_from(line));
+
+        // Vertical line: thick = width (20), horizontal pan of 11px > tol (10).
+        let col = Rect::new(100.0, 50.0, 20.0, 200.0);
+        assert!(!Rect::new(102.0, 50.0, 20.0, 220.0).shifted_from(col));
+        assert!(Rect::new(111.0, 50.0, 20.0, 200.0).shifted_from(col));
+
+        // Thin line (< 8 px) hits the 4.0 px tol/thick floor.
+        let thin = Rect::new(10.0, 20.0, 40.0, 4.0);
+        assert!(!Rect::new(10.0, 23.0, 40.0, 4.0).shifted_from(thin));
+        assert!(Rect::new(10.0, 25.0, 40.0, 4.0).shifted_from(thin));
     }
 
     #[test]
     fn normalize_folds_whitespace_ellipsis_and_ocr_punct() {
         assert_eq!(normalize_ocr_text("hello   world"), "hello world");
         assert_eq!(normalize_ocr_text("  a\n\tb  "), "a b");
+        assert_eq!(normalize_ocr_text("   \n\t "), "");
         assert_eq!(normalize_ocr_text("…"), "…");
         assert_eq!(normalize_ocr_text("……"), "…");
         assert_eq!(normalize_ocr_text("………"), "…");
         assert_eq!(normalize_ocr_text("..."), "…");
         assert_eq!(normalize_ocr_text("・・・"), "…");
+        assert_eq!(normalize_ocr_text("⋯"), "…");
+        assert_eq!(normalize_ocr_text("‥"), "…");
+        assert_eq!(normalize_ocr_text("︙"), "…");
+        assert_eq!(normalize_ocr_text("ジョン・スミス"), "ジョン・スミス");
         assert_eq!(normalize_ocr_text("待って………"), "待って");
         assert_eq!(normalize_ocr_text("待って…"), "待って");
+        assert_eq!(normalize_ocr_text("待って …"), "待って");
         assert_eq!(normalize_ocr_text("待って"), "待って");
         assert_eq!(normalize_ocr_text("待って…ください"), "待って…ください");
         assert_eq!(normalize_ocr_text("セリフ。"), "セリフ。");
@@ -318,13 +336,20 @@ mod tests {
     }
 
     #[test]
-    fn rect_center_and_iou() {
+    fn rect_center_iou_and_clamped_bounds() {
         let a = Rect::new(0.0, 0.0, 10.0, 10.0);
         assert_eq!(a.center(), (5.0, 5.0));
         assert_eq!(a.iou(a), 1.0);
         assert_eq!(a.iou(Rect::new(20.0, 0.0, 10.0, 10.0)), 0.0);
+        // Touching edge and zero-area rect must return 0.0, not NaN.
+        assert_eq!(a.iou(Rect::new(10.0, 0.0, 10.0, 10.0)), 0.0);
+        assert_eq!(Rect::new(0.0, 0.0, 0.0, 0.0).iou(Rect::new(0.0, 0.0, 0.0, 0.0)), 0.0);
         // Half overlap: intersection 50, union 150.
         assert!((a.iou(Rect::new(5.0, 0.0, 10.0, 10.0)) - 1.0 / 3.0).abs() < 1e-6);
+
+        assert_eq!(Rect::new(-5.4, 2.6, 20.0, 10.0).clamped_bounds(12, 10), (0, 3, 12, 10));
+        assert_eq!(Rect::new(8.0, 8.0, -5.0, -3.0).clamped_bounds(12, 10), (8, 8, 8, 8));
+        assert_eq!(Rect::new(5.0, 5.0, 10.0, 10.0).clamped_bounds(0, 0), (0, 0, 0, 0));
     }
 
     #[test]
@@ -334,8 +359,17 @@ mod tests {
         assert!((flipped.y - 0.4).abs() < 1e-5);
         assert!((flipped.width - 0.2).abs() < 1e-5);
         assert!((flipped.height - 0.1).abs() < 1e-5);
+
+        let clamped = NormRect::new(-0.2, 0.8, 0.5, 0.5).sanitize().unwrap();
+        assert!((clamped.x - 0.0).abs() < 1e-5);
+        assert!((clamped.y - 0.8).abs() < 1e-5);
+        assert!((clamped.width - 0.3).abs() < 1e-5);
+        assert!((clamped.height - 0.2).abs() < 1e-5);
+
+        assert!(NormRect::new(1.2, 0.0, 0.2, 0.2).sanitize().is_none());
         assert!(NormRect::new(0.0, 0.0, 0.001, 0.5).sanitize().is_none());
         assert!(NormRect::new(f32::NAN, 0.0, 0.2, 0.2).sanitize().is_none());
+        assert!(NormRect::new(0.0, f32::INFINITY, 0.2, 0.2).sanitize().is_none());
     }
 
     #[test]
@@ -348,6 +382,11 @@ mod tests {
         assert!((px.height - 200.0).abs() < 1e-3);
         let back = NormRect::from_pixel(px, 1000, 500);
         assert!((back.x - n.x).abs() < 1e-5);
+        assert!((back.y - n.y).abs() < 1e-5);
         assert!((back.width - n.width).abs() < 1e-5);
+        assert!((back.height - n.height).abs() < 1e-5);
+
+        let zero = NormRect::from_pixel(Rect::new(1.0, 2.0, 3.0, 4.0), 0, 0);
+        assert!(zero.x.is_finite() && zero.y.is_finite() && zero.width.is_finite() && zero.height.is_finite());
     }
 }

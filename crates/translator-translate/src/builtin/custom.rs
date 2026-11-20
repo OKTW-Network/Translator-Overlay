@@ -44,14 +44,14 @@ pub async fn custom_models(models_dir: &Path) -> Vec<String> {
 mod tests {
     use std::fs;
 
+    use tempfile::tempdir;
+
     use super::*;
 
     #[tokio::test]
     async fn custom_models_list_the_folders_gguf_files() {
-        let dir = std::env::temp_dir().join(format!("translator-custom-models-{}", std::process::id()));
-        // Left behind by a run that panicked.
-        let _ = fs::remove_dir_all(&dir);
-        assert!(custom_models(&dir).await.is_empty() && dir.join(CUSTOM_DIR).is_dir());
+        let dir = tempdir().unwrap();
+        assert!(custom_models(dir.path()).await.is_empty() && dir.path().join(CUSTOM_DIR).is_dir());
         for name in [
             "b.GGUF",
             "a.gguf",
@@ -61,9 +61,8 @@ mod tests {
             "mmproj-F16.gguf",
             "notes.txt",
         ] {
-            fs::write(dir.join(CUSTOM_DIR).join(name), [0]).unwrap();
+            fs::write(dir.path().join(CUSTOM_DIR).join(name), [0]).unwrap();
         }
-        assert_eq!(custom_models(&dir).await, ["a.gguf", "b.GGUF", "big-00001-of-00002.gguf", "mixture-of-experts.gguf"]);
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(custom_models(dir.path()).await, ["a.gguf", "b.GGUF", "big-00001-of-00002.gguf", "mixture-of-experts.gguf"]);
     }
 }

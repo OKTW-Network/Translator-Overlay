@@ -74,11 +74,10 @@ pub async fn list_models(program: &Path, cancel: &CancellationToken, timeout: Du
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::rpc::{is_auth_failure, map_auth_failure};
 
     #[test]
     fn spawn_args_are_global_then_agent_stdio() {
-        let args = spawn_args("grok-4.5", Some("low"), "You are a translation engine.");
+        let args = spawn_args(" grok-4.5 ", Some(" low "), "You are a translation engine.");
         let agent = args.iter().position(|a| a == "agent").expect("agent");
         assert_eq!(args.get(agent + 1).map(String::as_str), Some("stdio"));
         assert!(args[..agent].windows(2).any(|w| w[0] == "--model" && w[1] == "grok-4.5"));
@@ -91,22 +90,8 @@ mod tests {
         assert!(args[agent + 1..].iter().all(|a| !a.starts_with("--")));
         assert!(args.contains(&"--disallowed-tools".into()));
         assert!(args.iter().all(|a| !a.contains("always-approve") && !a.contains("yolo")));
-    }
 
-    #[test]
-    fn spawn_args_omit_empty_model() {
-        let args = spawn_args("", None, "sys");
-        assert!(args.windows(2).all(|w| w[0] != "--model"));
-    }
-
-    #[test]
-    fn auth_failures_map_to_login_hint() {
-        assert!(is_auth_failure("ACP error: auth_required"));
-        assert!(is_auth_failure("authentication required"));
-        let err = map_auth_failure(TranslateError::CliProtocol("auth_required".into()), AUTH_HINT);
-        assert!(err.to_string().contains("grok login"));
-        assert!(err.to_string().contains("XAI_API_KEY"));
-        let other = map_auth_failure(TranslateError::CliProtocol("session/new missing sessionId".into()), AUTH_HINT);
-        assert!(!other.to_string().contains("grok login"));
+        let empty = spawn_args("  ", Some("  "), "sys");
+        assert!(empty.windows(2).all(|w| w[0] != "--model" && w[0] != "--effort"));
     }
 }

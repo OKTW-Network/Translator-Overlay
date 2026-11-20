@@ -393,13 +393,15 @@ mod tests {
 
     #[test]
     fn read_unpads_rows_and_caches_per_sequence() {
+        assert!(Slot::default().read().unwrap().is_none());
+
         let (device, context) = create_d3d_device().expect("d3d device");
         // 3 px wide → 12-byte rows; staging pitch is padded well past that.
         let (width, height) = (3u32, 2u32);
         let pixels: Vec<u8> = (0..(width * height * 4) as u8).collect();
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
+        let make_desc = |w, h| D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -407,6 +409,7 @@ mod tests {
             Usage: D3D11_USAGE_DEFAULT,
             ..Default::default()
         };
+        let desc = make_desc(width, height);
         let init = D3D11_SUBRESOURCE_DATA {
             pSysMem: pixels.as_ptr().cast(),
             SysMemPitch: width * 4,
@@ -414,11 +417,12 @@ mod tests {
         };
         let mut texture = None;
         unsafe { device.CreateTexture2D(&desc, Some(&init), Some(&mut texture)) }.expect("texture");
+        let texture = texture.expect("texture");
         let mut slot = Slot {
             gpu: Some(GpuFrame {
-                device,
-                context,
-                texture: texture.expect("texture"),
+                device: device.clone(),
+                context: context.clone(),
+                texture: texture.clone(),
                 desc,
             }),
             sequence: 1,
@@ -426,15 +430,47 @@ mod tests {
         };
 
         let first = slot.read().expect("read").expect("frame");
+        assert!(slot.staging.is_some());
         assert_eq!((first.width, first.height, first.sequence), (width, height, 1));
         assert_eq!(&first.rgba[..], &pixels[..]);
 
         let again = slot.read().expect("read").expect("frame");
         assert_eq!(again.rgba.as_ptr(), first.rgba.as_ptr(), "same sequence must not read back again");
 
+        // Update GPU texture before bumping sequence so cached staging reuse must re-copy.
+        let pixels2: Vec<u8> = pixels.iter().map(|b| b.wrapping_add(100)).collect();
+        unsafe {
+            context.UpdateSubresource(&texture, 0, None, pixels2.as_ptr().cast(), width * 4, 0);
+        }
         slot.sequence = 2;
         let next = slot.read().expect("read").expect("frame");
         assert_eq!(next.sequence, 2);
-        assert_eq!(&next.rgba[..], &pixels[..]);
+        assert_ne!(next.rgba.as_ptr(), first.rgba.as_ptr());
+        assert_eq!(&next.rgba[..], &pixels2[..]);
+
+        // FrameHandler::on_frame_arrived clears `slot.staging` when dimensions change; simulate
+        // that invalidated slot and verify `Slot::read` lazily reallocates staging for the new size.
+        let (nw, nh) = (5u32, 3u32);
+        let pixels3: Vec<u8> = (0..(nw * nh * 4) as u8).collect();
+        let desc3 = make_desc(nw, nh);
+        let init3 = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels3.as_ptr().cast(),
+            SysMemPitch: nw * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut tex3 = None;
+        unsafe { device.CreateTexture2D(&desc3, Some(&init3), Some(&mut tex3)) }.expect("texture 3");
+        slot.gpu = Some(GpuFrame {
+            device,
+            context,
+            texture: tex3.expect("texture 3"),
+            desc: desc3,
+        });
+        slot.staging = None;
+        slot.sequence = 3;
+        let resized = slot.read().expect("read").expect("frame");
+        assert!(slot.staging.is_some());
+        assert_eq!((resized.width, resized.height, resized.sequence), (nw, nh, 3));
+        assert_eq!(&resized.rgba[..], &pixels3[..]);
     }
 }

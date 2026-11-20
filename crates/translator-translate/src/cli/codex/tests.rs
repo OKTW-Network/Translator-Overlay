@@ -12,7 +12,7 @@ use crate::{
     ChatMessage, TranslateError,
     cli::{
         CliBackend, LiveSession,
-        codex::{CodexSession, TurnOutput, list_models, read_list, spawn_args, thread_start_params},
+        codex::{CodexSession, TurnOutput, list_models, read_list, spawn_args, thread_start_params, turn_start_params},
         resolve_program,
         rpc::{JsonRpcChild, kill_and_wait},
     },
@@ -33,6 +33,17 @@ fn separates_native_login_from_translation_context() {
     assert_eq!(params["config"]["features.hooks"], false);
     assert_eq!(params["config"]["skills.include_instructions"], false);
     assert_eq!(thread_start_params("model", Path::new("C:/tmp"), "sys", ServiceTier::Priority)["serviceTier"], "fast");
+
+    let with_schema = turn_start_params("thr_1", "user prompt", Some(" medium "), true);
+    assert_eq!(with_schema["threadId"], "thr_1");
+    assert_eq!(with_schema["input"][0]["text"], "user prompt");
+    assert_eq!(with_schema["sandboxPolicy"]["networkAccess"], false);
+    assert!(with_schema.get("outputSchema").is_some());
+    assert_eq!(with_schema["effort"], "medium");
+
+    let plain = turn_start_params("thr_1", "user prompt", Some("   "), false);
+    assert!(plain.get("outputSchema").is_none());
+    assert!(plain.get("effort").is_none());
 }
 
 #[test]
@@ -42,11 +53,13 @@ fn streams_only_matching_final_items_and_corrects_completed_text() {
     for (method, params) in [
         ("item/started", json!({"threadId":"other", "turnId":"turn", "item":{"id":"bad","type":"agentMessage","text":"WRONG"}})),
         ("item/started", json!({"threadId":"thread", "turnId":"old", "item":{"id":"bad","type":"agentMessage","text":"WRONG"}})),
+        ("item/started", json!({"threadId":"thread", "item":{"id":"bad","type":"agentMessage","text":"WRONG"}})),
         (
             "item/started",
             json!({"threadId":"thread", "turnId":"turn", "item":{"id":"comment","type":"agentMessage","phase":"commentary","text":"WRONG"}}),
         ),
         ("item/agentMessage/delta", json!({"threadId":"thread", "turnId":"turn", "itemId":"comment","delta":"WRONG"})),
+        ("item/agentMessage/delta", json!({"threadId":"thread", "turnId":"turn", "itemId":"final","delta":""})),
     ] {
         assert!(!output.apply(method, &params, "thread", &mut turn));
     }
@@ -75,6 +88,11 @@ fn streams_only_matching_final_items_and_corrects_completed_text() {
         "thread",
         &mut turn
     ));
+    // Known non-tool items do not flip saw_tool; an actual tool item does.
+    for safe in ["reasoning", "plan", "userMessage", "contextCompaction"] {
+        output.apply("item/started", &json!({"threadId":"thread", "turnId":"turn", "item":{"id":"k","type":safe}}), "thread", &mut turn);
+        assert!(!output.saw_tool, "{safe} should not mark saw_tool");
+    }
     output.apply(
         "item/started",
         &json!({"threadId":"thread", "turnId":"turn", "item":{"id":"tool","type":"futureTool"}}),
@@ -232,7 +250,8 @@ async fn codex_protocol_regression() {
             if scenario == "pages" {
                 assert_eq!(pages.unwrap().len(), 2);
             } else {
-                assert!(pages.is_err());
+                let err = pages.unwrap_err();
+                assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains("invalid catalog cursor")), "{err}");
             }
             kill_and_wait(&mut rpc.child).await;
             continue;
@@ -240,8 +259,16 @@ async fn codex_protocol_regression() {
         let session =
             CodexSession::from_rpc(rpc, thread_start_params("model", cwd.path(), "sys", ServiceTier::Standard), true, &cancel, timeout)
                 .await;
-        if matches!(scenario, "old" | "agents" | "mixed_sources" | "missing_sources" | "writable" | "persistent" | "active_mcp") {
-            assert!(session.is_err(), "{scenario}");
+        if let Some(expected_reason) = match scenario {
+            "old" => Some("unsupported version"),
+            "agents" | "mixed_sources" => Some("unexpected instruction sources"),
+            "missing_sources" => Some("unknown instruction sources"),
+            "writable" | "persistent" => Some("thread permissions or persistence differ"),
+            "active_mcp" => Some("MCP runtime is not disabled"),
+            _ => None,
+        } {
+            let err = session.err().unwrap_or_else(|| panic!("expected error for {scenario}"));
+            assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains(expected_reason)), "{scenario}: got {err}");
             assert!(!std::fs::read_to_string(&log).unwrap().contains("turn/start"), "OCR sent: {scenario}");
             continue;
         }
@@ -259,7 +286,19 @@ async fn codex_protocol_regression() {
                 assert!(result.unwrap_err().is_cancelled());
                 session.cancel_turn().await;
             }
-            _ => assert!(result.is_err(), "{scenario}"),
+            "tool" => {
+                let err = result.unwrap_err();
+                assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains("invoked a tool")), "{err}");
+            }
+            "failed" => {
+                let err = result.unwrap_err();
+                assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains("Codex turn failed")), "{err}");
+            }
+            "unknown_status" => {
+                let err = result.unwrap_err();
+                assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains("Codex turn missing status")), "{err}");
+            }
+            other => panic!("unhandled scenario {other}"),
         }
         session.close().await;
         let log = std::fs::read_to_string(&log).unwrap();

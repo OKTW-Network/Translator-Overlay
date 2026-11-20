@@ -395,3 +395,112 @@ fn create_layer() -> Result<(HWND, DibSurface, DibSurface), OverlayError> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use translator_core::NormRect;
+
+    use super::*;
+    use crate::host::win32::lock_hwnd_tests;
+
+    struct TestTarget(HWND);
+
+    impl Drop for TestTarget {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+    }
+
+    fn create_test_host() -> (OverlayHost, mpsc::UnboundedReceiver<OverlayEvent>, parking_lot::MutexGuard<'static, ()>) {
+        let lock = lock_hwnd_tests();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let host = OverlayHost::create(
+            OverlayConfig {
+                reader_enabled: false,
+                ..OverlayConfig::default()
+            },
+            event_tx,
+        )
+        .expect("OverlayHost::create");
+        (host, event_rx, lock)
+    }
+
+    #[test]
+    fn clear_region_select_mid_move_drag_does_not_panic_on_move() {
+        let (mut host, mut rx, _lock) = create_test_host();
+        host.handle(OverlayCommand::BeginRegionSelect {
+            regions: vec![NormRect::new(0.1, 0.1, 0.3, 0.3)],
+        });
+        let picker = host.picker.as_mut().expect("picker active");
+        picker.set_client_size(200, 200);
+        // Start a Move drag inside region 0 (20..80, 20..80).
+        picker.on_left_down(50, 50);
+
+        host.handle(OverlayCommand::ClearRegionSelect);
+        let picker = host.picker.as_mut().expect("picker remains open");
+        assert!(picker.regions.is_empty());
+        assert!(picker.selected.is_none());
+        // Follow-up mouse movement must not index `regions[0]`.
+        let _ = picker.on_move(70, 70);
+        assert!(matches!(rx.try_recv(), Ok(OverlayEvent::RegionSelectUpdated(r)) if r.is_empty()));
+    }
+
+    #[test]
+    fn teardown_mid_picker_resets_hit_test_and_clears_picker() {
+        let (mut host, _rx, _lock) = create_test_host();
+        host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
+        assert!(PICKER_HIT_TEST.load(Ordering::Acquire));
+        assert!(host.picker.is_some());
+
+        host.teardown();
+        assert!(!PICKER_HIT_TEST.load(Ordering::Acquire));
+        assert!(host.picker.is_none());
+    }
+
+    #[test]
+    fn detach_cancels_active_picker_and_update_config_keeps_picker_open() {
+        use windows::Win32::UI::WindowsAndMessaging::WS_OVERLAPPEDWINDOW;
+
+        let (mut host, mut rx, _lock) = create_test_host();
+        let target = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                windows::core::w!("STATIC"),
+                windows::core::w!("host-test-target"),
+                WS_OVERLAPPEDWINDOW,
+                20,
+                20,
+                200,
+                200,
+                None,
+                None,
+                Some(module_handle().unwrap().into()),
+                None,
+            )
+        }
+        .expect("target hwnd");
+        let _guard = TestTarget(target);
+
+        host.handle(OverlayCommand::Attach {
+            target_hwnd: target.0 as isize,
+        });
+        host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
+        host.apply_overlay(true);
+        // Disabling captions while the picker is open must not cancel/close the picker.
+        host.handle(OverlayCommand::UpdateConfig(OverlayConfig {
+            enabled: false,
+            reader_enabled: false,
+            ..OverlayConfig::default()
+        }));
+        assert!(host.picker.is_some());
+        assert!(PICKER_HIT_TEST.load(Ordering::Acquire));
+
+        host.handle(OverlayCommand::Detach);
+        assert!(host.picker.is_none());
+        assert!(host.target.is_none());
+        assert!(!PICKER_HIT_TEST.load(Ordering::Acquire));
+        assert!(matches!(rx.try_recv(), Ok(OverlayEvent::RegionSelectCancelled)));
+    }
+}

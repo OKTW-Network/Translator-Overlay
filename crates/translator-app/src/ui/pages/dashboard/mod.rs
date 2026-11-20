@@ -548,3 +548,43 @@ fn build_regions_pane(b: &mut Binds<UiShared>, d: &mut Binds<DashSnap>, cx: &UiC
     children!(pane; heading, toolbar, name_row, help);
     Ok(pane)
 }
+
+#[cfg(test)]
+mod tests {
+    use translator_capture::WindowInfo;
+    use translator_core::AppConfig;
+
+    use super::*;
+    use crate::ui::state::test_ui_shared;
+
+    #[test]
+    fn take_dash_switches_preview_regions_clamps_index_and_truncates_titles() {
+        let (mut ui, _rx) = test_ui_shared(AppConfig::default());
+        ui.windows.push(WindowInfo {
+            title: "A".repeat(100),
+            hwnd: 777,
+        });
+        ui.selected_idx = Some(0);
+        let committed = NormRect::new(0.1, 0.1, 0.2, 0.2);
+        let draft = NormRect::new(0.4, 0.4, 0.3, 0.3);
+        {
+            let mut s = ui.state.write();
+            s.ocr_regions = vec![committed];
+            s.region_select_draft = vec![draft];
+            s.region_select_active = false;
+        }
+        let d1 = take_dash(&ui);
+        assert_eq!(d1.preview_regions, [committed]);
+        assert_eq!(d1.selected_idx, Some(0));
+        assert_eq!(d1.selected_hwnd, Some(777));
+        assert_eq!(d1.window_labels[0].chars().count(), 72);
+        assert!(d1.window_labels[0].ends_with('…'));
+
+        ui.state.write().region_select_active = true;
+        ui.selected_idx = Some(99);
+        let d2 = take_dash(&ui);
+        assert_eq!(d2.preview_regions, [draft]);
+        assert_eq!(d2.selected_idx, None);
+        assert_eq!(d2.selected_hwnd, None);
+    }
+}

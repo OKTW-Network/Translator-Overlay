@@ -886,10 +886,227 @@ pub fn take_chrome(ui: &UiShared) -> ChromeSnap {
 }
 
 #[cfg(test)]
+pub(crate) fn test_ui_shared(cfg: AppConfig) -> (UiShared, tokio::sync::mpsc::UnboundedReceiver<PipelineCommand>) {
+    let state = Arc::new(parking_lot::RwLock::new(translator_core::AppState::new(cfg.clone())));
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut ui = UiShared {
+        state,
+        cmd_tx,
+        windows: Vec::new(),
+        selected_idx: None,
+        draft: Box::default(),
+        optional: Box::new(optional_api_state(&cfg)),
+        color_hex: Default::default(),
+        overlay_font_val: 0.0,
+        overlay_font_enabled: false,
+        open_color_picker: None,
+        api_key_revealed: false,
+        confirm: ConfirmAction::None,
+        form_error: None,
+        region_presets: RegionPresetFile::default(),
+        presets: NamedPick::default(),
+        pending_save_regions: Vec::new(),
+        api_profiles: Vec::new(),
+        profiles: NamedPick::default(),
+        dictionary: Box::default(),
+        model_catalog: Vec::new(),
+        model_list_loading: false,
+        model_list_fp: String::new(),
+        model_list_gen: 0,
+        custom_models: Vec::new(),
+        hotkey_listen: None,
+        hotkey_listen_gen: 0,
+        hotkey_error: None,
+        page: Page::Dashboard,
+        pane_open: true,
+    };
+    load_form(&mut ui, cfg);
+    (ui, cmd_rx)
+}
+
+#[cfg(test)]
+pub(crate) const TEST_MEM_STORE: NamedStore = NamedStore {
+    pick: |ui| &mut ui.presets,
+    view: |ui| &ui.presets,
+    names: |ui| ui.region_presets.presets.iter().map(|p| p.name.clone()).collect(),
+    commit: |ui, name| {
+        if name == "bad" {
+            return Err("cannot store bad".into());
+        }
+        ui.region_presets.upsert(name.into(), vec![NormRect::new(0.0, 0.0, 0.5, 0.5)]);
+        Ok(())
+    },
+    delete: |ui, name| {
+        if name == "locked" {
+            return Err("delete failed".into());
+        }
+        ui.region_presets.presets.retain(|p| p.name != name);
+        Ok(())
+    },
+    on_cancel: |_| {},
+    name_required: "err.preset_name_required",
+    overwrite_title: "dash.overwrite_preset_title",
+    overwrite_body: "dash.overwrite_preset_body",
+    delete_title: "dash.delete_preset_title",
+    delete_body: "dash.delete_preset_body",
+};
+
+#[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn ui_shared_stays_under_1kb() {
         let n = std::mem::size_of::<super::UiShared>();
         assert!(n <= 1024, "UiShared is {n} bytes; box another large field");
+    }
+
+    #[test]
+    fn load_form_and_effective_draft_roundtrip_and_clamp() {
+        let mut cfg = AppConfig::default();
+        cfg.api.temperature = Some(0.7);
+        cfg.api.top_p = Some(0.9);
+        cfg.api.top_k = Some(32);
+        cfg.api.max_tokens = Some(1024);
+        cfg.api.reasoning_effort = Some("high".into());
+        cfg.overlay.font_px = Some(28);
+        let (mut ui, _rx) = test_ui_shared(cfg.clone());
+
+        assert!(!draft_differs_from(&ui, &cfg));
+        assert_eq!(effective_draft(&ui), cfg);
+
+        // Out-of-range values clamp on effective_draft; disabled toggles emit None.
+        ui.optional.temp_val = 9.0;
+        ui.optional.top_p_val = -2.0;
+        ui.optional.top_k_val = 9999.0;
+        ui.optional.max_tokens_val = 0.0;
+        ui.optional.reasoning_str = " low ".into();
+        ui.overlay_font_val = 999.0;
+        let clamped = effective_draft(&ui);
+        assert_eq!(clamped.api.temperature, Some(2.0));
+        assert_eq!(clamped.api.top_p, Some(0.0));
+        assert_eq!(clamped.api.top_k, Some(1000));
+        assert_eq!(clamped.api.max_tokens, Some(1));
+        assert_eq!(clamped.api.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(clamped.overlay.font_px, Some(OVERLAY_FONT_PX_MAX));
+        assert!(draft_differs_from(&ui, &cfg));
+
+        ui.overlay_font_val = 1.0;
+        assert_eq!(effective_draft(&ui).overlay.font_px, Some(OVERLAY_FONT_PX_MIN));
+
+        ui.optional.temp_enabled = false;
+        ui.optional.top_p_enabled = false;
+        ui.optional.top_k_enabled = false;
+        ui.optional.max_tokens_enabled = false;
+        ui.optional.reasoning_enabled = false;
+        ui.overlay_font_enabled = false;
+        let none = effective_draft(&ui);
+        assert_eq!(none.api.temperature, None);
+        assert_eq!(none.api.top_p, None);
+        assert_eq!(none.api.top_k, None);
+        assert_eq!(none.api.max_tokens, None);
+        assert_eq!(none.api.reasoning_effort, None);
+        assert_eq!(none.overlay.font_px, None);
+    }
+
+    #[test]
+    fn take_chrome_and_truncate_and_dictionary_ui_helpers() {
+        let (mut ui, _rx) = test_ui_shared(AppConfig::default());
+        ui.windows.push(WindowInfo {
+            title: "Win".into(),
+            hwnd: 42,
+        });
+        ui.selected_idx = Some(0);
+        {
+            let mut s = ui.state.write();
+            s.status = PipelineStatus::Capturing;
+            s.translation_model_load = Some(PipelineStatus::LoadingModels {
+                kind: translator_core::ModelKind::Translation,
+            });
+        }
+        let snap = take_chrome(&ui);
+        assert_eq!(snap.selected_hwnd, Some(42));
+        assert!(matches!(snap.status, PipelineStatus::LoadingModels {
+            kind: translator_core::ModelKind::Translation
+        }));
+        assert!(!snap.settings_dirty);
+
+        // Error overrides translation_model_load, and dirty draft sets settings_dirty.
+        ui.state.write().status = PipelineStatus::Error { message: "fail".into() };
+        ui.draft.api.model = "changed".into();
+        let snap = take_chrome(&ui);
+        assert!(matches!(snap.status, PipelineStatus::Error { .. }));
+        assert!(snap.settings_dirty);
+
+        assert_eq!(truncate("  hello   world  ", 20), "hello world");
+        assert_eq!(truncate("hello", 5), "hello");
+        assert_eq!(truncate("甲乙丙丁戊", 4), "甲乙丙…");
+        assert_eq!(truncate("abc", 1), "…");
+        assert_eq!(truncate("abc", 0), "…");
+
+        let mut dict = DictionaryUi {
+            names: vec!["one".into()],
+            pick: NamedPick {
+                selected: Some(0),
+                ..NamedPick::default()
+            },
+            pairs: vec![DictionaryPair {
+                source: "a".into(),
+                target: "b".into(),
+            }],
+            saved_pairs: vec![DictionaryPair {
+                source: "x".into(),
+                target: "y".into(),
+            }],
+            loaded: Some("one".into()),
+            editor_open: true,
+        };
+        assert_eq!(dict.selected_name().as_deref(), Some("one"));
+        assert!(dict.dirty());
+        dict.revert();
+        assert!(!dict.dirty());
+        dict.pick.dialog = NamedDialog::SaveName;
+        dict.close_editor();
+        assert!(!dict.editor_open);
+        assert_eq!(dict.pick.dialog, NamedDialog::None);
+    }
+
+    #[test]
+    fn load_api_profile_and_commit_named_and_validation_guards() {
+        let (mut ui, _rx) = test_ui_shared(AppConfig::default());
+        assert!(load_api_profile(&mut ui).is_err());
+
+        let profile_api = ApiConfig {
+            model: "profile-model".into(),
+            temperature: Some(0.3),
+            ..Default::default()
+        };
+        ui.api_profiles.push(ApiProfile {
+            name: "Work".into(),
+            api: profile_api,
+        });
+        ui.profiles.selected = Some(0);
+        ui.profiles.dialog = NamedDialog::SaveName;
+        load_api_profile(&mut ui).unwrap();
+        assert_eq!(ui.draft.api.model, "profile-model");
+        assert!(ui.optional.temp_enabled);
+        assert!((ui.optional.temp_val - 0.3).abs() < 1e-6);
+        assert_eq!(ui.profiles.dialog, NamedDialog::None);
+
+        // No-disk validation guards on REGION_PRESETS and DICTIONARIES
+        ui.pending_save_regions.clear();
+        assert!((REGION_PRESETS.commit)(&mut ui, "p1").is_err());
+        assert!((DICTIONARIES.commit)(&mut ui, "CON").is_err());
+
+        // Custom in-memory NamedStore verifies commit_named success & error paths without touching disk.
+        ui.presets.dialog = NamedDialog::SaveName;
+        commit_named(&mut ui, &TEST_MEM_STORE, "bad".into());
+        assert_eq!(ui.state.read().last_error.as_deref(), Some("cannot store bad"));
+        assert_eq!(ui.presets.dialog, NamedDialog::SaveName, "error leaves dialog open");
+
+        commit_named(&mut ui, &TEST_MEM_STORE, "good".into());
+        assert_eq!(ui.presets.selected, Some(0));
+        assert_eq!(ui.presets.name_draft, "good");
+        assert_eq!(ui.presets.dialog, NamedDialog::None);
     }
 }

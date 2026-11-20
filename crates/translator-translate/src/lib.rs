@@ -1090,7 +1090,7 @@ mod tests {
     use translator_core::{ApiConfig, DictionaryPair, ModelProvider, Rect, ServiceTier, TranslationConfig};
 
     use super::*;
-    use crate::http::{completion_from_http_body, extract_responses_completion};
+    use crate::http::{ScriptedHttpServer, completion_from_http_body, extract_responses_completion};
 
     #[test]
     fn changing_service_tier_resets_cli_session() {
@@ -1122,39 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn compress_keeps_recent_pairs() {
-        let mut conv = Conversation::empty();
-        conv.ensure_system("sys");
-        for i in 0..5 {
-            conv.push_user(format!("u{i}"));
-            conv.items.push(ResponseItem::message("assistant", format!("a{i}")));
-        }
-        assert_eq!(conv.turn_count(), 5);
-        conv.compress_if_needed(5, 2);
-        // system + 2 pairs (4 messages) = 5
-        let messages = conv.messages();
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, "system");
-        assert_eq!(conv.turn_count(), 2);
-    }
-
-    #[test]
-    fn merge_translations_maps_ids() {
-        let source = vec![OcrBlock {
-            id: 1,
-            text: "Hello".into(),
-            confidence: 0.9,
-            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
-            source_lines: 1,
-            source_height: 1.0,
-            source_width: 1.0,
-        }];
-        let json = r#"{"b":[[1,"T1"]]}"#;
-        let out = merge_translations(&source, json).unwrap();
-        assert_eq!(out[0].translation, "T1");
-    }
-
-    #[test]
     fn clear_resets_conversation() {
         let mut conv = Conversation::empty();
         conv.ensure_system("sys");
@@ -1179,6 +1146,7 @@ mod tests {
         assert_eq!(conv.session_id, id);
         assert_eq!(conv.messages().len(), 1);
         assert_eq!(conv.items.len(), 1);
+        assert_eq!(conv.turn_count(), 0);
     }
 
     #[test]
@@ -1354,22 +1322,18 @@ mod tests {
 
     #[test]
     fn merge_tolerates_prose_and_trailing_commas() {
-        let source = vec![OcrBlock {
-            id: 0,
-            text: "Hi".into(),
-            confidence: 1.0,
-            bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
-            source_lines: 1,
-            source_height: 1.0,
-            source_width: 1.0,
-        }];
-        let json = r#"Here you go: {"b": [[0, "T3"]]} Hope that helps!"#;
+        let source = vec![page_block(0, "Hi"), page_block(1, "Bye")];
+        let json = r#"Here you go: {"b": [[0, "T3"], [1, "T4"]]} Hope that helps!"#;
         let out = merge_translations(&source, json).unwrap();
         assert_eq!(out[0].translation, "T3");
+        assert_eq!(out[1].translation, "T4");
 
-        let json = r#"{"b": [[0, "T3",],]}"#;
+        // Inner and outer trailing commas on multiple blocks exercise fallback `parse_pairs_from_array`.
+        let json = r#"{"b": [[0, "T3",], [1, "T4",],]}"#;
         let out = merge_translations(&source, json).unwrap();
+        assert_eq!(out.len(), 2);
         assert_eq!(out[0].translation, "T3");
+        assert_eq!(out[1].translation, "T4");
     }
 
     #[test]
@@ -1664,40 +1628,6 @@ mod tests {
         assert_eq!(peek_translation_pairs(r#"{"b":[["0","A"]]}"#), [(0, "A".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[1,120]]}"#), [(1, "120".into())]);
         assert_eq!(peek_translation_pairs(r#"{"b":[[1,12"#), [(1, "12".into())]);
-    }
-
-    #[test]
-    fn cancelled_is_not_retryable() {
-        assert!(!TranslateError::Cancelled.is_retryable());
-        assert!(TranslateError::Cancelled.is_cancelled());
-        assert!(
-            TranslateError::ApiStatus {
-                status: 503,
-                body: "x".into()
-            }
-            .is_retryable()
-        );
-        assert!(!TranslateError::MissingBaseUrl.is_retryable());
-        assert!(!TranslateError::CliNotFound("grok".into()).is_retryable());
-        assert!(TranslateError::CliExit("closed stdout".into()).is_retryable());
-        assert!(TranslateError::CliProtocol("CLI turn timed out".into()).is_retryable());
-        assert!(!TranslateError::CliProtocol("Grok session invoked a tool".into()).is_retryable());
-        assert!(TranslateError::MissingBlocks(vec![1]).is_retryable());
-        assert!(should_retry(&TranslateError::MissingBlocks(vec![1]), 0, 2));
-        assert!(!should_retry(&TranslateError::MissingBlocks(vec![1]), 2, 2));
-    }
-
-    #[test]
-    fn should_retry_api_status_until_budget() {
-        let err = TranslateError::ApiStatus {
-            status: 429,
-            body: "rate limited".into(),
-        };
-        assert!(should_retry(&err, 0, 2));
-        assert!(should_retry(&err, 1, 2));
-        assert!(!should_retry(&err, 2, 2));
-        assert!(!should_retry(&TranslateError::Cancelled, 0, 2));
-        assert!(!should_retry(&TranslateError::MissingBaseUrl, 0, 2));
     }
 
     /// Loopback HTTP/1.1 server that answers every request with an empty translation and counts
@@ -2015,5 +1945,244 @@ mod tests {
         assert_eq!(requests.len(), 2, "resent once with a trimmed history");
         assert_matches!(result.error, Some(TranslateError::ContextFull(_)), "a trimmed history that still overflows fails");
         assert_eq!(result.conversation.turn_count(), 1, "the trim is kept");
+    }
+
+    #[tokio::test]
+    async fn context_full_trim_succeeds_on_retry() {
+        let cfg = TranslationConfig {
+            history_max_items: 1,
+            ..TranslationConfig::default()
+        };
+        let mut conv = Conversation::empty();
+        for text in ["A", "B", "C"] {
+            conv = run_page(conv, &cfg, vec![page_block(1, text)], 0, vec![Ok(r#"{"b":[[1,"T"]]}"#)])
+                .await
+                .0
+                .conversation;
+        }
+        assert_eq!(conv.turn_count(), 3);
+
+        let replies = vec![Err(TranslateError::ContextFull(4096)), Ok(r#"{"b":[[1,"T_OK"]]}"#)];
+        let (result, requests, ..) = run_page(conv, &cfg, vec![page_block(1, "D")], 0, replies).await;
+        assert!(result.error.is_none());
+        assert_eq!(requests.len(), 2);
+        assert_eq!(result.translated.len(), 1);
+        assert_eq!(result.translated[0].translation, "T_OK");
+        assert_eq!(result.conversation.turn_count(), 2, "1 trimmed turn + 1 newly committed turn");
+    }
+
+    #[tokio::test]
+    async fn translate_page_shares_retry_budget_partial_commit_rollback_and_plain_text_mid_failure() {
+        // Shared budget: first reply uses attempt 1 of max_retries=2, leaving one resend.
+        let cfg = TranslationConfig::default();
+        let blocks = vec![page_block(1, "A"), page_block(2, "B"), page_block(3, "C")];
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        let calls = std::cell::Cell::new(0u32);
+        let res = translate_page(
+            conv,
+            &cfg,
+            &ApiConfig {
+                max_retries: 2,
+                ..ApiConfig::default()
+            },
+            &[],
+            blocks,
+            |_req, attempt, _| {
+                let c = calls.get();
+                calls.set(c + 1);
+                async move {
+                    match c {
+                        0 => Ok((
+                            Completion {
+                                text: r#"{"b":[[1,"T1"]]}"#.into(),
+                                replay_items: Vec::new(),
+                            },
+                            attempt + 1, // simulates 1 transport retry already used
+                        )),
+                        _ => Ok((
+                            Completion {
+                                text: "{bad json".into(),
+                                replay_items: Vec::new(),
+                            },
+                            attempt,
+                        )),
+                    }
+                }
+            },
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(calls.get(), 2, "attempt 1 consumed before resend, max_retries=2 ends after 2nd attempt");
+        assert_matches!(res.error, Some(TranslateError::Parse(_)));
+        assert_eq!(res.translated.len(), 1);
+        assert_eq!(res.conversation.turn_count(), 1, "committed block 1 kept, unparsable resend rolled back");
+        assert_eq!(res.conversation.messages().len(), 3, "system + u1 + a1 only");
+
+        // PlainText mid-page failure keeps earlier translated blocks and rolls back failed block turn.
+        let blocks = vec![page_block(1, "A"), page_block(2, "B")];
+        let replies = vec![Ok("T1"), Err(TranslateError::Other("boom".into()))];
+        let (plain_res, requests, _, _) = run_page_in(ReplyMode::PlainText, Conversation::empty(), &cfg, blocks, 1, replies).await;
+        assert_eq!(requests, [vec![1], vec![2]]);
+        assert_matches!(plain_res.error, Some(TranslateError::Other(_)));
+        assert_eq!(plain_res.translated.len(), 1);
+        assert_eq!(plain_res.translated[0].translation, "T1");
+        assert_eq!(plain_res.conversation.turn_count(), 1);
+        assert_eq!(plain_res.conversation.messages().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn complete_with_retry_on_retries_5xx_stops_on_4xx_and_cancels_backoff() {
+        use std::io::Write;
+
+        // Scripted HTTP server returning two 503s then 200 OK
+        let server = ScriptedHttpServer::spawn(5, |idx, _head, mut sock| {
+            let (status, payload) = match idx {
+                0 | 1 => ("503 Service Unavailable", "busy"),
+                2 => ("200 OK", r#"{"choices":[{"message":{"role":"assistant","content":"{\"b\":[]}"}}]}"#),
+                3 => ("400 Bad Request", "bad"),
+                _ => ("503 Service Unavailable", "still busy"),
+            };
+            let _ = write!(
+                sock,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+        });
+
+        let api = ApiConfig {
+            provider: ModelProvider::OpenaiCompatible,
+            base_url: server.base_url.clone(),
+            model: "m".into(),
+            stream: false,
+            max_retries: 3,
+            retry_backoff_ms: 50,
+            ..ApiConfig::default()
+        };
+        let client = TranslateClient::new(api.clone());
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        conv.push_user("hi");
+
+        let mut retry_attempts = Vec::new();
+        let (comp, ended_attempt) = client
+            .complete_with_retry_on(
+                &conv,
+                &CancellationToken::new(),
+                0,
+                |attempt, _, _, _| retry_attempts.push(attempt),
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(comp.text, "{\"b\":[]}");
+        assert_eq!(ended_attempt, 2);
+        assert_eq!(retry_attempts, [1, 2]);
+
+        // Non-retryable 400 fails immediately without invoking on_retry.
+        let mut retry_400 = Vec::new();
+        let err = client
+            .complete_with_retry_on(
+                &conv,
+                &CancellationToken::new(),
+                0,
+                |attempt, _, _, _| retry_400.push(attempt),
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(err, TranslateError::ApiStatus { status: 400, .. });
+        assert!(retry_400.is_empty());
+
+        // Cancel during backoff aborts wait promptly.
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let started = std::time::Instant::now();
+        let err = TranslateClient::new(ApiConfig {
+            retry_backoff_ms: 5_000,
+            ..api
+        })
+        .complete_with_retry_on(&conv, &cancel, 0, |_, _, _, _| cancel_clone.cancel(), &mut |_| {}, &mut |_| {})
+        .await
+        .unwrap_err();
+        server.finish();
+        assert!(err.is_cancelled());
+        assert!(started.elapsed() < Duration::from_secs(2), "cancel took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn conversation_compression_edge_cases_merge_pairs_and_first_json_object() {
+        // history_max_items == 0 drops all turns while preserving system message.
+        let mut conv = Conversation::empty();
+        conv.ensure_system("sys");
+        for i in 0..3 {
+            conv.push_user(format!("u{i}"));
+            conv.commit_completion(&Completion {
+                text: format!("a{i}"),
+                replay_items: Vec::new(),
+            });
+        }
+        conv.compress_if_needed(3, 0);
+        assert_eq!(conv.turn_count(), 0);
+        assert_eq!(conv.messages().len(), 1);
+        assert_eq!(conv.messages()[0].role, "system");
+
+        // Without system message, compress drops oldest turns cleanly.
+        let mut no_sys = Conversation::empty();
+        for i in 0..3 {
+            no_sys.push_user(format!("u{i}"));
+            no_sys.commit_completion(&Completion {
+                text: format!("a{i}"),
+                replay_items: Vec::new(),
+            });
+        }
+        no_sys.compress_if_needed(3, 1);
+        assert_eq!(no_sys.turn_count(), 1);
+        assert_eq!(no_sys.messages().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["u2", "a2"]);
+
+        // same_page appends to the active page and rollback decrements without dropping page 0; dictionary_reminder: false omits reminder.
+        let src = [page_block(0, "Hi")];
+        let glossary = [DictionaryPair {
+            source: "Hi".into(),
+            target: "嗨".into(),
+        }];
+        let tcfg = TranslationConfig {
+            dictionary_reminder: false,
+            instruction_reminder: false,
+            ..TranslationConfig::default()
+        };
+        let mut conv = Conversation::empty();
+        let _ = conv.begin_translate_request(&tcfg, &ApiConfig::default(), &src, &glossary, false);
+        conv.commit_completion(&Completion {
+            text: "first".into(),
+            replay_items: Vec::new(),
+        });
+        let snap = conv.begin_translate_request(&tcfg, &ApiConfig::default(), &src, &glossary, true);
+        assert!(!snap.messages().last().unwrap().content.contains("Glossary terms"));
+        assert_eq!(conv.turn_count(), 1);
+        conv.rollback_user_turn();
+        assert_eq!(conv.turn_count(), 1, "rollback of second turn on same page keeps page count 1");
+        assert_eq!(conv.messages().len(), 3);
+
+        // merge_pairs preserves source order across out-of-order, unknown, and duplicate IDs (first match wins).
+        let source = [page_block(10, "A"), page_block(20, "B")];
+        let merged = merge_pairs(&source, &[
+            (999, "unknown".into()),
+            (20, "T20".into()),
+            (10, "T10a".into()),
+            (10, "T10b".into()),
+        ]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, 10);
+        assert_eq!(merged[0].translation, "T10a");
+        assert_eq!(merged[1].id, 20);
+        assert_eq!(merged[1].translation, "T20");
+
+        // first_json_object ignores braces and escaped quotes inside strings; UTF-8 BOM parses cleanly.
+        let bom_and_braces = "\u{feff}Prefix {\"b\":[[0,\"say \\\"hi\\\" {not end}\"]]} Suffix";
+        let out = merge_translations(&[page_block(0, "hi")], bom_and_braces).unwrap();
+        assert_eq!(out[0].translation, "say \"hi\" {not end}");
     }
 }

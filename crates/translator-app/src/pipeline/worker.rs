@@ -947,6 +947,8 @@ pub(crate) fn translated_geometry_changed(previous: &[TranslatedBlock], remapped
 
 #[cfg(test)]
 mod tests {
+    use translator_core::{AppConfig, ModelProvider};
+
     use super::*;
 
     fn frame(w: u32, h: u32, seq: u64) -> CapturedFrame {
@@ -1097,11 +1099,179 @@ mod tests {
     #[test]
     fn remap_adopts_ocr_box_after_content_resize() {
         let prev_box = Rect::new(50.0, 80.0, 100.0, 20.0);
-        let scaled = Rect::new(75.0, 120.0, 150.0, 30.0);
+        let scaled = Rect::new(52.0, 82.0, 104.0, 21.0);
+        assert!(!scaled.shifted_from(prev_box), "small resize must rely on content_resized flag");
         let prior = [remap_translated("hello", "你好", prev_box)];
         let now = [remap_ocr("hello", scaled)];
+
+        let kept = remap_translations_to_ocr(&prior, &now, false);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].bbox, prev_box, "without resize, small bbox delta keeps previous box");
+
         let out = remap_translations_to_ocr(&prior, &now, true);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].bbox, scaled);
+        assert_eq!(out[0].bbox, scaled, "with resize, scaled bbox is adopted");
+    }
+
+    #[test]
+    fn translated_geometry_changed_handles_duplicates_reorder_and_dims() {
+        let b1 = remap_translated("OK", "好", Rect::new(10.0, 10.0, 40.0, 20.0));
+        let b2 = remap_translated("OK", "好", Rect::new(10.0, 60.0, 40.0, 20.0));
+        assert!(!translated_geometry_changed(&[b1.clone(), b2.clone()], &[b1.clone(), b2.clone()]));
+        assert!(!translated_geometry_changed(&[b1.clone(), b2.clone()], &[b2.clone(), b1.clone()]));
+
+        let b2_moved = remap_translated("OK", "好", Rect::new(10.0, 90.0, 40.0, 20.0));
+        assert!(translated_geometry_changed(&[b1.clone(), b2.clone()], &[b1.clone(), b2_moved]));
+        assert!(translated_geometry_changed(&[b1.clone(), b2.clone()], &[b1.clone(), b1.clone()]));
+        assert!(translated_geometry_changed(std::slice::from_ref(&b1), &[b1.clone(), b2.clone()]));
+        assert!(translated_geometry_changed(std::slice::from_ref(&b1), &[TranslatedBlock {
+            source_height: 35.0,
+            ..b1.clone()
+        }]));
+        assert!(translated_geometry_changed(std::slice::from_ref(&b1), &[TranslatedBlock {
+            source_width: 60.0,
+            ..b1.clone()
+        }]));
+    }
+
+    #[test]
+    fn same_content_multi_region_and_boundary_mutation() {
+        let r1 = Rect::new(0.0, 0.0, 4.0, 4.0);
+        let r2 = Rect::new(10.0, 10.0, 4.0, 4.0);
+        let mut rgba = vec![1u8; 16 * 16 * 4];
+        let base = CapturedFrame::new(16, 16, rgba.clone(), 1);
+        let cache = LastRawOcr {
+            sequence: 1,
+            width: 16,
+            height: 16,
+            scope: LastRawOcr::pack_scope(&base, &[r1, r2]),
+            blocks: Vec::new(),
+        };
+        assert!(cache.same_content(&base, &[r1, r2]));
+
+        // Mutate top-left pixel (10, 10) right inside region 2 -> miss.
+        let mut inside_r2 = rgba.clone();
+        inside_r2[(10 * 16 + 10) * 4] = 99;
+        assert!(!cache.same_content(&CapturedFrame::new(16, 16, inside_r2, 2), &[r1, r2]));
+
+        // Mutate pixel (14, 14) just outside region 2 (10..14, 10..14) -> hit.
+        rgba[(14 * 16 + 14) * 4] = 99;
+        assert!(cache.same_content(&CapturedFrame::new(16, 16, rgba, 3), &[r1, r2]));
+    }
+
+    #[test]
+    fn inflight_preview_paint_captions_and_preview_sequence() {
+        let mut cfg = AppConfig::default();
+        cfg.api.provider = ModelProvider::OpenaiCompatible;
+        let state = Arc::new(RwLock::new(AppState::new(cfg)));
+        let mut p = Pipeline::detached(Arc::clone(&state));
+
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let job = InflightTranslate {
+            cancel: CancellationToken::new(),
+            rx,
+            page: PendingPage {
+                blocks: vec![remap_ocr("A", Rect::new(0.0, 0.0, 20.0, 20.0)), OcrBlock {
+                    id: 1,
+                    ..remap_ocr("B", Rect::new(0.0, 30.0, 20.0, 20.0))
+                }],
+                content_width: 200,
+                content_height: 100,
+            },
+            cached_hits: vec![Some("TA".into()), None],
+            kept: Vec::new(),
+        };
+        let preview = job.preview(&[(1, "TB".into())]);
+        assert_eq!(preview.len(), 2);
+        assert_eq!(preview[0].translation, "TA");
+        assert_eq!(preview[1].translation, "TB");
+
+        assert!(p.paint_captions(preview.clone(), 200, 100));
+        assert!(!p.paint_captions(preview.clone(), 200, 100), "unchanged captions + size must skip repaint");
+        assert!(p.paint_captions(preview, 240, 120), "content size change must repaint");
+        assert_eq!(p.painted_size, (240, 120));
+
+        p.update_preview(&CapturedFrame::new(10, 10, vec![0; 400], 5));
+        assert_eq!(state.read().preview.sequence, 5);
+        p.absorb_preview_sequence();
+        p.update_preview(&CapturedFrame::new(10, 10, vec![0; 400], 1));
+        assert_eq!(state.read().preview.sequence, 6, "restarted stream sequence advances past absorbed sequence");
+    }
+
+    #[tokio::test]
+    async fn handle_command_covers_cancel_cache_regions_hotkeys_and_shutdown() {
+        let mut cfg = AppConfig::default();
+        cfg.api.provider = ModelProvider::OpenaiCompatible;
+        let state = Arc::new(RwLock::new(AppState::new(cfg)));
+        let mut p = Pipeline::detached(Arc::clone(&state));
+
+        // CancelTranslate while inflight cancels token; without inflight calls restore_after_cancel.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        p.set_inflight(InflightTranslate {
+            cancel: cancel.clone(),
+            rx,
+            page: PendingPage {
+                blocks: Vec::new(),
+                content_width: 10,
+                content_height: 10,
+            },
+            cached_hits: Vec::new(),
+            kept: Vec::new(),
+        });
+        assert!(!p.handle_command(PipelineCommand::CancelTranslate).await);
+        assert!(cancel.is_cancelled());
+        p.take_inflight();
+        state.write().status = PipelineStatus::Translating;
+        p.handle_command(PipelineCommand::CancelTranslate).await;
+        assert_eq!(state.read().status, PipelineStatus::Cancelled);
+
+        // ClearTranslationCache & ResetConversation
+        p.translation_cache.insert("k", "ja", "zh-TW", "v");
+        p.state.write().translation_cache_len = 1;
+        p.state.write().push_history("src".into(), "dst".into(), 5);
+        p.handle_command(PipelineCommand::ClearTranslationCache).await;
+        assert!(p.translation_cache.is_empty());
+        assert_eq!(state.read().translation_cache_len, 0);
+        p.handle_command(PipelineCommand::ResetConversation).await;
+        assert!(state.read().history.is_empty());
+
+        // SetCaptureRegions sanitizes inverted/OOB/tiny rects before storing.
+        p.handle_command(PipelineCommand::SetCaptureRegions {
+            regions: vec![
+                translator_core::NormRect::new(0.9, 1.2, -0.4, -0.5),
+                translator_core::NormRect::new(0.1, 0.1, 0.001, 0.001),
+            ],
+        })
+        .await;
+        assert_eq!(state.read().ocr_regions.len(), 1);
+        let stored = state.read().ocr_regions[0];
+        assert!((stored.x - 0.5).abs() < 1e-6 && (stored.y - 0.7).abs() < 1e-6, "{stored:?}");
+        assert!((stored.width - 0.4).abs() < 1e-6 && (stored.height - 0.3).abs() < 1e-6, "{stored:?}");
+
+        // Hotkeys disabled suppresses ClearHistory and SelectRegion (when picker is closed);
+        // enabling hotkeys lets SelectRegion dispatch to begin_region_select.
+        {
+            let mut s = state.write();
+            s.config.hotkeys.enabled = false;
+            s.selected_hwnd = Some(1);
+            s.region_select_active = false;
+            s.last_error = None;
+            s.push_history("h".into(), "t".into(), 5);
+        }
+        p.handle_command(PipelineCommand::Hotkey(HotkeyAction::ClearHistory)).await;
+        assert_eq!(state.read().history.len(), 1, "disabled hotkeys ignore ClearHistory");
+        p.handle_command(PipelineCommand::Hotkey(HotkeyAction::SelectRegion)).await;
+        assert!(state.read().last_error.is_none(), "disabled hotkeys ignore SelectRegion when inactive");
+
+        state.write().config.hotkeys.enabled = true;
+        p.handle_command(PipelineCommand::Hotkey(HotkeyAction::SelectRegion)).await;
+        assert_eq!(
+            state.read().last_error.as_deref(),
+            Some(rust_i18n::t!("err.overlay_unavailable").as_ref()),
+            "enabled SelectRegion dispatches into begin_region_select"
+        );
+
+        assert!(p.handle_command(PipelineCommand::Shutdown).await);
     }
 }

@@ -182,24 +182,21 @@ impl Preview {
 mod tests {
     use super::*;
 
-    fn reference(rgba: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for px in rgba.as_chunks::<4>().0 {
-            out.push((u32::from(px[2]) * u32::from(px[3]) / 255) as u8);
-            out.push((u32::from(px[1]) * u32::from(px[3]) / 255) as u8);
-            out.push((u32::from(px[0]) * u32::from(px[3]) / 255) as u8);
-            out.push(px[3]);
-        }
-        out
-    }
-
     #[test]
-    fn premul_matches_reference_for_opaque_and_mixed_alpha() {
+    fn premul_converts_opaque_mixed_zero_alpha_and_empty() {
+        assert!(rgba_to_premul_bgra(&[]).is_empty());
+
         let opaque: &[u8] = &[10, 20, 30, 255, 200, 150, 100, 255];
-        let mixed: &[u8] = &[10, 20, 30, 128, 200, 150, 100, 255, 0, 255, 0, 51];
-        for rgba in [opaque, mixed] {
-            assert_eq!(rgba_to_premul_bgra(rgba), reference(rgba));
-        }
+        assert_eq!(rgba_to_premul_bgra(opaque), vec![30, 20, 10, 255, 100, 150, 200, 255]);
+
+        // Zero alpha zeroes out channels; mixed alpha floors R/G/B * A / 255 and flips R<->B.
+        let mixed: &[u8] = &[100, 200, 255, 0, 10, 20, 30, 128, 0, 255, 0, 51, 200, 150, 100, 255];
+        assert_eq!(rgba_to_premul_bgra(mixed), vec![
+            0, 0, 0, 0, // a=0 -> 0 premul channels
+            15, 10, 5, 128, // 30*128/255=15, 20*128/255=10, 10*128/255=5
+            0, 51, 0, 51, // 255*51/255=51
+            100, 150, 200, 255,
+        ]);
     }
 
     #[test]
@@ -216,5 +213,26 @@ mod tests {
         for (x, y) in [(0, 0), (5, 5), (3, 3), (9, 9)] {
             assert_eq!(alpha(x, y), 0, "pixel ({x},{y}) outside the stroke");
         }
+    }
+
+    #[test]
+    fn outline_regions_clamps_scales_blends_and_skips_invalid() {
+        // Invalid NaN / degenerate rects leave background completely untouched.
+        let mut bgra = vec![40u8; 8 * 8 * 4];
+        let orig = bgra.clone();
+        outline_regions(&mut bgra, 8, 8, 1.0, &[NormRect::new(f32::NAN, 0.0, 0.5, 0.5), NormRect::new(0.1, 0.1, 0.001, 0.5)]);
+        assert_eq!(bgra, orig);
+
+        // Edge-touching region at scale=2.0 clamps cleanly to 0..8 and blends BGR [255,220,80] at A=230 over bg [10,20,30,255].
+        let mut scaled = vec![0u8; 8 * 8 * 4];
+        for px in scaled.as_chunks_mut::<4>().0 {
+            px.copy_from_slice(&[10, 20, 30, 255]);
+        }
+        outline_regions(&mut scaled, 8, 8, 2.0, &[NormRect::new(0.0, 0.0, 1.0, 1.0)]);
+        // Corner (0, 0) blended: B=(255*230+10*25)/255=230, G=(220*230+20*25)/255=200, R=(80*230+30*25)/255=75, A=255.
+        assert_eq!(&scaled[0..4], &[230, 200, 75, 255]);
+        // Center (4, 4) untouched (stroke half=2.0 only reaches rows/cols 0..2 and 6..8).
+        let mid = (4 * 8 + 4) * 4;
+        assert_eq!(&scaled[mid..mid + 4], &[10, 20, 30, 255]);
     }
 }

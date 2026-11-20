@@ -327,15 +327,67 @@ mod tests {
 
     #[test]
     fn token_roundtrip_orders_modifiers() {
-        let chord = HotkeyChord::parse("shift+f9+ctrl").unwrap();
+        let chord = HotkeyChord::parse("shift+f9+control").unwrap();
+        assert_eq!(chord.vk, 0x78);
         assert_eq!(chord.to_token(), "ctrl+shift+f9");
         assert_eq!(chord.label(), "Ctrl+Shift+F9");
         assert!(chord.ctrl && chord.shift && !chord.alt);
+        assert_eq!(HotkeyChord::parse(&chord.to_token()), Some(chord));
+
+        let full = HotkeyChord::parse("shift+alt+ctrl+a").unwrap();
+        assert_eq!(full.to_token(), "ctrl+alt+shift+a");
+        assert_eq!(full.label(), "Ctrl+Alt+Shift+A");
+        assert_eq!(HotkeyChord::parse(&full.to_token()), Some(full));
+    }
+
+    #[test]
+    fn names_table_is_unique_and_roundtrips() {
+        use std::collections::HashSet;
+
+        let mut vks = HashSet::new();
+        let mut tokens = HashSet::new();
+        for &(vk, tok, lab) in NAMES {
+            assert!(vks.insert(vk), "duplicate vk {vk:#x}");
+            assert!(tokens.insert(tok), "duplicate token {tok}");
+            assert!(is_bindable_vk(vk), "unbindable vk {vk:#x} in NAMES");
+            let parsed = HotkeyChord::parse(tok).unwrap();
+            assert_eq!(parsed.vk, vk);
+            assert_eq!(parsed.to_token(), tok);
+            assert_eq!(parsed.label(), lab);
+        }
+
+        // Unnamed bindable VK roundtrips via `vk{N}`.
+        let unnamed = HotkeyChord::parse("vk136").unwrap();
+        assert_eq!(unnamed.vk, 136);
+        assert_eq!(unnamed.to_token(), "vk136");
+        assert_eq!(unnamed.label(), "VK136");
+        assert_eq!(HotkeyChord::parse(&unnamed.to_token()), Some(unnamed));
     }
 
     #[test]
     fn illegal_tokens_do_not_parse() {
-        for raw in ["", "ctrl", "lwin", "win+f9", "lbutton", "esc", "ctrl+esc", "ctrl+ctrl+a", "f9+a"] {
+        for raw in [
+            "",
+            "ctrl",
+            "lwin",
+            "win+f9",
+            "lbutton",
+            "esc",
+            "ctrl+esc",
+            "ctrl+ctrl+a",
+            "ctrl+control+a",
+            "alt+alt+a",
+            "ctrl+",
+            "+a",
+            "ctrl++a",
+            "f9+a",
+            "f0",
+            "f25",
+            "vk0",
+            "vk27",
+            "vk91",
+            "vk255",
+        ] {
             assert!(HotkeyChord::parse(raw).is_none(), "{raw}");
         }
     }

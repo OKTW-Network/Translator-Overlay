@@ -249,3 +249,48 @@ fn outlined(padding: Thickness) -> Result<Border> {
     root.SetPadding(padding)?;
     Ok(root)
 }
+
+#[cfg(test)]
+mod tests {
+    use translator_core::{AppConfig, NormRect};
+
+    use super::*;
+    use crate::ui::state::{TEST_MEM_STORE, test_ui_shared};
+
+    #[test]
+    fn named_snap_confirm_texts_and_resolve_dialog() {
+        let (mut ui, _rx) = test_ui_shared(AppConfig::default());
+        ui.region_presets.upsert("alpha".into(), vec![NormRect::new(0.0, 0.0, 0.5, 0.5)]);
+        ui.presets.selected = Some(0);
+        assert_eq!(NamedSnap::take(&ui, &TEST_MEM_STORE).selected(), Some(0));
+        ui.presets.selected = Some(99);
+        assert_eq!(NamedSnap::take(&ui, &TEST_MEM_STORE).selected(), None);
+
+        assert!(confirm_texts(&TEST_MEM_STORE, &NamedDialog::None).is_none());
+        assert!(confirm_texts(&TEST_MEM_STORE, &NamedDialog::SaveName).is_none());
+        let (_, body_ow, _) = confirm_texts(&TEST_MEM_STORE, &NamedDialog::Overwrite { name: "alpha".into() }).unwrap();
+        assert!(body_ow.contains("alpha"));
+        let (_, body_del, _) = confirm_texts(&TEST_MEM_STORE, &NamedDialog::Delete { name: "alpha".into() }).unwrap();
+        assert!(body_del.contains("alpha"));
+
+        // Cancel Overwrite returns to SaveName; Cancel Delete leaves dialog None.
+        resolve_named_dialog(&mut ui, &TEST_MEM_STORE, NamedDialog::Overwrite { name: "alpha".into() }, false);
+        assert_eq!(ui.presets.dialog, NamedDialog::SaveName);
+        ui.presets.dialog = NamedDialog::None;
+        resolve_named_dialog(&mut ui, &TEST_MEM_STORE, NamedDialog::Delete { name: "alpha".into() }, false);
+        assert_eq!(ui.presets.dialog, NamedDialog::None);
+
+        // Confirm Overwrite commits and selects item; Confirm Delete removes it and resets selection.
+        resolve_named_dialog(&mut ui, &TEST_MEM_STORE, NamedDialog::Overwrite { name: "alpha".into() }, true);
+        assert_eq!(ui.presets.selected, Some(0));
+        assert_eq!(ui.presets.name_draft, "alpha");
+        resolve_named_dialog(&mut ui, &TEST_MEM_STORE, NamedDialog::Delete { name: "alpha".into() }, true);
+        assert!(ui.region_presets.presets.is_empty());
+        assert!(ui.presets.selected.is_none());
+        assert!(ui.presets.name_draft.is_empty());
+
+        // Confirm Delete error records error in AppState.
+        resolve_named_dialog(&mut ui, &TEST_MEM_STORE, NamedDialog::Delete { name: "locked".into() }, true);
+        assert_eq!(ui.state.read().last_error.as_deref(), Some("delete failed"));
+    }
+}

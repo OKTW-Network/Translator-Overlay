@@ -219,17 +219,27 @@ mod tests {
 
     #[test]
     fn crop_frame_extracts_subrect() {
-        let mut rgba = vec![0u8; 4 * 3 * 4];
-        let i = (4 + 1) * 4;
-        rgba[i] = 255;
-        rgba[i + 3] = 255;
+        let (w, h) = (5u32, 4u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[x as u8, y as u8, (x + y) as u8, 255]);
+            }
+        }
 
-        let frame = CapturedFrame::new(4, 3, rgba, 1);
-        let cropped = metrics(4, 3, 2, 2, 1, 1).crop_frame(&frame);
-        assert_eq!(cropped.width, 2);
+        let frame = CapturedFrame::new(w, h, rgba, 7);
+        let cropped = metrics(5, 4, 3, 2, 1, 2).crop_frame(&frame);
+        assert_eq!(cropped.width, 3);
         assert_eq!(cropped.height, 2);
-        assert_eq!(cropped.rgba[0], 255);
-        assert_eq!(cropped.rgba[3], 255);
+        assert_eq!(cropped.sequence, 7);
+
+        let mut expected = Vec::new();
+        for y in 2..4u8 {
+            for x in 1..4u8 {
+                expected.extend_from_slice(&[x, y, x + y, 255]);
+            }
+        }
+        assert_eq!(&cropped.rgba[..], &expected[..]);
     }
 
     #[test]
@@ -243,39 +253,85 @@ mod tests {
 
     #[test]
     fn crop_scales_title_bar_with_ceil() {
-        // 31 × 900/600 = 46.5 → ceil 47; floor sizes match.
-        let cropped = metrics(800, 600, 784, 553, 8, 31).crop_frame(&CapturedFrame::new(1200, 900, vec![0u8; 1200 * 900 * 4], 0));
-        assert_eq!(cropped.width, 1176);
-        assert_eq!(cropped.height, 829);
-
-        let y = scale_ceil(31, 899, 600);
-        assert_eq!(y, 47);
-        assert_eq!(scale_ceil(31, 900, 900), 31);
-        assert_eq!(scale_floor(553, 900, 900), 553);
+        // 80x60 -> 120x90 (1.5x): offset_x=1 -> 1.5 -> ceil 2, offset_y=3 -> 4.5 -> ceil 5.
+        let (fw, fh) = (120u32, 90u32);
+        let mut rgba = vec![0u8; (fw * fh * 4) as usize];
+        for y in 0..fh {
+            for x in 0..fw {
+                let i = ((y * fw + x) * 4) as usize;
+                let px = if x < 2 || y < 5 { [255, 0, 0, 255] } else { [0, 255, 0, 255] };
+                rgba[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        let cropped = metrics(80, 60, 78, 55, 1, 3).crop_frame(&CapturedFrame::new(fw, fh, rgba, 9));
+        assert_eq!(cropped.width, 117);
+        assert_eq!(cropped.height, 82);
+        assert_eq!(cropped.sequence, 9);
+        assert_eq!(cropped.rgba.len(), 117 * 82 * 4);
+        assert!(cropped.rgba.as_chunks::<4>().0.iter().all(|px| *px == [0, 255, 0, 255]));
     }
 
     #[test]
-    fn clamp_fits_the_client_under_an_inset() {
-        // A collapsed client (client == window) that gets a 31 px caption shrinks to fit below it.
+    fn crop_frame_handles_degenerate_and_truncated_inputs() {
+        let empty = CapturedFrame::new(0, 0, Vec::new(), 3);
+        let out = metrics(800, 600, 784, 553, 8, 31).crop_frame(&empty);
+        assert_eq!((out.width, out.height, out.sequence), (0, 0, 3));
+
+        // Zero window dimensions and extreme downscale clamp to at least 1x1 inside frame.
+        let tiny_frame = CapturedFrame::new(2, 2, vec![42u8; 2 * 2 * 4], 4);
+        let zero_win = metrics(0, 0, 10, 10, 0, 0).crop_frame(&tiny_frame);
+        assert_eq!((zero_win.width, zero_win.height), (2, 2));
+
+        let extreme = metrics(1000, 1000, 10, 10, 2000, 2000).crop_frame(&tiny_frame);
+        assert_eq!((extreme.width, extreme.height), (1, 1));
+        assert_eq!(&extreme.rgba[..], &[42, 42, 42, 42]);
+
+        // Truncated pixel buffer must hit bounds guard instead of panicking.
+        let truncated = CapturedFrame::new(4, 4, vec![9u8; 4], 5);
+        let safe = metrics(4, 4, 2, 2, 1, 1).crop_frame(&truncated);
+        assert_eq!((safe.width, safe.height), (2, 2));
+        assert_eq!(safe.rgba.len(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn clamp_and_screen_rect_boundaries() {
+        // Collapsed client getting a 31 px caption shrinks height to stay within window.
         let mut m = metrics(800, 600, 800, 600, 0, 31);
         m.clamp();
         assert_eq!(m.client_height, 569);
         assert_eq!(m.screen_rect(), (0, 31, 800, 569));
+
+        // Horizontal inset + out-of-range offsets + zero client sizes.
+        let mut clamped = metrics(100, 80, 0, 200, 150, 20);
+        clamped.clamp();
+        assert_eq!((clamped.offset_x, clamped.offset_y, clamped.client_width, clamped.client_height), (99, 20, 1, 60));
+
+        // Negative secondary-monitor coordinates and i32::MAX saturation.
+        let multi = ClientAreaMetrics {
+            frame_left: -1920,
+            frame_top: -1080,
+            ..metrics(1200, 900, 1176, 829, 12, 47)
+        };
+        assert_eq!(multi.screen_rect(), (-1908, -1033, 1176, 829));
+
+        let sat = ClientAreaMetrics {
+            frame_left: i32::MAX - 5,
+            frame_top: i32::MAX - 2,
+            ..metrics(100, 100, 50, 50, 20, 10)
+        };
+        assert_eq!(sat.screen_rect(), (i32::MAX, i32::MAX, 50, 50));
+        assert_eq!(client_screen_rect(0), None);
     }
 
     #[test]
     fn scaling_ceils_insets_and_floors_sizes() {
-        // 800x600 window metrics mapped onto a 1200x900 DWM frame.
-        assert_eq!(scale_ceil(8, 1200, 800), 12);
-        assert_eq!(scale_ceil(31, 900, 600), 47);
-        assert_eq!(scale_floor(784, 1200, 800), 1176);
+        // 31 * 899 / 600 = 46.448 → ceil 47 (distinguishes ceil from round-to-nearest), floor 46.
+        assert_eq!(scale_ceil(31, 899, 600), 47);
+        assert_eq!(scale_floor(31, 899, 600), 46);
         assert_eq!(scale_floor(553, 900, 600), 829);
+        assert_eq!(scale_ceil(31, 900, 900), 31);
+        assert_eq!(scale_floor(553, 900, 900), 553);
         assert_eq!(scale_ceil(31, 900, 0), 31, "a zero denominator keeps the value");
-        let m = ClientAreaMetrics {
-            frame_left: 10,
-            frame_top: 20,
-            ..metrics(1200, 900, 1176, 829, 12, 47)
-        };
-        assert_eq!(m.screen_rect(), (22, 67, 1176, 829));
+        assert_eq!(scale_floor(553, 900, 0), 553);
     }
 }

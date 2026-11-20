@@ -669,7 +669,6 @@ fn best_effort_cli_session_delete(program: &Path, cwd: &Path, session_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::codex;
 
     #[test]
     fn classifies_codex_response_without_jsonrpc() {
@@ -726,14 +725,6 @@ mod tests {
         assert_eq!(cmd["decision"], "cancel");
         let patch = deny_permission_result("item/fileChange/requestApproval", &Value::Null);
         assert_eq!(patch["decision"], "abort");
-    }
-
-    #[test]
-    fn argv_builders_never_yolo() {
-        let args = codex::spawn_args();
-        assert_eq!(args[0], "app-server");
-        assert!(args.contains(&"project_doc_max_bytes=0".into()));
-        assert!(args.iter().all(|a| !a.contains("yolo")));
     }
 
     #[test]
@@ -817,5 +808,60 @@ mod tests {
             &mut saw_tool,
         );
         assert!(saw_tool);
+    }
+
+    #[test]
+    fn classify_rpc_error_response_and_non_object() {
+        assert!(classify_rpc(Value::Array(Vec::new())).is_none());
+        assert!(classify_rpc(serde_json::json!({"result": 1})).is_none());
+        match classify_rpc(serde_json::json!({"id": 7, "error": {"message": "denied"}})) {
+            Some(Incoming::Response { id, result: Err(msg) }) => {
+                assert_eq!(id, Value::from(7));
+                assert_eq!(msg, "denied");
+            }
+            other => panic!("{other:?}"),
+        }
+        match classify_rpc(serde_json::json!({"id": 8, "error": {}})) {
+            Some(Incoming::Response { id, result: Err(msg) }) => {
+                assert_eq!(id, Value::from(8));
+                assert_eq!(msg, "JSON-RPC error");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_acp_update_and_reject_option_id_fallbacks_and_stderr_tail() {
+        let mut text = String::new();
+        let mut saw_tool = false;
+        collect_acp_update(
+            "unrelated/method",
+            &serde_json::json!({"update":{"sessionUpdate":"agent_message_chunk","content":"ignored"}}),
+            &mut text,
+            &mut saw_tool,
+        );
+        assert!(text.is_empty());
+        collect_acp_update(
+            "x.ai/session/update",
+            &serde_json::json!({"update":{"sessionUpdate":"agent_message_chunk","content":"flat"}}),
+            &mut text,
+            &mut saw_tool,
+        );
+        assert_eq!(text, "flat");
+
+        let params = serde_json::json!({
+            "options": [
+                {"kind": "reject_always", "optionId": "always-no"}
+            ]
+        });
+        assert_eq!(reject_option_id(&params), Some("always-no"));
+
+        let tail = StderrTail::default();
+        for i in 0..25 {
+            tail.push(format!("line-{i}"));
+        }
+        let joined = tail.joined();
+        assert!(joined.starts_with("line-5 | "), "{joined}");
+        assert!(joined.ends_with("line-24"), "{joined}");
     }
 }

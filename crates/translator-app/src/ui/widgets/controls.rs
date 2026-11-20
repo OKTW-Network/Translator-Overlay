@@ -359,3 +359,23 @@ pub fn card_color_popup(
     });
     Ok(card.root)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantize_to_step_snaps_clamps_and_handles_degenerate_steps() {
+        // Avoids float drift with 0.05 increments
+        let q = quantize_to_step(0.1499999, 0.0, 2.0, 0.05);
+        assert!((q - 0.15).abs() < 1e-9, "got {q}");
+        assert_eq!(quantize_to_step(-5.0, 0.0, 2.0, 0.05), 0.0);
+        assert_eq!(quantize_to_step(5.0, 0.0, 2.0, 0.05), 2.0);
+        // Step zero / negative / non-finite / sub-micro falls back to clamped value
+        assert_eq!(quantize_to_step(1.23, 0.0, 2.0, 0.0), 1.23);
+        assert_eq!(quantize_to_step(1.23, 0.0, 2.0, -0.5), 1.23);
+        assert_eq!(quantize_to_step(1.23, 0.0, 2.0, f64::NAN), 1.23);
+        assert_eq!(quantize_to_step(1.23, 0.0, 2.0, f64::INFINITY), 1.23);
+        assert_eq!(quantize_to_step(1.23, 0.0, 2.0, 1e-8), 1.23);
+    }
+}

@@ -284,33 +284,183 @@ mod tests {
     use std::sync::Arc;
 
     use parking_lot::RwLock;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+    use translator_core::{DictionaryPair, OcrBlock, OcrModel, PipelineStatus, Rect, TranslatedBlock};
 
     use super::*;
+    use crate::pipeline::worker::{InflightTranslate, PendingPage};
+
+    fn base_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.api.provider = ModelProvider::OpenaiCompatible;
+        config
+    }
+
+    fn test_pipeline(cfg: AppConfig, dir: &Path) -> Pipeline {
+        let mut p = Pipeline::detached(Arc::new(RwLock::new(AppState::new(cfg))));
+        p.config_path = Some(dir.join("config.toml"));
+        p
+    }
+
+    fn inflight_stub() -> (InflightTranslate, CancellationToken) {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        (
+            InflightTranslate {
+                cancel: cancel.clone(),
+                rx,
+                page: PendingPage {
+                    blocks: Vec::new(),
+                    content_width: 100,
+                    content_height: 100,
+                },
+                cached_hits: Vec::new(),
+                kept: Vec::new(),
+            },
+            cancel,
+        )
+    }
 
     #[tokio::test]
     async fn new_model_or_prompt_drops_cached_translations() {
-        // apply_config saves to `config_path()`, which this override points at a real config.
-        if std::env::var_os("TRANSLATOR_OVERLAY_ROOT").is_some() {
-            return;
-        }
-        let mut config = AppConfig::default();
-        // Not the built-in default: nothing may download or load a model.
-        config.api.provider = ModelProvider::OpenaiCompatible;
-        let mut p = Pipeline::detached(Arc::new(RwLock::new(AppState::new(config.clone()))));
+        let tmp = tempdir().unwrap();
+        let mut config = base_config();
+        let mut p = test_pipeline(config.clone(), tmp.path());
         let tr = config.translation.clone();
         let cache_one = |p: &mut Pipeline| p.translation_cache.insert("X", &tr.source_lang, &tr.target_lang, "TX");
 
         cache_one(&mut p);
         p.apply_config(config.clone()).await;
+        assert!(p.state.read().last_error.is_none());
         assert_eq!(p.translation_cache.len(), 1, "an unchanged config keeps the cache");
 
         config.api.model = "other-model".into();
         p.apply_config(config.clone()).await;
+        assert!(p.state.read().last_error.is_none());
         assert!(p.translation_cache.is_empty(), "a new model drops the cache");
 
         cache_one(&mut p);
         config.translation.system_prompt = Some("Use a casual tone.".into());
         p.apply_config(config).await;
+        assert!(p.state.read().last_error.is_none());
         assert!(p.translation_cache.is_empty(), "a new system prompt drops the cache");
+        assert!(tmp.path().join("config.toml").is_file());
+    }
+
+    #[tokio::test]
+    async fn identity_vs_prompt_change_and_cache_shrink_and_last_page() {
+        let tmp = tempdir().unwrap();
+        let mut cfg = base_config();
+        let mut p = test_pipeline(cfg.clone(), tmp.path());
+        p.translation_cache.insert("A", "ja", "zh-TW", "TA");
+        p.translation_cache.insert("B", "ja", "zh-TW", "TB");
+        p.translation_cache.insert("C", "ja", "zh-TW", "TC");
+        p.conversation.ensure_system("sys");
+        p.conversation.push_user("u1");
+
+        // Changing prompt clears cache while preserving conversation + inflight.
+        let (job, cancel) = inflight_stub();
+        p.set_inflight(job);
+        cfg.translation.system_prompt = Some("New tone".into());
+        p.apply_config(cfg.clone()).await;
+        assert!(!cancel.is_cancelled(), "prompt change must not cancel inflight");
+        assert_eq!(p.conversation.turn_count(), 1, "prompt change keeps conversation");
+        assert!(p.translation_cache.is_empty());
+
+        // Changing identity cancels inflight + clears conversation + cache.
+        p.translation_cache.insert("A", "ja", "zh-TW", "TA");
+        cfg.api.model = "m2".into();
+        p.apply_config(cfg.clone()).await;
+        assert!(cancel.is_cancelled(), "identity change cancels inflight");
+        assert_eq!(p.conversation.turn_count(), 0, "identity change clears conversation");
+        assert!(p.translation_cache.is_empty());
+
+        // Shrinking cache_max_entries evicts excess entries immediately and updates UI count.
+        p.translation_cache.insert("A", "ja", "zh-TW", "TA");
+        p.translation_cache.insert("B", "ja", "zh-TW", "TB");
+        p.translation_cache.insert("C", "ja", "zh-TW", "TC");
+        cfg.translation.cache_max_entries = 1;
+        p.apply_config(cfg.clone()).await;
+        assert_eq!(p.translation_cache.len(), 1);
+        assert_eq!(p.state.read().translation_cache_len, 1);
+
+        // last_page retained when captions exist, cleared when captions are empty.
+        let page = PendingPage {
+            blocks: vec![OcrBlock {
+                id: 0,
+                text: "X".into(),
+                confidence: 1.0,
+                bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+                source_lines: 1,
+                source_height: 10.0,
+                source_width: 10.0,
+            }],
+            content_width: 100,
+            content_height: 100,
+        };
+        p.last_page = Some(page.clone());
+        p.captions = vec![TranslatedBlock {
+            id: 0,
+            source: "X".into(),
+            translation: "TX".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }];
+        p.apply_config(cfg.clone()).await;
+        assert!(p.last_page.is_some());
+
+        p.captions.clear();
+        p.apply_config(cfg).await;
+        assert!(p.last_page.is_none());
+    }
+
+    #[tokio::test]
+    async fn engine_reload_updates_cached_ocr_fields_and_save_error_survives_restore() {
+        let tmp = tempdir().unwrap();
+        let mut cfg = base_config();
+        let mut p = test_pipeline(cfg.clone(), tmp.path());
+
+        cfg.ocr.model = OcrModel::V5English;
+        cfg.ocr.device = OcrDevice::Cpu;
+        cfg.ocr.det_max_side = 1280;
+        p.apply_config(cfg.clone()).await;
+        assert_eq!(p.ocr_model, OcrModel::V5English);
+        assert_eq!(p.ocr_device, OcrDevice::Cpu);
+        assert_eq!(p.ocr_det_max_side, 1280);
+
+        // Point config_path at an existing directory so cfg.save fails.
+        p.config_path = Some(tmp.path().to_path_buf());
+        p.apply_config(cfg).await;
+        let s = p.state.read();
+        assert!(matches!(s.status, PipelineStatus::Error { .. }), "save failure must override restore_operational_status");
+        assert!(s.last_error.as_deref().is_some_and(|e| !e.is_empty()));
+    }
+
+    #[test]
+    fn apply_dictionary_profile_handles_none_and_invalid_name() {
+        let mut state = AppState::new(base_config());
+        state.dictionary_pairs.push(DictionaryPair {
+            source: "old".into(),
+            target: "舊".into(),
+        });
+        state.config.translation.dictionary_profile = None;
+        apply_dictionary_profile(&mut state);
+        assert!(state.dictionary_pairs.is_empty());
+        assert!(state.last_error.is_none());
+
+        state.dictionary_pairs.push(DictionaryPair {
+            source: "old".into(),
+            target: "舊".into(),
+        });
+        state.config.translation.dictionary_profile = Some("CON".into());
+        apply_dictionary_profile(&mut state);
+        assert!(state.dictionary_pairs.is_empty());
+        assert!(state.last_error.is_some());
+        assert!(matches!(state.status, PipelineStatus::Error { .. }));
     }
 }

@@ -90,45 +90,72 @@ pub(crate) fn write_toml_str(path: &Path, text: &str) -> Result<(), TomlFileErro
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
     fn write_replaces_existing_file_and_leaves_no_temp() {
-        let dir = std::env::temp_dir().join(format!("toml-file-test-{}", std::process::id()));
-        let path = dir.join("config.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
         write_toml_str(&path, "a = 1\n").unwrap();
         write_toml_str(&path, "a = 2\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a = 2\n");
-        assert!(!dir.join("config.toml.tmp").exists());
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!dir.path().join("config.toml.tmp").exists());
+    }
+
+    #[test]
+    fn write_cleans_up_temp_when_rename_fails() {
+        let dir = tempdir().unwrap();
+        let target_as_dir = dir.path().join("config.toml");
+        std::fs::create_dir_all(&target_as_dir).unwrap();
+        let err = write_toml_str(&target_as_dir, "a = 1\n").unwrap_err();
+        assert!(matches!(err, TomlFileError::Io { .. }), "{err:?}");
+        assert!(!dir.path().join("config.toml.tmp").exists(), "temp file must be removed when rename fails");
     }
 
     #[test]
     fn broken_file_is_moved_aside_with_its_content() {
-        let dir = std::env::temp_dir().join(format!("toml-file-broken-{}", std::process::id()));
-        let path = dir.join("api-profiles.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-profiles.toml");
         write_toml_str(&path, "[[[not valid").unwrap();
         let Err(TomlFileError::Broken { backup, .. }) = load_toml_or_empty::<toml::Table>(&path) else {
             panic!("expected Broken");
         };
         assert!(!path.exists(), "the next save must start from an empty slot");
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "[[[not valid");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn non_utf8_file_is_moved_aside_with_its_bytes() {
-        let dir = std::env::temp_dir().join(format!("toml-file-big5-{}", std::process::id()));
-        let path = dir.join("config.toml");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
         // `中文` in Big5.
         let bytes = b"system_prompt = \"\xa4\xa4\xa4\xe5\"\n";
-        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, bytes).unwrap();
         let Err(TomlFileError::Broken { backup, .. }) = load_toml_or_empty::<toml::Table>(&path) else {
             panic!("expected Broken");
         };
         assert!(!path.exists(), "the next save must not overwrite it");
         assert_eq!(std::fs::read(&backup).unwrap(), bytes);
-        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_file_does_not_backup_io_or_non_parse_errors() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        assert!(matches!(parse_file::<()>(missing.as_path(), |_| unreachable!()), Err(TomlFileError::Io { .. })));
+
+        let valid = dir.path().join("valid.toml");
+        write_toml_str(&valid, "a = 1\n").unwrap();
+        let err = parse_file::<()>(&valid, |_| {
+            Err(TomlFileError::Io {
+                path: valid.clone(),
+                source: std::io::Error::other("semantic error"),
+            })
+        })
+        .unwrap_err();
+        assert!(matches!(err, TomlFileError::Io { .. }));
+        assert!(valid.exists(), "non-parse callback errors must leave the file in place");
     }
 }

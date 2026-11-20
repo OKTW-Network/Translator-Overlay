@@ -343,4 +343,47 @@ mod tests {
         // DirectWrite rejects non-locale names with E_INVALIDARG.
         assert!(measure_columns("一二三", 20, "繁體中文", 1000, 1000).is_ok());
     }
+
+    #[test]
+    fn draw_text_label_at_offset_preserves_outside_and_handles_empty_or_oob() {
+        let mut dib = crate::gfx::surface::DibSurface::create().unwrap();
+        dib.ensure(120, 80).unwrap();
+        let surface = SurfaceSize::new(120, 80);
+        let hdc = dib.hdc();
+        let buf = dib.pixels().unwrap();
+        let bg = [20u8, 40, 60, 128];
+        for px in buf.as_chunks_mut::<4>().0 {
+            px.copy_from_slice(&bg);
+        }
+        let rect = SurfaceRect::new(20, 15, 80, 40);
+        let style = || LabelStyle {
+            font_px: 20,
+            color: Rgba::new(255, 255, 255, 255),
+            locale: "en",
+            vertical: false,
+            line_pitch: None,
+        };
+        draw_text_label(hdc, buf, surface, rect, "Hi", style()).unwrap();
+        let mut inside_ink = 0usize;
+        for y in 0..80 {
+            for x in 0..120 {
+                let idx = (y * 120 + x) * 4;
+                let px = &buf[idx..idx + 4];
+                if (20..100).contains(&x) && (15..55).contains(&y) {
+                    if px != bg {
+                        inside_ink += 1;
+                    }
+                } else {
+                    assert_eq!(px, bg, "pixel outside label rect modified at ({x}, {y})");
+                }
+            }
+        }
+        assert!(inside_ink > 0, "expected glyph ink inside non-zero offset rect");
+
+        // Empty text and OOB rect must be clean no-ops without touching pixels.
+        let before = buf.to_vec();
+        draw_text_label(hdc, buf, surface, SurfaceRect::new(200, 200, 40, 20), "Hi", style()).unwrap();
+        draw_text_label(hdc, buf, surface, rect, "", style()).unwrap();
+        assert_eq!(buf, before);
+    }
 }

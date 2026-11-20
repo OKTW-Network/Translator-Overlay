@@ -401,7 +401,24 @@ mod tests {
         WINDOW_EX_STYLE(unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32)
     }
 
-    fn spawn_overlay_and_target() -> Result<(crate::host::OverlayHost, HWND, parking_lot::MutexGuard<'static, ()>), String> {
+    struct OverlayTestRig {
+        host: crate::host::OverlayHost,
+        target: HWND,
+        event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::command::OverlayEvent>,
+        _lock: parking_lot::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for OverlayTestRig {
+        fn drop(&mut self) {
+            use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+            self.host.teardown();
+            if !self.target.is_invalid() {
+                let _ = unsafe { DestroyWindow(self.target) };
+            }
+        }
+    }
+
+    fn spawn_overlay_and_target() -> Result<OverlayTestRig, String> {
         use tokio::sync::mpsc;
         use translator_core::OverlayConfig;
         use windows::{
@@ -436,7 +453,7 @@ mod tests {
         let _ = unsafe { ShowWindow(target, SW_SHOW) };
         let _ = unsafe { SetForegroundWindow(target) };
 
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         match OverlayHost::create(
             OverlayConfig {
                 reader_enabled: false,
@@ -444,7 +461,12 @@ mod tests {
             },
             event_tx,
         ) {
-            Ok(host) => Ok((host, target, lock)),
+            Ok(host) => Ok(OverlayTestRig {
+                host,
+                target,
+                event_rx,
+                _lock: lock,
+            }),
             Err(e) => {
                 let _ = unsafe { DestroyWindow(target) };
                 Err(format!("OverlayHost::create: {e}"))
@@ -454,33 +476,39 @@ mod tests {
 
     #[test]
     fn first_picker_session_shows_a_visible_hit_testable_layer() -> Result<(), String> {
-        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT};
+        use std::sync::atomic::Ordering;
 
-        use crate::command::OverlayCommand;
+        use windows::Win32::UI::WindowsAndMessaging::{WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT};
 
-        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+        use crate::{command::OverlayCommand, host::wnd::PICKER_HIT_TEST};
 
-        host.handle(OverlayCommand::Attach {
-            target_hwnd: target.0 as isize,
+        let mut rig = spawn_overlay_and_target()?;
+
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
         });
-        host.apply_overlay(true);
-        host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
-        host.apply_overlay(true);
-        if host.replay_present {
-            host.apply_overlay(true);
+        rig.host.apply_overlay(true);
+        rig.host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
+        rig.host.apply_overlay(true);
+        if rig.host.replay_present {
+            rig.host.apply_overlay(true);
         }
 
-        let visible = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
-        let ex = overlay_ex_style(host.hwnd);
+        let visible = unsafe { IsWindowVisible(rig.host.hwnd) }.as_bool();
+        let ex = overlay_ex_style(rig.host.hwnd);
         let click_through = ex.contains(WS_EX_TRANSPARENT);
         let toolwindow = ex.contains(WS_EX_TOOLWINDOW);
         let topmost = ex.contains(WS_EX_TOPMOST);
-        let presented = host.presented_rect.is_some();
-        let veil = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
-        let target_fg = target_is_foreground(target);
+        let presented = rig.host.presented_rect.is_some();
+        let full_veil = rig
+            .host
+            .surface
+            .pixels()
+            .is_some_and(|px| !px.is_empty() && px.as_chunks::<4>().0.iter().all(|c| c[3] > 0));
+        let target_fg = target_is_foreground(rig.target);
 
-        host.teardown();
-        let _ = unsafe { DestroyWindow(target) };
+        rig.host.teardown();
+        let hit_test_after_teardown = PICKER_HIT_TEST.load(Ordering::Acquire);
 
         if !visible {
             return Err("overlay HWND is not visible after first picker apply".into());
@@ -497,8 +525,11 @@ mod tests {
         if !presented {
             return Err("presented_rect is None after first picker apply".into());
         }
-        if !veil {
-            return Err("picker DIB has no non-zero alpha (blank veil)".into());
+        if !full_veil {
+            return Err("picker DIB must paint non-zero alpha across the full veil".into());
+        }
+        if hit_test_after_teardown {
+            return Err("teardown left PICKER_HIT_TEST enabled".into());
         }
         Ok(())
     }
@@ -506,27 +537,27 @@ mod tests {
     #[test]
     fn empty_captions_stay_visible_and_clear_the_dib() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
-        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GetWindowTextW, WS_EX_TOOLWINDOW};
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, WS_EX_TOOLWINDOW};
 
         use crate::command::OverlayCommand;
 
-        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+        let mut rig = spawn_overlay_and_target()?;
 
-        host.handle(OverlayCommand::Attach {
-            target_hwnd: target.0 as isize,
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
         });
-        host.apply_overlay(true);
+        rig.host.apply_overlay(true);
 
         let mut title_buf = [0u16; 256];
-        let n = unsafe { GetWindowTextW(host.hwnd, &mut title_buf) }.max(0) as usize;
+        let n = unsafe { GetWindowTextW(rig.host.hwnd, &mut title_buf) }.max(0) as usize;
         let title = String::from_utf16_lossy(&title_buf[..n]);
-        let ex = overlay_ex_style(host.hwnd);
-        let visible_empty = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
-        let blank_empty = host.surface.pixels().is_some_and(|px| px.iter().all(|&b| b == 0));
-        let presented_empty = host.presented_rect.is_some();
+        let ex = overlay_ex_style(rig.host.hwnd);
+        let visible_empty = unsafe { IsWindowVisible(rig.host.hwnd) }.as_bool();
+        let blank_empty = rig.host.surface.pixels().is_some_and(|px| px.iter().all(|&b| b == 0));
+        let presented_empty = rig.host.presented_rect.is_some();
         let toolwindow = ex.contains(WS_EX_TOOLWINDOW);
 
-        host.handle(OverlayCommand::SetBlocks {
+        rig.host.handle(OverlayCommand::SetBlocks {
             blocks: vec![TranslatedBlock {
                 id: 1,
                 source: "src".into(),
@@ -541,16 +572,13 @@ mod tests {
             content_width: 400,
             content_height: 300,
         });
-        host.apply_overlay(true);
-        let ink = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
+        rig.host.apply_overlay(true);
+        let ink = rig.host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
 
-        host.handle(OverlayCommand::Clear);
-        host.apply_overlay(true);
-        let visible_clear = unsafe { IsWindowVisible(host.hwnd) }.as_bool();
-        let blank_clear = host.surface.pixels().is_some_and(|px| px.iter().all(|&b| b == 0));
-
-        host.teardown();
-        let _ = unsafe { DestroyWindow(target) };
+        rig.host.handle(OverlayCommand::Clear);
+        rig.host.apply_overlay(true);
+        let visible_clear = unsafe { IsWindowVisible(rig.host.hwnd) }.as_bool();
+        let blank_clear = rig.host.surface.pixels().is_some_and(|px| px.iter().all(|&b| b == 0));
 
         if title != "Translator Overlay Captions" {
             return Err(format!("overlay title is {title:?}, expected Translator Overlay Captions"));
@@ -582,19 +610,18 @@ mod tests {
     #[test]
     fn captions_arriving_mid_drag_are_painted() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
-        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
         use crate::command::OverlayCommand;
 
-        let (mut host, target, _lock) = spawn_overlay_and_target()?;
-        host.handle(OverlayCommand::Attach {
-            target_hwnd: target.0 as isize,
+        let mut rig = spawn_overlay_and_target()?;
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
         });
-        host.apply_overlay(true);
+        rig.host.apply_overlay(true);
 
         // The user is dragging the target when a streamed caption lands.
-        host.in_movesize = true;
-        host.handle(OverlayCommand::SetBlocks {
+        rig.host.in_movesize = true;
+        rig.host.handle(OverlayCommand::SetBlocks {
             blocks: vec![TranslatedBlock {
                 id: 1,
                 source: "src".into(),
@@ -609,12 +636,9 @@ mod tests {
             content_width: 400,
             content_height: 300,
         });
-        host.apply_overlay(true);
-        let ink = host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
-        let still_dragging = host.in_movesize;
-
-        host.teardown();
-        let _ = unsafe { DestroyWindow(target) };
+        rig.host.apply_overlay(true);
+        let ink = rig.host.surface.pixels().is_some_and(|px| px.iter().any(|&b| b != 0));
+        let still_dragging = rig.host.in_movesize;
 
         if !ink {
             return Err("a caption set mid-drag was not painted".into());
@@ -628,16 +652,15 @@ mod tests {
     #[test]
     fn wrapped_translation_follows_the_source_line_pitch() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
-        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
         use crate::command::OverlayCommand;
 
-        let (mut host, target, _lock) = spawn_overlay_and_target()?;
-        host.handle(OverlayCommand::Attach {
-            target_hwnd: target.0 as isize,
+        let mut rig = spawn_overlay_and_target()?;
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
         });
         // Two source lines spaced far wider than the font's own line pitch.
-        host.handle(OverlayCommand::SetBlocks {
+        rig.host.handle(OverlayCommand::SetBlocks {
             blocks: vec![TranslatedBlock {
                 id: 1,
                 source: "src".into(),
@@ -652,10 +675,10 @@ mod tests {
             content_width: 400,
             content_height: 300,
         });
-        host.apply_overlay(true);
-        let (w, _) = host.surface.size();
+        rig.host.apply_overlay(true);
+        let (w, _) = rig.host.surface.size();
         // Rows holding ink: a second colour besides the background fill.
-        let inked: Vec<usize> = host.surface.pixels().map_or(Vec::new(), |px| {
+        let inked: Vec<usize> = rig.host.surface.pixels().map_or(Vec::new(), |px| {
             px.chunks(w as usize * 4)
                 .enumerate()
                 .filter(|(_, row)| {
@@ -665,9 +688,6 @@ mod tests {
                 .map(|(y, _)| y)
                 .collect()
         });
-
-        host.teardown();
-        let _ = unsafe { DestroyWindow(target) };
 
         let (Some(top), Some(bottom)) = (inked.first(), inked.last()) else {
             return Err("caption was not painted".into());
@@ -682,20 +702,19 @@ mod tests {
     #[test]
     fn caption_ink_stays_on_its_background() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
-        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
         use crate::{command::OverlayCommand, gfx::draw};
 
-        let (mut host, target, _lock) = spawn_overlay_and_target()?;
-        host.handle(OverlayCommand::Attach {
-            target_hwnd: target.0 as isize,
+        let mut rig = spawn_overlay_and_target()?;
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
         });
         // Two lines merged with a much smaller third: the median line box sets a font taller
         // than the average line pitch, so the text cannot sit on the source lines.
         let text = "我完全了解，並會照著要求繼續處理這件事情，請你在這裡稍微等我一下就好。";
         let mut failures = Vec::new();
         for w in (200..=380).step_by(20) {
-            host.handle(OverlayCommand::SetBlocks {
+            rig.host.handle(OverlayCommand::SetBlocks {
                 blocks: vec![TranslatedBlock {
                     id: 1,
                     source: "src".into(),
@@ -710,25 +729,39 @@ mod tests {
                 content_width: 400,
                 content_height: 300,
             });
-            host.apply_overlay(true);
-            let (sw, sh) = host.surface.size();
+            rig.host.apply_overlay(true);
+            let (sw, sh) = rig.host.surface.size();
+            if sw != 400 || sh != 300 {
+                failures.push(format!("w={w} unexpected surface size ({sw}, {sh}), expected (400, 300)"));
+                continue;
+            }
             let surface = draw::SurfaceSize::new(sw, sh);
             let span = SourceSpan { w, h: 72, lines: 3 };
-            let (rect, px, _) = host
+            let (rect, px, _) = rig
+                .host
                 .layout_label(draw::SurfaceRect::new(10, 10, w, 30), text, span, &[], surface)
                 .map_err(|e| e.to_string())?;
-            let buf = host.surface.pixels().ok_or("paint bitmap missing")?;
-            let stray = (0..sh)
-                .flat_map(|y| (0..sw).map(move |x| (x, y)))
-                .filter(|&(x, y)| buf[y as usize * surface.stride + x as usize * 4 + 3] != 0)
-                .filter(|&(x, y)| x < rect.x || x >= rect.x + rect.w || y < rect.y || y >= rect.y + rect.h)
-                .count();
+            let buf = rig.host.surface.pixels().ok_or("paint bitmap missing")?;
+            let mut inside = 0usize;
+            let mut stray = 0usize;
+            for y in 0..sh {
+                for x in 0..sw {
+                    if buf[y as usize * surface.stride + x as usize * 4 + 3] != 0 {
+                        if x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h {
+                            inside += 1;
+                        } else {
+                            stray += 1;
+                        }
+                    }
+                }
+            }
+            if inside == 0 {
+                failures.push(format!("w={w} px={px} rect={rect:?} had no painted pixels inside rect"));
+            }
             if stray > 0 {
                 failures.push(format!("w={w} px={px} rect={rect:?} stray={stray}"));
             }
         }
-        host.teardown();
-        let _ = unsafe { DestroyWindow(target) };
         if failures.is_empty() {
             Ok(())
         } else {
@@ -739,7 +772,6 @@ mod tests {
     #[test]
     fn long_translation_shrinks_then_widens_then_wraps() -> Result<(), String> {
         use translator_core::{Rect, TranslatedBlock};
-        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
 
         use crate::{
             command::OverlayCommand,
@@ -749,12 +781,12 @@ mod tests {
             },
         };
 
-        let (mut host, target, _lock) = spawn_overlay_and_target()?;
+        let mut rig = spawn_overlay_and_target()?;
 
-        host.handle(OverlayCommand::Attach {
-            target_hwnd: target.0 as isize,
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
         });
-        host.handle(OverlayCommand::SetBlocks {
+        rig.host.handle(OverlayCommand::SetBlocks {
             blocks: vec![TranslatedBlock {
                 id: 1,
                 source: "了解".into(),
@@ -769,11 +801,12 @@ mod tests {
             content_width: 400,
             content_height: 300,
         });
-        host.apply_overlay(true);
+        rig.host.apply_overlay(true);
 
-        let surface = draw::SurfaceSize::new(host.surface_w.max(1), host.surface_h.max(1));
+        let surface = draw::SurfaceSize::new(rig.host.surface_w.max(1), rig.host.surface_h.max(1));
         let long = "I understand completely and will proceed with the request as written";
-        let (rect_h, font_h, _) = host
+        let (rect_h, font_h, _) = rig
+            .host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -802,7 +835,8 @@ mod tests {
                 h: 28,
             },
         ];
-        let (rect_boxed, font_boxed, _) = host
+        let (rect_boxed, font_boxed, _) = rig
+            .host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -816,21 +850,24 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
-        // Two tightly spaced source lines: 52px of ink is less than two lines plus padding.
+        // Two tightly spaced source lines: 52px of ink fits two wrapped lines without shrinking or widening.
         let two_line_base = SurfaceRect {
             x: 20,
             y: 150,
             w: 160,
             h: 28,
         };
-        let (rect_two, font_two, _) = host
+        let (rect_two, font_two, _) = rig
+            .host
             .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 160, h: 52, lines: 2 }, &[], surface)
             .map_err(|e| e.to_string())?;
         // Same ink span from one tilted line: shrink or widen instead of wrapping.
-        let (rect_tilt, font_tilt, _) = host
+        let (rect_tilt, font_tilt, _) = rig
+            .host
             .layout_label(two_line_base, "Please wait right here", SourceSpan { w: 160, h: 52, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
-        let (_, font_short, _) = host
+        let (_, font_short, _) = rig
+            .host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -844,7 +881,8 @@ mod tests {
                 surface,
             )
             .map_err(|e| e.to_string())?;
-        let (rect_v, _, vertical_en) = host
+        let (rect_v, _, vertical_en) = rig
+            .host
             .layout_label(
                 SurfaceRect {
                     x: 20,
@@ -864,10 +902,12 @@ mod tests {
             w: 20,
             h: 120,
         };
-        let (rect_cjk, _, vertical_cjk) = host
+        let (rect_cjk, _, vertical_cjk) = rig
+            .host
             .layout_label(column, "我完全了解，並會照著要求繼續處理這件事情。", SourceSpan { w: 20, h: 120, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
-        let (_, _, vertical_short) = host
+        let (_, _, vertical_short) = rig
+            .host
             .layout_label(column, "嗯？", SourceSpan { w: 20, h: 120, lines: 1 }, &[], surface)
             .map_err(|e| e.to_string())?;
 
@@ -878,24 +918,23 @@ mod tests {
             w: 120,
             h: 120,
         };
-        host.surface.ensure(surface.width, surface.height).map_err(|e| e.to_string())?;
-        host.surface.pixels().ok_or("paint bitmap missing")?.fill(0);
-        host.paint_label(label, "我完全了解", LabelStyle {
-            font_px: 16,
-            color: draw::Rgba::from_argb(0xFFFF_FFFF),
-            locale: "zh-TW",
-            vertical: true,
-            line_pitch: None,
-        })
-        .map_err(|e| e.to_string())?;
-        let buf = host.surface.pixels().ok_or("paint bitmap missing")?;
+        rig.host.surface.ensure(surface.width, surface.height).map_err(|e| e.to_string())?;
+        rig.host.surface.pixels().ok_or("paint bitmap missing")?.fill(0);
+        rig.host
+            .paint_label(label, "我完全了解", LabelStyle {
+                font_px: 16,
+                color: draw::Rgba::from_argb(0xFFFF_FFFF),
+                locale: "zh-TW",
+                vertical: true,
+                line_pitch: None,
+            })
+            .map_err(|e| e.to_string())?;
+        let buf = rig.host.surface.pixels().ok_or("paint bitmap missing")?;
         let ink_x: Vec<i32> = (label.y..label.y + label.h)
             .flat_map(|y| (label.x..label.x + label.w).map(move |x| (x, y)))
             .filter(|&(x, y)| buf[y as usize * surface.stride + x as usize * 4 + 3] > 0)
             .map(|(x, _)| x)
             .collect();
-        host.teardown();
-        let _ = unsafe { DestroyWindow(target) };
 
         // Column source: Han text stays in columns at the source height, growing left.
         if !vertical_cjk || !vertical_short || vertical_en {
@@ -908,12 +947,16 @@ mod tests {
             let min_x = ink_x.iter().min();
             return Err(format!("expected one column of ink at the right edge, got {} px from x={min_x:?}", ink_x.len()));
         }
-        if rect_v.w <= 20 {
-            return Err(format!("expected English over a column to widen, got {}", rect_v.w));
+        if rect_v.w <= 20 || rect_v.h != 200 || rect_v.x >= 20 {
+            return Err(format!(
+                "expected English over a 20x200 column to widen and wrap inside h=200 centered onto the canvas, got {rect_v:?}"
+            ));
         }
 
-        if rect_two.w != 160 || rect_two.h < 52 {
-            return Err(format!("two-line source must wrap onto its second line before widening, got {rect_two:?}"));
+        if rect_two.w != 160 || rect_two.h != 52 || font_two != font_short {
+            return Err(format!(
+                "two-line source must fit two lines in w=160 h=52 at source font {font_short}px, got {rect_two:?} at {font_two}px"
+            ));
         }
         if rect_tilt.w <= 160 && font_tilt >= font_two {
             return Err(format!("one tilted source line must shrink or widen before wrapping, got {rect_tilt:?} at {font_tilt}px"));
@@ -940,9 +983,48 @@ mod tests {
         if rect_h.h <= 28 {
             return Err(format!("expected wrapped height taller than the source line, got {}", rect_h.h));
         }
-        if rect_v.h <= 28 {
-            return Err(format!("expected vertical run to wrap taller than one line, got {}", rect_v.h));
-        }
+        Ok(())
+    }
+
+    #[test]
+    fn on_follow_event_drives_movesize_and_destroy_state_machine() -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+
+        use crate::{
+            command::{OverlayCommand, OverlayEvent},
+            host::wnd::PICKER_HIT_TEST,
+        };
+
+        let mut rig = spawn_overlay_and_target()?;
+        rig.host.handle(OverlayCommand::Attach {
+            target_hwnd: rig.target.0 as isize,
+        });
+        rig.host.apply_overlay(true);
+        assert!(rig.host.presented_rect.is_some());
+
+        assert!(rig.host.on_follow_event(EVENT_SYSTEM_MOVESIZESTART, rig.target));
+        assert!(rig.host.in_movesize);
+        assert!(!rig.host.on_follow_event(EVENT_OBJECT_REORDER, rig.target), "Z-order churn mid-drag must not schedule apply_overlay");
+
+        assert!(rig.host.on_follow_event(EVENT_SYSTEM_MOVESIZEEND, rig.target));
+        assert!(!rig.host.in_movesize);
+        assert!(rig.host.presented_rect.is_none());
+        assert!(rig.host.on_follow_event(EVENT_OBJECT_REORDER, rig.target), "Z-order events resume scheduling outside drag");
+
+        // Unrelated HWND destroy leaves target + picker intact.
+        rig.host.handle(OverlayCommand::BeginRegionSelect { regions: Vec::new() });
+        let other = HWND(0xDEADisize as *mut _);
+        assert!(rig.host.on_follow_event(EVENT_OBJECT_DESTROY, other));
+        assert_eq!(rig.host.target, Some(rig.target));
+        assert!(rig.host.picker.is_some());
+
+        // Target HWND destroy detaches target and cancels active picker.
+        assert!(rig.host.on_follow_event(EVENT_OBJECT_DESTROY, rig.target));
+        assert!(rig.host.target.is_none());
+        assert!(rig.host.picker.is_none());
+        assert_eq!(FOLLOW_TARGET.load(Ordering::Acquire), 0);
+        assert!(!PICKER_HIT_TEST.load(Ordering::Acquire));
+        assert!(matches!(rig.event_rx.try_recv(), Ok(OverlayEvent::RegionSelectCancelled)));
         Ok(())
     }
 }

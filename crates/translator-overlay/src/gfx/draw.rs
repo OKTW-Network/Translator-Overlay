@@ -237,13 +237,18 @@ mod tests {
         let mut buf = vec![0u8; 8 * 8 * 4];
         let surface = SurfaceSize::new(8, 8);
         stroke_rect(&mut buf, surface, SurfaceRect { x: 1, y: 1, w: 6, h: 6 }, Rgba::new(0, 0, 255, 255), 1);
-        // top-left of stroke: pixel (1, 1), stride 8
-        let i = (8 + 1) * 4;
-        assert_eq!(buf[i], 255); // B
-        assert_eq!(buf[i + 3], 255);
-        // interior pixel (3,3) untouched
-        let mid = (3 * 8 + 3) * 4;
-        assert_eq!(buf[mid + 3], 0);
+        for y in 0..8 {
+            for x in 0..8 {
+                let on_border = (1..=6).contains(&x) && (1..=6).contains(&y) && (x == 1 || x == 6 || y == 1 || y == 6);
+                let idx = (y * 8 + x) * 4;
+                let px = &buf[idx..idx + 4];
+                if on_border {
+                    assert_eq!(px, [255, 0, 0, 255], "expected blue border at ({x}, {y})");
+                } else {
+                    assert_eq!(px, [0, 0, 0, 0], "expected untouched pixel at ({x}, {y})");
+                }
+            }
+        }
     }
 
     #[test]
@@ -284,7 +289,6 @@ mod tests {
         let body = SurfaceRect { x: 0, y: 0, w: 200, h: 28 };
         let body_px = font_height_for(body);
         assert!((22..=24).contains(&body_px), "body line → ~23px font, got {body_px}");
-        assert!(body_px < 28, "font must stay under line box height");
 
         // Large title scales with box (not crushed to 20–28).
         let title = SurfaceRect { x: 0, y: 0, w: 300, h: 64 };
@@ -318,21 +322,58 @@ mod tests {
         let vertical = SurfaceRect { x: 0, y: 0, w: 24, h: 220 };
         let px = font_height_for(vertical);
         assert_eq!(px, 18, "vertical text should size from width less padding");
-        // Must not treat full column height as font size.
-        assert!(px < 40, "vertical text must not use full height, got {px}");
     }
 
     #[test]
-    fn place_label_shifts_up_past_the_bottom() {
+    fn place_label_shifts_up_and_clamps_all_edges() {
         let surface = SurfaceSize::new(200, 100);
-        let base = SurfaceRect {
-            x: 10,
-            y: 80,
-            w: 80,
-            h: 16,
-        };
-        let placed = place_label(base, 80, 40, surface);
-        assert_eq!(placed.y, 60);
-        assert_eq!(placed.h, 40);
+        let shifted_y = place_label(SurfaceRect::new(10, 80, 80, 16), 80, 40, surface);
+        assert_eq!(shifted_y, SurfaceRect::new(10, 60, 80, 40));
+
+        let shifted_x = place_label(SurfaceRect::new(-15, -5, 40, 20), 40, 20, surface);
+        assert_eq!(shifted_x, SurfaceRect::new(0, 0, 40, 20));
+
+        let right_edge = place_label(SurfaceRect::new(180, 90, 40, 20), 60, 30, surface);
+        assert_eq!(right_edge, SurfaceRect::new(140, 70, 60, 30));
+
+        let oversized = place_label(SurfaceRect::new(50, 50, 20, 20), 500, 300, surface);
+        assert_eq!(oversized, SurfaceRect::new(0, 0, 200, 100));
+    }
+
+    #[test]
+    fn map_rect_scales_or_keeps_one_to_one_and_clamps_oob() {
+        // 1:1 preserves exact 10x10 dimensions without forcing 24x22 readable minima.
+        let same = map_rect_to_surface(Rect::new(5.0, 6.0, 10.0, 10.0), 100, 100, 100, 100).unwrap();
+        assert_eq!(same, SurfaceRect::new(5, 6, 10, 10));
+
+        // Scaled path enforces 24x22 minima.
+        let scaled = map_rect_to_surface(Rect::new(10.0, 10.0, 2.0, 2.0), 100, 100, 200, 200).unwrap();
+        assert_eq!(scaled, SurfaceRect::new(20, 20, 24, 22));
+
+        // Partially OOB clips to surface; wholly OOB returns None.
+        let partial = map_rect_to_surface(Rect::new(-5.0, 90.0, 20.0, 20.0), 100, 100, 100, 100).unwrap();
+        assert_eq!(partial, SurfaceRect::new(0, 90, 15, 10));
+        assert!(map_rect_to_surface(Rect::new(120.0, 10.0, 20.0, 20.0), 100, 100, 100, 100).is_none());
+    }
+
+    #[test]
+    fn surface_rect_clamp_blend_over_and_rgba_from_argb() {
+        assert_eq!(SurfaceRect::new(-5, -5, 10, 10).clamp_to(20, 20), Some(SurfaceRect::new(0, 0, 5, 5)));
+        assert_eq!(SurfaceRect::new(20, 0, 10, 10).clamp_to(20, 20), None);
+        assert_eq!(SurfaceRect::new(0, 0, 0, 10).clamp_to(20, 20), None);
+        assert_eq!(Rgba::from_argb(0x8012_3456), Rgba::new(0x12, 0x34, 0x56, 0x80));
+
+        let mut buf = [10u8, 20, 40, 200];
+        blend_over(&mut buf, 0, Rgba::new(100, 150, 200, 0));
+        assert_eq!(buf, [10, 20, 40, 200]);
+
+        // Composite semi-transparent src over non-zero premultiplied dst
+        let mut semi = [100u8, 0, 0, 200];
+        blend_over(&mut semi, 0, Rgba::new(200, 0, 0, 128));
+        // B: (0*128 + 100*127)/255 = 49; R: (200*128 + 0*127)/255 = 100; A: 128 + (200*127)/255 = 227
+        assert_eq!(semi, [49, 0, 100, 227]);
+
+        blend_over(&mut semi, 0, Rgba::new(1, 2, 3, 255));
+        assert_eq!(semi, [3, 2, 1, 255]);
     }
 }

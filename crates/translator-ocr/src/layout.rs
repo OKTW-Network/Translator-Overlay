@@ -209,6 +209,43 @@ mod tests {
             (TEXT, 0.9, [120.0, 110.0, 300.0, 190.0]),
         ];
         assert_eq!(rects(&boxes), [[100.0, 100.0, 600.0, 200.0]]);
+
+        // CHART is a NON_TEXT figure that filter_boxes normally spares TEXT inside;
+        // only KEEP_LARGE drops the contained TEXT here.
+        let chart_with_text = [
+            (CHART, 0.9, [100.0, 100.0, 600.0, 600.0]),
+            (TEXT, 0.9, [150.0, 150.0, 400.0, 300.0]),
+        ];
+        assert!(rects(&chart_with_text).is_empty());
+    }
+
+    #[test]
+    fn inline_formula_and_cross_class_nms_and_non_text_filters() {
+        // INLINE_FORMULA drops when overlapping TEXT by > 50% (without being >= 90% contained
+        // in KEEP_LARGE), even when INLINE_FORMULA has the larger area.
+        let formula = [
+            (INLINE_FORMULA, 0.9, [100.0, 100.0, 200.0, 140.0]),
+            (TEXT, 0.9, [140.0, 100.0, 220.0, 140.0]),
+        ];
+        assert_eq!(rects(&formula), [[140.0, 100.0, 220.0, 140.0]]);
+
+        // Cross-class NMS >= 0.98 drops the lower-scored box even across IMAGE/TEXT.
+        let cross_nms = [
+            (IMAGE, 0.95, [100.0, 100.0, 300.0, 200.0]),
+            (TEXT, 0.50, [100.0, 100.0, 300.0, 200.0]),
+        ];
+        assert!(rects(&cross_nms).is_empty());
+
+        // Strict > THRESHOLD (0.3) and non-text classes.
+        let boundaries = [
+            (TEXT, 0.3, [10.0, 10.0, 100.0, 50.0]),
+            (TEXT, 0.31, [10.0, 60.0, 100.0, 100.0]),
+            (SEAL, 0.9, [10.0, 110.0, 100.0, 150.0]),
+            (HEADER_IMAGE, 0.9, [10.0, 160.0, 100.0, 200.0]),
+            (FOOTER_IMAGE, 0.9, [10.0, 210.0, 100.0, 250.0]),
+            (TEXT, 0.9, [1100.0, 10.0, 1200.0, 50.0]),
+        ];
+        assert_eq!(rects(&boundaries), [[10.0, 60.0, 100.0, 100.0]]);
     }
 
     #[test]

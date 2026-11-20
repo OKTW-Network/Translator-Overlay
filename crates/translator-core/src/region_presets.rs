@@ -95,46 +95,52 @@ pub fn sanitize_regions(regions: &[NormRect]) -> Vec<NormRect> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
+
+    use tempfile::tempdir;
 
     use super::*;
-
-    fn temp_path(name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        std::env::temp_dir().join(format!("translator_overlay_presets_{name}_{nanos}.toml"))
-    }
 
     fn sample_regions() -> Vec<NormRect> {
         vec![NormRect::new(0.02, 0.80, 0.40, 0.18), NormRect::new(0.70, 0.05, 0.28, 0.12)]
     }
 
+    fn assert_rect_near(actual: NormRect, expected: (f32, f32, f32, f32)) {
+        assert!((actual.x - expected.0).abs() < 1e-5, "{actual:?} != {expected:?}");
+        assert!((actual.y - expected.1).abs() < 1e-5, "{actual:?} != {expected:?}");
+        assert!((actual.width - expected.2).abs() < 1e-5, "{actual:?} != {expected:?}");
+        assert!((actual.height - expected.3).abs() < 1e-5, "{actual:?} != {expected:?}");
+    }
+
     #[test]
-    fn roundtrip_named_preset() {
-        let path = temp_path("roundtrip");
-        let _ = fs::remove_file(&path);
+    fn roundtrip_named_preset_and_multi_preset() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("region-presets.toml");
         let mut file = RegionPresetFile::default();
         file.upsert("HUD".into(), sample_regions());
+        file.upsert("Dialog".into(), vec![NormRect::new(0.1, 0.7, 0.8, 0.25)]);
         file.save(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("[[presets]]\n"), "{text}");
         assert!(text.contains("name = \"HUD\"\n"), "{text}");
+        assert!(text.contains("name = \"Dialog\"\n"), "{text}");
         assert!(text.contains("x = 0.02"), "{text}");
         assert!(!text.contains("[[presets.regions]]"), "{text}");
+
         let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
-        assert_eq!(loaded.presets.len(), 1);
+        assert_eq!(loaded.presets.len(), 2);
         assert_eq!(loaded.presets[0].name, "HUD");
-        assert_eq!(loaded.presets[0].regions, sanitize_regions(&sample_regions()));
-        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.presets[0].regions.len(), 2);
+        assert_rect_near(loaded.presets[0].regions[0], (0.02, 0.80, 0.40, 0.18));
+        assert_rect_near(loaded.presets[0].regions[1], (0.70, 0.05, 0.28, 0.12));
+        assert_eq!(loaded.presets[1].name, "Dialog");
+        assert_rect_near(loaded.presets[1].regions[0], (0.1, 0.7, 0.8, 0.25));
     }
 
     #[test]
     fn legacy_array_of_tables_still_loads() {
-        let path = temp_path("legacy");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("region-presets.toml");
         fs::write(
             &path,
             r#"
@@ -159,29 +165,24 @@ height = 0.12
         assert_eq!(loaded.presets.len(), 1);
         assert_eq!(loaded.presets[0].name, "HUD");
         assert_eq!(loaded.presets[0].regions.len(), 2);
-        let region = loaded.presets[0].regions[1];
-        assert!((region.x - 0.7).abs() < 1e-5, "{region:?}");
-        assert!((region.y - 0.05).abs() < 1e-5, "{region:?}");
-        assert!((region.width - 0.28).abs() < 1e-5, "{region:?}");
-        assert!((region.height - 0.12).abs() < 1e-5, "{region:?}");
-        let _ = fs::remove_file(&path);
+        assert_rect_near(loaded.presets[0].regions[0], (0.02, 0.8, 0.4, 0.18));
+        assert_rect_near(loaded.presets[0].regions[1], (0.7, 0.05, 0.28, 0.12));
     }
 
     #[test]
     fn empty_save_writes_empty_array() {
-        let path = temp_path("empty");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("region-presets.toml");
         RegionPresetFile::default().save(&path).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "presets = []\n");
         let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
         assert!(loaded.presets.is_empty());
-        let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn missing_file_is_empty_and_does_not_create() {
-        let path = temp_path("missing");
-        let _ = fs::remove_file(&path);
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("region-presets.toml");
         let loaded = RegionPresetFile::load_or_empty_at(&path).unwrap();
         assert!(loaded.presets.is_empty());
         assert!(!path.exists());
@@ -206,8 +207,30 @@ height = 0.12
         assert_eq!(cleaned.len(), 1);
         assert!(validate_preset("  ", &cleaned).is_err());
         assert!(validate_preset("ok", &[]).is_err());
+        assert!(validate_preset("ok", &[NormRect::new(0.0, 0.0, 0.001, 0.5)]).is_err());
         let (name, regions) = validate_preset("  ok  ", &bad).unwrap();
         assert_eq!(name, "ok");
         assert_eq!(regions.len(), 1);
+
+        let mut file = RegionPresetFile {
+            presets: vec![
+                RegionPreset {
+                    name: "  ".into(),
+                    regions: sample_regions(),
+                },
+                RegionPreset {
+                    name: "EmptyAfterSanitize".into(),
+                    regions: vec![NormRect::new(0.0, 0.0, 0.001, 0.5)],
+                },
+                RegionPreset {
+                    name: "  Kept  ".into(),
+                    regions: bad.to_vec(),
+                },
+            ],
+        };
+        file.sanitize_in_place();
+        assert_eq!(file.presets.len(), 1);
+        assert_eq!(file.presets[0].name, "Kept");
+        assert_eq!(file.presets[0].regions.len(), 1);
     }
 }

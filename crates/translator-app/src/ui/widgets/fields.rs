@@ -428,3 +428,23 @@ impl ColorField {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod last_tests {
+    use super::*;
+
+    #[test]
+    fn last_tracks_echoes_and_shared_clones() {
+        let last = Last::<String>::default();
+        let clone = last.clone();
+        assert!(!clone.is(&"a".into()));
+        assert!(last.changed(&"a".into()));
+        assert!(clone.is(&"a".into()));
+        assert!(!last.changed(&"a".into()));
+        assert!(last.changed(&"b".into()));
+        assert!(clone.is(&"b".into()));
+        clone.forget();
+        assert!(!last.is(&"b".into()));
+        assert!(last.changed(&"b".into()));
+    }
+}

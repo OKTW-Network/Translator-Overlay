@@ -1063,4 +1063,72 @@ mod tests {
         // Without a system message, 7B's first user turn opens with `<|startoftext|>`.
         assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&messages[1..2], false), "<|startoftext|> u1<|extra_0|>");
     }
+
+    #[test]
+    fn memory_estimate_covers_gguf_and_onnx_across_devices() {
+        let gemma_gguf = find("gemma-4-e4b-it-qat-gguf-q4_k_xl").unwrap();
+        let hymt_gguf = find("hy-mt2-1.8b-gguf-q4_k_m").unwrap();
+        let onnx_q4 = find("gemma-4-e4b-it-qat-q4").unwrap();
+        let onnx_q4f16 = find("gemma-4-e4b-it-qat-q4f16").unwrap();
+
+        assert_eq!(gemma_gguf.memory_estimate(OcrDevice::Cpu, 4096).0, 0, "CPU uses no VRAM");
+
+        // GPU GGUF: DirectML matches WebGPU; context grows VRAM only.
+        let (vram_gpu_h4, ram_gpu_h4) = hymt_gguf.memory_estimate(OcrDevice::Webgpu, 4096);
+        let (vram_gpu_h8, ram_gpu_h8) = hymt_gguf.memory_estimate(OcrDevice::Webgpu, 8192);
+        assert_eq!(hymt_gguf.memory_estimate(OcrDevice::Directml, 4096), (vram_gpu_h4, ram_gpu_h4));
+        assert_eq!(ram_gpu_h8, ram_gpu_h4);
+        assert!(vram_gpu_h8 > vram_gpu_h4);
+
+        // ONNX: no DirectML estimate; WebGPU context grows VRAM only, CPU grows RAM only.
+        assert_eq!(onnx_q4.memory_estimate(OcrDevice::Directml, 4096), (0, 0));
+        let (vram_w4, ram_w4) = onnx_q4.memory_estimate(OcrDevice::Webgpu, 4096);
+        let (vram_w8, ram_w8) = onnx_q4.memory_estimate(OcrDevice::Webgpu, 8192);
+        assert_eq!(ram_w4, ram_w8);
+        assert!(vram_w8 > vram_w4);
+
+        let (vram_c4, ram_c4) = onnx_q4f16.memory_estimate(OcrDevice::Cpu, 4096);
+        let (vram_c8, ram_c8) = onnx_q4f16.memory_estimate(OcrDevice::Cpu, 8192);
+        assert_eq!((vram_c4, vram_c8), (0, 0));
+        assert!(ram_c8 > ram_c4);
+    }
+
+    #[test]
+    fn render_prompt_handles_empty_and_whitespace_system_prompts() {
+        let user = ChatMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            reasoning_content: None,
+        };
+        let empty_sys = ChatMessage {
+            role: "system".into(),
+            content: "".into(),
+            reasoning_content: None,
+        };
+        let ws_sys = ChatMessage {
+            role: "system".into(),
+            content: "  \t\n ".into(),
+            reasoning_content: None,
+        };
+
+        assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&[empty_sys.clone(), user.clone()], false), "<|startoftext|>hi<|extra_0|>");
+        assert_eq!(
+            BuiltinArch::Qwen3_5.render_prompt(&[ws_sys.clone(), user.clone()], false),
+            "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        );
+        assert_eq!(
+            BuiltinArch::Gemma4.render_prompt(&[ws_sys, user.clone()], false),
+            "<bos><|turn>system\n<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n"
+        );
+        assert!(
+            BuiltinArch::HyMt2Small
+                .render_prompt(&[empty_sys.clone(), user.clone()], false)
+                .contains("<｜hy_place▁holder▁no▁3｜>")
+        );
+        assert!(
+            BuiltinArch::HyMt2Moe
+                .render_prompt(&[empty_sys, user], false)
+                .starts_with("<｜hy_begin▁of▁sentence｜><｜reasoning_mode｜>")
+        );
+    }
 }

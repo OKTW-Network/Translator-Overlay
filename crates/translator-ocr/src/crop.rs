@@ -92,9 +92,31 @@ mod tests {
     fn crop_rejects_tiny_and_oob() {
         let rgba = solid(32, 32, 1, 2, 3, 255);
         assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 4.0, 4.0)).is_none());
+        assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 8.0, 7.0)).is_none());
+        assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 7.0, 8.0)).is_none());
+        assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 8.0, 8.0)).is_some());
         assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(40.0, 40.0, 10.0, 10.0)).is_none());
-        assert!(crop_to_rgb8(32, 32, &rgba, Rect::new(0.0, 0.0, 16.0, 16.0)).is_some());
+        assert!(crop_to_rgb8(0, 32, &[], Rect::new(0.0, 0.0, 8.0, 8.0)).is_none());
+        assert!(crop_to_rgb8(32, 0, &[], Rect::new(0.0, 0.0, 8.0, 8.0)).is_none());
+        assert!(crop_to_rgb8(u32::MAX, u32::MAX, &[], Rect::new(0.0, 0.0, 8.0, 8.0)).is_none());
         assert!(crop_to_rgb8(32, 32, &rgba[..rgba.len() - 1], Rect::new(0.0, 0.0, 16.0, 16.0)).is_none(), "short buffer");
+    }
+
+    #[test]
+    fn partial_oob_clamps_origin_and_preserves_pixels() {
+        let (w, h) = (16u32, 16u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // Pixel (2, 1) in source.
+        let i = (w + 2) as usize * 4;
+        rgba[i..i + 4].copy_from_slice(&[11, 22, 33, 255]);
+
+        let clamped = crop_to_rgb8(w, h, &rgba, Rect::new(-4.0, -2.0, 14.0, 12.0)).unwrap();
+        assert_eq!((clamped.x, clamped.y, clamped.width, clamped.height), (0, 0, 10, 10));
+        let dest = (10 + 2) * 3;
+        assert_eq!(&clamped.rgb[dest..dest + 3], &[11, 22, 33]);
+
+        let bottom_right = crop_to_rgb8(w, h, &rgba, Rect::new(8.0, 8.0, 20.0, 20.0)).unwrap();
+        assert_eq!((bottom_right.x, bottom_right.y, bottom_right.width, bottom_right.height), (8, 8, 8, 8));
     }
 
     #[test]

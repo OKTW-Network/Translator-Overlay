@@ -223,3 +223,42 @@ impl<T: PartialEq> Prop<T> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prop_caches_on_success_skips_repeat_and_does_not_cache_err() {
+        let mut p = Prop::default();
+        let mut calls = 0;
+
+        let err = translator_winui::Error::empty();
+        assert!(
+            p.set(10, |_| {
+                calls += 1;
+                Err(err.clone())
+            })
+            .is_err()
+        );
+        // Because apply failed, repeating the same value must still invoke apply.
+        p.set(10, |&v| {
+            assert_eq!(v, 10);
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        p.set(10, |_| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        p.set(20, |&v| {
+            assert_eq!(v, 20);
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+    }
+}

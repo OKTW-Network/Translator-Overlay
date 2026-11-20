@@ -397,15 +397,6 @@ mod tests {
     }
 
     #[test]
-    fn tilted_line_height_uses_quad_short_side() {
-        // 100×20 parallelogram with 10px of vertical shear. AABB is 30px tall.
-        let bb = quad([(0.0, 10.0), (100.0, 20.0), (100.0, 40.0), (0.0, 30.0)]);
-        let r = region_box(&bb).0;
-        assert!((r.width - 100.0).abs() < 0.01, "keep AABB width, got {}", r.width);
-        assert!((r.height - 20.0).abs() < 0.5, "glyph box is 20px, got {}", r.height);
-    }
-
-    #[test]
     fn narrow_horizontal_cell_keeps_height() {
         // w < h but not a vertical run: height must not come from the shorter width.
         let bb = upright(0.0, 0.0, 16.0, 22.0);
@@ -415,24 +406,17 @@ mod tests {
     }
 
     #[test]
-    fn vertical_run_width_uses_quad_short_side() {
-        let bb = upright(10.0, 0.0, 30.0, 200.0);
-        let r = region_box(&bb).0;
-        assert!((r.width - 20.0).abs() < 0.01);
-        assert!((r.height - 200.0).abs() < 0.01);
-    }
-
-    #[test]
     fn cover_height_keeps_aabb_when_line_is_tilted() {
         let bb = quad([(0.0, 10.0), (100.0, 20.0), (100.0, 40.0), (0.0, 30.0)]);
         let (bbox, cover_h, cover_w) = region_box(&bb);
+        assert!((bbox.width - 100.0).abs() < 0.01, "keep AABB width, got {}", bbox.width);
         assert!((bbox.height - 20.0).abs() < 0.5, "h={}", bbox.height);
         assert!((cover_h - 30.0).abs() < 0.5, "cover_h={}", cover_h);
         assert!((cover_w - 100.0).abs() < 0.5, "cover_w={}", cover_w);
     }
 
     #[test]
-    fn cover_width_keeps_aabb_when_column_is_tilted() {
+    fn cover_width_and_vertical_quad_handle_shear_and_rotation() {
         // 20-wide × 200-tall parallelogram with 10px of horizontal shear. AABB is 30px wide.
         let bb = quad([(10.0, 0.0), (30.0, 0.0), (40.0, 200.0), (20.0, 200.0)]);
         let (bbox, cover_h, cover_w) = region_box(&bb);
@@ -440,5 +424,37 @@ mod tests {
         assert!((bbox.height - 200.0).abs() < 0.5, "h={}", bbox.height);
         assert!((cover_w - 30.0).abs() < 0.5, "cover_w={}", cover_w);
         assert!((cover_h - 200.0).abs() < 0.5, "cover_h={}", cover_h);
+
+        // Edge 0→1 vertical (~90° rotated column): quad_sides branches to (!a_horizontal).
+        let rot = quad([(30.0, 0.0), (35.0, 200.0), (15.0, 200.0), (10.0, 0.0)]);
+        let (rbbox, _, rcover_w) = region_box(&rot);
+        assert!((rbbox.width - 20.0).abs() < 0.5, "w={}", rbbox.width);
+        assert!((rcover_w - 25.0).abs() < 0.5, "cover_w={}", rcover_w);
+
+        // Degenerate zero-area quad falls back to AABB without NaN.
+        let flat = quad([(5.0, 10.0), (5.0, 10.0), (25.0, 10.0), (25.0, 10.0)]);
+        let (fb, ch, cw) = region_box(&flat);
+        assert!((fb.width - 20.0).abs() < 0.01 && fb.height == 0.0 && ch == 0.0 && cw == 20.0);
+    }
+
+    #[test]
+    fn blocks_from_page_filters_threshold_single_chars_and_merges() {
+        let cfg = LineMergeConfig {
+            mode: LineMergeMode::Off,
+            ..Default::default()
+        };
+        let lines = vec![
+            (upright(10.0, 10.0, 60.0, 30.0), "  keep  ".into(), 0.5),
+            (upright(10.0, 40.0, 60.0, 60.0), "low".into(), 0.49),
+            (upright(10.0, 70.0, 60.0, 90.0), "   ".into(), 0.9),
+            (upright(10.0, 100.0, 30.0, 120.0), "V".into(), 0.9),
+            (upright(10.0, 130.0, 30.0, 150.0), "あ".into(), 0.9),
+        ];
+
+        let filtered = OcrEngine::blocks_from_page((lines.clone(), Vec::new()), 1080, false, 0.5, true, &cfg);
+        assert_eq!(filtered.iter().map(|b| (b.id, b.text.as_str())).collect::<Vec<_>>(), [(0, "keep"), (1, "あ")]);
+
+        let unfiltered = OcrEngine::blocks_from_page((lines, Vec::new()), 1080, false, 0.5, false, &cfg);
+        assert_eq!(unfiltered.iter().map(|b| (b.id, b.text.as_str())).collect::<Vec<_>>(), [(0, "keep"), (1, "V"), (2, "あ")]);
     }
 }

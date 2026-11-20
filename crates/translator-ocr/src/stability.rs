@@ -157,6 +157,10 @@ mod tests {
 
     use super::*;
 
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
     fn block(text: &str) -> OcrBlock {
         OcrBlock {
             id: 0,
@@ -174,12 +178,16 @@ mod tests {
     }
 
     #[test]
-    fn cold_start_ready_after_two_hits() {
+    fn cold_start_ready_and_non_consecutive_reset() {
         let mut gate = StabilityGate::new(0);
-        let fp = fingerprint("hello");
-        assert_matches!(gate.observe(fp), StabilityOutcome::Waiting { .. });
-        assert_matches!(gate.observe(fp), StabilityOutcome::Ready { .. });
-        assert_matches!(gate.observe(fp), StabilityOutcome::AlreadyEmitted { .. });
+        let a = fingerprint("hello");
+        let b = fingerprint("other");
+        assert_matches!(gate.observe(a), StabilityOutcome::Waiting { .. });
+        // Non-consecutive hit resets consecutive counter.
+        assert_matches!(gate.observe(b), StabilityOutcome::Waiting { .. });
+        assert_matches!(gate.observe(a), StabilityOutcome::Waiting { .. });
+        assert_matches!(gate.observe(a), StabilityOutcome::Ready { fingerprint, .. } if fingerprint == a);
+        assert_matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { fingerprint } if fingerprint == a);
     }
 
     #[test]
@@ -223,44 +231,39 @@ mod tests {
     #[test]
     fn thrashing_force_ready_after_max_wait() {
         // Never two identical hits in a row, so only max_wait can end the a, b, a thrash.
+        let t0 = Instant::now();
         let mut gate = StabilityGate::new(80);
         let a = fingerprint("alpha");
         let b = fingerprint("beta");
 
-        assert_matches!(gate.observe(a), StabilityOutcome::Waiting { .. });
-        std::thread::sleep(Duration::from_millis(40));
-        assert_matches!(gate.observe(b), StabilityOutcome::Waiting { .. });
-        std::thread::sleep(Duration::from_millis(50));
-        // Total wait ≥ 80ms across switches → force translate latest.
+        assert_matches!(gate.observe_at(a, t0), StabilityOutcome::Waiting { .. });
+        assert_matches!(gate.observe_at(b, t0 + ms(40)), StabilityOutcome::Waiting { .. });
+        // Total wait >= 80ms across switches -> force translate latest.
         assert_matches!(
-            gate.observe(a),
+            gate.observe_at(a, t0 + ms(90)),
             StabilityOutcome::Ready {
                 fingerprint: fp,
-                ..
+                elapsed_ms: 90,
             } if fp == a
         );
     }
 
     #[test]
     fn post_emit_thrash_force_ready_without_two_identical_hits() {
-        // After the first translate, alternating A and B never gives B two hits in a row,
-        // alone, but max_wait must still force re-translate with latest B.
+        let t0 = Instant::now();
         let mut gate = StabilityGate::new(90);
         let a = fingerprint("line-a");
         let b = fingerprint("line-b");
 
-        let _ = gate.observe(a);
-        assert_matches!(gate.observe(a), StabilityOutcome::Ready { .. });
-        // Alternating blips: each is only one hit of the other fp.
-        assert_matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. });
-        assert_matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. });
-        std::thread::sleep(Duration::from_millis(50));
-        assert_matches!(gate.observe(b), StabilityOutcome::AlreadyEmitted { .. });
-        assert_matches!(gate.observe(a), StabilityOutcome::AlreadyEmitted { .. });
-        std::thread::sleep(Duration::from_millis(50));
-        // Wait clock must survive returns to A; force Ready with divergent B.
+        let _ = gate.observe_at(a, t0);
+        assert_matches!(gate.observe_at(a, t0), StabilityOutcome::Ready { .. });
+        assert_matches!(gate.observe_at(b, t0 + ms(10)), StabilityOutcome::AlreadyEmitted { .. });
+        assert_matches!(gate.observe_at(a, t0 + ms(20)), StabilityOutcome::AlreadyEmitted { .. });
+        assert_matches!(gate.observe_at(b, t0 + ms(60)), StabilityOutcome::AlreadyEmitted { .. });
+        assert_matches!(gate.observe_at(a, t0 + ms(70)), StabilityOutcome::AlreadyEmitted { .. });
+        // Wait clock survived returns to A; force Ready at 10 + 100 = 110ms (>= 90ms).
         assert_matches!(
-            gate.observe(b),
+            gate.observe_at(b, t0 + ms(110)),
             StabilityOutcome::Ready {
                 fingerprint: fp,
                 ..
@@ -269,49 +272,69 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_ignores_ocr_punct_fold() {
+    fn thrash_resolved_after_max_wait_clears_unstable_since() {
+        let t0 = Instant::now();
+        let mut gate = StabilityGate::new(80);
+        let a = fingerprint("alpha");
+        let b = fingerprint("beta");
+        let c = fingerprint("gamma");
+
+        let _ = gate.observe_at(a, t0);
+        assert_matches!(gate.observe_at(a, t0), StabilityOutcome::Ready { .. });
+        // Blip B starts unstable_since at t0 + 10ms, then stays on A past max_wait.
+        assert_matches!(gate.observe_at(b, t0 + ms(10)), StabilityOutcome::AlreadyEmitted { .. });
+        assert_matches!(gate.observe_at(a, t0 + ms(100)), StabilityOutcome::AlreadyEmitted { .. });
+        // unstable_since was cleared, so a single new blip C must NOT force-emit.
+        assert_matches!(gate.observe_at(c, t0 + ms(105)), StabilityOutcome::AlreadyEmitted { fingerprint } if fingerprint == a);
+    }
+
+    #[test]
+    fn fingerprint_normalizes_ignores_jitter_order_and_blank_blocks() {
         assert_eq!(OcrFingerprint::from_blocks(&[block("待って…")]), OcrFingerprint::from_blocks(&[block("待って………")]));
         assert_eq!(OcrFingerprint::from_blocks(&[block("待って…")]), OcrFingerprint::from_blocks(&[block("待って")]));
         assert_eq!(OcrFingerprint::from_blocks(&[block("何？")]), OcrFingerprint::from_blocks(&[block("何?")]));
         assert_eq!(OcrFingerprint::from_blocks(&[block("そう〜")]), OcrFingerprint::from_blocks(&[block("そう~")]));
         assert_eq!(OcrFingerprint::from_blocks(&[block("そう～")]), OcrFingerprint::from_blocks(&[block("そう~")]));
-    }
+        assert_eq!(OcrFingerprint::from_blocks(&[]), OcrFingerprint::from_blocks(&[block("   \t ")]));
+        assert_ne!(OcrFingerprint::from_blocks(&[block("A")]), OcrFingerprint::from_blocks(&[block("A"), block("A")]));
 
-    #[test]
-    fn fingerprint_ignores_bbox_jitter() {
         let a = OcrBlock {
-            id: 0,
-            text: "Hello".into(),
-            confidence: 0.9,
             bbox: Rect::new(10.0, 10.0, 100.0, 20.0),
-            source_lines: 1,
-            source_height: 20.0,
-            source_width: 100.0,
+            ..block("Hello")
         };
         let b = OcrBlock {
-            id: 0,
-            text: "Hello".into(),
-            confidence: 0.9,
             bbox: Rect::new(14.0, 18.0, 98.0, 22.0),
-            source_lines: 1,
-            source_height: 22.0,
-            source_width: 98.0,
+            ..block("Hello")
         };
-        assert_eq!(OcrFingerprint::from_blocks(&[a]), OcrFingerprint::from_blocks(&[b]));
+        assert_eq!(OcrFingerprint::from_blocks(std::slice::from_ref(&a)), OcrFingerprint::from_blocks(&[b]));
+
+        let mut two = block("two");
+        two.bbox.y = 40.0;
+        assert_eq!(OcrFingerprint::from_blocks(&[a.clone(), two.clone()]), OcrFingerprint::from_blocks(&[two, a]));
     }
 
     #[test]
-    fn fingerprint_ignores_block_order() {
-        let a = block("one");
-        let mut b = block("two");
-        b.bbox.y = 40.0;
-        assert_eq!(OcrFingerprint::from_blocks(&[a.clone(), b.clone()]), OcrFingerprint::from_blocks(&[b, a]));
-    }
-
-    #[test]
-    fn force_emit_bypasses_wait() {
+    fn force_emit_bypasses_wait_and_records_emitted() {
+        let t0 = Instant::now();
         let mut gate = StabilityGate::new(10_000);
-        let fp = fingerprint("now");
-        assert_matches!(gate.force_emit(fp), StabilityOutcome::Ready { elapsed_ms: 0, .. });
+        let old = fingerprint("old");
+        let now = fingerprint("now");
+        assert_matches!(gate.observe_at(old, t0), StabilityOutcome::Waiting { .. });
+        assert_matches!(
+            gate.force_emit(now),
+            StabilityOutcome::Ready {
+                fingerprint,
+                elapsed_ms: 0,
+            } if fingerprint == now
+        );
+        assert_matches!(
+            gate.observe_at(now, t0 + ms(50)),
+            StabilityOutcome::AlreadyEmitted { fingerprint } if fingerprint == now
+        );
+        // Earlier pending state was cleared: a single `old` hit waits/stays AlreadyEmitted, not Ready.
+        assert_matches!(
+            gate.observe_at(old, t0 + ms(60)),
+            StabilityOutcome::AlreadyEmitted { fingerprint } if fingerprint == now
+        );
     }
 }

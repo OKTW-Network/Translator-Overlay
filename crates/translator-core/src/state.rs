@@ -214,36 +214,10 @@ mod tests {
         assert_eq!(ids, vec![3, 2, 1]);
         assert_eq!(state.history.front().unwrap().source_text, "s3");
         assert_eq!(state.history.back().unwrap().source_text, "s1");
-    }
 
-    #[test]
-    fn restore_operational_status_prefers_paused() {
-        let mut state = AppState::new(AppConfig::default());
-        state.auto_running = true;
-        state.capture_paused = true;
-        state.translate_in_flight = true;
-        state.restore_operational_status();
-        assert_eq!(state.status, PipelineStatus::Paused);
-    }
-
-    #[test]
-    fn restore_operational_status_shows_captions_while_capturing() {
-        let mut state = AppState::new(AppConfig::default());
-        state.auto_running = true;
-        state.restore_operational_status();
-        assert_eq!(state.status, PipelineStatus::Capturing);
-        state.latest_translated_blocks.push(TranslatedBlock {
-            id: 0,
-            source: "a".into(),
-            translation: "b".into(),
-            confidence: 1.0,
-            bbox: crate::types::Rect::new(0.0, 0.0, 1.0, 1.0),
-            source_lines: 1,
-            source_height: 1.0,
-            source_width: 1.0,
-        });
-        state.restore_operational_status();
-        assert_eq!(state.status, PipelineStatus::OverlayActive);
+        state.push_history("s4".into(), "t4".into(), 0);
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].source_text, "s4");
     }
 
     #[test]
@@ -256,5 +230,8 @@ mod tests {
         assert!(entry.covered_by("cached\nnew line", "快取\n新行"));
         assert!(entry.covered_by("new line", "新行"));
         assert!(!entry.covered_by("cached", "快取"));
+        assert!(!entry.covered_by("new line", "別行"));
+        assert!(!entry.covered_by("other", "新行"));
+        assert!(!entry.covered_by("new line extra", "新行"));
     }
 }

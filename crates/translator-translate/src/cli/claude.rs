@@ -502,12 +502,31 @@ mod tests {
     }
 
     #[test]
-    fn result_text_is_fallback_when_nothing_streamed() {
+    fn apply_event_handles_error_array_and_non_success_subtype() {
         let mut text = String::new();
         let mut saw_tool = false;
-        let result = serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": "{\"b\":[]}" });
-        assert_eq!(apply_event(&result, &mut text, &mut saw_tool), TurnStep::Done("{\"b\":[]}".into()));
-        assert!(text.is_empty());
+        let with_errors = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": true,
+            "result": "",
+            "errors": ["first error", "second error"]
+        });
+        let TurnStep::Failed(msg) = apply_event(&with_errors, &mut text, &mut saw_tool) else {
+            panic!("expected failure");
+        };
+        assert_eq!(msg, "Claude Code turn failed: first error; second error");
+
+        let non_success_subtype = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": false,
+            "result": ""
+        });
+        let TurnStep::Failed(msg) = apply_event(&non_success_subtype, &mut text, &mut saw_tool) else {
+            panic!("expected failure for non-success subtype even when is_error is false");
+        };
+        assert_eq!(msg, "Claude Code turn failed: error_during_execution");
     }
 
     #[test]
@@ -523,6 +542,80 @@ mod tests {
         });
         assert_eq!(models_from_initialize(&response), ["sonnet", "haiku"]);
         assert!(models_from_initialize(&serde_json::json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompt_handles_result_fallback_streaming_empty_tool_and_auth_error() {
+        let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let program = Path::new(&system_root).join("System32\\sort.exe");
+        let StdioChild {
+            child,
+            stdin,
+            stdout: _stdout,
+            stderr_tail,
+        } = spawn_stdio(&program, &[], &std::env::temp_dir(), &[]).expect("spawn sort.exe");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut session = ClaudeSession {
+            child,
+            stdin: Some(stdin),
+            rx,
+            stderr_tail,
+        };
+        let cancel = CancellationToken::new();
+        let timeout = Duration::from_secs(5);
+
+        // 1. Empty stream falls back to `result` field.
+        let mut partials = Vec::new();
+        tx.send(serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": "fallback text"}))
+            .unwrap();
+        let out = session
+            .prompt("u1", &cancel, timeout, &mut |p| partials.push(p.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "fallback text");
+        assert!(partials.is_empty());
+
+        // 2. Non-empty streamed text takes priority over `result` and triggers partial callbacks.
+        tx.send(delta("hel")).unwrap();
+        tx.send(delta("lo")).unwrap();
+        tx.send(serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": "ignored"}))
+            .unwrap();
+        let out = session
+            .prompt("u2", &cancel, timeout, &mut |p| partials.push(p.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(out, "hello");
+        assert_eq!(partials, ["hel", "hello"]);
+
+        // 3. Whitespace-only delta and whitespace-only result fail with "no assistant text".
+        tx.send(delta("   ")).unwrap();
+        tx.send(serde_json::json!({"type": "result", "subtype": "success", "is_error": false, "result": "  "}))
+            .unwrap();
+        let err = session.prompt("u3", &cancel, timeout, &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains("no assistant text")), "{err:?}");
+
+        // 4. Tool invocation aborts the turn immediately without waiting for `result`.
+        tx.send(serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_start", "content_block": { "type": "tool_use" } }
+        }))
+        .unwrap();
+        let err = session.prompt("u4", &cancel, timeout, &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains("invoked a tool")), "{err:?}");
+
+        // 5. Auth error in `result` is mapped to AUTH_HINT.
+        tx.send(serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": "Not logged in · Please run /login"
+        }))
+        .unwrap();
+        let err = session.prompt("u5", &cancel, timeout, &mut |_| {}).await.unwrap_err();
+        assert!(matches!(err, TranslateError::CliProtocol(ref m) if m.contains(AUTH_HINT)), "{err:?}");
+
+        session.close().await;
     }
 
     /// Live end-to-end check against the locally installed, logged-in Claude Code.

@@ -594,6 +594,11 @@ mod tests {
         inner.snap.hotkeys.set(HotkeyAction::Stop, Some(chord("a")));
         inner.snap.can[HotkeyAction::Stop as usize] = true;
         assert_matches!(step(&mut inner, key(u16::from(b'A'), false, false), true), Step::Fire(HotkeyAction::StartPause));
+        release(&mut inner, u16::from(b'A'));
+
+        // When the first-matched action cannot run, do not fall through to the second action.
+        inner.snap.can[HotkeyAction::StartPause as usize] = false;
+        assert_matches!(step(&mut inner, key(u16::from(b'A'), false, false), true), Step::Pass);
     }
 
     #[test]
@@ -608,6 +613,9 @@ mod tests {
     #[test]
     fn escape_confirms_region_select_when_hotkeys_are_off() {
         let mut inner = inner_with(HotkeySnap::idle());
+        assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), true), Step::Pass);
+        release(&mut inner, VK_ESCAPE.0);
+
         inner.snap.region_select_active = true;
         assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, false), false), Step::Fire(HotkeyAction::SelectRegion));
     }
@@ -617,5 +625,44 @@ mod tests {
         let mut inner = inner_with(HotkeySnap::idle());
         inner.snap.region_select_active = true;
         assert_matches!(step(&mut inner, key(VK_ESCAPE.0, false, true), true), Step::Pass);
+    }
+
+    #[test]
+    fn key_up_mirrors_key_down_and_out_of_range_vk_passes() {
+        let mut inner = live("f9");
+        let f9 = 0x78;
+        assert_matches!(step(&mut inner, key(f9, false, false), true), Step::Fire(HotkeyAction::StartPause));
+        assert_matches!(
+            step(
+                &mut inner,
+                KeyIn {
+                    vk: f9,
+                    down: false,
+                    win: false,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                },
+                true
+            ),
+            Step::Swallow
+        );
+        assert_matches!(step(&mut inner, key(b'Z' as u16, false, false), true), Step::Pass);
+        assert_matches!(
+            step(
+                &mut inner,
+                KeyIn {
+                    vk: b'Z' as u16,
+                    down: false,
+                    win: false,
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                },
+                true
+            ),
+            Step::Pass
+        );
+        assert_matches!(step(&mut inner, key(KEY_SLOTS as u16, false, false), true), Step::Pass);
     }
 }

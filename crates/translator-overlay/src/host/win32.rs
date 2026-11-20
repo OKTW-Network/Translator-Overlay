@@ -570,10 +570,13 @@ mod tests {
 
     fn assert_parked_beside_target(overlay: HWND, target: HWND, other: HWND) -> Result<(), String> {
         use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
-        if !target_is_foreground(other) {
+        if target_is_foreground(target) {
             return Ok(());
         }
-        if window_is_topmost(overlay) || z_order_is_above(overlay, other) {
+        if window_is_topmost(overlay) {
+            return Err("overlay remained WS_EX_TOPMOST after park".into());
+        }
+        if target_is_foreground(other) && z_order_is_above(overlay, other) {
             return Err("overlay covers the new foreground window".into());
         }
         if !unsafe { IsWindowVisible(overlay) }.as_bool() {
@@ -711,6 +714,81 @@ mod tests {
         raise_target_window(w.target);
         if was_fg && !target_is_foreground(w.target) {
             return Err("raise_target_window dropped focus from the already-foreground target".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lparam_point_decodes_signed_i16_coordinates() {
+        let pack = |x: i16, y: i16| LPARAM((((y as u16 as u32) << 16) | (x as u16 as u32)) as isize);
+        assert_eq!(lparam_point(pack(0, 0)), (0, 0));
+        assert_eq!(lparam_point(pack(123, 456)), (123, 456));
+        assert_eq!(lparam_point(pack(-1, -1)), (-1, -1));
+        assert_eq!(lparam_point(pack(i16::MIN, i16::MAX)), (-32768, 32767));
+        assert_eq!(lparam_point(pack(i16::MAX, i16::MIN)), (32767, -32768));
+    }
+
+    struct SingleWindow(HWND);
+
+    impl Drop for SingleWindow {
+        fn drop(&mut self) {
+            use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+            if !self.0.is_invalid() {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+    }
+
+    #[test]
+    fn pull_beside_target_tucks_under_fg_without_burying_under_target() -> Result<(), String> {
+        use windows::{
+            Win32::{
+                System::LibraryLoader::GetModuleHandleW,
+                UI::WindowsAndMessaging::{CreateWindowExW, HWND_TOP, SW_SHOWNA, ShowWindow, WS_OVERLAPPEDWINDOW},
+            },
+            core::w,
+        };
+
+        let w = create_z_order_windows()?;
+        let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
+        let mid_hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                w!("STATIC"),
+                w!("z-order-mid"),
+                WS_OVERLAPPEDWINDOW,
+                160,
+                40,
+                240,
+                180,
+                None,
+                None,
+                Some(hinstance.into()),
+                None,
+            )
+        }
+        .map_err(|e| format!("CreateWindowExW(mid): {e}"))?;
+        let mid = SingleWindow(mid_hwnd);
+        let _ = unsafe { ShowWindow(mid.0, SW_SHOWNA) };
+
+        // Deterministic normal-band Z-order without requiring foreground lock:
+        // overlay > other (fg) > mid > target.
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let _ = unsafe { SetWindowPos(w.overlay, Some(HWND_TOP), 0, 0, 0, 0, flags) };
+        let _ = unsafe { SetWindowPos(w.other, Some(w.overlay), 0, 0, 0, 0, flags) };
+        let _ = unsafe { SetWindowPos(mid.0, Some(w.other), 0, 0, 0, 0, flags) };
+        let _ = unsafe { SetWindowPos(w.target, Some(mid.0), 0, 0, 0, 0, flags) };
+
+        assert!(z_order_is_above(w.overlay, w.other));
+        assert!(z_order_is_above(w.other, w.target));
+
+        pull_beside_target(w.overlay, w.target, w.other);
+
+        if !z_order_is_above(w.overlay, w.target) {
+            return Err("pull_beside_target placed overlay behind target".into());
+        }
+        if z_order_is_above(w.overlay, w.other) {
+            return Err("pull_beside_target left overlay covering fg window".into());
         }
         Ok(())
     }

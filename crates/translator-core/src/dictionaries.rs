@@ -170,20 +170,11 @@ fn write_pairs_file(path: &Path, pairs: &[DictionaryPair]) -> Result<(), Diction
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::fs;
+
+    use tempfile::tempdir;
 
     use super::*;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("translator_overlay_dicts_{name}_{nanos}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     #[test]
     fn name_validation() {
@@ -194,10 +185,16 @@ mod tests {
         assert!(!is_valid_profile_name("."));
         assert!(!is_valid_profile_name(".."));
         assert!(!is_valid_profile_name("a/b"));
+        assert!(!is_valid_profile_name(r"a\b"));
         assert!(!is_valid_profile_name("a:b"));
         assert!(!is_valid_profile_name("CON"));
         assert!(!is_valid_profile_name("con"));
+        assert!(!is_valid_profile_name("CON.foo"));
+        assert!(!is_valid_profile_name("nul.bar"));
         assert!(!is_valid_profile_name("ends."));
+        assert!(!is_valid_profile_name("a\0b"));
+        assert!(!is_valid_profile_name("a\nb"));
+        assert!(matches!(dictionary_profile_path(Path::new("."), "a/b"), Err(DictionaryError::Invalid(_))));
     }
 
     #[test]
@@ -233,63 +230,89 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_one_profile() {
-        let dir = temp_dir("roundtrip");
-        save_profile_pairs(&dir, "Game A", &[
+    fn roundtrip_one_profile_and_special_keys() {
+        let dir = tempdir().unwrap();
+        save_profile_pairs(dir.path(), "Game A", &[
             DictionaryPair {
                 source: "主人公".into(),
                 target: "主角".into(),
             },
             DictionaryPair {
-                source: "セーブ".into(),
-                target: "存檔".into(),
+                source: "Lv.1".into(),
+                target: "等級1".into(),
+            },
+            DictionaryPair {
+                source: "a = b".into(),
+                target: String::new(),
             },
         ])
         .unwrap();
-        let text = fs::read_to_string(dir.join("Game A.toml")).unwrap();
-        assert!(text.contains("\"主人公\"") || text.contains("主人公"), "{text}");
+        let text = fs::read_to_string(dir.path().join("Game A.toml")).unwrap();
+        assert!(text.contains("\"主人公\""), "{text}");
         assert!(text.contains("主角"), "{text}");
-        let names = list_dictionary_names(&dir).unwrap();
+        let names = list_dictionary_names(dir.path()).unwrap();
         assert_eq!(names, vec!["Game A".to_string()]);
-        let loaded = load_profile_pairs(&dir, "Game A").unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.iter().any(|p| p.source == "主人公" && p.target == "主角"), "{loaded:?}");
-        assert!(loaded.iter().any(|p| p.source == "セーブ" && p.target == "存檔"), "{loaded:?}");
-        delete_profile(&dir, "Game A").unwrap();
-        assert!(list_dictionary_names(&dir).unwrap().is_empty());
-        let _ = fs::remove_dir_all(&dir);
+        let loaded = load_profile_pairs(dir.path(), "Game A").unwrap();
+        assert_eq!(loaded, vec![
+            DictionaryPair {
+                source: "Lv.1".into(),
+                target: "等級1".into(),
+            },
+            DictionaryPair {
+                source: "a = b".into(),
+                target: String::new(),
+            },
+            DictionaryPair {
+                source: "主人公".into(),
+                target: "主角".into(),
+            },
+        ]);
+        delete_profile(dir.path(), "Game A").unwrap();
+        // Deleting missing profile is a no-op; invalid names error.
+        delete_profile(dir.path(), "Game A").unwrap();
+        assert!(matches!(delete_profile(dir.path(), "a/b"), Err(DictionaryError::Invalid(_))));
+        assert!(list_dictionary_names(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_sorts_and_skips_invalid_or_non_toml() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Zeta.toml"), "a = \"b\"\n").unwrap();
+        fs::write(dir.path().join("Alpha.toml"), "a = \"b\"\n").unwrap();
+        fs::write(dir.path().join(" leading.toml"), "a = \"b\"\n").unwrap();
+        fs::write(dir.path().join("trailing .toml"), "a = \"b\"\n").unwrap();
+        fs::write(dir.path().join("notes.txt"), "a = \"b\"\n").unwrap();
+        fs::write(dir.path().join("broken.toml.broken-1"), "a = \"b\"\n").unwrap();
+        fs::create_dir_all(dir.path().join("sub.toml")).unwrap();
+
+        let names = list_dictionary_names(dir.path()).unwrap();
+        assert_eq!(names, vec!["Alpha".to_string(), "Zeta".to_string()]);
     }
 
     #[test]
     fn missing_dir_and_file_are_empty() {
-        let dir = temp_dir("missing");
-        let _ = fs::remove_dir_all(&dir);
-        assert!(list_dictionary_names(&dir).unwrap().is_empty());
-        fs::create_dir_all(&dir).unwrap();
-        assert!(load_profile_pairs(&dir, "Nope").unwrap().is_empty());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn rejects_invalid_name_on_path() {
-        let dir = temp_dir("invalid");
-        assert!(dictionary_profile_path(&dir, "a/b").is_err());
-        let _ = fs::remove_dir_all(&dir);
+        let dir = tempdir().unwrap();
+        assert!(list_dictionary_names(&dir.path().join("missing")).unwrap().is_empty());
+        assert!(load_profile_pairs(dir.path(), "Nope").unwrap().is_empty());
     }
 
     #[test]
     fn rejects_non_string_values() {
-        let dir = temp_dir("nonstr");
-        fs::write(dir.join("Game.toml"), "主人公 = \"主角\"\nLv.1 = \"等級1\"\n").unwrap();
-        assert!(load_profile_pairs(&dir, "Game").is_err());
-        fs::write(dir.join("Game.toml"), "HP = 100\n").unwrap();
-        assert!(load_profile_pairs(&dir, "Game").is_err());
-        fs::write(dir.join("Game.toml"), "\"Lv.1\" = \"等級1\"\n").unwrap();
-        let loaded = load_profile_pairs(&dir, "Game").unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Game.toml");
+        fs::write(&path, "\"主人公\" = \"主角\"\nLv.1 = \"等級1\"\n").unwrap();
+        assert!(matches!(load_profile_pairs(dir.path(), "Game"), Err(DictionaryError::Invalid(_))));
+        assert!(path.exists(), "valid TOML with nested table must not be renamed to .broken-*");
+
+        fs::write(&path, "HP = 100\n").unwrap();
+        assert!(matches!(load_profile_pairs(dir.path(), "Game"), Err(DictionaryError::Invalid(_))));
+        assert!(path.exists(), "valid TOML with integer value must not be renamed to .broken-*");
+
+        fs::write(&path, "\"Lv.1\" = \"等級1\"\n").unwrap();
+        let loaded = load_profile_pairs(dir.path(), "Game").unwrap();
         assert_eq!(loaded, vec![DictionaryPair {
             source: "Lv.1".into(),
             target: "等級1".into(),
         }]);
-        let _ = fs::remove_dir_all(&dir);
     }
 }

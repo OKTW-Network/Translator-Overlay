@@ -68,39 +68,63 @@ mod tests {
 
     #[test]
     fn batch_pads_to_the_widest_line() {
+        // Empty slice returns empty tensor at MIN_WIDTH.
+        assert_eq!(batch(&[]), (Vec::new(), 320));
+
         // 96×24 scales to 192×48 and pads to the 320 minimum; 800×40 to 960×48.
         let (short, long) = (solid(96, 24, [255, 255, 255]), solid(800, 40, [0, 0, 0]));
         let (tensor, width) = batch(&[&short, &long]);
         assert_eq!((width, tensor.len()), (960, 2 * 3 * 48 * 960));
         assert!((tensor[191] - 1.0).abs() < 1e-6, "white");
         assert_eq!(tensor[192], 0.0, "zero padding");
+        // Row 1 keeps its right-side zero padding as well.
+        assert_eq!(tensor[width + 192], 0.0);
         assert_eq!(tensor[3 * 48 * 960], -1.0, "black");
 
         assert_eq!(batch(&[&solid(4000, 40, [0, 0, 0])]).1, 3200, "width is capped");
         assert_eq!(batch(&[&short]).1, 320);
+
+        // Very narrow crop clamps resized width to at least 1 pixel without panic.
+        let (narrow, nw) = batch(&[&solid(1, 100, [255, 255, 255])]);
+        assert_eq!(nw, 320);
+        assert!((narrow[0] - 1.0).abs() < 1e-6);
+        assert_eq!(narrow[1], 0.0);
     }
 
     #[test]
     fn batch_reads_channels_as_bgr() {
-        let (tensor, width) = batch(&[&solid(320, 48, [255, 0, 0])]);
+        let (tensor, width) = batch(&[&solid(320, 48, [255, 128, 0])]);
         let plane = 48 * width;
-        assert_eq!([tensor[0], tensor[plane]], [-1.0, -1.0]);
-        assert!((tensor[2 * plane] - 1.0).abs() < 1e-6);
+        assert_eq!(tensor[0], -1.0, "B=0");
+        assert!((tensor[plane] - (128.0 / 127.5 - 1.0)).abs() < 1e-5, "G=128");
+        assert!((tensor[2 * plane] - 1.0).abs() < 1e-6, "R=255");
     }
 
     #[test]
     fn decode_collapses_repeats_and_skips_blanks() {
-        let classes = ["", "a", "b", " "].map(String::from);
+        let classes = ["", "a", "b", "あ"].map(String::from);
         let step = |class: usize, prob: f32| {
             let mut probs = [0.0; 4];
             probs[class] = prob;
             probs
         };
-        // a a _ a b ␠ → "aab "
-        let probs = [step(1, 0.9), step(1, 0.5), step(0, 1.0), step(1, 0.7), step(2, 0.8), step(3, 0.6)].concat();
+        assert_eq!(decode(&[], &classes), (String::new(), 0.0));
+
+        // a a a _ a b あ → "aabあ" (3+ consecutive repeats collapse; score uses winning probs).
+        let competing = [0.1, 0.4, 0.5, 0.0];
+        let probs = [
+            step(1, 0.9),
+            step(1, 0.5),
+            step(1, 0.7),
+            step(0, 1.0),
+            step(1, 0.7),
+            competing,
+            step(3, 0.6),
+        ]
+        .concat();
         let (text, score) = decode(&probs, &classes);
-        assert_eq!(text, "aab ");
-        assert!((score - (0.9 + 0.7 + 0.8 + 0.6) / 4.0).abs() < 1e-6);
+        assert_eq!(text, "aabあ");
+        assert!((score - (0.9 + 0.7 + 0.5 + 0.6) / 4.0).abs() < 1e-6);
 
         assert_eq!(decode(&step(0, 1.0), &classes), (String::new(), 0.0));
     }

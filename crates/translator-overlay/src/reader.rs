@@ -424,4 +424,81 @@ mod tests {
         assert!(crate::host::win32::window_is_topmost(reader.hwnd), "set_text should restore topmost");
         reader.teardown();
     }
+
+    #[test]
+    fn hit_test_classifies_nine_zones_including_negative_coords() {
+        use windows::Win32::Graphics::Gdi::ClientToScreen;
+
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let mut reader = ReaderWindow::create(&OverlayConfig {
+            reader_enabled: true,
+            ..OverlayConfig::default()
+        })
+        .expect("reader create");
+        let _ = unsafe { SetWindowPos(reader.hwnd, None, -400, -300, DEFAULT_W, DEFAULT_H, SWP_NOZORDER | SWP_NOACTIVATE) };
+
+        let mut origin = POINT { x: 0, y: 0 };
+        assert!(unsafe { ClientToScreen(reader.hwnd, &mut origin) }.as_bool());
+        assert!(origin.x < 0 && origin.y < 0, "expected negative screen origin, got ({}, {})", origin.x, origin.y);
+        let (w, h) = reader.client_size();
+        let at_client = |cx: i32, cy: i32| {
+            let sx = (origin.x + cx) as i16 as u16 as u32;
+            let sy = (origin.y + cy) as i16 as u16 as u32;
+            reader.hit_test(LPARAM(((sy << 16) | sx) as isize)).0 as u32
+        };
+
+        assert_eq!(at_client(0, 0), HTTOPLEFT);
+        assert_eq!(at_client(-10, -10), HTTOPLEFT);
+        assert_eq!(at_client(w / 2, 0), HTTOP);
+        assert_eq!(at_client(w - 1, 0), HTTOPRIGHT);
+        assert_eq!(at_client(0, h / 2), HTLEFT);
+        assert_eq!(at_client(w / 2, h / 2), HTCAPTION);
+        assert_eq!(at_client(w - 1, h / 2), HTRIGHT);
+        assert_eq!(at_client(0, h - 1), HTBOTTOMLEFT);
+        assert_eq!(at_client(w / 2, h - 1), HTBOTTOM);
+        assert_eq!(at_client(w - 1, h - 1), HTBOTTOMRIGHT);
+
+        reader.teardown();
+    }
+
+    #[test]
+    fn dismiss_apply_config_and_set_placeholder_state_transitions() {
+        use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+
+        let _lock = crate::host::win32::lock_hwnd_tests();
+        let mut reader = ReaderWindow::create(&OverlayConfig {
+            reader_enabled: true,
+            ..OverlayConfig::default()
+        })
+        .expect("reader create");
+        assert!(unsafe { IsWindowVisible(reader.hwnd) }.as_bool());
+
+        reader.dismiss();
+        assert!(reader.dismissed);
+        assert!(!unsafe { IsWindowVisible(reader.hwnd) }.as_bool());
+
+        // Re-applying config while enabled stays hidden until disabled+re-enabled.
+        reader.apply_config(&OverlayConfig {
+            reader_enabled: true,
+            ..OverlayConfig::default()
+        });
+        assert!(reader.dismissed);
+        assert!(!unsafe { IsWindowVisible(reader.hwnd) }.as_bool());
+
+        reader.apply_config(&OverlayConfig {
+            reader_enabled: false,
+            ..OverlayConfig::default()
+        });
+        assert!(!reader.dismissed);
+        reader.apply_config(&OverlayConfig {
+            reader_enabled: true,
+            ..OverlayConfig::default()
+        });
+        assert!(unsafe { IsWindowVisible(reader.hwnd) }.as_bool());
+
+        reader.set_placeholder("waiting...".into());
+        assert_eq!(reader.placeholder, "waiting...");
+
+        reader.teardown();
+    }
 }

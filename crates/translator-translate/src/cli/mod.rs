@@ -407,7 +407,28 @@ mod tests {
     fn system_prompt_names_the_fence_and_reply_format() {
         let system = cli_system_prompt("base", ReplyMode::Structured);
         assert!(system.contains(UNTRUSTED_BEGIN) && system.contains("JSON"), "{system}");
+        // Calling twice must be idempotent.
+        assert_eq!(cli_system_prompt(&system, ReplyMode::Structured), system);
         let system = cli_system_prompt("base", ReplyMode::PlainText);
         assert!(system.contains(UNTRUSTED_BEGIN) && !system.contains("JSON"), "{system}");
+        assert_eq!(cli_system_prompt(&system, ReplyMode::PlainText), system);
+    }
+
+    #[test]
+    fn plan_turn_rejects_malformed_histories_and_recreates_on_system_prompt_change() {
+        assert!(plan_turn(&[], &msgs(&[("system", "sys")])).is_err());
+        assert!(plan_turn(&[], &msgs(&[("user", "u1"), ("user", "u2")])).is_err());
+        assert!(plan_turn(&[], &msgs(&[("system", "sys"), ("assistant", "a1")])).is_err());
+
+        let mirrored = msgs(&[("system", "old sys"), ("user", "u1"), ("assistant", "a1")]);
+        let changed_sys = msgs(&[("system", "new sys"), ("user", "u1"), ("assistant", "a1"), ("user", "u2")]);
+        match plan_turn(&mirrored, &changed_sys).unwrap() {
+            SessionPlan::Recreate { system, bootstrap, user } => {
+                assert_eq!(system, "new sys");
+                assert!(bootstrap.as_deref().is_some_and(|b| b.contains("u1") && b.contains("a1")));
+                assert_eq!(user, "u2");
+            }
+            other => panic!("expected Recreate on system change, got {other:?}"),
+        }
     }
 }

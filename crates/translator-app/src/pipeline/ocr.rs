@@ -412,3 +412,203 @@ impl Pipeline {
         self.reset_ocr_session(false);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use parking_lot::RwLock;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+    use translator_core::{AppConfig, AppState, ModelProvider, OcrBlock, PipelineStatus, Rect, TranslatedBlock};
+    use translator_ocr::{BlockPersistenceFilter, StabilityGate};
+
+    use super::*;
+    use crate::pipeline::worker::{InflightTranslate, PendingPage};
+
+    fn ocr_pipeline() -> Pipeline {
+        let mut cfg = AppConfig::default();
+        cfg.api.provider = ModelProvider::OpenaiCompatible;
+        let mut p = Pipeline::detached(Arc::new(RwLock::new(AppState::new(cfg))));
+        p.persist = BlockPersistenceFilter::new(0, 100, 0);
+        p.gate = StabilityGate::new(0);
+        p
+    }
+
+    fn blk(id: u32, text: &str) -> OcrBlock {
+        OcrBlock {
+            id,
+            text: text.into(),
+            confidence: 0.9,
+            bbox: Rect::new(0.0, 0.0, 20.0, 20.0),
+            source_lines: 1,
+            source_height: 20.0,
+            source_width: 20.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_ocr_handles_error_stale_and_manual() {
+        let mut p = ocr_pipeline();
+
+        // Error sets err.ocr
+        p.ocr_job = Some(OcrJob {
+            handle: tokio::spawn(async { Err(OcrError::Other("ort boom".into())) }),
+            started: Instant::now(),
+            sequence: 1,
+            width: 100,
+            height: 100,
+            scope: Vec::new(),
+            manual: false,
+            stale: false,
+        });
+        let res = (&mut p.ocr_job.as_mut().unwrap().handle).await;
+        p.finish_ocr(res);
+        assert!(matches!(p.state.read().status, PipelineStatus::Error { .. }));
+        assert!(p.last_raw_ocr.is_none());
+
+        // Stale result is ignored even if Ok
+        p.state.write().restore_operational_status();
+        p.ocr_job = Some(OcrJob {
+            handle: tokio::spawn(async { Ok(vec![blk(0, "X")]) }),
+            started: Instant::now(),
+            sequence: 2,
+            width: 100,
+            height: 100,
+            scope: Vec::new(),
+            manual: false,
+            stale: true,
+        });
+        let res = (&mut p.ocr_job.as_mut().unwrap().handle).await;
+        p.finish_ocr(res);
+        assert!(p.last_raw_ocr.is_none());
+
+        // Manual result bypasses gate and starts translate immediately
+        p.ocr_job = Some(OcrJob {
+            handle: tokio::spawn(async { Ok(vec![blk(0, "ManualText")]) }),
+            started: Instant::now(),
+            sequence: 3,
+            width: 100,
+            height: 100,
+            scope: Vec::new(),
+            manual: true,
+            stale: false,
+        });
+        let res = (&mut p.ocr_job.as_mut().unwrap().handle).await;
+        p.finish_ocr(res);
+        assert!(p.inflight.is_some());
+        assert_eq!(p.last_page.as_ref().unwrap().blocks[0].text, "ManualText");
+    }
+
+    #[tokio::test]
+    async fn run_ocr_auto_content_cache_hit_adopts_sequence_and_feeds_pipeline() {
+        let mut p = ocr_pipeline();
+        let frame_bytes = vec![42u8; 10 * 10 * 4];
+        let f1 = CapturedFrame::new(10, 10, frame_bytes.clone(), 1);
+        p.last_raw_ocr = Some(LastRawOcr {
+            sequence: 1,
+            width: 10,
+            height: 10,
+            scope: LastRawOcr::pack_scope(&f1, &[]),
+            blocks: vec![blk(0, "Cached")],
+        });
+
+        let f2 = CapturedFrame::new(10, 10, frame_bytes, 9);
+        p.run_ocr_auto(&f2);
+        assert!(p.ocr_job.is_none(), "content hit must not spawn OCR inference");
+        assert_eq!(p.last_raw_ocr.as_ref().unwrap().sequence, 9);
+        assert_eq!(p.ocr_blocks[0].text, "Cached");
+    }
+
+    #[tokio::test]
+    async fn clear_stale_overlay_and_maybe_expire_raw_empty_at() {
+        let mut p = ocr_pipeline();
+        p.state.write().auto_running = true;
+        p.state.write().config.ocr.hold_ms = 50;
+
+        // Already empty in WaitingForStable preserves status.
+        p.state.write().status = PipelineStatus::WaitingForStable { elapsed_ms: 10 };
+        p.clear_stale_overlay("already empty");
+        assert_eq!(p.state.read().status, PipelineStatus::WaitingForStable { elapsed_ms: 10 });
+
+        // Non-empty while translating preserves Translating status.
+        let (_tx, rx) = mpsc::unbounded_channel();
+        p.set_inflight(InflightTranslate {
+            cancel: CancellationToken::new(),
+            rx,
+            page: PendingPage {
+                blocks: vec![blk(0, "X")],
+                content_width: 100,
+                content_height: 100,
+            },
+            cached_hits: Vec::new(),
+            kept: Vec::new(),
+        });
+        p.state.write().status = PipelineStatus::Translating;
+        p.set_ocr_blocks(vec![blk(0, "X")]);
+        p.set_captions(vec![TranslatedBlock {
+            id: 0,
+            source: "X".into(),
+            translation: "TX".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }]);
+        p.clear_stale_overlay("blank");
+        assert_eq!(p.state.read().status, PipelineStatus::Translating);
+        assert!(p.captions.is_empty());
+        assert!(p.ocr_blocks.is_empty());
+
+        // maybe_expire_raw_empty_at holds before grace and clears at/after grace.
+        p.take_inflight();
+        p.set_captions(vec![TranslatedBlock {
+            id: 0,
+            source: "Y".into(),
+            translation: "TY".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
+            source_lines: 1,
+            source_height: 10.0,
+            source_width: 10.0,
+        }]);
+        let t0 = Instant::now();
+        p.raw_empty_since = Some(t0);
+        p.maybe_expire_raw_empty_at(t0 + Duration::from_millis(40));
+        assert_eq!(p.captions.len(), 1);
+        p.maybe_expire_raw_empty_at(t0 + Duration::from_millis(50));
+        assert!(p.captions.is_empty());
+        assert!(p.raw_empty_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn ocr_pixel_regions_sanitizes_and_cache_disabled_clears_previous_captions_on_ready() {
+        let mut p = ocr_pipeline();
+        p.state.write().ocr_regions = vec![NormRect::new(0.5, 0.5, -0.25, 0.25), NormRect::new(f32::NAN, 0.0, 0.2, 0.2)];
+        let px_rects = p.ocr_pixel_regions(200, 100);
+        assert_eq!(px_rects, vec![Rect::new(50.0, 50.0, 50.0, 25.0)]);
+
+        p.apply_ocr_regions(vec![NormRect::new(0.0, 0.0, 0.5, 0.5)]);
+        assert_eq!(p.state.read().ocr_regions.len(), 1);
+        assert!(!p.state.read().region_select_active);
+
+        // cache_enabled == false clears previous captions when StabilityOutcome::Ready arrives.
+        p.state.write().config.translation.cache_enabled = false;
+        p.set_captions(vec![TranslatedBlock {
+            id: 0,
+            source: "Old".into(),
+            translation: "舊".into(),
+            confidence: 1.0,
+            bbox: Rect::new(0.0, 0.0, 20.0, 20.0),
+            source_lines: 1,
+            source_height: 20.0,
+            source_width: 20.0,
+        }]);
+        let t0 = Instant::now();
+        p.consume_raw_ocr_at(vec![blk(0, "New")], 100, 100, t0);
+        p.consume_raw_ocr_at(vec![blk(0, "New")], 100, 100, t0 + Duration::from_millis(10));
+        assert!(p.captions.is_empty(), "old captions cleared before translating new page without cache");
+        assert!(p.inflight.is_some());
+    }
+}

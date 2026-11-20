@@ -804,6 +804,116 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
 }
 
 #[cfg(test)]
+pub(crate) struct ScriptedHttpServer {
+    pub(crate) base_url: String,
+    expected: usize,
+    served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl ScriptedHttpServer {
+    pub(crate) fn spawn<F>(count: usize, handler: F) -> Self
+    where
+        F: Fn(usize, String, std::net::TcpStream) + Send + Sync + 'static,
+    {
+        use std::{
+            io::{BufRead, BufReader, ErrorKind, Read},
+            net::TcpListener,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+            },
+            time::Instant,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handler = Arc::new(handler);
+        let served = Arc::new(AtomicUsize::new(0));
+        let served_srv = Arc::clone(&served);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+
+        let handle = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut workers = Vec::with_capacity(count);
+            for idx in 0..count {
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break Some(s),
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            if stop_srv.load(Ordering::Acquire) || Instant::now() >= deadline {
+                                break None;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break None,
+                    }
+                };
+                let Some(stream) = stream else { break };
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                served_srv.fetch_add(1, Ordering::Release);
+                let handler = Arc::clone(&handler);
+                workers.push(std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut req_head = String::new();
+                    let mut len = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        req_head.push_str(&line);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    let mut body = vec![0u8; len];
+                    let _ = reader.read_exact(&mut body);
+                    handler(idx, req_head, stream);
+                }));
+            }
+            for w in workers {
+                let _ = w.join();
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            expected: count,
+            served,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) fn finish(mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some(handle) = self.handle.take() {
+            handle.join().unwrap();
+        }
+        assert_eq!(self.served.load(Ordering::Acquire), self.expected, "unexpected request count to ScriptedHttpServer");
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScriptedHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::assert_matches;
 
@@ -1315,5 +1425,211 @@ mod tests {
         assert!(parse_openai_model_ids(r#"{"object":"list","data":[]}"#).is_err());
         assert!(parse_openai_model_ids(r#"{"object":"list"}"#).is_err());
         assert!(parse_openai_model_ids("not-json").is_err());
+    }
+
+    #[test]
+    fn sse_and_response_parser_edge_cases() {
+        // CRLF frames, `:comment` ignored, multi-line `data:` joined by `\n`, flush without trailing blank line.
+        let mut raw = ": ping\r\n\r\ndata: line1\r\ndata: line2\r\n".to_string();
+        let events = drain_sse_events(&mut raw, true);
+        assert!(raw.is_empty());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "line1\nline2");
+
+        // ResponseItem::Message assistant serializes with output_text part.
+        let asst = ResponseItem::message("assistant", "done").to_input_value();
+        assert_eq!(asst["type"], "message");
+        assert_eq!(asst["role"], "assistant");
+        assert_eq!(asst["content"][0]["type"], "output_text");
+        assert_eq!(asst["content"][0]["text"], "done");
+
+        // extract_chat_completion rejects empty choices, null content, and whitespace content.
+        for bad in [
+            r#"{"choices":[]}"#,
+            r#"{"choices":[{"message":{"role":"assistant","content":null}}]}"#,
+            r#"{"choices":[{"message":{"role":"assistant","content":"  \n\t "}}]}"#,
+        ] {
+            assert_matches!(extract_chat_completion(bad), Err(TranslateError::Parse(_)), "bad={bad}");
+        }
+
+        // ResponsesSse precedence: response.completed wins over output_item.done and delta_text.
+        let precedence = "event: response.output_text.delta\n\
+                          data: {\"type\":\"response.output_text.delta\",\"delta\":\"from_delta\"}\n\n\
+                          event: response.output_item.done\n\
+                          data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"from_item\"}]}}\n\n\
+                          event: response.completed\n\
+                          data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"from_completed\"}]}]}}\n\n";
+        assert_eq!(completion_from_http_body(HttpApi::Responses, precedence).unwrap().text, "from_completed");
+
+        // stream_event_error variants: `error` object, `/response/error`, bare `event: error`
+        for body in [
+            "data: {\"error\":\"boom\"}\n\n",
+            "data: {\"response\":{\"error\":{\"message\":\"resp fail\"}}}\n\n",
+            "event: error\ndata: {\"type\":\"error\"}\n\n",
+        ] {
+            assert_matches!(completion_from_http_body(HttpApi::Responses, body), Err(TranslateError::ApiStatus { status: 500, .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_http_and_sse_responses_handle_status_flush_fallback_and_cancel() {
+        use std::{
+            io::Write,
+            sync::{Arc, Mutex},
+        };
+
+        let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+        let hold_rx = Arc::new(Mutex::new(Some(hold_rx)));
+        let hold_rx_cb = Arc::clone(&hold_rx);
+
+        let (split_tx, split_rx) = std::sync::mpsc::channel::<()>();
+        let split_rx = Arc::new(Mutex::new(Some(split_rx)));
+        let split_rx_cb = Arc::clone(&split_rx);
+
+        let server = ScriptedHttpServer::spawn(5, move |idx, _head, mut sock| match idx {
+            // Non-streaming 200 JSON
+            0 => {
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"ok_json"}}]}"#;
+                let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+            // Error status 429
+            1 => {
+                let body = "rate limited";
+                let _ = write!(sock, "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+            // Synchronized physical TCP chunk split: send event 1 ("你") + first UTF-8 byte of "好",
+            // wait until the client receives "你", then send the remaining bytes without trailing `\n\n`.
+            2 => {
+                let _ = sock.set_nodelay(true);
+                let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n");
+                let p1 = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xe4\xbd\xa0\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"\xe5";
+                let p2 = b"\xa5\xbd\"}}]}";
+                let _ = sock.write_all(p1);
+                let _ = sock.flush();
+                if let Some(rx) = split_rx_cb.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(5));
+                }
+                let _ = sock.write_all(p2);
+                let _ = sock.flush();
+            }
+            // Stream requested, plain JSON returned (non-SSE fallback in consume_sse_response)
+            3 => {
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"plain_fallback"}}]}"#;
+                let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}");
+            }
+            // Cancel mid-stream: send first event, then wait until test releases channel
+            _ => {
+                let _ = write!(
+                    sock,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"first\"}}}}]}}\n\n"
+                );
+                let _ = sock.flush();
+                if let Some(rx) = hold_rx_cb.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(5));
+                }
+            }
+        });
+
+        let client = http_client(None).unwrap();
+        let cancel = CancellationToken::new();
+
+        let r0 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
+        let c0 = consume_http_response(r0, HttpApi::ChatCompletions, false, &cancel, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(c0.text, "ok_json");
+
+        let r1 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
+        let e1 = consume_http_response(r1, HttpApi::ChatCompletions, false, &cancel, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert_matches!(e1, TranslateError::ApiStatus { status: 429, ref body } if body == "rate limited");
+
+        let mut live = Vec::new();
+        let r2 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
+        let c2 = consume_http_response(r2, HttpApi::ChatCompletions, true, &cancel, &mut |t| {
+            live.push(t.to_string());
+            if t == "你" {
+                let _ = split_tx.send(());
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(c2.text, "你好");
+        assert_eq!(live, ["你", "你好"]);
+
+        let r3 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
+        let c3 = consume_http_response(r3, HttpApi::ChatCompletions, true, &cancel, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(c3.text, "plain_fallback");
+
+        let mid_cancel = CancellationToken::new();
+        let trigger = mid_cancel.clone();
+        let r4 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
+        let e4 = consume_http_response(r4, HttpApi::ChatCompletions, true, &mid_cancel, &mut |_| trigger.cancel())
+            .await
+            .unwrap_err();
+        let _ = hold_tx.send(());
+        server.finish();
+        assert!(e4.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn list_http_models_normalizes_url_sends_bearer_and_handles_errors() {
+        use std::{
+            io::Write,
+            sync::{Arc, Mutex},
+        };
+
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_srv = Arc::clone(&captured);
+        let server = ScriptedHttpServer::spawn(2, move |idx, head, mut sock| {
+            captured_srv.lock().unwrap().push(head);
+            if idx == 0 {
+                let body = r#"{"data":[{"id":"m1"},{"id":"m2"}]}"#;
+                let _ = write!(sock, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            } else {
+                let body = "upstream error";
+                let _ =
+                    write!(sock, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+
+        let empty_err = list_http_models(
+            &ApiConfig {
+                base_url: "  ".into(),
+                ..ApiConfig::default()
+            },
+            &CancellationToken::new(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert_matches!(empty_err, TranslateError::MissingBaseUrl);
+
+        let api = ApiConfig {
+            base_url: format!("{}/v1///", server.base_url),
+            api_key: " secret-key ".into(),
+            ..ApiConfig::default()
+        };
+        let models = list_http_models(&api, &CancellationToken::new(), Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(models, ["m1", "m2"]);
+
+        let err = list_http_models(&api, &CancellationToken::new(), Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert_matches!(err, TranslateError::ApiStatus { status: 500, .. });
+        server.finish();
+
+        let heads = captured.lock().unwrap();
+        assert!(heads[0].starts_with("GET /v1/models "), "got: {}", heads[0]);
+        assert!(
+            heads[0].lines().any(|l| l.eq_ignore_ascii_case("authorization: Bearer secret-key")),
+            "missing bearer header in {}",
+            heads[0]
+        );
     }
 }

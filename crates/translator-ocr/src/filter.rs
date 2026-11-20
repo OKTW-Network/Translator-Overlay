@@ -373,6 +373,10 @@ impl BlockPersistenceFilter {
 mod tests {
     use super::*;
 
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
     fn block(text: &str, x: f32, y: f32) -> OcrBlock {
         OcrBlock {
             id: 0,
@@ -402,56 +406,66 @@ mod tests {
         let blocks = vec![
             block("Hello", 10.0, 10.0),
             block("V", 100.0, 10.0),
-            block("甲乙", 10.0, 40.0),
+            block(" V ", 120.0, 10.0),
+            block("甲", 10.0, 40.0),
+            block("あ", 40.0, 40.0),
+            block("?", 70.0, 40.0),
             block("0", 200.0, 10.0),
+            block(" 0 ", 220.0, 10.0),
         ];
         let kept = filter_single_char_blocks(blocks);
-        assert_eq!(kept.len(), 2);
-        assert_eq!(kept[0].text, "Hello");
-        assert_eq!(kept[1].text, "甲乙");
-        assert_eq!(kept[0].id, 0);
-        assert_eq!(kept[1].id, 1);
+        let texts: Vec<_> = kept.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["Hello", "甲", "あ", "?"]);
+        assert_eq!(kept.iter().map(|b| b.id).collect::<Vec<_>>(), [0, 1, 2, 3]);
+        assert!(!is_single_latin_or_digit(""));
+        assert!(!is_single_latin_or_digit("é"));
     }
 
     #[test]
     fn persistence_drops_flickering_text() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(80, 200, 2_000);
         // Frame 1: icon noise + real text
-        let out1 = f.filter(vec![block("HP", 10.0, 10.0), block("x#?", 200.0, 50.0)]);
+        let out1 = f.filter_at(vec![block("HP", 10.0, 10.0), block("x#?", 200.0, 50.0)], t0);
         assert!(out1.is_empty(), "first sight should not emit");
 
         // Frame 2 soon after: HP stays, noise text changes (animation)
-        std::thread::sleep(Duration::from_millis(40));
-        let out2 = f.filter(vec![block("HP", 11.0, 10.0), block("@@", 201.0, 51.0)]);
+        let out2 = f.filter_at(vec![block("HP", 11.0, 10.0), block("@@", 201.0, 51.0)], t0 + ms(40));
         assert!(out2.is_empty(), "still under persist window");
 
         // Frame 3 after persist: only HP remains stable
-        std::thread::sleep(Duration::from_millis(50));
-        let out3 = f.filter(vec![block("HP", 10.0, 11.0), block("!!", 199.0, 49.0)]);
+        let out3 = f.filter_at(vec![block("HP", 10.0, 11.0), block("!!", 199.0, 49.0)], t0 + ms(90));
         assert_eq!(out3.len(), 1);
         assert_eq!(out3[0].text, "HP");
     }
 
     #[test]
-    fn persistence_keeps_confirmed_across_missed_frame() {
+    fn persistence_keeps_confirmed_across_missed_frame_then_expires_after_hold() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        let _ = f.filter(vec![block("Menu", 10.0, 10.0)]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![block("Menu", 12.0, 10.0)]);
+        let _ = f.filter_at(vec![block("Menu", 10.0, 10.0)], t0);
+        let confirmed = f.filter_at(vec![block("Menu", 12.0, 10.0)], t0 + ms(60));
         assert_eq!(confirmed.len(), 1);
+        assert!(f.settled());
 
-        // Frame where OCR misses the static text (busy animated background).
-        let held = f.filter(vec![]);
+        // Frame where OCR misses the static text (busy animated background): hysteresis keeps it, marked unsettled.
+        let held = f.filter_at(vec![], t0 + ms(100));
         assert_eq!(held.len(), 1, "hysteresis should keep confirmed text");
         assert_eq!(held[0].text, "Menu");
+        assert!(!f.settled(), "held text is not on screen this frame");
+
+        // Past hold (last_seen at t0 + 60ms -> expired by t0 + 361ms).
+        let expired = f.filter_at(vec![], t0 + ms(361));
+        assert!(expired.is_empty(), "confirmed track expires after hold");
+        assert!(f.settled());
     }
 
     #[test]
     fn persistence_freezes_confirmed_bbox_against_jitter() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![block("Menu", 100.0, 200.0)]);
+        let _ = f.filter_at(vec![block("Menu", 100.0, 200.0)], t0);
+        let confirmed = f.filter_at(vec![block("Menu", 100.0, 200.0)], t0 + ms(60));
         assert_eq!(confirmed.len(), 1);
         let frozen = confirmed[0].bbox;
 
@@ -459,45 +473,44 @@ mod tests {
         let mut jittered = block("Menu", 104.0, 197.0);
         jittered.bbox.width = 76.0;
         jittered.bbox.height = 22.0;
-        let out = f.filter(vec![jittered]);
+        let out = f.filter_at(vec![jittered], t0 + ms(80));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].bbox, frozen, "confirmed track should keep stable bbox");
     }
 
     #[test]
     fn persistence_follows_confirmed_bbox_on_scroll() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![block("Menu", 100.0, 200.0)]);
+        let _ = f.filter_at(vec![block("Menu", 100.0, 200.0)], t0);
+        let confirmed = f.filter_at(vec![block("Menu", 100.0, 200.0)], t0 + ms(60));
         assert_eq!(confirmed.len(), 1);
 
         // Same text, page scrolled one row (still inside the track match radius).
         let moved = block("Menu", 100.0, 220.0);
-        let out = f.filter(vec![moved.clone()]);
+        let out = f.filter_at(vec![moved.clone()], t0 + ms(80));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].bbox, moved.bbox, "whole-box shift should move the track");
     }
 
     #[test]
     fn persistence_pending_text_keeps_bbox_until_adopt() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let origin = block_wh("セリフ", 100.0, 200.0, 80.0, 22.0);
-        let _ = f.filter(vec![origin.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![origin.clone()]);
+        let _ = f.filter_at(vec![origin.clone()], t0);
+        let confirmed = f.filter_at(vec![origin], t0 + ms(60));
         assert_eq!(confirmed.len(), 1);
         let frozen = confirmed[0].bbox;
 
         // New line in the same region: wider box, different text.
         let next = block_wh("次の台詞です", 100.0, 200.0, 200.0, 24.0);
-        let held = f.filter(vec![next.clone()]);
+        let held = f.filter_at(vec![next.clone()], t0 + ms(80));
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].text, "セリフ");
         assert_eq!(held[0].bbox, frozen, "pending text must not walk or resize the box");
 
-        std::thread::sleep(Duration::from_millis(60));
-        let adopted = f.filter(vec![next.clone()]);
+        let adopted = f.filter_at(vec![next.clone()], t0 + ms(140));
         assert_eq!(adopted.len(), 1);
         assert_eq!(adopted[0].text, "次の台詞です");
         assert_eq!(adopted[0].bbox, next.bbox, "adopt new text and its box together");
@@ -505,15 +518,15 @@ mod tests {
 
     #[test]
     fn persistence_reset_drops_confirmed_tracks() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        let _ = f.filter(vec![block("Menu", 100.0, 200.0)]);
-        std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(f.filter(vec![block("Menu", 100.0, 200.0)]).len(), 1);
+        let _ = f.filter_at(vec![block("Menu", 100.0, 200.0)], t0);
+        assert_eq!(f.filter_at(vec![block("Menu", 100.0, 200.0)], t0 + ms(60)).len(), 1);
 
         f.reset();
         // Same text at a scaled position after a capture resize: must not emit
         // the old-pixel box (or any box) until the track persists again.
-        let scaled = f.filter(vec![block("Menu", 150.0, 300.0)]);
+        let scaled = f.filter_at(vec![block("Menu", 150.0, 300.0)], t0 + ms(80));
         assert!(scaled.is_empty(), "reset must drop confirmed tracks");
     }
 
@@ -528,87 +541,104 @@ mod tests {
     #[test]
     fn thrashing_text_force_confirms_after_max_wait() {
         // Settle never passes (same-text window huge); text flips every frame.
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(10_000, 500, 80);
-        let _ = f.filter(vec![block("hello!", 10.0, 10.0)]);
-        assert!(f.filter(vec![block("hello", 11.0, 10.0)]).is_empty());
+        let _ = f.filter_at(vec![block("hello!", 10.0, 10.0)], t0);
+        assert!(f.filter_at(vec![block("hello", 11.0, 10.0)], t0 + ms(20)).is_empty());
 
-        std::thread::sleep(Duration::from_millis(90));
-        let out = f.filter(vec![block("hello?", 10.0, 11.0)]);
+        let out = f.filter_at(vec![block("hello?", 10.0, 11.0)], t0 + ms(90));
         assert_eq!(out.len(), 1, "thrash should force-confirm after max_wait");
         assert_eq!(out[0].text, "hello?");
+
+        // max_wait == 0 disables force-confirm.
+        let mut no_force = BlockPersistenceFilter::new(10_000, 500, 0);
+        let _ = no_force.filter_at(vec![block("a!", 10.0, 10.0)], t0);
+        assert!(no_force.filter_at(vec![block("a?", 10.0, 10.0)], t0 + ms(5_000)).is_empty());
+    }
+
+    #[test]
+    fn confirmed_thrash_force_adopts_after_max_wait() {
+        let t0 = Instant::now();
+        let mut f = BlockPersistenceFilter::new(50, 300, 80);
+        let _ = f.filter_at(vec![block("old", 10.0, 10.0)], t0);
+        assert_eq!(f.filter_at(vec![block("old", 10.0, 10.0)], t0 + ms(60))[0].text, "old");
+
+        // Replacement keeps changing every frame so pending settle never completes.
+        assert_eq!(f.filter_at(vec![block("new1", 10.0, 10.0)], t0 + ms(70))[0].text, "old");
+        assert_eq!(f.filter_at(vec![block("new2", 10.0, 10.0)], t0 + ms(110))[0].text, "old");
+        let adopted = f.filter_at(vec![block("new3", 10.0, 10.0)], t0 + ms(150));
+        assert_eq!(adopted[0].text, "new3", "thrashing confirmed track force-adopts at max_wait");
     }
 
     #[test]
     fn thrashing_with_bbox_width_swing_still_force_confirms() {
-        // Trailing glyph flicker often changes box width / center a lot.
+        // Trailing glyph flicker often changes box width / center a lot;
+        // distinct normalized texts still match and force-confirm.
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(10_000, 400, 80);
-        let _ = f.filter(vec![block_wh("セリフ", 100.0, 200.0, 80.0, 22.0)]);
-        let _ = f.filter(vec![block_wh("セリフ。", 98.0, 199.0, 160.0, 24.0)]);
-        let _ = f.filter(vec![block_wh("セリフ", 102.0, 201.0, 84.0, 20.0)]);
-        std::thread::sleep(Duration::from_millis(90));
-        let out = f.filter(vec![block_wh("セリフ…", 96.0, 198.0, 170.0, 26.0)]);
+        let _ = f.filter_at(vec![block_wh("セリフ", 100.0, 200.0, 80.0, 22.0)], t0);
+        let _ = f.filter_at(vec![block_wh("セリフＡ", 98.0, 199.0, 160.0, 24.0)], t0 + ms(30));
+        let _ = f.filter_at(vec![block_wh("セリフＢ", 102.0, 201.0, 84.0, 20.0)], t0 + ms(60));
+        let out = f.filter_at(vec![block_wh("セリフＣ", 96.0, 198.0, 170.0, 26.0)], t0 + ms(90));
         assert_eq!(out.len(), 1);
-        assert!(out[0].text.starts_with("セリフ"));
+        assert_eq!(out[0].text, "セリフＣ");
     }
 
     #[test]
     fn unconfirmed_track_survives_longer_than_hold_for_force() {
-        // hold and settle are short; max_wait is longer — track must live to force.
-        let mut f = BlockPersistenceFilter::new(20, 50, 120);
-        let _ = f.filter(vec![block("a!", 10.0, 10.0)]);
-        std::thread::sleep(Duration::from_millis(70)); // past hold, under max_wait
-        // Still matched: last_seen updates. Simulate gap then return:
-        let mid = f.filter(vec![]);
+        // hold and settle are short; max_wait (200ms > settle + 100ms = 120ms) is longer — track must live to force.
+        let t0 = Instant::now();
+        let mut f = BlockPersistenceFilter::new(20, 50, 200);
+        let _ = f.filter_at(vec![block("a!", 10.0, 10.0)], t0);
+        // Missed frame at 130ms (> hold 50ms and > settle + 100ms 120ms, <= max_wait 200ms).
+        let mid = f.filter_at(vec![], t0 + ms(130));
         assert!(mid.is_empty());
-        std::thread::sleep(Duration::from_millis(30));
-        // Track retained because unconfirmed retain = max_wait (120).
-        let _ = f.filter(vec![block("a", 11.0, 10.0)]);
-        std::thread::sleep(Duration::from_millis(40));
-        let forced = f.filter(vec![block("a?", 10.0, 11.0)]);
-        assert_eq!(forced.len(), 1, "should force after total first_seen >= 120ms");
+
+        // Track retained because unconfirmed retain = max_wait (200ms).
+        let _ = f.filter_at(vec![block("a", 11.0, 10.0)], t0 + ms(170));
+        let forced = f.filter_at(vec![block("a?", 10.0, 11.0)], t0 + ms(210));
+        assert_eq!(forced.len(), 1, "should force after total first_seen >= 200ms");
+        assert_eq!(forced[0].text, "a?");
     }
 
     #[test]
     fn persistence_ocr_punct_fold_is_same_text() {
-        for (origin_text, flicker) in [("待って…", "待って………"), ("何？", "何?"), ("そう〜", "そう~")] {
-            let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-            let origin = block_wh(origin_text, 100.0, 200.0, 80.0, 22.0);
-            let _ = f.filter(vec![origin.clone()]);
-            std::thread::sleep(Duration::from_millis(60));
-            let confirmed = f.filter(vec![origin.clone()]);
-            assert_eq!(confirmed.len(), 1, "{origin_text}");
-            let frozen = confirmed[0].bbox;
+        let t0 = Instant::now();
+        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
+        let origin = block_wh("待って…", 100.0, 200.0, 80.0, 22.0);
+        let _ = f.filter_at(vec![origin.clone()], t0);
+        let confirmed = f.filter_at(vec![origin], t0 + ms(60));
+        let frozen = confirmed[0].bbox;
 
-            let out = f.filter(vec![block_wh(flicker, 102.0, 201.0, 76.0, 20.0)]);
-            assert_eq!(out.len(), 1, "{origin_text}");
-            assert_eq!(out[0].text, origin_text);
-            assert_eq!(out[0].bbox, frozen, "{origin_text} fold must keep frozen bbox");
-        }
+        let out = f.filter_at(vec![block_wh("待って………", 102.0, 201.0, 76.0, 20.0)], t0 + ms(80));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "待って…");
+        assert_eq!(out[0].bbox, frozen);
     }
 
     #[test]
     fn same_reading_tolerates_misreads_only() {
         assert!(same_reading("今日はいい天気ですね", "今日はいい天気でずね"), "one glyph swapped");
         assert!(same_reading("今日はいい天気ですね", "今日はいい天気です"), "trailing glyph missed");
-        assert!(!same_reading("今日はいい天気", "今日はいい天気ですね"), "typewriter growth is a change");
+        // 1-char growth (dist = 1 <= 10/6): caught specifically by prefix-growth guard.
+        assert!(!same_reading("今日はいい天気です", "今日はいい天気ですね"), "typewriter growth is a change");
         assert!(!same_reading("はいです", "はいでず"), "short strings must match exactly");
         assert!(!same_reading("今日はいい天気ですね", "明日は悪い天気ですよ"), "real change");
     }
 
     #[test]
     fn confirmed_track_ignores_misread() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let origin = block_wh("今日はいい天気ですね", 100.0, 200.0, 200.0, 22.0);
-        let _ = f.filter(vec![origin.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let confirmed = f.filter(vec![origin]);
+        let _ = f.filter_at(vec![origin.clone()], t0);
+        let confirmed = f.filter_at(vec![origin], t0 + ms(60));
         assert_eq!(confirmed.len(), 1);
 
         // Animated background: one glyph misread and a box wobble, held past settle.
         let misread = block_wh("今日はいい天気でずね", 103.0, 201.0, 196.0, 22.0);
-        let _ = f.filter(vec![misread.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let out = f.filter(vec![misread]);
+        let _ = f.filter_at(vec![misread.clone()], t0 + ms(80));
+        let out = f.filter_at(vec![misread], t0 + ms(140));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "今日はいい天気ですね", "misread must not replace emitted text");
         assert_eq!(out[0].bbox, confirmed[0].bbox);
@@ -616,101 +646,98 @@ mod tests {
 
     #[test]
     fn confirm_takes_most_frequent_reading() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let right = block_wh("今日はいい天気ですね", 100.0, 200.0, 200.0, 22.0);
         let misread = block_wh("今日はいい天気でずね", 100.0, 200.0, 200.0, 22.0);
-        let _ = f.filter(vec![right.clone()]);
-        let _ = f.filter(vec![right]);
-        std::thread::sleep(Duration::from_millis(60));
+        let _ = f.filter_at(vec![right.clone()], t0);
+        let _ = f.filter_at(vec![right], t0 + ms(20));
         // Misread on the confirming frame must not become the shown text.
-        let out = f.filter(vec![misread]);
+        let out = f.filter_at(vec![misread], t0 + ms(60));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "今日はいい天気ですね");
     }
 
     #[test]
     fn confirmed_misread_is_corrected_by_votes() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let right = block_wh("今日はいい天気ですね", 100.0, 200.0, 200.0, 22.0);
         let misread = block_wh("今日はいい天気でずね", 100.0, 200.0, 200.0, 22.0);
-        let _ = f.filter(vec![misread.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(f.filter(vec![misread])[0].text, "今日はいい天気でずね");
+        let _ = f.filter_at(vec![misread.clone()], t0);
+        assert_eq!(f.filter_at(vec![misread], t0 + ms(60))[0].text, "今日はいい天気でずね");
 
         // Shown reading has 2 votes; the right one switches in at twice that.
-        for _ in 0..3 {
-            assert_eq!(f.filter(vec![right.clone()])[0].text, "今日はいい天気でずね");
+        for i in 1..=3 {
+            assert_eq!(f.filter_at(vec![right.clone()], t0 + ms(60 + i * 10))[0].text, "今日はいい天気でずね");
         }
-        assert_eq!(f.filter(vec![right])[0].text, "今日はいい天気ですね");
+        assert_eq!(f.filter_at(vec![right], t0 + ms(100))[0].text, "今日はいい天気ですね");
     }
 
     #[test]
     fn alternating_misread_does_not_flip_confirmed_text() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let right = block_wh("今日はいい天気ですね", 100.0, 200.0, 200.0, 22.0);
         let misread = block_wh("今日はいい天気でずね", 100.0, 200.0, 200.0, 22.0);
-        let _ = f.filter(vec![right.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        let _ = f.filter(vec![right.clone()]);
-        for _ in 0..20 {
-            assert_eq!(f.filter(vec![misread.clone()])[0].text, "今日はいい天気ですね");
-            assert_eq!(f.filter(vec![right.clone()])[0].text, "今日はいい天気ですね");
+        let _ = f.filter_at(vec![right.clone()], t0);
+        let _ = f.filter_at(vec![right.clone()], t0 + ms(60));
+        for i in 0..20 {
+            assert_eq!(f.filter_at(vec![misread.clone()], t0 + ms(70 + i * 20))[0].text, "今日はいい天気ですね");
+            assert_eq!(f.filter_at(vec![right.clone()], t0 + ms(80 + i * 20))[0].text, "今日はいい天気ですね");
         }
     }
 
     #[test]
     fn typewriter_growth_is_adopted_after_settle() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        let partial = block_wh("今日はいい天気", 100.0, 200.0, 140.0, 22.0);
-        let _ = f.filter(vec![partial.clone()]);
-        std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(f.filter(vec![partial]).len(), 1);
+        let partial = block_wh("今日はいい天気です", 100.0, 200.0, 180.0, 22.0);
+        let _ = f.filter_at(vec![partial.clone()], t0);
+        assert_eq!(f.filter_at(vec![partial], t0 + ms(60)).len(), 1);
 
         let full = block_wh("今日はいい天気ですね", 100.0, 200.0, 200.0, 22.0);
-        assert_eq!(f.filter(vec![full.clone()])[0].text, "今日はいい天気");
-        std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(f.filter(vec![full])[0].text, "今日はいい天気ですね");
+        assert_eq!(f.filter_at(vec![full.clone()], t0 + ms(70))[0].text, "今日はいい天気です");
+        assert_eq!(f.filter_at(vec![full], t0 + ms(130))[0].text, "今日はいい天気ですね");
     }
 
     #[test]
     fn replaced_text_expires_after_hold_before_adopt() {
         // Settle longer than hold: the new reading is still pending when the old text expires.
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(100, 30, 2_000);
         let old = block_wh("アオイ", 100.0, 200.0, 80.0, 22.0);
-        let _ = f.filter(vec![old.clone()]);
-        std::thread::sleep(Duration::from_millis(110));
-        assert_eq!(f.filter(vec![old]).len(), 1);
+        let _ = f.filter_at(vec![old.clone()], t0);
+        assert_eq!(f.filter_at(vec![old], t0 + ms(110)).len(), 1);
         assert!(f.settled());
 
         let new = block_wh("ハル", 100.0, 200.0, 60.0, 22.0);
-        assert_eq!(f.filter(vec![new.clone()])[0].text, "アオイ", "held for hold");
+        assert_eq!(f.filter_at(vec![new.clone()], t0 + ms(120))[0].text, "アオイ", "held for hold");
         assert!(!f.settled());
-        std::thread::sleep(Duration::from_millis(40));
-        assert!(f.filter(vec![new.clone()]).is_empty(), "replaced text expires after hold");
+        assert!(f.filter_at(vec![new.clone()], t0 + ms(160)).is_empty(), "replaced text expires after hold");
         assert!(!f.settled());
 
-        std::thread::sleep(Duration::from_millis(70));
-        assert_eq!(f.filter(vec![new])[0].text, "ハル");
+        assert_eq!(f.filter_at(vec![new], t0 + ms(230))[0].text, "ハル");
         assert!(f.settled());
     }
 
     #[test]
-    fn held_track_is_emitted_but_not_settled() {
+    fn unconfirmed_text_and_output_sorting() {
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        let _ = f.filter(vec![block("Menu", 10.0, 10.0)]);
-        std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(f.filter(vec![block("Menu", 10.0, 10.0)]).len(), 1);
-        assert!(f.settled());
-
-        assert_eq!(f.filter(vec![]).len(), 1, "hysteresis keeps the text");
-        assert!(!f.settled(), "held text is not on screen this frame");
-    }
-
-    #[test]
-    fn unconfirmed_text_is_not_settled() {
-        let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
-        assert!(f.filter(vec![block("Menu", 10.0, 10.0)]).is_empty());
+        let input = vec![
+            block("   ", 0.0, 0.0),
+            block("Bottom", 10.0, 100.0),
+            block("TopRight", 200.0, 10.0),
+            block("TopLeft", 10.0, 10.0),
+        ];
+        assert!(f.filter_at(input.clone(), t0).is_empty());
         assert!(!f.settled(), "new text is still settling");
+
+        let out = f.filter_at(input, t0 + ms(60));
+        let texts: Vec<_> = out.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["TopLeft", "TopRight", "Bottom"]);
+        assert_eq!(out.iter().map(|b| b.id).collect::<Vec<_>>(), [0, 1, 2]);
     }
 
     #[test]
@@ -718,6 +745,7 @@ mod tests {
         // Four overlapping dialogue lines (merge off). Matching must be 1:1 per
         // frame — otherwise later lines steal earlier tracks and only the last
         // couple survive.
+        let t0 = Instant::now();
         let mut f = BlockPersistenceFilter::new(50, 300, 2_000);
         let lines = vec![
             block_wh("一行目です", 100.0, 200.0, 240.0, 32.0),
@@ -725,9 +753,8 @@ mod tests {
             block_wh("三行目です", 100.0, 256.0, 240.0, 32.0),
             block_wh("四行目です", 100.0, 284.0, 240.0, 32.0),
         ];
-        let _ = f.filter(lines.clone());
-        std::thread::sleep(Duration::from_millis(60));
-        let out = f.filter(lines);
+        let _ = f.filter_at(lines.clone(), t0);
+        let out = f.filter_at(lines, t0 + ms(60));
         assert_eq!(out.len(), 4, "texts={:?}", out.iter().map(|b| b.text.as_str()).collect::<Vec<_>>());
         assert_eq!(out[0].text, "一行目です");
         assert_eq!(out[3].text, "四行目です");

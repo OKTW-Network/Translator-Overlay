@@ -282,3 +282,275 @@ async fn http_download(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{ErrorKind, Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Instant,
+    };
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    struct TestServer {
+        base_url: String,
+        expected: usize,
+        served: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestServer {
+        fn spawn(responses: Vec<Vec<u8>>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let expected = responses.len();
+            let served = Arc::new(AtomicUsize::new(0));
+            let served_srv = Arc::clone(&served);
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_srv = Arc::clone(&stop);
+
+            let handle = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                for resp in responses {
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((s, _)) => break s,
+                            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                                if stop_srv.load(Ordering::Acquire) || Instant::now() >= deadline {
+                                    return;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => return,
+                        }
+                    };
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut buf = [0u8; 4096];
+                    let mut read = 0;
+                    while read < buf.len() {
+                        let n = stream.read(&mut buf[read..]).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        read += n;
+                        if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let _ = stream.write_all(&resp);
+                    let _ = stream.flush();
+                    served_srv.fetch_add(1, Ordering::Release);
+                }
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                expected,
+                served,
+                stop,
+                handle: Some(handle),
+            }
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().unwrap();
+            }
+            assert_eq!(self.served.load(Ordering::Acquire), self.expected, "unexpected request count to TestServer");
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn leaked_str(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    #[tokio::test]
+    async fn empty_artifacts_succeeds_without_status_updates() {
+        let dir = tempdir().unwrap();
+        let mut updates = Vec::new();
+        download_artifacts(ModelKind::Ocr, &[], dir.path(), |s| updates.push(s))
+            .await
+            .unwrap();
+        assert!(updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commit_part_checks_size_and_cleans_up_on_mismatch() {
+        let dir = tempdir().unwrap();
+        let art = ModelArtifact {
+            file_name: "model.onnx",
+            release: "https://example.invalid",
+            remote_name: "model.onnx",
+            expected_bytes: 5,
+        };
+        let part = part_path(dir.path(), &art);
+        let dest = dir.path().join(art.file_name);
+
+        // Missing part returns error.
+        assert!(commit_part(dir.path(), &art).await.is_err());
+
+        // Exact size commits and replaces existing dest.
+        std::fs::write(&dest, b"stale").unwrap();
+        std::fs::write(&part, b"12345").unwrap();
+        commit_part(dir.path(), &art).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"12345");
+        assert!(!part.exists());
+
+        // Wrong size deletes dest so it cannot poison cache.
+        std::fs::write(&part, b"123").unwrap();
+        assert!(commit_part(dir.path(), &art).await.is_err());
+        assert!(!dest.exists());
+        assert!(!part.exists());
+    }
+
+    #[tokio::test]
+    async fn http_download_commits_exact_bytes_and_reports_progress() {
+        let dir = tempdir().unwrap();
+        let body = b"hello world!".to_vec();
+        let server = TestServer::spawn(vec![
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 12\r\n\r\n".to_vec(),
+            [
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 12\r\n\r\n".as_slice(),
+                &body,
+            ]
+            .concat(),
+        ]);
+        let art = ModelArtifact {
+            file_name: "weights.bin",
+            release: leaked_str(server.base_url.clone()),
+            remote_name: "weights.bin",
+            expected_bytes: 12,
+        };
+
+        let mut statuses = Vec::new();
+        download_artifacts(ModelKind::Translation, &[&art], dir.path(), |s| statuses.push(s))
+            .await
+            .unwrap();
+        server.finish();
+
+        assert_eq!(std::fs::read(dir.path().join("weights.bin")).unwrap(), body);
+        assert!(!part_path(dir.path(), &art).exists());
+        assert!(matches!(
+            statuses.first(),
+            Some(PipelineStatus::DownloadingModels {
+                kind: ModelKind::Translation,
+                file_index: 1,
+                file_count: 1,
+                percent: 0,
+            })
+        ));
+        assert!(matches!(
+            statuses.last(),
+            Some(PipelineStatus::DownloadingModels {
+                kind: ModelKind::Translation,
+                file_index: 1,
+                file_count: 1,
+                percent: 100,
+            })
+        ));
+        // Progress updates are deduplicated.
+        assert!(statuses.windows(2).all(|w| w[0] != w[1]));
+    }
+
+    #[tokio::test]
+    async fn http_download_rejects_bad_status_and_size_mismatches() {
+        let dir = tempdir().unwrap();
+        // 1) Content-Length mismatch before opening `.part`.
+        let s1 = TestServer::spawn(vec![
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 99\r\n\r\n".to_vec(),
+        ]);
+        let art1 = ModelArtifact {
+            file_name: "cl.bin",
+            release: leaked_str(s1.base_url.clone()),
+            remote_name: "cl.bin",
+            expected_bytes: 5,
+        };
+        assert!(download_artifacts(ModelKind::Ocr, &[&art1], dir.path(), |_| {}).await.is_err());
+        s1.finish();
+        assert!(!part_path(dir.path(), &art1).exists());
+        assert!(!dir.path().join("cl.bin").exists());
+
+        // 2) Stream without Content-Length exceeding expected_bytes cleans up `.part`.
+        let s2 = TestServer::spawn(vec![
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n123456789".to_vec(),
+        ]);
+        let art2 = ModelArtifact {
+            file_name: "over.bin",
+            release: leaked_str(s2.base_url.clone()),
+            remote_name: "over.bin",
+            expected_bytes: 5,
+        };
+        assert!(download_artifacts(ModelKind::Ocr, &[&art2], dir.path(), |_| {}).await.is_err());
+        s2.finish();
+        assert!(!part_path(dir.path(), &art2).exists());
+
+        // 3) Truncated stream without Content-Length cleans up `.part`.
+        let s3 = TestServer::spawn(vec![
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n12".to_vec(),
+        ]);
+        let art3 = ModelArtifact {
+            file_name: "short.bin",
+            release: leaked_str(s3.base_url.clone()),
+            remote_name: "short.bin",
+            expected_bytes: 5,
+        };
+        assert!(download_artifacts(ModelKind::Ocr, &[&art3], dir.path(), |_| {}).await.is_err());
+        s3.finish();
+        assert!(!part_path(dir.path(), &art3).exists());
+
+        // 4) HTTP 404 errors cleanly.
+        let s4 = TestServer::spawn(vec![
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        ]);
+        let art4 = ModelArtifact {
+            file_name: "missing.bin",
+            release: leaked_str(s4.base_url.clone()),
+            remote_name: "missing.bin",
+            expected_bytes: 5,
+        };
+        assert!(download_artifacts(ModelKind::Ocr, &[&art4], dir.path(), |_| {}).await.is_err());
+        s4.finish();
+        assert!(!dir.path().join("missing.bin").exists());
+    }
+
+    #[tokio::test]
+    async fn xet_source_parses_headers_and_falls_back_when_absent() {
+        let server = TestServer::spawn(vec![
+            b"HTTP/1.1 302 Found\r\nConnection: close\r\nx-xet-hash: abc123\r\nLink: <https://example/other>; rel=\"canonical\", <https://example/tok>; rel=\"xet-auth\"\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec(),
+        ]);
+        let probe = http_client_builder(Some(Duration::from_secs(5)))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let hit = xet_source(&probe, &format!("{}/a", server.base_url)).await;
+        assert_eq!(hit, Some(("abc123".into(), "https://example/tok".into())));
+        let miss = xet_source(&probe, &format!("{}/b", server.base_url)).await;
+        assert_eq!(miss, None);
+        server.finish();
+    }
+}

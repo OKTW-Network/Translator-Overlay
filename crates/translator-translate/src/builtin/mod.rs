@@ -856,6 +856,8 @@ impl OnnxModel {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -935,12 +937,12 @@ mod tests {
                 .try_fold(ShapeState::default(), |s, p| shape.feed(s, p))
                 .map(|s| shape.done(s))
         };
-        // Any split into tokens; `"`, `\\` and `\u` escapes stay inside the text.
-        assert_eq!(feed(&[r#"{"b":[[3,"早"#, r#"安\"\\é"],"#, r#"[12,""#, r#""]]}"#]), Some(true));
+        // Any split into tokens; `"`, `\\`, `\n`, `\t` and `\uXXXX` escapes stay inside the text.
+        assert_eq!(feed(&[r#"{"b":[[3,"早"#, r#"安\"\\\u00"#, r#"e9\n\t"],"#, r#"[12,""#, r#""]]}"#]), Some(true));
         assert_eq!(feed(&[r#"{"b":[[3,"a"],[12,"#]), Some(false));
         assert_eq!(feed(&[r#"{"b":[[3,"[HP] [MP]"#]), Some(false));
         // The slips 1.8B and 7B make (7B closes a text with `」`, then `]]}`), a wrong or skipped id,
-        // and anything after the end.
+        // anything after the end, control chars, or an incomplete `\u` closed early.
         for bad in [
             r#"{"b":[[3，"#,
             r#"{"b":[[3],"#,
@@ -951,10 +953,140 @@ mod tests {
             r#"{"b":[[3,"a"]]}"#,
             r#"{"b":[[3,"a"],[12,"b"]]} "#,
             "{\"b\":[[3,\"a\nb",
+            "{\"b\":[[3,\"a\tb",
             r#"{"b":[[3,"\x"#,
+            r#"{"b":[[3,"\u00e"]"#,
             r#"{"b":[[3,"\u00g"#,
         ] {
             assert_eq!(feed(&[bad]), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn dry_threshold_sampling_temperature_and_kv_slot_shape() {
+        // Len 3 < DRY_ALLOWED_LENGTH (4) leaves logits intact; len == 4 penalizes by -DRY_MULTIPLIER.
+        let mut logits_short = [0.0; 10];
+        apply_dry(&mut logits_short, &[1, 2, 3, 9, 1, 2, 3], &HashSet::new());
+        assert_eq!(logits_short, [0.0; 10]);
+
+        let mut logits_exact = [0.0; 10];
+        apply_dry(&mut logits_exact, &[1, 2, 3, 4, 9, 1, 2, 3, 4], &HashSet::new());
+        assert_eq!(logits_exact[9], -DRY_MULTIPLIER);
+
+        // Sampling excludes NEG_INFINITY and sharpens at low temperature.
+        let logits = [f32::NEG_INFINITY, 3.0, 2.0, f32::NEG_INFINITY];
+        let mut rng = fastrand::Rng::with_seed(11);
+        let cold = Sampling {
+            temperature: 0.25,
+            top_p: 1.0,
+            top_k: usize::MAX,
+        };
+        let picks = Vec::from_fn(200, |_| cold.pick(&logits, &mut rng));
+        assert!(picks.iter().all(|&t| t == 1 || t == 2));
+        assert!(picks.iter().filter(|&&t| t == 1).count() > 180);
+
+        // KvSlot::shape preserves fixed state and substitutes dynamic batch/sequence dims.
+        let attn = KvSlot {
+            past: "past_key_values.0.key".into(),
+            present: "present.0.key".into(),
+            dims: vec![-1, 4, -1, 256],
+            in_place: true,
+        };
+        assert_eq!(attn.shape(128), [1, 4, 128, 256]);
+        let fixed = KvSlot {
+            past: "past_key_values.0.conv_state".into(),
+            present: "present.0.conv_state".into(),
+            dims: vec![-1, 8, 128],
+            in_place: false,
+        };
+        assert_eq!(fixed.shape(128), [1, 8, 128]);
+    }
+
+    #[test]
+    fn next_token_handles_fallback_closing_heuristic_and_exhaustion() {
+        let shape = ReplyShape { ids: vec![1] };
+        let decoding = Decoding {
+            sampling: None,
+            dry: false,
+            shape: Some(shape),
+        };
+        let breakers = HashSet::new();
+        let mut rng = fastrand::Rng::new();
+
+        // Vocab: 0 = "wrong", 1 = "{\"b\":[[1,\"", 2 = "a", 3 = "]}", 4 = "\"]]}", 5 = EOS (None)
+        let piece = |t: u32| -> ort::Result<Option<String>> {
+            Ok(match t {
+                0 => Some("wrong".into()),
+                1 => Some(r#"{"b":[[1,""#.into()),
+                2 => Some("a".into()),
+                3 => Some("]}".into()),
+                4 => Some(r#""]]}"#.into()),
+                _ => None,
+            })
+        };
+
+        // Out-of-shape argmax falls back to highest-logit fitting token.
+        let mut state = ShapeState::default();
+        let mut logits = [10.0, 2.0, 5.0, 1.0, 0.0, -5.0];
+        assert_eq!(next_token(&decoding, &mut logits, &[], &breakers, &mut rng, &mut state, piece).unwrap(), Some(1));
+        assert!(state.in_text);
+
+        // Closing heuristic: when model picks `]}` (token 3) or EOS inside text, prefer token 4 (`"]]}`) even though `a` has higher logit.
+        let mut logits = [-10.0, -10.0, 5.0, 10.0, 1.0, -5.0];
+        let mut s2 = state;
+        assert_eq!(next_token(&decoding, &mut logits, &[1], &breakers, &mut rng, &mut s2, piece).unwrap(), Some(4));
+        assert_eq!(s2.lit, 1);
+
+        let mut logits = [-10.0, -10.0, 5.0, -10.0, 1.0, 10.0];
+        let mut s3 = state;
+        assert_eq!(next_token(&decoding, &mut logits, &[1], &breakers, &mut rng, &mut s3, piece).unwrap(), Some(4));
+
+        // No token fits once shape is finished (all logits map to non-empty or wrong tokens for done state).
+        let mut logits = [1.0; 2];
+        assert_eq!(next_token(&decoding, &mut logits, &[], &breakers, &mut rng, &mut s3, |t| Ok(Some(format!("bad{t}")))).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn ensure_loaded_validates_custom_catalog_directml_and_cancellation() {
+        let dir = tempdir().unwrap();
+        let mut backend = BuiltinBackend::default();
+
+        for (bad_model, needle) in [
+            ("custom:", "no custom GGUF"),
+            ("custom:../escape.gguf", "invalid custom GGUF"),
+            ("custom:sub\\file.gguf", "invalid custom GGUF"),
+            ("no-such-model-id", "unknown built-in model"),
+        ] {
+            let api = ApiConfig {
+                builtin_model: bad_model.into(),
+                ..ApiConfig::default()
+            };
+            let err = ensure_loaded(&mut backend, &api, dir.path(), &CancellationToken::new(), &mut |_| {})
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains(needle), "model={bad_model} err={err}");
+        }
+
+        let directml_api = ApiConfig {
+            builtin_model: "gemma-4-e4b-it-qat-q4".into(),
+            builtin_device: OcrDevice::Directml,
+            ..ApiConfig::default()
+        };
+        let err = ensure_loaded(&mut backend, &directml_api, dir.path(), &CancellationToken::new(), &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("DirectML"), "{err}");
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let valid_api = ApiConfig {
+            builtin_model: "gemma-4-e4b-it-qat-q4".into(),
+            builtin_device: OcrDevice::Cpu,
+            ..ApiConfig::default()
+        };
+        let err = ensure_loaded(&mut backend, &valid_api, dir.path(), &cancelled, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled(), "{err}");
     }
 }

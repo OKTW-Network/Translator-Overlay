@@ -326,6 +326,10 @@ mod tests {
         }
         cache.set_max(2);
         assert_eq!(cache.len(), 2);
+        assert!(cache.lookup("k0", "ja", "zh-TW").is_none());
+        assert!(cache.lookup("k1", "ja", "zh-TW").is_none());
+        assert_eq!(cache.lookup("k2", "ja", "zh-TW").as_deref(), Some("v2"));
+        assert_eq!(cache.lookup("k3", "ja", "zh-TW").as_deref(), Some("v3"));
     }
 
     #[test]
@@ -369,22 +373,28 @@ mod tests {
 
     #[test]
     fn stitch_prefers_hits_then_model_id_then_text() {
-        let source = vec![block(0, "名前"), block(1, "台詞"), block(2, "台詞")];
-        let hits = vec![Some("名字".into()), None, None];
-        let model = vec![TranslatedBlock {
-            id: 1,
-            source: "台詞".into(),
-            translation: "對白".into(),
+        let source = vec![block(0, "同じ"), block(1, "同じ"), block(2, "別の")];
+        let hits = vec![Some("hit_wins".into()), None, None];
+        let tb = |id, src: &str, tr: &str| TranslatedBlock {
+            id,
+            source: src.into(),
+            translation: tr.into(),
             confidence: 0.9,
             bbox: Rect::new(0.0, 0.0, 10.0, 10.0),
             source_lines: 1,
             source_height: 10.0,
             source_width: 10.0,
-        }];
+        };
+        // Block 0 has hit > model id 0; block 1 has model id 1 > earlier by_norm ("by_id_0"); block 2 falls back to by_norm from id 99.
+        let model = vec![
+            tb(0, "同じ", "by_id_0"),
+            tb(1, "同じ", "by_id_1"),
+            tb(99, "別の", "by_norm_fallback"),
+        ];
         let out = TranslationCache::stitch(&source, &hits, &model);
-        assert_eq!(out[0].translation, "名字");
-        assert_eq!(out[1].translation, "對白");
-        assert_eq!(out[2].translation, "對白");
+        assert_eq!(out[0].translation, "hit_wins");
+        assert_eq!(out[1].translation, "by_id_1");
+        assert_eq!(out[2].translation, "by_norm_fallback");
         assert_eq!(out[0].bbox, source[0].bbox);
         assert_eq!(out[0].id, 0);
 
@@ -410,5 +420,65 @@ mod tests {
         cache.store_model_pairs(&translated, &tcfg);
         assert_eq!(cache.lookup("はい", "ja", "zh-TW").as_deref(), Some("是"));
         assert!(cache.lookup("いいえ", "ja", "zh-TW").is_none());
+
+        let disabled = TranslationConfig {
+            cache_enabled: false,
+            ..tcfg
+        };
+        cache.store_model_pairs(
+            &[TranslatedBlock {
+                id: 2,
+                source: "いいえ".into(),
+                translation: "不是".into(),
+                confidence: 0.9,
+                bbox: Rect::new(0.0, 0.0, 1.0, 1.0),
+                source_lines: 1,
+                source_height: 1.0,
+                source_width: 1.0,
+            }],
+            &disabled,
+        );
+        assert!(cache.lookup("いいえ", "ja", "zh-TW").is_none());
+    }
+
+    #[test]
+    fn overwrite_at_capacity_and_lru_tiebreak_at_high_freq() {
+        let mut cache = TranslationCache::new(2);
+        cache.insert("a", "ja", "zh-TW", "A1");
+        cache.insert("b", "ja", "zh-TW", "B1");
+        // Overwriting an existing key at capacity must not evict "b".
+        cache.insert("a", "ja", "zh-TW", "A2");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.lookup("b", "ja", "zh-TW").as_deref(), Some("B1")); // b now freq=2
+        // Make a reach freq=3 older than b freq=3.
+        assert_eq!(cache.lookup("a", "ja", "zh-TW").as_deref(), Some("A2")); // a now freq=3
+        assert!(cache.lookup("b", "ja", "zh-TW").is_some()); // b now freq=3, newer tick
+        cache.insert("c", "ja", "zh-TW", "C1");
+        assert!(cache.lookup("a", "ja", "zh-TW").is_none(), "oldest freq=3 entry a must be evicted");
+        assert_eq!(cache.lookup("b", "ja", "zh-TW").as_deref(), Some("B1"));
+        assert_eq!(cache.lookup("c", "ja", "zh-TW").as_deref(), Some("C1"));
+    }
+
+    #[test]
+    fn source_lang_isolation_zero_capacity_clamps_and_clear() {
+        let mut cache = TranslationCache::new(4);
+        cache.insert("hi", "en", "zh-TW", "嗨");
+        cache.insert("hi", "ja", "zh-TW", "是");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.lookup("hi", "en", "zh-TW").as_deref(), Some("嗨"));
+        assert_eq!(cache.lookup("hi", "ja", "zh-TW").as_deref(), Some("是"));
+        assert!(cache.lookup("hi", "ko", "zh-TW").is_none());
+
+        cache.set_max(0);
+        assert_eq!(cache.len(), TRANSLATION_CACHE_MAX_MIN, "set_max(0) clamps to {TRANSLATION_CACHE_MAX_MIN}");
+        cache.clear();
+        assert!(cache.is_empty());
+
+        let mut clamped = TranslationCache::new(0);
+        clamped.insert("hi", "en", "zh-TW", "嗨");
+        clamped.insert("hi", "ja", "zh-TW", "是");
+        assert_eq!(clamped.len(), TRANSLATION_CACHE_MAX_MIN, "new(0) clamps capacity to {TRANSLATION_CACHE_MAX_MIN}");
+        assert!(clamped.lookup("hi", "en", "zh-TW").is_none());
+        assert_eq!(clamped.lookup("hi", "ja", "zh-TW").as_deref(), Some("是"));
     }
 }

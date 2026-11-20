@@ -131,3 +131,41 @@ fn missing_artifacts(models_dir: &Path, config: &OcrConfig) -> Vec<&'static Mode
         .filter(|a| !models_dir.join(a.file_name).is_file())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+    use translator_core::LineMergeMode;
+
+    use super::*;
+
+    #[test]
+    fn missing_artifacts_tracks_ocr_and_layout_files() {
+        let dir = tempdir().unwrap();
+        let mut cfg = OcrConfig::default();
+        cfg.line_merge.mode = LineMergeMode::Rules;
+
+        let all_rules = missing_artifacts(dir.path(), &cfg);
+        assert_eq!(all_rules.len(), 3);
+
+        cfg.line_merge.mode = LineMergeMode::Layout;
+        let all_layout = missing_artifacts(dir.path(), &cfg);
+        assert_eq!(all_layout.len(), 4);
+        assert_eq!(all_layout[3].file_name, LAYOUT_ARTIFACT.file_name);
+
+        // Two of three OCR files present → one OCR + layout still missing.
+        std::fs::write(dir.path().join(all_rules[0].file_name), b"x").unwrap();
+        std::fs::write(dir.path().join(all_rules[1].file_name), b"x").unwrap();
+        let partial = missing_artifacts(dir.path(), &cfg);
+        assert_eq!(partial.iter().map(|a| a.file_name).collect::<Vec<_>>(), [all_rules[2].file_name, LAYOUT_ARTIFACT.file_name]);
+
+        // Directory at artifact path still counts as missing.
+        std::fs::write(dir.path().join(all_rules[2].file_name), b"x").unwrap();
+        std::fs::create_dir_all(dir.path().join(LAYOUT_ARTIFACT.file_name)).unwrap();
+        assert_eq!(missing_artifacts(dir.path(), &cfg).iter().map(|a| a.file_name).collect::<Vec<_>>(), [LAYOUT_ARTIFACT.file_name]);
+        std::fs::remove_dir_all(dir.path().join(LAYOUT_ARTIFACT.file_name)).unwrap();
+
+        std::fs::write(dir.path().join(LAYOUT_ARTIFACT.file_name), b"x").unwrap();
+        assert!(missing_artifacts(dir.path(), &cfg).is_empty());
+    }
+}
