@@ -8,6 +8,7 @@ mod rpc;
 
 use std::{
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -355,13 +356,15 @@ impl Drop for TempCwd {
 }
 
 fn make_isolated_cwd() -> Result<PathBuf, TranslateError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir()
         .join("translator-overlay-cli")
-        .join(format!("{}-{nanos}", std::process::id()));
+        .join(format!("{}-{nanos}-{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| TranslateError::CliProtocol(format!("create isolated cwd: {e}")))?;
     Ok(dir)
 }

@@ -33,7 +33,7 @@ use crate::{
     host::{
         follow::{FOLLOW_OVERLAY, FOLLOW_TARGET, uninstall_follow_hooks},
         win32::{ClientRect, set_overlay_owner},
-        wnd::{CLASS_NAME, HOST_TEARING_DOWN, WINDOW_TITLE, overlay_wnd_proc},
+        wnd::{CLASS_NAME, HOST_TEARING_DOWN, PICKER_HIT_TEST, WINDOW_TITLE, overlay_wnd_proc},
     },
     picker::{PickerEnd, RegionPicker},
     reader::{ReaderWindow, format_reader_text},
@@ -218,9 +218,12 @@ impl OverlayHost {
                 }
             }
             OverlayCommand::ClearRegionSelect => {
-                if let Some(p) = self.picker.as_mut() {
-                    p.regions.clear();
-                    p.selected = None;
+                if self.picker.is_some() {
+                    self.abort_picker_drag();
+                    if let Some(p) = self.picker.as_mut() {
+                        p.regions.clear();
+                        p.selected = None;
+                    }
                     let _ = self.event_tx.send(OverlayEvent::RegionSelectUpdated(Vec::new()));
                     self.dirty = true;
                 }
@@ -328,8 +331,10 @@ impl OverlayHost {
 
     pub(crate) fn teardown(&mut self) {
         HOST_TEARING_DOWN.store(true, Ordering::Release);
+        PICKER_HIT_TEST.store(false, Ordering::Release);
         FOLLOW_TARGET.store(0, Ordering::Release);
         FOLLOW_OVERLAY.store(0, Ordering::Release);
+        self.picker = None;
         self.in_movesize = false;
         uninstall_follow_hooks(&mut self.follow_hooks);
         if let Some(mut reader) = self.reader.take() {

@@ -924,18 +924,20 @@ pub(crate) fn translated_geometry_changed(previous: &[TranslatedBlock], remapped
         return true;
     }
     let previous_keys: Vec<String> = previous.iter().map(|p| normalize_ocr_text(&p.source)).collect();
+    let mut used = vec![false; previous.len()];
     for b in remapped {
         let key = normalize_ocr_text(&b.source);
-        let Some((a, _)) = previous
-            .iter()
-            .zip(&previous_keys)
-            .find(|(p, k)| **k == key && p.translation == b.translation)
-        else {
+        let Some(idx) = previous.iter().zip(&previous_keys).enumerate().position(|(i, (p, k))| {
+            !used[i]
+                && **k == key
+                && p.translation == b.translation
+                && p.bbox == b.bbox
+                && p.source_height == b.source_height
+                && p.source_width == b.source_width
+        }) else {
             return true;
         };
-        if a.bbox != b.bbox || a.source_height != b.source_height || a.source_width != b.source_width {
-            return true;
-        }
+        used[idx] = true;
     }
     false
 }

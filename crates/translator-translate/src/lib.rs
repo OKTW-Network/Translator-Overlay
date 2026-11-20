@@ -524,6 +524,9 @@ fn parse_pairs_from_array(mut s: &str, include_open: bool) -> Vec<(u32, String)>
             Some(rest) => {
                 out.push((id, text));
                 s = rest.trim_start();
+                if let Some(after_comma) = s.strip_prefix(',') {
+                    s = after_comma.trim_start();
+                }
                 if let Some(rest) = s.strip_prefix(']') {
                     s = rest;
                 } else {

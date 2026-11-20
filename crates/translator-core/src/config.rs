@@ -102,7 +102,8 @@ impl AppConfig {
     fn from_toml_lenient(text: &str) -> Result<Self, TomlFileError> {
         let src: toml::Table = toml::from_str(text)?;
         let mut dest = toml::Table::new();
-        apply_lenient(&mut dest, &src, "");
+        let mut path = Vec::new();
+        apply_lenient(&mut dest, &src, &mut path);
         Ok(Self::deserialize(toml::Value::Table(dest)).unwrap_or_default())
     }
 
@@ -112,57 +113,37 @@ impl AppConfig {
 }
 
 /// Try each key as a whole value; if a table fails, apply its children independently.
-fn apply_lenient(root: &mut toml::Table, src: &toml::Table, prefix: &str) {
+fn apply_lenient(root: &mut toml::Table, src: &toml::Table, path: &mut Vec<String>) {
     for (key, value) in src {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
+        path.push(key.clone());
 
-        insert_by_path(root, &path, value.clone());
-        if AppConfig::deserialize(toml::Value::Table(root.clone())).is_ok() {
-            continue;
+        let mut candidate = root.clone();
+        insert_at(&mut candidate, path, value.clone());
+        if AppConfig::deserialize(toml::Value::Table(candidate.clone())).is_ok() {
+            *root = candidate;
+        } else if let toml::Value::Table(child) = value {
+            apply_lenient(root, child, path);
         }
-        remove_by_path(root, &path);
 
-        if let toml::Value::Table(child) = value {
-            apply_lenient(root, child, &path);
-        }
+        path.pop();
     }
 }
 
-fn insert_by_path(root: &mut toml::Table, path: &str, value: toml::Value) {
-    let mut parts = path.split('.');
-    let Some(last) = parts.next_back() else {
+fn insert_at(root: &mut toml::Table, path: &[String], value: toml::Value) {
+    let Some((last, parents)) = path.split_last() else {
         return;
     };
     let mut current = root;
-    for part in parts {
-        if !matches!(current.get(part), Some(toml::Value::Table(_))) {
-            current.insert(part.to_string(), toml::Value::Table(toml::Table::new()));
+    for part in parents {
+        if !matches!(current.get(part.as_str()), Some(toml::Value::Table(_))) {
+            current.insert(part.clone(), toml::Value::Table(toml::Table::new()));
         }
-        let Some(toml::Value::Table(next)) = current.get_mut(part) else {
-            unreachable!("insert_by_path ensures a table");
+        let Some(toml::Value::Table(next)) = current.get_mut(part.as_str()) else {
+            unreachable!("insert_at ensures a table");
         };
         current = next;
     }
-    current.insert(last.to_string(), value);
-}
-
-fn remove_by_path(root: &mut toml::Table, path: &str) {
-    let mut parts = path.split('.');
-    let Some(last) = parts.next_back() else {
-        return;
-    };
-    let mut current = root;
-    for part in parts {
-        let Some(toml::Value::Table(next)) = current.get_mut(part) else {
-            return;
-        };
-        current = next;
-    }
-    current.remove(last);
+    current.insert(last.clone(), value);
 }
 
 /// How the translator reaches a model.
@@ -747,7 +728,7 @@ pub fn format_argb_hex(argb: u32) -> String {
 /// Parse `"#AARRGGBB"` (optional surrounding space; hex digits case-insensitive).
 pub fn parse_argb_hex(s: &str) -> Option<u32> {
     let hex = s.trim().strip_prefix('#')?;
-    if hex.len() != 8 {
+    if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     u32::from_str_radix(hex, 16).ok()

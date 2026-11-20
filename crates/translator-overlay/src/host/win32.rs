@@ -282,6 +282,9 @@ fn park_unfocused(overlay: HWND, target: HWND) -> windows::core::Result<()> {
     if !z_order_is_above(overlay, target) || (fg_ok && covering_foreground(overlay, fg, target)) {
         pull_beside_target(overlay, target, if fg_ok { fg } else { HWND::default() });
     }
+    if !unsafe { IsWindowVisible(overlay) }.as_bool() {
+        let _ = unsafe { ShowWindow(overlay, SW_SHOWNOACTIVATE) };
+    }
 
     debug!(
         overlay = overlay.0 as isize,

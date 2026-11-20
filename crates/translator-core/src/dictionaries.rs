@@ -38,13 +38,14 @@ pub fn is_valid_profile_name(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." {
         return false;
     }
-    if name.ends_with('.') || name.ends_with(' ') {
+    if name.ends_with('.') || name.chars().any(char::is_control) {
         return false;
     }
     if name.contains(FORBIDDEN_NAME_CHARS) {
         return false;
     }
-    !RESERVED_STEMS.iter().any(|stem| name.eq_ignore_ascii_case(stem))
+    let stem = name.split('.').next().unwrap_or(name);
+    !RESERVED_STEMS.iter().any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
 /// Trim, drop empty sources, keep the last target for a repeated source.
@@ -93,7 +94,7 @@ pub fn list_dictionary_names(dir: &Path) -> Result<Vec<String>, DictionaryError>
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if is_valid_profile_name(stem) {
+        if stem == stem.trim() && is_valid_profile_name(stem) {
             names.push(stem.to_string());
         }
     }

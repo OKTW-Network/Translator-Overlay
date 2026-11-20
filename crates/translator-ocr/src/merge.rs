@@ -285,6 +285,10 @@ fn assemble_group(
             let same_row = match along {
                 Some(Axis::X) => !vertical,
                 Some(Axis::Y) => vertical,
+                None if vertical => {
+                    b.bbox.y >= prev.bbox.y + prev.bbox.height * 0.25
+                        && (prev.bbox.x + prev.bbox.width).min(b.bbox.x + b.bbox.width) > prev.bbox.x.max(b.bbox.x)
+                }
                 None => {
                     b.bbox.x >= prev.bbox.x + prev.bbox.width * 0.25
                         && (prev.bbox.y + prev.bbox.height).min(b.bbox.y + b.bbox.height) > prev.bbox.y.max(b.bbox.y)
