@@ -1038,6 +1038,18 @@ mod tests {
         assert!(matches!(snap.status, PipelineStatus::Error { .. }));
         assert!(snap.settings_dirty);
 
+        // A retry's model shows its thinking.
+        {
+            let mut s = ui.state.write();
+            s.status = PipelineStatus::RetryingTranslate {
+                attempt: 1,
+                max_retries: 3,
+                message: "bad JSON".into(),
+            };
+            s.translation_model_load = Some(PipelineStatus::Thinking);
+        }
+        assert!(matches!(take_chrome(&ui).status, PipelineStatus::Thinking));
+
         assert_eq!(truncate("  hello   world  ", 20), "hello world");
         assert_eq!(truncate("hello", 5), "hello");
         assert_eq!(truncate("甲乙丙丁戊", 4), "甲乙丙…");

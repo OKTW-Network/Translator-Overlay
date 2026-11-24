@@ -21,8 +21,9 @@ pub enum BuiltinArch {
 }
 
 impl BuiltinArch {
-    /// Prompt text for `messages`, ending with an open model turn.
-    pub fn render_prompt(self, messages: &[ChatMessage], empty_thought: bool) -> String {
+    /// Prompt text for `messages`, ending with an open model turn. `effort` (a reasoning effort, `None`
+    /// for off) turns thinking on and leaves the turn inside an open thought (see [`Self::thought`]).
+    pub fn render_prompt(self, messages: &[ChatMessage], empty_thought: bool, effort: Option<&str>) -> String {
         // The Hy-MT2 templates keep every message untrimmed and only read a leading system message.
         let (system, turns) = match messages.split_first() {
             Some((first, rest)) if first.role == "system" => (Some(first.content.as_str()), rest),
@@ -63,9 +64,14 @@ impl BuiltinArch {
                 }
                 out
             }
-            // Thinking stays off: `reasoning_effort:no_think` and an empty think block in every model turn.
+            // The template takes `high`, `low`, or `no_think`. Earlier model turns keep an empty think block.
             Self::HyMt2Moe => {
-                let mut out = format!("<｜hy_begin▁of▁sentence｜>{}<｜reasoning_mode｜>reasoning_effort:no_think", system.unwrap_or(""));
+                let mode = match effort {
+                    None => "no_think",
+                    Some("minimal" | "low") => "low",
+                    Some(_) => "high",
+                };
+                let mut out = format!("<｜hy_begin▁of▁sentence｜>{}<｜reasoning_mode｜>reasoning_effort:{mode}", system.unwrap_or(""));
                 for m in turns {
                     match m.role.as_str() {
                         "user" => out.push_str(&format!("<｜hy_User｜>{}", m.content)),
@@ -73,15 +79,32 @@ impl BuiltinArch {
                         _ => {}
                     }
                 }
-                out.push_str("<｜hy_Assistant｜><think></think>");
+                out.push_str(if effort.is_some() {
+                    "<｜hy_Assistant｜><think>"
+                } else {
+                    "<｜hy_Assistant｜><think></think>"
+                });
                 out
             }
-            // Thinking stays off (`enable_thinking=false`): an empty think block opens every model turn.
-            // Earlier model turns keep their untrimmed reply (the official template trims it), like Gemma 4.
+            // An empty think block opens every earlier model turn, and the new one when thinking is off
+            // (`enable_thinking=false`). Earlier model turns keep their untrimmed reply (the official
+            // template trims it), like Gemma 4. Thinking on: the template's effort sentence (`medium` has none).
             Self::Qwen3_5 => {
+                let effort_note = match effort {
+                    None | Some("medium") => "",
+                    Some("minimal" | "low") => {
+                        "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration."
+                    }
+                    Some(_) => {
+                        "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer."
+                    }
+                };
                 let mut out = String::new();
-                if let Some(system) = system.map(str::trim).filter(|s| !s.is_empty()) {
-                    out.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n"));
+                match (effort_note, system.map(str::trim).filter(|s| !s.is_empty())) {
+                    ("", Some(system)) => out.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n")),
+                    (note, Some(system)) => out.push_str(&format!("<|im_start|>system\n{note}\n\n{system}<|im_end|>\n")),
+                    ("", None) => {}
+                    (note, None) => out.push_str(&format!("<|im_start|>system\n{note}<|im_end|>\n")),
                 }
                 for m in turns {
                     match m.role.as_str() {
@@ -90,10 +113,14 @@ impl BuiltinArch {
                         _ => {}
                     }
                 }
-                out.push_str("<|im_start|>assistant\n<think>\n\n</think>\n\n");
+                out.push_str(if effort.is_some() {
+                    "<|im_start|>assistant\n<think>\n"
+                } else {
+                    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                });
                 out
             }
-            // Thinking stays off: no `<|think|>` in the system turn.
+            // Thinking on: `<|think|>` opens the system turn (an otherwise empty one without a system message).
             Self::Gemma4 => {
                 // Earlier model turns keep the empty thought channel and their untrimmed reply (the
                 // official template drops and trims both): that matches their cached KV, so it gets reused.
@@ -102,18 +129,34 @@ impl BuiltinArch {
                 } else {
                     "model\n"
                 };
+                let think = if effort.is_some() { "<|think|>\n" } else { "" };
                 let mut out = String::from("<bos>");
+                if system.is_none() && effort.is_some() {
+                    out.push_str("<|turn>system\n<|think|>\n<turn|>\n");
+                }
                 for m in messages {
-                    if m.role == "assistant" {
-                        out.push_str(&format!("<|turn>{model}{}<turn|>\n", m.content));
-                    } else {
-                        out.push_str(&format!("<|turn>{}\n{}<turn|>\n", m.role, m.content.trim()));
+                    match m.role.as_str() {
+                        "assistant" => out.push_str(&format!("<|turn>{model}{}<turn|>\n", m.content)),
+                        "system" => out.push_str(&format!("<|turn>system\n{think}{}<turn|>\n", m.content.trim())),
+                        role => out.push_str(&format!("<|turn>{role}\n{}<turn|>\n", m.content.trim())),
                     }
                 }
                 out.push_str("<|turn>");
-                out.push_str(model);
+                out.push_str(if effort.is_some() { "model\n<|channel>thought\n" } else { model });
                 out
             }
+        }
+    }
+
+    /// A thought: `(open, end, after)`. A thinking prompt ends with `open`, which history's model turns
+    /// do not share; the `end` token closes the thought, and the model turn continues with `after`
+    /// before the answer. `None`: the model cannot think.
+    pub fn thought(self) -> Option<(&'static str, &'static str, &'static str)> {
+        match self {
+            Self::Gemma4 => Some(("<|channel>thought\n", "<channel|>", "")),
+            Self::HyMt2Small | Self::HyMt2Medium => None,
+            Self::HyMt2Moe => Some(("<think>", "</think>", "")),
+            Self::Qwen3_5 => Some(("<think>\n", "</think>", "\n\n")),
         }
     }
 
@@ -1018,11 +1061,21 @@ mod tests {
         ];
         let expected =
             "<bos><|turn>system\nsys<turn|>\n<|turn>user\nu1<turn|>\n<|turn>model\na1\n<turn|>\n<|turn>user\nu2<turn|>\n<|turn>model\n";
-        assert_eq!(BuiltinArch::Gemma4.render_prompt(&messages, false), expected);
+        assert_eq!(BuiltinArch::Gemma4.render_prompt(&messages, false, None), expected);
         // Earlier model turns keep the reply untrimmed and the empty thought channel, so the cached KV stays a prefix.
         assert_eq!(
-            BuiltinArch::Gemma4.render_prompt(&messages, true),
+            BuiltinArch::Gemma4.render_prompt(&messages, true, None),
             expected.replace("<|turn>model\n", "<|turn>model\n<|channel>thought\n<channel|>")
+        );
+        // Thinking: `<|think|>` opens the system turn (its own turn without a system message) and the
+        // new model turn opens the thought channel.
+        assert_eq!(
+            BuiltinArch::Gemma4.render_prompt(&messages, false, Some("low")),
+            "<bos><|turn>system\n<|think|>\nsys<turn|>\n<|turn>user\nu1<turn|>\n<|turn>model\na1\n<turn|>\n<|turn>user\nu2<turn|>\n<|turn>model\n<|channel>thought\n"
+        );
+        assert_eq!(
+            BuiltinArch::Gemma4.render_prompt(&messages[1..2], true, Some("high")),
+            "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nu1<turn|>\n<|turn>model\n<|channel>thought\n"
         );
     }
 
@@ -1052,16 +1105,64 @@ mod tests {
             ),
         ];
         for (arch, expected) in cases {
-            assert_eq!(arch.render_prompt(&messages, false), expected, "{arch:?}");
+            assert_eq!(arch.render_prompt(&messages, false, None), expected, "{arch:?}");
         }
         // Qwen: `apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)`, but
         // with the earlier reply untrimmed.
-        assert_eq!(
-            BuiltinArch::Qwen3_5.render_prompt(&messages, false),
-            "<|im_start|>system\nsys<|im_end|>\n<|im_start|>user\nu1<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\na1\n<|im_end|>\n<|im_start|>user\nu2<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
+        let qwen = "<|im_start|>system\nsys<|im_end|>\n<|im_start|>user\nu1<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\na1\n<|im_end|>\n<|im_start|>user\nu2<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        assert_eq!(BuiltinArch::Qwen3_5.render_prompt(&messages, false, None), qwen);
         // Without a system message, 7B's first user turn opens with `<|startoftext|>`.
-        assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&messages[1..2], false), "<|startoftext|> u1<|extra_0|>");
+        assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&messages[1..2], false, None), "<|startoftext|> u1<|extra_0|>");
+
+        // Thinking on: the template's effort setting, and the new model turn left inside an open thought.
+        let hy_moe = cases[2].1;
+        assert_eq!(
+            BuiltinArch::HyMt2Moe.render_prompt(&messages, false, Some("minimal")),
+            hy_moe.replace("no_think", "low").strip_suffix("</think>").unwrap()
+        );
+        assert!(
+            BuiltinArch::HyMt2Moe
+                .render_prompt(&messages, false, Some("max"))
+                .contains("reasoning_effort:high<")
+        );
+        let qwen_open = qwen.strip_suffix("\n</think>\n\n").unwrap();
+        assert_eq!(BuiltinArch::Qwen3_5.render_prompt(&messages, false, Some("medium")), qwen_open);
+        assert_eq!(
+            BuiltinArch::Qwen3_5.render_prompt(&messages, false, Some("low")),
+            qwen_open.replace(
+                "system\nsys",
+                "system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\nsys"
+            )
+        );
+        assert!(
+            BuiltinArch::Qwen3_5
+                .render_prompt(&messages[1..2], false, Some("high"))
+                .starts_with("<|im_start|>system\nReasoning effort is set to xhigh. ")
+        );
+        // Models that cannot think ignore the effort.
+        assert_eq!(BuiltinArch::HyMt2Small.render_prompt(&messages, false, Some("high")), cases[0].1);
+    }
+
+    #[test]
+    fn next_prompt_shares_the_prompt_before_its_thought() {
+        let msg = |role: &str, content: &str| ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            reasoning_content: None,
+        };
+        let asked = [msg("system", "sys"), msg("user", "u1")];
+        let next = [msg("system", "sys"), msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2")];
+        for arch in [BuiltinArch::Gemma4, BuiltinArch::HyMt2Moe, BuiltinArch::Qwen3_5] {
+            for empty_thought in [false, true] {
+                // The checkpoint the model takes before `open`, which the next page's history (its
+                // thought dropped) still starts with.
+                let (open, ..) = arch.thought().unwrap();
+                let prompt = arch.render_prompt(&asked, empty_thought, Some("high"));
+                let checkpoint = prompt.strip_suffix(open).unwrap_or_else(|| panic!("{arch:?}: {prompt}"));
+                let next = arch.render_prompt(&next, empty_thought, Some("high"));
+                assert!(next.starts_with(checkpoint), "{arch:?}:\n{next}\n{checkpoint}");
+            }
+        }
     }
 
     #[test]
@@ -1111,23 +1212,29 @@ mod tests {
             reasoning_content: None,
         };
 
-        assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&[empty_sys.clone(), user.clone()], false), "<|startoftext|>hi<|extra_0|>");
+        assert_eq!(BuiltinArch::HyMt2Medium.render_prompt(&[empty_sys.clone(), user.clone()], false, None), "<|startoftext|>hi<|extra_0|>");
         assert_eq!(
-            BuiltinArch::Qwen3_5.render_prompt(&[ws_sys.clone(), user.clone()], false),
+            BuiltinArch::Qwen3_5.render_prompt(&[ws_sys.clone(), user.clone()], false, None),
             "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         );
+        // A blank system message with thinking on is just the effort sentence.
+        assert!(
+            BuiltinArch::Qwen3_5
+                .render_prompt(&[ws_sys.clone(), user.clone()], false, Some("low"))
+                .starts_with("<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n")
+        );
         assert_eq!(
-            BuiltinArch::Gemma4.render_prompt(&[ws_sys, user.clone()], false),
+            BuiltinArch::Gemma4.render_prompt(&[ws_sys, user.clone()], false, None),
             "<bos><|turn>system\n<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n"
         );
         assert!(
             BuiltinArch::HyMt2Small
-                .render_prompt(&[empty_sys.clone(), user.clone()], false)
+                .render_prompt(&[empty_sys.clone(), user.clone()], false, None)
                 .contains("<｜hy_place▁holder▁no▁3｜>")
         );
         assert!(
             BuiltinArch::HyMt2Moe
-                .render_prompt(&[empty_sys, user], false)
+                .render_prompt(&[empty_sys, user], false, None)
                 .starts_with("<｜hy_begin▁of▁sentence｜><｜reasoning_mode｜>")
         );
     }

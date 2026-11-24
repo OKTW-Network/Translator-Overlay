@@ -131,6 +131,8 @@ Built-in models are available in two formats:
 
 The compute device (GPU / CPU) is configured independently from OCR, along with context length, reply length ratio, and DRY repetition penalty. **Stop** releases VRAM.
 
+Gemma 4, Hy-MT2 30B A3B, and Qwen3.8 27B can think before answering via **Reasoning effort** (off by default); the status bar shows "Thinking" meanwhile, and the thinking never shows up in the translation.
+
 ### Model catalog
 
 Download sizes are shown in parentheses; each family downloads into its own subdirectory under `models/`:

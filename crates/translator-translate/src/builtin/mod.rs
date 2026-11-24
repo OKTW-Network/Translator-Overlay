@@ -45,6 +45,12 @@ use crate::{
 /// `LOOP_TOKENS` tokens is stuck in a loop.
 const LOOP_TOKENS: usize = 64;
 
+/// State checkpoints a model keeps for state its KV cache cannot cut back: one per recent prompt,
+/// taken before the prompt's open thought (which history does not repeat), so a retry, a prompt after
+/// a cancelled one, or one whose history dropped a reply's thought restarts from the last prompt it
+/// shares. Each is a copy of that state (Qwen3.8 27B: ~150 MB).
+const MAX_CHECKPOINTS: usize = 3;
+
 /// DRY settings: llama.cpp's recommended multiplier and base.
 const DRY_MULTIPLIER: f32 = 0.8;
 const DRY_BASE: f32 = 1.75;
@@ -53,8 +59,8 @@ const DRY_BASE: f32 = 1.75;
 const DRY_ALLOWED_LENGTH: usize = 4;
 /// A repeat match stops at a token holding one of these, so JSON quoting never counts as a repeat.
 const DRY_BREAKERS: [char; 4] = ['\n', ':', '"', '*'];
-/// Gemma 4's thought channel markers. Thinking is always off, so no reply may hold one; sampled
-/// anyway (after the answer, at temperature 1), they would show as text and teach the history to repeat them.
+/// Gemma 4's thought channel markers. No answer may hold one (a thought only comes before it);
+/// sampled anyway, they would show as text and teach the history to repeat them.
 const THOUGHT_TOKENS: [&str; 2] = ["<|channel>", "<channel|>"];
 
 /// The loaded model, if any. Lives behind a mutex on [`crate::TranslateClient`].
@@ -78,7 +84,7 @@ struct Loaded {
 
 enum Engine {
     Onnx(Box<OnnxModel>),
-    Llama(llama::Model),
+    Llama(Box<llama::Model>),
 }
 
 /// Download / load the model selected in `api` unless it is already loaded: its catalog spec, or
@@ -134,7 +140,9 @@ pub(crate) async fn ensure_loaded(
                 on_status(Some(loading));
                 tokio::task::spawn_blocking(move || match &spec.files {
                     BuiltinFiles::Onnx(onnx) => OnnxModel::load(spec, onnx, device, &dir).map(|m| Engine::Onnx(Box::new(m))),
-                    BuiltinFiles::Gguf { file, .. } => llama::Model::load(model_id, &dir.join(file.file_name), gpu).map(Engine::Llama),
+                    BuiltinFiles::Gguf { file, .. } => {
+                        llama::Model::load(model_id, &dir.join(file.file_name), gpu).map(|m| Engine::Llama(Box::new(m)))
+                    }
                 })
             }
             None => {
@@ -143,7 +151,7 @@ pub(crate) async fn ensure_loaded(
                     return Err(TranslateError::Other(format!("{} not found", path.display())));
                 }
                 on_status(Some(loading));
-                tokio::task::spawn_blocking(move || llama::Model::load(model_id, &path, gpu).map(Engine::Llama))
+                tokio::task::spawn_blocking(move || llama::Model::load(model_id, &path, gpu).map(|m| Engine::Llama(Box::new(m))))
             }
         };
         job.await
@@ -161,7 +169,9 @@ pub(crate) async fn ensure_loaded(
     Ok(spec)
 }
 
-/// Load the model if needed (see [`ensure_loaded`]), then generate one completion.
+/// Load the model if needed (see [`ensure_loaded`]), then generate one completion: the answer only.
+/// A thought stays out of history (it would fill the context); the next prompt restarts from the
+/// checkpoint the model took before the reply.
 pub(crate) async fn complete(
     mut backend: OwnedMutexGuard<BuiltinBackend>,
     api: &ApiConfig,
@@ -173,8 +183,15 @@ pub(crate) async fn complete(
 ) -> Result<String, TranslateError> {
     let spec = ensure_loaded(&mut backend, api, models_dir, cancel, on_status).await?;
 
+    // Catalog models that can think do when an effort is set; the user's own GGUF never does.
+    let effort = api
+        .reasoning_effort
+        .as_deref()
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !matches!(e.as_str(), "" | "none" | "off"));
+    let thought = effort.as_ref().and(spec.and_then(|s| s.arch.thought()));
     // `None` for the user's own GGUF, which the loaded model renders.
-    let prompt = spec.map(|s| s.arch.render_prompt(messages, s.empty_thought));
+    let prompt = spec.map(|s| s.arch.render_prompt(messages, s.empty_thought, effort.as_deref()));
     let chat = if prompt.is_none() { messages.to_vec() } else { Vec::new() };
     // The last message is the source payload, and a structured reply mirrors its JSON.
     let source = messages.last().map_or_else(String::new, |m| m.content.clone());
@@ -199,39 +216,61 @@ pub(crate) async fn complete(
             ids: crate::peek_translation_pairs(&source).into_iter().map(|(id, _)| id).collect(),
         })
         .filter(|s| !s.ids.is_empty() && api.reply_mode == ReplyMode::Structured),
+        thought,
     };
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // `None`: the model started thinking.
+    let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
     let cancel_job = cancel.clone();
     let job = tokio::task::spawn_blocking(move || {
-        let Some(loaded) = backend.loaded.as_mut() else {
-            return Ok(Err(TranslateError::Cancelled));
-        };
-        // A bare plain-text source can be a token or two; the floor leaves its reply room.
-        let max_tokens = |source_tokens: usize| ((output_ratio * source_tokens as f32).ceil() as usize).max(16).min(max_tokens_cap);
-        let on_text = |text: &str| drop(tx.send(text.to_owned()));
-        match &mut loaded.engine {
-            Engine::Onnx(model) => {
-                let max_tokens = max_tokens(model.tokenizer.encode(source, false)?.len());
-                // Every ONNX model is a catalog one, so it has a prompt.
-                model.generate(&prompt.unwrap_or_default(), max_tokens, context, decoding, &cancel_job, on_text)
+        let result = (|| {
+            let Some(loaded) = backend.loaded.as_mut() else {
+                return Ok(Err(TranslateError::Cancelled));
+            };
+            // A bare plain-text source can be a token or two; the floor leaves its reply room.
+            let max_tokens = |source_tokens: usize| ((output_ratio * source_tokens as f32).ceil() as usize).max(16).min(max_tokens_cap);
+            let on_text = |text: Option<&str>| drop(tx.send(text.map(str::to_owned)));
+            match &mut loaded.engine {
+                Engine::Onnx(model) => {
+                    let max_tokens = max_tokens(model.tokenizer.encode(source, false)?.len());
+                    // Every ONNX model is a catalog one, so it has a prompt.
+                    model.generate(&prompt.unwrap_or_default(), max_tokens, context, decoding, &cancel_job, on_text)
+                }
+                Engine::Llama(model) => {
+                    let max_tokens = max_tokens(model.token_count(&source)?);
+                    let prompt = match prompt {
+                        Some(prompt) => prompt,
+                        None => model.chat_prompt(&chat)?,
+                    };
+                    model.generate(&prompt, max_tokens, context, decoding, &cancel_job, on_text)
+                }
             }
-            Engine::Llama(model) => {
-                let max_tokens = max_tokens(model.token_count(&source)?);
-                let prompt = match prompt {
-                    Some(prompt) => prompt,
-                    None => model.chat_prompt(&chat)?,
-                };
-                model.generate(&prompt, max_tokens, context, decoding, &cancel_job, on_text)
+        })();
+        // The lock outlives the sender, so the next job's status cannot land before this one's cleanup.
+        (backend, result)
+    });
+    // Ends when the job drops its sender. The thinking status ends with the first answer text, or
+    // with the job however it ends.
+    let mut thinking = false;
+    while let Some(text) = rx.recv().await {
+        match text {
+            None => {
+                thinking = true;
+                on_status(Some(PipelineStatus::Thinking));
+            }
+            Some(text) => {
+                if std::mem::take(&mut thinking) {
+                    on_status(None);
+                }
+                on_text(&text);
             }
         }
-    });
-    // Ends when the job drops its sender.
-    while let Some(text) = rx.recv().await {
-        on_text(&text);
+    }
+    if thinking {
+        on_status(None);
     }
     match job.await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(TranslateError::Other(format!("{}: {e}", spec.map_or(api.builtin_model.trim(), |s| s.id)))),
+        Ok((_, Ok(result))) => result,
+        Ok((_, Err(e))) => Err(TranslateError::Other(format!("{}: {e}", spec.map_or(api.builtin_model.trim(), |s| s.id)))),
         Err(e) => Err(TranslateError::Other(format!("built-in model task: {e}"))),
     }
 }
@@ -319,6 +358,15 @@ struct KvCache {
     past: Vec<DynValue>,
     /// Sequence capacity of the in-place buffers.
     context: usize,
+    /// Out-of-place KV and fixed-size state at each recent prompt's checkpoint, oldest first (see
+    /// [`MAX_CHECKPOINTS`]). In-place KV needs none: it gets overwritten past the shared tokens.
+    checkpoints: Vec<Checkpoint>,
+}
+
+/// The out-of-place `past` values (decoder input order) for `ids[..tokens]`.
+struct Checkpoint {
+    tokens: usize,
+    past: Vec<DynValue>,
 }
 
 fn session(device: OcrDevice, path: &Path) -> ort::Result<Session> {
@@ -367,6 +415,22 @@ fn ends_in_loop(reply: &[u32]) -> bool {
     })
 }
 
+/// Where the checkpoint of prompt `ids` sits: before its open thought (`open`, which history does not
+/// repeat), and before its last token, which a retry of the same prompt still feeds for the logits.
+fn checkpoint_at(ids: &[u32], open: &[u32]) -> usize {
+    let at = if ids.ends_with(open) { ids.len() - open.len() } else { ids.len() };
+    at.min(ids.len().saturating_sub(1))
+}
+
+/// If `next` is the open thought's end token, ends the thought: pushes `next` and the tokens that
+/// follow it, and returns where the answer starts.
+fn end_thought(thought: &mut Option<(u32, Vec<u32>)>, next: u32, ids: &mut Vec<u32>) -> Option<usize> {
+    let (end, after) = thought.take_if(|(end, _)| *end == next)?;
+    ids.push(end);
+    ids.extend(after);
+    Some(ids.len())
+}
+
 /// DRY ("Don't Repeat Yourself"): a token that would extend a span of `reply` already seen earlier
 /// in `reply` loses `DRY_MULTIPLIER × DRY_BASE^(len − DRY_ALLOWED_LENGTH)` from its logit, `len`
 /// being the span's length. Only the reply counts: copying names from the source is expected.
@@ -399,6 +463,9 @@ struct Decoding {
     dry: bool,
     /// `None` leaves the reply unconstrained.
     shape: Option<ReplyShape>,
+    /// The prompt opened a thought: see [`crate::builtin::catalog::BuiltinArch::thought`]. The
+    /// reply's text, shape, and `max_tokens` cover only the answer after it.
+    thought: Option<(&'static str, &'static str, &'static str)>,
 }
 
 /// Holds a reply to `{"b":[[id,"text"],...]}` with exactly the source's ids, in order. Small models
@@ -682,9 +749,9 @@ impl OnnxModel {
             .collect()
     }
 
-    /// `on_text` gets the whole reply so far after each token. The inner error is
-    /// [`TranslateError::Cancelled`], [`TranslateError::ContextFull`], or [`TranslateError::Looping`]
-    /// ([`TranslateError::Other`] when decoding greedily).
+    /// The answer. `on_text` gets `None` once a thought starts, then the whole answer so far after each
+    /// token. The inner error is [`TranslateError::Cancelled`], [`TranslateError::ContextFull`], or
+    /// [`TranslateError::Looping`] ([`TranslateError::Other`] when decoding greedily).
     fn generate(
         &mut self,
         prompt: &str,
@@ -692,18 +759,38 @@ impl OnnxModel {
         context: usize,
         decoding: Decoding,
         cancel: &CancellationToken,
-        mut on_text: impl FnMut(&str),
+        mut on_text: impl FnMut(Option<&str>),
     ) -> ort::Result<Result<String, TranslateError>> {
+        // The open thought's end token and the tokens that follow it (`None` once it ends), and the
+        // tokens that opened it.
+        let (mut thought, open) = match decoding.thought {
+            Some((open, end, after)) => (
+                Some((
+                    self.tokenizer.token_to_id(end).ok_or_else(|| missing(end))?,
+                    self.tokenizer.encode(after, false)?.get_ids().to_vec(),
+                )),
+                self.tokenizer.encode(open, false)?.get_ids().to_vec(),
+            ),
+            None => (None, Vec::new()),
+        };
+        let thinking_decoding = Decoding {
+            shape: None,
+            thought: None,
+            ..decoding
+        };
+        let all_in_place = self.kv.iter().all(|s| s.in_place);
         let cache = self.cache.take().filter(|c| c.context == context);
         let (mut ids, reused) = match &cache {
-            Some(c) if prompt.len() > c.text.len() && prompt.starts_with(&c.text) => {
+            // Empty text: a request stopped mid-prompt; its tokens still match below.
+            Some(c) if !c.text.is_empty() && prompt.len() > c.text.len() && prompt.starts_with(&c.text) => {
                 ([c.ids.as_slice(), self.tokenizer.encode(&prompt[c.text.len()..], false)?.get_ids()].concat(), c.ids.len())
             }
             // In-place KV past the shared tokens just gets overwritten, so a retry, a request after a
-            // cancelled one, or trimmed history still reuses what comes before.
-            // shortcut: out-of-place layers' KV cannot be cut and fixed-size state cannot be rewound, so
-            // those models re-prefill everything; snapshot the state after the system prompt if that gets slow.
-            Some(c) if self.kv.iter().all(|s| s.in_place) => {
+            // cancelled one, or history that dropped a reply's thought still reuses what comes before.
+            // Out-of-place KV and fixed-size state go back to the last checkpoint within it.
+            // shortcut: trimmed history shares only the system prompt, where no checkpoint sits, so those
+            // models re-prefill everything; checkpoint after the system prompt too if that gets slow.
+            Some(c) => {
                 let ids = self.tokenizer.encode(prompt, false)?.get_ids().to_vec();
                 // Feed at least one token for the logits.
                 let shared = ids
@@ -712,17 +799,39 @@ impl OnnxModel {
                     .take_while(|(a, b)| a == b)
                     .count()
                     .min(ids.len().saturating_sub(1));
-                (ids, shared)
+                // All of the cache shared (e.g. after a stop mid-prompt): its state goes on as is.
+                let reused = if all_in_place || shared == c.ids.len() {
+                    shared
+                } else {
+                    c.checkpoints.iter().map(|k| k.tokens).filter(|&t| t <= shared).max().unwrap_or(0)
+                };
+                (ids, reused)
             }
-            _ => (self.tokenizer.encode(prompt, false)?.get_ids().to_vec(), 0),
+            None => (self.tokenizer.encode(prompt, false)?.get_ids().to_vec(), 0),
         };
         let prompt_len = ids.len();
         if prompt_len > context {
+            self.cache = cache;
             return Ok(Err(TranslateError::ContextFull(context)));
         }
-        let mut past = match cache {
-            Some(c) if reused > 0 => c.past,
-            stale => self.empty_past(context, stale.map_or_else(Vec::new, |c| c.past))?,
+        let checkpoint_at = checkpoint_at(&ids, &open);
+        let (mut past, mut checkpoints) = match cache {
+            Some(mut c) if reused > 0 => {
+                c.checkpoints.retain(|k| k.tokens <= reused);
+                if reused < c.ids.len() && !all_in_place {
+                    // `reused` is the last checkpoint's; it moves into `past`.
+                    let mut restored = c.checkpoints.pop().map(|k| k.past).unwrap_or_default().into_iter();
+                    c.past = self
+                        .kv
+                        .iter()
+                        .zip(c.past)
+                        .map(|(slot, value)| if slot.in_place { Some(value) } else { restored.next() })
+                        .collect::<Option<_>>()
+                        .ok_or_else(|| missing("checkpoint value"))?;
+                }
+                (c.past, c.checkpoints)
+            }
+            stale => (self.empty_past(context, stale.map_or_else(Vec::new, |c| c.past))?, Vec::new()),
         };
         let mut fed = reused;
         let start = Instant::now();
@@ -735,12 +844,21 @@ impl OnnxModel {
         let mut logits_f32 = Vec::new();
         let mut looping = false;
         let mut shape_state = ShapeState::default();
+        // Where the answer starts: after the thought, if any.
+        let mut answer = prompt_len;
         let chunk = self.onnx.prefill_chunk() as usize;
+        // Ends the request early; the cache is kept all the same.
+        let mut stopped = None;
         loop {
             if cancel.is_cancelled() {
-                return Ok(Err(TranslateError::Cancelled));
+                stopped = Some(TranslateError::Cancelled);
+                break;
             }
-            let total = ids.len().min(fed.saturating_add(chunk));
+            let mut total = ids.len().min(fed.saturating_add(chunk));
+            // Stop at the checkpoint for the state there.
+            if fed < checkpoint_at {
+                total = total.min(checkpoint_at);
+            }
             let step: Vec<i64> = ids[fed..total].iter().map(|&t| i64::from(t)).collect();
             let n = step.len();
             let mut embedded = self.embed.run(ort::inputs!["input_ids" => Tensor::from_array(([1, n], step))?])?;
@@ -755,6 +873,9 @@ impl OnnxModel {
             // Rebind every step: a device-bound output keeps the last run's buffer, and the KV grows.
             binding.clear_outputs();
             binding.bind_output_to_device("logits", &cpu_mem)?;
+            // The state at the checkpoint, kept. A run only reads its out-of-place inputs, so they
+            // stay as they are.
+            let mut kept = (fed == checkpoint_at && !all_in_place).then(Vec::new);
             for (slot, value) in self.kv.iter().zip(std::mem::take(&mut past)) {
                 binding.bind_input(&slot.past, &value)?;
                 if slot.in_place {
@@ -762,7 +883,17 @@ impl OnnxModel {
                     binding.bind_output(&slot.present, value)?;
                 } else {
                     binding.bind_output_to_device(&slot.present, &kv_mem)?;
+                    if let Some(kept) = &mut kept {
+                        kept.push(value);
+                    }
                 }
+            }
+            if let Some(past) = kept {
+                checkpoints.retain(|k| k.tokens < fed);
+                if checkpoints.len() == MAX_CHECKPOINTS {
+                    checkpoints.remove(0);
+                }
+                checkpoints.push(Checkpoint { tokens: fed, past });
             }
 
             let mut outputs = self.decoder.run_binding(&binding)?;
@@ -777,7 +908,12 @@ impl OnnxModel {
             if fed < ids.len() {
                 continue;
             }
-            prefill.get_or_insert_with(|| start.elapsed());
+            if prefill.is_none() {
+                prefill = Some(start.elapsed());
+                if thought.is_some() {
+                    on_text(None);
+                }
+            }
 
             logits_f32.clear();
             match logits.dtype().tensor_type() {
@@ -791,37 +927,67 @@ impl OnnxModel {
                     Some(self.tokenizer.decode(&[t], false)?)
                 })
             };
-            for &t in &self.thought_tokens {
-                logits_f32[t as usize] = f32::NEG_INFINITY;
-            }
-            let reply = &ids[prompt_len..];
-            let Some(next) = next_token(&decoding, &mut logits_f32, reply, &self.dry_breakers, &mut self.rng, &mut shape_state, piece)?
-            else {
-                return Ok(Err(TranslateError::Other("no token fits the reply JSON".into())));
+            let step_decoding = if thought.is_some() {
+                &thinking_decoding
+            } else {
+                for &t in &self.thought_tokens {
+                    logits_f32[t as usize] = f32::NEG_INFINITY;
+                }
+                &decoding
             };
-            if eos.contains(&next) {
+            let reply = &ids[answer..];
+            let Some(next) = next_token(step_decoding, &mut logits_f32, reply, &self.dry_breakers, &mut self.rng, &mut shape_state, piece)?
+            else {
+                stopped = Some(TranslateError::Other("no token fits the reply JSON".into()));
                 break;
-            }
-            ids.push(next);
-            text = self.tokenizer.decode(&ids[prompt_len..], true)?;
-            // A byte-level token can end mid-character, which decodes to U+FFFD until the next token completes it.
-            if !text.ends_with('\u{FFFD}') {
-                on_text(&text);
-            }
-            if decoding.shape.as_ref().is_some_and(|s| s.done(shape_state)) {
+            };
+            if let Some(start) = end_thought(&mut thought, next, &mut ids) {
+                answer = start;
+            } else if eos.contains(&next) {
                 break;
+            } else {
+                ids.push(next);
+                if thought.is_none() {
+                    text = self.tokenizer.decode(&ids[answer..], true)?;
+                    // A byte-level token can end mid-character, which decodes to U+FFFD until the next token completes it.
+                    if !text.ends_with('\u{FFFD}') {
+                        on_text(Some(&text));
+                    }
+                    if decoding.shape.as_ref().is_some_and(|s| s.done(shape_state)) {
+                        break;
+                    }
+                }
             }
             if ends_in_loop(&ids[prompt_len..]) {
                 looping = true;
                 break;
             }
-            if ids.len() - prompt_len >= max_tokens {
+            // A thought is bounded by the context only.
+            if thought.is_none() && ids.len() - answer >= max_tokens {
                 break;
             }
             // The next step would feed all of `ids`; a cut-off reply would not parse anyway.
             if ids.len() > context {
-                return Ok(Err(TranslateError::ContextFull(context)));
+                stopped = Some(TranslateError::ContextFull(context));
+                break;
             }
+        }
+        // With special tokens, so a thought's markers stay in. Empty while the prompt is only partly
+        // fed: the next request matches tokens instead.
+        let text_fed = if fed < prompt_len {
+            String::new()
+        } else {
+            format!("{prompt}{}", self.tokenizer.decode(&ids[prompt_len..fed], false)?)
+        };
+        self.cache = Some(KvCache {
+            text: text_fed,
+            ids: ids[..fed].to_vec(),
+            past,
+            context,
+            checkpoints,
+        });
+        if let Some(e) = stopped {
+            return Ok(Err(e));
         }
         // The prefill feeds every uncached prompt token; each later step feeds one.
         let prefill = prefill.unwrap_or_default();
@@ -837,12 +1003,6 @@ impl OnnxModel {
             decode_tps = format_args!("{:.1}", (fed - prompt_len) as f64 / decode.as_secs_f64()),
             "built-in model generated"
         );
-        self.cache = Some(KvCache {
-            text: format!("{prompt}{}", self.tokenizer.decode(&ids[prompt_len..fed], true)?),
-            ids: ids[..fed].to_vec(),
-            past,
-            context,
-        });
         Ok(match (looping, decoding.sampling) {
             (false, _) => Ok(text),
             (true, Some(_)) => Err(TranslateError::Looping),
@@ -863,6 +1023,24 @@ mod tests {
     #[test]
     fn argmax_picks_first_max() {
         assert_eq!(argmax(&[1.0, 3.0, 3.0, -1.0]), 1);
+    }
+
+    #[test]
+    fn a_thought_ends_on_its_end_token_only_while_open() {
+        let mut thought = Some((9, vec![7]));
+        let mut ids = vec![1, 2];
+        assert_eq!(end_thought(&mut thought, 5, &mut ids), None);
+        assert_eq!((ids.as_slice(), thought.is_some()), (&[1, 2][..], true));
+        assert_eq!(end_thought(&mut thought, 9, &mut ids), Some(4));
+        assert_eq!((ids.as_slice(), thought.is_none()), (&[1, 2, 9, 7][..], true));
+        // Once ended, the same token is left to the EOS check.
+        assert_eq!(end_thought(&mut thought, 9, &mut ids), None);
+
+        // Before the open thought, else before the last token.
+        assert_eq!(checkpoint_at(&[1, 2, 3, 4], &[3, 4]), 2);
+        assert_eq!(checkpoint_at(&[1, 2, 3, 4], &[]), 3);
+        assert_eq!(checkpoint_at(&[1, 2, 3, 4], &[5]), 3);
+        assert_eq!(checkpoint_at(&[4], &[4]), 0);
     }
 
     #[test]
@@ -1009,6 +1187,7 @@ mod tests {
             sampling: None,
             dry: false,
             shape: Some(shape),
+            thought: None,
         };
         let breakers = HashSet::new();
         let mut rng = fastrand::Rng::new();

@@ -24,7 +24,7 @@ use windows::{
 
 use crate::{
     TranslateError,
-    builtin::{DRY_BREAKERS, Decoding, ShapeState, THOUGHT_TOKENS, ends_in_loop, next_token},
+    builtin::{DRY_BREAKERS, Decoding, MAX_CHECKPOINTS, ShapeState, THOUGHT_TOKENS, checkpoint_at, end_thought, ends_in_loop, next_token},
     http::ChatMessage,
 };
 
@@ -146,7 +146,17 @@ unsafe extern "C" {
     fn llama_vocab_eos(vocab: *const c_void) -> i32;
     fn llama_vocab_get_add_bos(vocab: *const c_void) -> bool;
     fn llama_model_chat_template(model: *const c_void, name: *const c_char) -> *const c_char;
+    fn llama_model_is_recurrent(model: *const c_void) -> bool;
+    fn llama_model_is_hybrid(model: *const c_void) -> bool;
+    fn llama_state_seq_get_size_ext(ctx: *mut c_void, seq_id: i32, flags: u32) -> usize;
+    fn llama_state_seq_get_data_ext(ctx: *mut c_void, dst: *mut u8, size: usize, seq_id: i32, flags: u32) -> usize;
+    /// 0 when the state does not load.
+    fn llama_state_seq_set_data_ext(ctx: *mut c_void, src: *const u8, size: usize, dest_seq_id: i32, flags: u32) -> usize;
 }
+
+/// `LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY`: only the state `llama_memory_seq_rm` cannot cut (recurrent
+/// layers, SWA KV).
+const STATE_PARTIAL_ONLY: u32 = 1;
 
 #[link(name = "ggml", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -254,6 +264,11 @@ pub(crate) struct Model {
     dry_breakers: HashSet<u32>,
     /// The vocab's [`THOUGHT_TOKENS`], never sampled.
     thought_tokens: Vec<u32>,
+    /// The model has recurrent state (Qwen3.5's linear-attention layers), which cannot be cut back.
+    recurrent: bool,
+    /// Recurrent state at each recent prompt's checkpoint (see [`MAX_CHECKPOINTS`]), oldest first:
+    /// `(tokens, state)`, each state that of `ids[..tokens]`.
+    checkpoints: Vec<(usize, Vec<u8>)>,
 }
 
 // SAFETY: llama.cpp models and contexts are not tied to a thread, and the backend mutex gives one
@@ -307,6 +322,10 @@ impl Model {
                 thought_tokens.push(id);
             }
         }
+        // SAFETY: `model` is loaded.
+        let recurrent = unsafe { llama_model_is_recurrent(model) };
+        // SAFETY: `model` is loaded.
+        let hybrid = unsafe { llama_model_is_hybrid(model) };
         Ok(Self {
             id,
             model,
@@ -319,6 +338,8 @@ impl Model {
             rng: fastrand::Rng::new(),
             dry_breakers,
             thought_tokens,
+            recurrent: recurrent || hybrid,
+            checkpoints: Vec::new(),
         })
     }
 
@@ -379,6 +400,24 @@ impl Model {
         })
     }
 
+    /// Save the recurrent state of `ids[..tokens]` (all of `self.ids`) as a checkpoint.
+    fn checkpoint(&mut self, tokens: usize) {
+        // SAFETY: `ctx` is live.
+        let size = unsafe { llama_state_seq_get_size_ext(self.ctx, 0, STATE_PARTIAL_ONLY) };
+        let mut state = vec![0_u8; size];
+        // SAFETY: `ctx` is live; `state` is writable for `size` bytes.
+        let written = unsafe { llama_state_seq_get_data_ext(self.ctx, state.as_mut_ptr(), size, 0, STATE_PARTIAL_ONLY) };
+        if written != size {
+            warn!(size, written, "llama.cpp state checkpoint failed");
+            return;
+        }
+        self.checkpoints.retain(|&(t, _)| t < tokens);
+        if self.checkpoints.len() == MAX_CHECKPOINTS {
+            self.checkpoints.remove(0);
+        }
+        self.checkpoints.push((tokens, state));
+    }
+
     /// A fresh `context`-token context in place of the current one.
     fn new_context(&mut self, context: usize) -> ort::Result<()> {
         if !self.ctx.is_null() {
@@ -388,6 +427,7 @@ impl Model {
         }
         self.ids.clear();
         self.text.clear();
+        self.checkpoints.clear();
         // SAFETY: no preconditions.
         let mut params = unsafe { llama_context_default_params() };
         params.n_ctx = context as u32;
@@ -416,12 +456,26 @@ impl Model {
         context: usize,
         decoding: Decoding,
         cancel: &CancellationToken,
-        mut on_text: impl FnMut(&str),
+        mut on_text: impl FnMut(Option<&str>),
     ) -> ort::Result<Result<String, TranslateError>> {
         if self.ctx.is_null() || self.context != context {
             self.new_context(context)?;
         }
         let vocab = self.vocab;
+        // The open thought's end token and the tokens that follow it (`None` once it ends), and the
+        // tokens that opened it.
+        let (mut thought, open) = match decoding.thought {
+            Some((open, end, after)) => match tokenize(vocab, end)?[..] {
+                [id] => (Some((id, tokenize(vocab, after)?)), tokenize(vocab, open)?),
+                _ => return Err(ort::Error::new(format!("model has no {end} token"))),
+            },
+            None => (None, Vec::new()),
+        };
+        let thinking_decoding = Decoding {
+            shape: None,
+            thought: None,
+            ..decoding
+        };
         let (mut ids, mut reused) = if !self.text.is_empty() && prompt.len() > self.text.len() && prompt.starts_with(&self.text) {
             ([self.ids.as_slice(), &tokenize(vocab, &prompt[self.text.len()..])?].concat(), self.ids.len())
         } else {
@@ -440,15 +494,31 @@ impl Model {
         if prompt_len > context {
             return Ok(Err(TranslateError::ContextFull(context)));
         }
+        let checkpoint_at = checkpoint_at(&ids, &open);
         // SAFETY: `ctx` is live; its memory lives as long as it does.
         let memory = unsafe { llama_get_memory(self.ctx) };
         if reused < self.ids.len() {
+            self.checkpoints.retain(|&(tokens, _)| tokens <= reused);
             // SAFETY: `memory` is `ctx`'s; this drops sequence 0 from position `reused` on.
             let cut = unsafe { llama_memory_seq_rm(memory, 0, reused as i32, -1) };
-            // Recurrent state (Qwen3.5's linear-attention layers) cannot be rewound.
-            if !cut {
+            // Recurrent state cannot be cut back: load the last checkpoint within the shared tokens,
+            // then cut the attention KV there.
+            let restored = cut
+                || match self.checkpoints.last() {
+                    Some(&(tokens, ref state)) => {
+                        reused = tokens;
+                        // SAFETY: `ctx` is live; `state` came from `llama_state_seq_get_data_ext` with the same flags.
+                        let loaded =
+                            unsafe { llama_state_seq_set_data_ext(self.ctx, state.as_ptr(), state.len(), 0, STATE_PARTIAL_ONLY) } != 0;
+                        // SAFETY: `memory` is `ctx`'s; this drops sequence 0 from position `tokens` on.
+                        loaded && unsafe { llama_memory_seq_rm(memory, 0, tokens as i32, -1) }
+                    }
+                    None => false,
+                };
+            if !restored {
                 // SAFETY: `memory` is `ctx`'s.
                 unsafe { llama_memory_clear(memory, true) };
+                self.checkpoints.clear();
                 reused = 0;
             }
         }
@@ -459,17 +529,22 @@ impl Model {
         let mut prefill = None;
         let mut fed = reused;
         let mut logits = Vec::new();
-        // The reply's bytes, and how many of them belong to tokens already fed.
+        // The answer's bytes.
         let mut reply = Vec::new();
-        let mut reply_fed;
         let mut text = String::new();
         let mut looping = false;
         let mut shape_state = ShapeState::default();
+        // Where the answer starts: after the thought, if any.
+        let mut answer = prompt_len;
         loop {
             if cancel.is_cancelled() {
                 return Ok(Err(TranslateError::Cancelled));
             }
-            let total = ids.len().min(fed + PREFILL_CHUNK);
+            let mut total = ids.len().min(fed + PREFILL_CHUNK);
+            // Stop at the checkpoint for the state there.
+            if fed < checkpoint_at {
+                total = total.min(checkpoint_at);
+            }
             // llama.cpp numbers the positions itself and outputs the last token's logits.
             // SAFETY: the pointer covers `total - fed` tokens that outlive the decode below.
             let batch = unsafe { llama_batch_get_one(ids[fed..total].as_mut_ptr(), (total - fed) as i32) };
@@ -483,16 +558,24 @@ impl Model {
                     // SAFETY: `memory` is `ctx`'s.
                     unsafe { llama_memory_clear(memory, true) };
                     self.ids.clear();
+                    self.checkpoints.clear();
                     return Err(ort::Error::new(format!("llama_decode failed ({status})")));
                 }
             }
             self.ids.extend_from_slice(&ids[fed..total]);
             fed = total;
-            reply_fed = reply.len();
+            if fed == checkpoint_at && self.recurrent {
+                self.checkpoint(fed);
+            }
             if fed < ids.len() {
                 continue;
             }
-            prefill.get_or_insert_with(|| start.elapsed());
+            if prefill.is_none() {
+                prefill = Some(start.elapsed());
+                if thought.is_some() {
+                    on_text(None);
+                }
+            }
 
             // SAFETY: `ctx` just decoded a batch that outputs its last token's logits.
             let last = unsafe { llama_get_logits_ith(self.ctx, -1) };
@@ -502,36 +585,47 @@ impl Model {
             logits.clear();
             // SAFETY: the row holds one logit per vocab token and lives until the next decode.
             logits.extend_from_slice(unsafe { slice::from_raw_parts(last, self.n_vocab) });
-            for &t in &self.thought_tokens {
-                logits[t as usize] = f32::NEG_INFINITY;
-            }
+            let step_decoding = if thought.is_some() {
+                &thinking_decoding
+            } else {
+                for &t in &self.thought_tokens {
+                    logits[t as usize] = f32::NEG_INFINITY;
+                }
+                &decoding
+            };
             // SAFETY: `vocab` is the loaded model's.
             let is_end = |t: u32| unsafe { llama_vocab_is_eog(vocab, t) };
             let Some(next) =
-                next_token(&decoding, &mut logits, &ids[prompt_len..], &self.dry_breakers, &mut self.rng, &mut shape_state, |t| {
+                next_token(step_decoding, &mut logits, &ids[answer..], &self.dry_breakers, &mut self.rng, &mut shape_state, |t| {
                     Ok((!is_end(t)).then(|| String::from_utf8_lossy(&piece(vocab, t, true)).into_owned()))
                 })?
             else {
                 return Ok(Err(TranslateError::Other("no token fits the reply JSON".into())));
             };
-            if is_end(next) {
+            if let Some(start) = end_thought(&mut thought, next, &mut ids) {
+                answer = start;
+            } else if is_end(next) {
                 break;
-            }
-            ids.push(next);
-            reply.extend(piece(vocab, next, false));
-            text = String::from_utf8_lossy(&reply).into_owned();
-            // A token can end mid-character, which decodes to U+FFFD until the next token completes it.
-            if !text.ends_with('\u{FFFD}') {
-                on_text(&text);
-            }
-            if decoding.shape.as_ref().is_some_and(|s| s.done(shape_state)) {
-                break;
+            } else {
+                ids.push(next);
+                if thought.is_none() {
+                    reply.extend(piece(vocab, next, false));
+                    text = String::from_utf8_lossy(&reply).into_owned();
+                    // A token can end mid-character, which decodes to U+FFFD until the next token completes it.
+                    if !text.ends_with('\u{FFFD}') {
+                        on_text(Some(&text));
+                    }
+                    if decoding.shape.as_ref().is_some_and(|s| s.done(shape_state)) {
+                        break;
+                    }
+                }
             }
             if ends_in_loop(&ids[prompt_len..]) {
                 looping = true;
                 break;
             }
-            if ids.len() - prompt_len >= max_tokens {
+            // A thought is bounded by the context only.
+            if thought.is_none() && ids.len() - answer >= max_tokens {
                 break;
             }
             // The next step feeds the token just added; a cut-off reply would not parse anyway.
@@ -552,7 +646,9 @@ impl Model {
             decode_tps = format_args!("{:.1}", (fed - prompt_len) as f64 / decode.as_secs_f64()),
             "built-in model generated"
         );
-        self.text = format!("{prompt}{}", String::from_utf8_lossy(&reply[..reply_fed]));
+        // With control tokens, so a thought's markers stay in.
+        let fed_reply: Vec<u8> = ids[prompt_len..fed].iter().flat_map(|&t| piece(vocab, t, true)).collect();
+        self.text = format!("{prompt}{}", String::from_utf8_lossy(&fed_reply));
         Ok(match (looping, decoding.sampling) {
             (false, _) => Ok(text),
             (true, Some(_)) => Err(TranslateError::Looping),

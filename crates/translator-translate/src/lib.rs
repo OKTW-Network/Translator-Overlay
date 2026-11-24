@@ -803,8 +803,8 @@ impl TranslateClient {
         Ok(())
     }
 
-    /// `on_status` reports built-in model download / load phases, then `None` when loading
-    /// ends; other providers never call it.
+    /// `on_status` reports built-in model download / load phases and its thinking, then `None` when
+    /// each ends; other providers never call it.
     pub async fn complete_cancellable(
         &self,
         conv: &Conversation,

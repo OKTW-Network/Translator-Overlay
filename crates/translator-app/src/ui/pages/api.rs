@@ -516,7 +516,7 @@ pub fn api_page(b: &mut Binds<UiShared>, cx: &UiCx) -> Result<StackPanel> {
             cx.edit(|ui, v| ui.optional.max_tokens_val = v),
             cx.edit(|ui, on| ui.optional.max_tokens_enabled = on),
         )?,
-        shown_for(b, &reasoning, not_builtin)?,
+        reasoning,
     );
 
     let timeout = card_slider_number(

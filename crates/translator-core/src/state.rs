@@ -34,6 +34,8 @@ pub enum PipelineStatus {
         kind: ModelKind,
     },
     Translating,
+    /// The built-in model is thinking before it answers.
+    Thinking,
     /// Auto-retry after a transient translate API / network / CLI error, or omitted blocks.
     RetryingTranslate {
         /// 1-based retry about to run.
@@ -105,8 +107,8 @@ pub struct PreviewInfo {
 #[derive(Debug, Default)]
 pub struct AppState {
     pub status: PipelineStatus,
-    /// Built-in translation model download / load phase. Kept apart from `status` so OCR
-    /// progress does not overwrite it; the UI shows it over any non-error status.
+    /// Built-in translation model download / load phase, or its thinking. Kept apart from `status`
+    /// so OCR progress does not overwrite it; the UI shows it over any non-error status.
     pub translation_model_load: Option<PipelineStatus>,
     pub config: AppConfig,
     pub latest_ocr_blocks: Vec<OcrBlock>,
