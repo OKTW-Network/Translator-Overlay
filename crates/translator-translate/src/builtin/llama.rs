@@ -28,7 +28,7 @@ use crate::{
     http::ChatMessage,
 };
 
-/// Tokens per `llama_decode` call, so a cancel waits for one chunk at most.
+/// Tokens per `llama_process` call, so a cancel waits for one chunk at most.
 const PREFILL_CHUNK: usize = 512;
 
 /// `llama_model_params` of the tag in `scripts/fetch-llama.ps1`.
@@ -96,18 +96,6 @@ struct ContextParams {
     ctx_other: *mut c_void,
 }
 
-/// `llama_batch`.
-#[repr(C)]
-struct Batch {
-    n_tokens: i32,
-    token: *mut u32,
-    embd: *mut f32,
-    pos: *mut i32,
-    n_seq_id: *mut i32,
-    seq_id: *mut *mut i32,
-    logits: *mut i8,
-}
-
 // No import library: rustc builds the imports from these declarations. The app delay-loads both
 // DLLs (its `build.rs`), so [`init`] can load them from `lib/llama.cpp`.
 // `llama_token` is an `int32_t` that is never negative here, declared `u32` like the ONNX path's ids.
@@ -125,8 +113,16 @@ unsafe extern "C" {
     fn llama_get_memory(ctx: *const c_void) -> *mut c_void;
     fn llama_memory_clear(memory: *mut c_void, data: bool);
     fn llama_memory_seq_rm(memory: *mut c_void, seq_id: i32, p0: i32, p1: i32) -> bool;
-    fn llama_batch_get_one(tokens: *mut u32, n_tokens: i32) -> Batch;
-    fn llama_decode(ctx: *mut c_void, batch: Batch) -> i32;
+    /// Holds up to `ctx`'s `n_batch` tokens and must not outlive `ctx`.
+    fn llama_batch_ext_init(ctx: *mut c_void) -> *mut c_void;
+    fn llama_batch_ext_free(batch: *mut c_void);
+    fn llama_batch_ext_clear(batch: *mut c_void);
+    /// The entry's index, negative when the batch is full.
+    fn llama_batch_ext_add_token(batch: *mut c_void, seq_id: i32, token: u32) -> i32;
+    fn llama_batch_ext_set_pos(batch: *mut c_void, idx: i32, pos: *const i32) -> bool;
+    fn llama_batch_ext_set_output_logits(batch: *mut c_void, idx: i32, value: bool) -> bool;
+    /// 0 on success, 1 when the KV has no room (memory unchanged), else an error.
+    fn llama_process(ctx: *mut c_void, kind: i32, batch: *mut c_void) -> i32;
     fn llama_get_logits_ith(ctx: *mut c_void, i: i32) -> *mut f32;
     fn llama_vocab_n_tokens(vocab: *const c_void) -> i32;
     fn llama_vocab_is_eog(vocab: *const c_void, token: u32) -> bool;
@@ -157,6 +153,9 @@ unsafe extern "C" {
 /// `LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY`: only the state `llama_memory_seq_rm` cannot cut (recurrent
 /// layers, SWA KV).
 const STATE_PARTIAL_ONLY: u32 = 1;
+
+/// `LLAMA_PROCESS_TYPE_DECODE`.
+const PROCESS_DECODE: i32 = 1;
 
 #[link(name = "ggml", kind = "raw-dylib")]
 unsafe extern "C" {
@@ -253,6 +252,8 @@ pub(crate) struct Model {
     n_vocab: usize,
     /// Null until the first reply; recreated when the context length changes.
     ctx: *mut c_void,
+    /// `ctx`'s `llama_batch_ext`, null with it.
+    batch: *mut c_void,
     context: usize,
     /// Tokens in `ctx`'s KV.
     ids: Vec<u32>,
@@ -278,6 +279,8 @@ unsafe impl Send for Model {}
 impl Drop for Model {
     fn drop(&mut self) {
         if !self.ctx.is_null() {
+            // SAFETY: `batch` came from `llama_batch_ext_init` and is freed once, before its context.
+            unsafe { llama_batch_ext_free(self.batch) };
             // SAFETY: `ctx` came from `llama_init_from_model` and is freed once.
             unsafe { llama_free(self.ctx) };
         }
@@ -332,6 +335,7 @@ impl Model {
             vocab,
             n_vocab,
             ctx: ptr::null_mut(),
+            batch: ptr::null_mut(),
             context: 0,
             ids: Vec::new(),
             text: String::new(),
@@ -421,6 +425,9 @@ impl Model {
     /// A fresh `context`-token context in place of the current one.
     fn new_context(&mut self, context: usize) -> ort::Result<()> {
         if !self.ctx.is_null() {
+            // SAFETY: `batch` came from `llama_batch_ext_init` and is nulled right after, before its context.
+            unsafe { llama_batch_ext_free(self.batch) };
+            self.batch = ptr::null_mut();
             // SAFETY: `ctx` came from `llama_init_from_model` and is nulled right after.
             unsafe { llama_free(self.ctx) };
             self.ctx = ptr::null_mut();
@@ -444,6 +451,8 @@ impl Model {
         if self.ctx.is_null() {
             return Err(ort::Error::new(format!("llama.cpp could not create a {context}-token context (see the log)")));
         }
+        // SAFETY: `ctx` is live; the batch is freed before it (see `Drop`).
+        self.batch = unsafe { llama_batch_ext_init(self.ctx) };
         self.context = context;
         Ok(())
     }
@@ -545,11 +554,21 @@ impl Model {
             if fed < checkpoint_at {
                 total = total.min(checkpoint_at);
             }
-            // llama.cpp numbers the positions itself and outputs the last token's logits.
-            // SAFETY: the pointer covers `total - fed` tokens that outlive the decode below.
-            let batch = unsafe { llama_batch_get_one(ids[fed..total].as_mut_ptr(), (total - fed) as i32) };
-            // SAFETY: `ctx` is live and `batch` points into `ids`.
-            match unsafe { llama_decode(self.ctx, batch) } {
+            // Positions continue the `fed` tokens in the KV; only the last token outputs logits.
+            // SAFETY: `batch` is `ctx`'s.
+            unsafe { llama_batch_ext_clear(self.batch) };
+            for (pos, &token) in (fed as i32..).zip(&ids[fed..total]) {
+                // SAFETY: `batch` is `ctx`'s.
+                let idx = unsafe { llama_batch_ext_add_token(self.batch, 0, token) };
+                // `ctx`'s `n_batch` is `PREFILL_CHUNK`, at least `total - fed`.
+                debug_assert!(idx >= 0, "llama.cpp batch full");
+                // SAFETY: `idx` is the entry just added; `pos` lives through the call.
+                unsafe { llama_batch_ext_set_pos(self.batch, idx, &pos) };
+            }
+            // SAFETY: the batch holds `total - fed` entries.
+            unsafe { llama_batch_ext_set_output_logits(self.batch, (total - fed - 1) as i32, true) };
+            // SAFETY: `ctx` is live and `batch` is its.
+            match unsafe { llama_process(self.ctx, PROCESS_DECODE, self.batch) } {
                 0 => {}
                 // No KV slot; the memory is as it was before the call.
                 1 => return Ok(Err(TranslateError::ContextFull(context))),
@@ -559,7 +578,7 @@ impl Model {
                     unsafe { llama_memory_clear(memory, true) };
                     self.ids.clear();
                     self.checkpoints.clear();
-                    return Err(ort::Error::new(format!("llama_decode failed ({status})")));
+                    return Err(ort::Error::new(format!("llama_process failed ({status})")));
                 }
             }
             self.ids.extend_from_slice(&ids[fed..total]);

@@ -2,11 +2,11 @@ param([switch]$Force)
 
 $ErrorActionPreference = "Stop"
 
-# llama.cpp v1.0.0's build. A new tag needs the structs in
+# llama.cpp v1.1.0's build. A new tag needs the structs in
 # crates/translator-translate/src/builtin/llama.rs checked against its llama.h.
-$Tag = "b12359"
+$Tag = "b12774"
 $Zip = "llama-$Tag-bin-win-vulkan-x64.zip"
-$Sha256 = "e8d18c6e4210cca87e7307c2ea78363ac8d158e4e1397358ec96ab70b53a0d5e"
+$Sha256 = "d29a16265d26ef7598209caaf1a544cbfa6abe2858c24b0ce4ae6bff87a76f22"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $OutDir = Join-Path $Root "third_party\llama.cpp"
