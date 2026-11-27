@@ -5,15 +5,15 @@ edition = "2024"
 
 [dependencies]
 bytes = { workspace = true }
-hf-xet = { version = "1.8.0", default-features = false, features = ["native-tls", "no-default-cache"] }
+hf-xet = { version = "1.8.1", default-features = false, features = ["native-tls", "no-default-cache"] }
 ort = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-toml = "1.2.1"
-toml_edit = { version = "0.25.19", default-features = false, features = ["display", "serde"] }
+toml = { workspace = true }
+toml_edit = { version = "0.25.20", default-features = false, features = ["display", "serde"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile = { workspace = true }
