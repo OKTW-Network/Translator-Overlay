@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use translator_core::{ApiConfig, HttpApi, ReplyMode, http_client};
+use translator_core::{ApiConfig, HttpApi, PipelineStatus, ReplyMode, http_client};
 
 use crate::{Completion, TranslateError};
 
@@ -333,6 +333,7 @@ pub(crate) async fn consume_http_response(
     http_api: HttpApi,
     stream: bool,
     cancel: &CancellationToken,
+    on_status: &mut impl FnMut(Option<PipelineStatus>),
     on_text: &mut impl FnMut(&str),
 ) -> Result<Completion, TranslateError> {
     let status = response.status();
@@ -355,13 +356,23 @@ pub(crate) async fn consume_http_response(
         };
         return completion_from_http_body(http_api, &body);
     }
-    consume_sse_response(&mut response, http_api, cancel, on_text).await
+    let mut thinking = false;
+    let mut on_thinking = |now: bool| {
+        if std::mem::replace(&mut thinking, now) != now {
+            on_status(now.then_some(PipelineStatus::Thinking { tokens: None }));
+        }
+    };
+    let result = consume_sse_response(&mut response, http_api, cancel, &mut on_thinking, on_text).await;
+    // An error or cancel can cut the stream mid-thought.
+    on_thinking(false);
+    result
 }
 
 async fn consume_sse_response(
     response: &mut reqwest::Response,
     http_api: HttpApi,
     cancel: &CancellationToken,
+    on_thinking: &mut impl FnMut(bool),
     on_text: &mut impl FnMut(&str),
 ) -> Result<Completion, TranslateError> {
     let mut raw = Vec::new();
@@ -386,12 +397,12 @@ async fn consume_sse_response(
         buf.push_str(&text);
         if is_sse || looks_like_sse(&buf) {
             is_sse = true;
-            push_sse_events(&mut buf, &mut acc, on_text, false)?;
+            push_sse_events(&mut buf, &mut acc, on_thinking, on_text, false)?;
         }
     }
 
     if is_sse {
-        push_sse_events(&mut buf, &mut acc, on_text, true)?;
+        push_sse_events(&mut buf, &mut acc, on_thinking, on_text, true)?;
         acc.finish()
     } else {
         completion_from_http_body(http_api, &buf)
@@ -421,11 +432,18 @@ fn take_utf8_prefix(bytes: &mut Vec<u8>) -> String {
     }
 }
 
-fn push_sse_events(buf: &mut String, acc: &mut SseAcc, on_text: &mut impl FnMut(&str), flush: bool) -> Result<(), TranslateError> {
+fn push_sse_events(
+    buf: &mut String,
+    acc: &mut SseAcc,
+    on_thinking: &mut impl FnMut(bool),
+    on_text: &mut impl FnMut(&str),
+    flush: bool,
+) -> Result<(), TranslateError> {
     for ev in drain_sse_events(buf, flush) {
         if acc.push(&ev)? {
             on_text(acc.live_text());
         }
+        on_thinking(acc.thinking());
     }
     Ok(())
 }
@@ -584,6 +602,14 @@ impl SseAcc {
         }
     }
 
+    /// Reasoning has started and the answer has not.
+    fn thinking(&self) -> bool {
+        match self {
+            Self::Chat(acc) => !acc.reasoning.is_empty() && acc.text.is_empty(),
+            Self::Responses(acc) => acc.reasoning_open,
+        }
+    }
+
     fn finish(self) -> Result<Completion, TranslateError> {
         match self {
             Self::Chat(acc) => acc.finish(),
@@ -661,6 +687,8 @@ struct ResponsesSse {
     delta_text: String,
     completed: Option<serde_json::Value>,
     items: Vec<serde_json::Value>,
+    /// The latest output item is a reasoning one still streaming.
+    reasoning_open: bool,
 }
 
 impl ResponsesSse {
@@ -685,7 +713,11 @@ impl ResponsesSse {
             "response.completed" => {
                 self.completed = Some(v.get("response").cloned().unwrap_or(v));
             }
+            "response.output_item.added" => {
+                self.reasoning_open = v.pointer("/item/type").and_then(serde_json::Value::as_str) == Some("reasoning");
+            }
             "response.output_item.done" => {
+                self.reasoning_open = false;
                 if let Some(item) = v.get("item") {
                     self.items.push(item.clone());
                 }
@@ -1239,6 +1271,32 @@ mod tests {
     }
 
     #[test]
+    fn sse_thinks_until_the_answer_starts() {
+        for (http_api, body, expected) in [
+            (
+                HttpApi::ChatCompletions,
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"a\"}}]}\n\n\
+                 data: {\"choices\":[{\"delta\":{\"reasoning\":\"b\"}}]}\n\n\
+                 data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                &[true, true, false][..],
+            ),
+            (
+                HttpApi::Responses,
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\"}}\n\n\
+                 data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"a\"}\n\n\
+                 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\"}}\n\n\
+                 data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n\
+                 data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                &[true, true, false, false, false],
+            ),
+        ] {
+            let mut seen = Vec::new();
+            push_sse_events(&mut body.to_owned(), &mut SseAcc::new(http_api), &mut |now| seen.push(now), &mut |_| {}, true).unwrap();
+            assert_eq!(seen, expected, "{http_api:?}");
+        }
+    }
+
+    #[test]
     fn chat_sse_reasoning_variants() {
         for (body, expected) in [
             (
@@ -1534,20 +1592,20 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let r0 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
-        let c0 = consume_http_response(r0, HttpApi::ChatCompletions, false, &cancel, &mut |_| {})
+        let c0 = consume_http_response(r0, HttpApi::ChatCompletions, false, &cancel, &mut |_| {}, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(c0.text, "ok_json");
 
         let r1 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
-        let e1 = consume_http_response(r1, HttpApi::ChatCompletions, false, &cancel, &mut |_| {})
+        let e1 = consume_http_response(r1, HttpApi::ChatCompletions, false, &cancel, &mut |_| {}, &mut |_| {})
             .await
             .unwrap_err();
         assert_matches!(e1, TranslateError::ApiStatus { status: 429, ref body } if body == "rate limited");
 
         let mut live = Vec::new();
         let r2 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
-        let c2 = consume_http_response(r2, HttpApi::ChatCompletions, true, &cancel, &mut |t| {
+        let c2 = consume_http_response(r2, HttpApi::ChatCompletions, true, &cancel, &mut |_| {}, &mut |t| {
             live.push(t.to_string());
             if t == "你" {
                 let _ = split_tx.send(());
@@ -1559,7 +1617,7 @@ mod tests {
         assert_eq!(live, ["你", "你好"]);
 
         let r3 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
-        let c3 = consume_http_response(r3, HttpApi::ChatCompletions, true, &cancel, &mut |_| {})
+        let c3 = consume_http_response(r3, HttpApi::ChatCompletions, true, &cancel, &mut |_| {}, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(c3.text, "plain_fallback");
@@ -1567,7 +1625,7 @@ mod tests {
         let mid_cancel = CancellationToken::new();
         let trigger = mid_cancel.clone();
         let r4 = client.post(format!("{}/chat/completions", server.base_url)).send().await.unwrap();
-        let e4 = consume_http_response(r4, HttpApi::ChatCompletions, true, &mid_cancel, &mut |_| trigger.cancel())
+        let e4 = consume_http_response(r4, HttpApi::ChatCompletions, true, &mid_cancel, &mut |_| {}, &mut |_| trigger.cancel())
             .await
             .unwrap_err();
         let _ = hold_tx.send(());

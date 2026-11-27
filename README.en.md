@@ -24,7 +24,7 @@ Real-time translation overlay for the Windows desktop: pick a target window → 
 
 - **Multiple backends**:
   - **Built-in model** (default): Fully local inference using GGUF (`llama.cpp`, Vulkan GPU / CPU) or ONNX (`ONNX Runtime`, WebGPU / CPU), plus support for your own custom GGUF files
-  - **OpenAI-compatible API**: Supports both `/chat/completions` and `/responses` with streaming, provider model-list autocomplete, Structured Outputs, reasoning replay, sampling / reasoning-effort controls, timeouts, and exponential backoff retries
+  - **OpenAI-compatible API**: Supports both `/chat/completions` and `/responses` with streaming (the status bar shows "Thinking" while the model reasons), provider model-list autocomplete, Structured Outputs, reasoning replay, sampling / reasoning-effort controls, timeouts, and exponential backoff retries
   - **Local CLI**: Grok / OpenCode / Codex (with Priority mode) / Claude Code, reusing your existing CLI logins
 - **Reply mode**: Choose **Structured** (translate all blocks in one JSON call) or **Plain text** (one block at a time, suited for models weak at JSON)
 - **Consistency & accuracy**: Session LFU translation cache (avoids re-translating identical lines), multi-turn conversation history, named glossary profiles, customizable system prompt style, plus **Repeat instruction** and **Repeat glossary** reminders for smaller models
@@ -131,7 +131,7 @@ Built-in models are available in two formats:
 
 The compute device (GPU / CPU) is configured independently from OCR, along with context length, reply length ratio, and DRY repetition penalty. **Stop** releases VRAM.
 
-Gemma 4, Hy-MT2 30B A3B, and Qwen3.8 27B can think before answering via **Reasoning effort** (off by default); the status bar shows "Thinking" meanwhile, and the thinking never shows up in the translation.
+Gemma 4, Hy-MT2 30B A3B, and Qwen3.8 27B can think before answering via **Reasoning effort** (off by default); the status bar shows "Thinking" with the thought's token count meanwhile, and the thinking never shows up in the translation.
 
 ### Model catalog
 

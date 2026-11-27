@@ -45,7 +45,7 @@ pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<Grid> {
         let (title, message, severity) = match (&snap.status, snap.last_error.as_deref().filter(|s| !s.is_empty())) {
             (PipelineStatus::RetryingTranslate { message, .. }, _) => (status_text(&snap.status), message.clone(), Sev::Warning),
             // A retry sets `last_error`, and its model thinks again: a warning with the reason, not an error.
-            (PipelineStatus::Thinking, Some(err)) => (status_text(&snap.status), err.to_owned(), Sev::Warning),
+            (PipelineStatus::Thinking { .. }, Some(err)) => (status_text(&snap.status), err.to_owned(), Sev::Warning),
             (_, Some(err)) => (t!("status.error_title"), err.to_owned(), Sev::Error),
             (PipelineStatus::Error { message }, None) => (t!("status.error_title"), message.clone(), Sev::Error),
             (PipelineStatus::WaitingForStable { elapsed_ms }, None) => {
@@ -86,7 +86,7 @@ pub fn status_infobar<S>(b: &mut Binds<S>) -> Result<Grid> {
             | PipelineStatus::WaitingForStable { .. }
             | PipelineStatus::LoadingModels { .. }
             | PipelineStatus::Translating
-            | PipelineStatus::Thinking
+            | PipelineStatus::Thinking { .. }
             | PipelineStatus::RetryingTranslate { .. } => Some(None),
             _ => None,
         };
@@ -510,7 +510,8 @@ pub(crate) fn status_text(status: &PipelineStatus) -> Cow<'static, str> {
             kind: ModelKind::Translation,
         } => t!("status.loading_translation_model"),
         PipelineStatus::Translating => t!("status.translating"),
-        PipelineStatus::Thinking => t!("status.thinking"),
+        PipelineStatus::Thinking { tokens: None } => t!("status.thinking"),
+        PipelineStatus::Thinking { tokens: Some(tokens) } => t!("status.thinking_tokens", tokens = tokens),
         PipelineStatus::RetryingTranslate { attempt, max_retries, .. } => {
             t!("status.retrying", attempt = attempt, max_retries = max_retries)
         }

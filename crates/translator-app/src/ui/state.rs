@@ -1046,9 +1046,9 @@ mod tests {
                 max_retries: 3,
                 message: "bad JSON".into(),
             };
-            s.translation_model_load = Some(PipelineStatus::Thinking);
+            s.translation_model_load = Some(PipelineStatus::Thinking { tokens: None });
         }
-        assert!(matches!(take_chrome(&ui).status, PipelineStatus::Thinking));
+        assert!(matches!(take_chrome(&ui).status, PipelineStatus::Thinking { .. }));
 
         assert_eq!(truncate("  hello   world  ", 20), "hello world");
         assert_eq!(truncate("hello", 5), "hello");

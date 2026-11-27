@@ -803,8 +803,8 @@ impl TranslateClient {
         Ok(())
     }
 
-    /// `on_status` reports built-in model download / load phases and its thinking, then `None` when
-    /// each ends; other providers never call it.
+    /// `on_status` reports built-in model download / load phases and the model's thinking (built-in
+    /// or a streamed HTTP reply), then `None` when each ends; CLI providers never call it.
     pub async fn complete_cancellable(
         &self,
         conv: &Conversation,
@@ -823,14 +823,7 @@ impl TranslateClient {
         if self.config.provider.is_http() && self.config.http_api == HttpApi::Responses {
             let body = responses_request_body(&self.config, &conv.items, &conv.session_id);
             return self
-                .http_complete(
-                    &format!("{}/responses", self.config.base_url.trim_end_matches('/')),
-                    &body,
-                    Some(conv.session_id.as_str()),
-                    HttpApi::Responses,
-                    cancel,
-                    on_text,
-                )
+                .http_complete(&body, Some(conv.session_id.as_str()), HttpApi::Responses, cancel, on_status, on_text)
                 .await;
         }
         let messages = conv.messages();
@@ -842,11 +835,11 @@ impl TranslateClient {
             });
         }
         self.http_complete(
-            &format!("{}/chat/completions", self.config.base_url.trim_end_matches('/')),
             &chat_completion_body(&self.config, &messages, &conv.session_id),
             Some(conv.session_id.as_str()),
             HttpApi::ChatCompletions,
             cancel,
+            on_status,
             on_text,
         )
         .await
@@ -854,11 +847,11 @@ impl TranslateClient {
 
     async fn http_complete<T: Serialize>(
         &self,
-        url: &str,
         body: &T,
         session_id: Option<&str>,
         http_api: HttpApi,
         cancel: &CancellationToken,
+        on_status: &mut impl FnMut(Option<PipelineStatus>),
         on_text: &mut impl FnMut(&str),
     ) -> Result<Completion, TranslateError> {
         if self.config.base_url.trim().is_empty() {
@@ -868,7 +861,11 @@ impl TranslateClient {
             return Err(TranslateError::Cancelled);
         }
 
-        let mut req = self.http.post(url);
+        let path = match http_api {
+            HttpApi::ChatCompletions => "chat/completions",
+            HttpApi::Responses => "responses",
+        };
+        let mut req = self.http.post(format!("{}/{path}", self.config.base_url.trim_end_matches('/')));
         if !self.config.api_key.trim().is_empty() {
             req = req.bearer_auth(self.config.api_key.trim());
         }
@@ -883,7 +880,7 @@ impl TranslateClient {
             result = send => result?,
         };
 
-        crate::http::consume_http_response(response, http_api, self.config.stream, cancel, on_text).await
+        crate::http::consume_http_response(response, http_api, self.config.stream, cancel, on_status, on_text).await
     }
 
     async fn cli_complete(

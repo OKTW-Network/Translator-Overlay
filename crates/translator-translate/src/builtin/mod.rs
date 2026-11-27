@@ -218,7 +218,7 @@ pub(crate) async fn complete(
         .filter(|s| !s.ids.is_empty() && api.reply_mode == ReplyMode::Structured),
         thought,
     };
-    // `None`: the model started thinking.
+    // `None`: one more thought token.
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
     let cancel_job = cancel.clone();
     let job = tokio::task::spawn_blocking(move || {
@@ -250,22 +250,24 @@ pub(crate) async fn complete(
     });
     // Ends when the job drops its sender. The thinking status ends with the first answer text, or
     // with the job however it ends.
-    let mut thinking = false;
+    let mut thought_tokens = 0;
     while let Some(text) = rx.recv().await {
         match text {
             None => {
-                thinking = true;
-                on_status(Some(PipelineStatus::Thinking));
+                thought_tokens += 1;
+                on_status(Some(PipelineStatus::Thinking {
+                    tokens: Some(thought_tokens),
+                }));
             }
             Some(text) => {
-                if std::mem::take(&mut thinking) {
+                if std::mem::take(&mut thought_tokens) > 0 {
                     on_status(None);
                 }
                 on_text(&text);
             }
         }
     }
-    if thinking {
+    if thought_tokens > 0 {
         on_status(None);
     }
     match job.await {
@@ -749,8 +751,8 @@ impl OnnxModel {
             .collect()
     }
 
-    /// The answer. `on_text` gets `None` once a thought starts, then the whole answer so far after each
-    /// token. The inner error is [`TranslateError::Cancelled`], [`TranslateError::ContextFull`], or
+    /// The answer. `on_text` gets `None` after each thought token, then the whole answer so far after
+    /// each token. The inner error is [`TranslateError::Cancelled`], [`TranslateError::ContextFull`], or
     /// [`TranslateError::Looping`] ([`TranslateError::Other`] when decoding greedily).
     fn generate(
         &mut self,
@@ -908,12 +910,7 @@ impl OnnxModel {
             if fed < ids.len() {
                 continue;
             }
-            if prefill.is_none() {
-                prefill = Some(start.elapsed());
-                if thought.is_some() {
-                    on_text(None);
-                }
-            }
+            prefill.get_or_insert_with(|| start.elapsed());
 
             logits_f32.clear();
             match logits.dtype().tensor_type() {
@@ -947,7 +944,9 @@ impl OnnxModel {
                 break;
             } else {
                 ids.push(next);
-                if thought.is_none() {
+                if thought.is_some() {
+                    on_text(None);
+                } else {
                     text = self.tokenizer.decode(&ids[answer..], true)?;
                     // A byte-level token can end mid-character, which decodes to U+FFFD until the next token completes it.
                     if !text.ends_with('\u{FFFD}') {

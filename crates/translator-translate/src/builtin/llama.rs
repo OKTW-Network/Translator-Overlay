@@ -589,12 +589,7 @@ impl Model {
             if fed < ids.len() {
                 continue;
             }
-            if prefill.is_none() {
-                prefill = Some(start.elapsed());
-                if thought.is_some() {
-                    on_text(None);
-                }
-            }
+            prefill.get_or_insert_with(|| start.elapsed());
 
             // SAFETY: `ctx` just decoded a batch that outputs its last token's logits.
             let last = unsafe { llama_get_logits_ith(self.ctx, -1) };
@@ -627,7 +622,9 @@ impl Model {
                 break;
             } else {
                 ids.push(next);
-                if thought.is_none() {
+                if thought.is_some() {
+                    on_text(None);
+                } else {
                     reply.extend(piece(vocab, next, false));
                     text = String::from_utf8_lossy(&reply).into_owned();
                     // A token can end mid-character, which decodes to U+FFFD until the next token completes it.
