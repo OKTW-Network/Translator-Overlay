@@ -500,10 +500,12 @@ const GEMMA4_31B_GGUF: &str = "https://huggingface.co/unsloth/gemma-4-31B-it-qat
 const HY_MT2_1_8B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF/resolve/a0c709d9fac510f2c807aa3af52872340dc37a4a";
 const HY_MT2_7B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/ab8472660ac61fac25f1af43fac2599d52a8a775";
 const HY_MT2_30B_GGUF: &str = "https://huggingface.co/tencent/Hy-MT2-30B-A3B-GGUF/resolve/fd3dcbb6b31e9e03923ef4f9f42500f74c3851c3";
-const QWEN3_8_27B_GGUF: &str = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4af51b3542f775b0a8e4b310bfb3f17e01c306c9";
+/// ISTA-DASLab's GSQ-RCO GGUF files.
+const QWEN3_8_27B_GGUF: &str =
+    "https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/resolve/d562806dbafae37109975e970aae91b43e73b440";
 
-/// GGUF token embedding tables. Q4_0 packs 32 weights into 18 bytes and Q8_0 into 34; Q4_K packs
-/// 256 into 144 and Q6_K into 210.
+/// GGUF token embedding tables. Q4_0 packs 32 weights into 18 bytes and Q8_0 into 34; IQ2_S packs
+/// 256 into 82, Q4_K into 144, and Q6_K into 210.
 const GEMMA4_E4B_EMBD: u64 = 262_144 * 2560 * 18 / 32;
 /// E4B's per-layer table: 42 layers × 256.
 const GEMMA4_E4B_LAYER_EMBD: u64 = 262_144 * 42 * 256 * 18 / 32;
@@ -517,7 +519,7 @@ const HY_MT2_7B_EMBD_Q6_K: u64 = 128_167 * 4096 * 210 / 256;
 const HY_MT2_7B_EMBD_Q8_0: u64 = 128_167 * 4096 * 34 / 32;
 const HY_MT2_30B_EMBD_Q4_K: u64 = 120_832 * 2048 * 144 / 256;
 const HY_MT2_30B_EMBD_Q8_0: u64 = 120_832 * 2048 * 34 / 32;
-const QWEN3_8_27B_EMBD_Q4_K: u64 = 248_320 * 5120 * 144 / 256;
+const QWEN3_8_27B_EMBD_IQ2_S: u64 = 248_320 * 5120 * 82 / 256;
 
 const fn mem(shape: &ArchShape, embed_bytes: u64, tied_bytes: u64) -> GgufMem {
     GgufMem {
@@ -952,6 +954,15 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         mem(&HY_MT2_30B_SHAPE, HY_MT2_30B_EMBD_Q8_0, 0),
         false,
     ),
+    gguf(
+        "qwen3.8-27b-gguf-iq3_s",
+        ("Qwen3.8 27B", "IQ3_S (11.8 GB)"),
+        BuiltinArch::Qwen3_5,
+        "qwen3.8-27b",
+        art(QWEN3_8_27B_GGUF, "Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf", 11_771_546_784),
+        mem(&QWEN3_8_27B_SHAPE, QWEN3_8_27B_EMBD_IQ2_S, 0),
+        false,
+    ),
     // ISTA-DASLab's 3-bit GSQ levels, stored losslessly in 4-bit blocks (ORT has no 3-bit kernel). Each
     // 128-weight group is four blocks of 32 sharing its scale: ORT WebGPU's fast prefill path takes
     // only block 32 (7× the prefill speed for 1.2 GB of repeated scales).
@@ -985,15 +996,6 @@ pub const BUILTIN_MODELS: &[BuiltinModelSpec] = &[
         }),
         empty_thought: false,
     },
-    gguf(
-        "qwen3.8-27b-gguf-q4_k_m",
-        ("Qwen3.8 27B", "Q4_K_M (16.6 GB)"),
-        BuiltinArch::Qwen3_5,
-        "qwen3.8-27b",
-        art(QWEN3_8_27B_GGUF, "Qwen3.8-27B-UD-Q4_K_M.gguf", 16_564_259_744),
-        mem(&QWEN3_8_27B_SHAPE, QWEN3_8_27B_EMBD_Q4_K, 0),
-        false,
-    ),
 ];
 
 #[cfg(test)]

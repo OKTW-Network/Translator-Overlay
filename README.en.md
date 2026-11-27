@@ -146,10 +146,10 @@ Download sizes are shown in parentheses; each family downloads into its own subd
 | Hy-MT2 1.8B | Q4_K_M (1.1 GB), Q6_K (1.5 GB), Q8_0 (1.9 GB) | q4f16 (1.4 GB), fp16 (3.6 GB) |
 | Hy-MT2 7B | Q4_K_M (4.6 GB), Q6_K (6.2 GB), Q8_0 (8.0 GB) | q4f16 (5.0 GB), fp16 (15.0 GB) |
 | Hy-MT2 30B A3B | Q4_K_M (18.2 GB), Q8_0 (32.0 GB) | q4f16 (16.3 GB) |
-| Qwen3.8 27B | Q4_K_M (16.6 GB) | q4f16 (15.2 GB) |
+| Qwen3.8 27B | IQ3_S (11.8 GB) | q4f16 (15.2 GB) |
 
 Sources:
-- **GGUF**: Publisher releases from [Unsloth](https://huggingface.co/unsloth) (Gemma 4 QAT, Qwen3.8 27B) and [Tencent](https://huggingface.co/tencent) (Hy-MT2)
+- **GGUF**: Publisher releases from [Unsloth](https://huggingface.co/unsloth) (Gemma 4 QAT) and [Tencent](https://huggingface.co/tencent) (Hy-MT2), and [ISTA-DASLab](https://huggingface.co/ISTA-DASLab)'s GSQ-RCO (Qwen3.8 27B)
 - **ONNX**: [Gemma 4 QAT ONNX](https://huggingface.co/collections/james58899/gemma-4-qat-onnx) (from Google's QAT checkpoints), [Hy-MT2 ONNX](https://huggingface.co/collections/james58899/hy-mt2-onnx) (fp16 from Tencent's weights; q4f16 from Intel's AutoRound int4 checkpoints), and [Qwen3.8 27B 3-bit GSQ ONNX](https://huggingface.co/james58899/Qwen3.8-27B-3Bit-GSQ-ONNX) (from ISTA-DASLab's 3-bit GSQ checkpoint)
 
 ### Custom GGUF
